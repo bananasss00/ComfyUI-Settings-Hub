@@ -16,6 +16,7 @@
     background: #16162a;
     border-bottom: 1px solid #333355;
     min-height: 24px;
+    flex: 0 0 auto;
 }
 
 .hub-tab-btn {
@@ -70,9 +71,20 @@
     color: #fff;
 }
 
-/* Item container */
+/* Item container: scrollable flex area that absorbs the node's free space.
+   Node smaller than content -> it scrolls (nothing draws outside the node);
+   node taller -> it stretches (no dead space, preset row pinned bottom). */
 .hub-container {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
     padding: 4px;
+}
+
+.hub-container-inner {
+    display: flex;
+    flex-direction: column;
 }
 
 .hub-item-row {
@@ -175,14 +187,14 @@
     padding: 2px 0;
 }
 
-/* Preset row */
+/* Preset row: pinned to the bottom of the node body in fill mode */
 .hub-preset-row {
     display: flex;
     align-items: center;
     gap: 4px;
     padding: 3px 2px;
-    border-bottom: 1px solid #333355;
-    margin-bottom: 4px;
+    border-top: 1px solid #333355;
+    flex: 0 0 auto;
 }
 
 .hub-preset-select {
@@ -250,12 +262,19 @@
 
 .settings-hub-wrap {
     width: 100%;
+    height: 100%;
     overflow: hidden;
     box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
 }
 
 .settings-hub {
     width: 100%;
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
 }
 
 .settings-hub * {
@@ -341,8 +360,18 @@
     font-family: inherit;
 }
 
+/* Multiline mirror takes the remaining row width; stretching it vertically
+   grows the node via the content observer (ResizeObserver on
+   .hub-container-inner) which re-fits the hub height. */
+span.hub-mirror.hub-mirror-text {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
 .hub-mirror textarea.hub-text-area {
-    max-width: 170px;
+    max-width: none;
+    width: 100%;
 }
 
 /* Dangerous hover for unpin buttons */

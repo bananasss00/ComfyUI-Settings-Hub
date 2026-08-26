@@ -37,6 +37,9 @@ function titleBarHeight() {
 }
 const SLOT_TOP_GAP = 8;
 const CHROME_H = 12;
+// ComfyUI's DOM-widget draw insets the element by ~10px on top and bottom
+// inside the widget slot; element height ends up slotHeight - 20.
+const DOM_SLOT_MARGIN = 20;
 
 const stateMap = new WeakMap();
 
@@ -73,8 +76,8 @@ function ensureHubDom(node) {
         if (widget) {
             widget.serializable = false;
             if (widget.options) widget.options.serialize = false;
-            // Slot height is driven by measured content; ComfyUI sizes the
-            // element itself per frame, so we never pin explicit pixel widths.
+            // Slot height is driven by measured content (auto mode) or by the
+            // user-sized node (fill mode); applyHubLayout swaps this closure.
             widget.computeSize = () => [node.size[0], (wrap._hubH ?? 60) + SLOT_TOP_GAP + CHROME_H];
         }
     } catch (err) {
@@ -83,6 +86,19 @@ function ensureHubDom(node) {
 
     st = { root, wrap, widget };
     stateMap.set(node, st);
+
+    // Content-follow: ResizeObserver on the inner content wrapper catches
+    // in-hub textarea resizes (resize: vertical), tab-bar wraps, font loads.
+    // The wrapper's height is pure content height - the observer never fires
+    // because WE resized the node, so there is no feedback loop.
+    if (typeof ResizeObserver !== "undefined") {
+        try {
+            st.contentRO = new ResizeObserver(() => {
+                if (node.flags?.collapsed) return;
+                scheduleLayout(node, st);
+            });
+        } catch (_) { st.contentRO = null; }
+    }
 
     initDrag(root, {
         getCfg: () => getHubConfig(node),
@@ -152,7 +168,10 @@ function mirrorHtml(item, tw) {
             // Multiline mirrors: persisted flag OR live widget carrying a
             // real <textarea> element (DOM prompt widgets have no flag).
             if (item.options?.multiline || isMultilineWidget(tw)) {
-                return `<span class="hub-mirror"><textarea class="hub-text-area" rows="3" spellcheck="false" data-role="text" data-hub-control>${esc(val)}</textarea></span>`;
+                // hub-mirror-text: the textarea takes the remaining row width
+                // (see styles.css); vertical resize is followed by the
+                // content observer so the node re-fits.
+                return `<span class="hub-mirror hub-mirror-text"><textarea class="hub-text-area" rows="3" spellcheck="false" data-role="text" data-hub-control>${esc(val)}</textarea></span>`;
             }
             return `<span class="hub-mirror"><input type="text" class="hub-text-input" data-role="text" data-hub-control value="${esc(val)}"></span>`;
         }
@@ -190,12 +209,17 @@ function dividerRowHtml(item) {
 function containerHtml(node, cfg) {
     const activeTabId = getActiveTabId(cfg);
     const items = itemsOfTab(cfg, activeTabId);
+    // .hub-container is the scroll viewport (flex:1 of the node body);
+    // .hub-container-inner is the measured content wrapper inside it - its
+    // height stays independent of the viewport being stretched or scrolled.
     if (!items.length) {
-        return `<div class="hub-container"><div class="hub-empty">Right-click any node → 📌 Pin to Settings Hub</div></div>`;
+        return `<div class="hub-container"><div class="hub-container-inner">` +
+            `<div class="hub-empty">Right-click any node → 📌 Pin to Settings Hub</div>` +
+            `</div></div>`;
     }
     const rows = items.map((it) =>
         it.type === "divider" ? dividerRowHtml(it) : itemRowHtml(it)).join("");
-    return `<div class="hub-container">${rows}</div>`;
+    return `<div class="hub-container"><div class="hub-container-inner">${rows}</div></div>`;
 }
 
 function presetRowHtml(cfg) {
@@ -442,40 +466,136 @@ function renderHub(node) {
     // Attach reactive hooks for every rendered binding.
     for (const item of cfg.items) ensureHooksForItem(item);
 
+    // The innerHTML swap rebuilt .hub-container-inner - re-attach the
+    // content observer to the fresh element.
+    if (st.contentRO) {
+        try {
+            st.contentRO.disconnect();
+            const inner = st.root.querySelector(".hub-container-inner");
+            if (inner) st.contentRO.observe(inner);
+        } catch (_) {}
+    }
+
     layoutNode(node);
 }
 
-function measurer(node, st) {
-    return () => {
-        if (node.flags?.collapsed) return;
-        // max(scrollHeight, rect) covers both content growth and cases where
-        // the element already has an explicitly sized wrapper.
-        const rectH = st.root.getBoundingClientRect?.().height || 0;
-        const measured = Math.ceil(Math.max(st.root.scrollHeight, rectH, 24));
-        st.wrap._hubH = measured;
-        if (st.widget) {
-            st.widget.computeSize = () => [node.size[0], measured + SLOT_TOP_GAP + CHROME_H];
-        }
-        // AUTO-HEIGHT (dev_plan: "configurable width, auto height"): the node
-        // hugs its content in BOTH directions. User resizes adjust the width
-        // freely; manual height changes snap back - shrinking can no longer
-        // clip content, growing can no longer leave dead canvas space.
-        const total = titleBarHeight() + SLOT_TOP_GAP + measured + CHROME_H;
-        if (Math.abs(node.size[1] - total) > 0.5) {
-            node.setSize([node.size[0], total]);
-            node.setDirtyCanvas(true, true);
-        }
+// ---------------------------------------------------------------------------
+// Layout engine
+// ---------------------------------------------------------------------------
+// Two sizing modes, switched by node.__hubUserH (set in hub_node.onResize
+// when the USER drags the node, never when we set the size ourselves):
+//
+//   AUTO (default)  - node height hugs the content (dev_plan "auto height").
+//   FILL (userH)    - the user's height wins; the DOM fills the node exactly
+//                     (preset row pinned to the bottom, .hub-container
+//                     stretches / scrolls). Content growth taller than the
+//                     node lifts the envelope instead of clipping.
+//
+// Measurement is BY PARTS (tab bar + inner content + preset row), taken from
+// .hub-container-inner - immune to the viewport being stretched or scrolled,
+// unlike the old max(scrollHeight, rect) read of the whole root which went
+// stale (reported: dead space under the preset row).
+
+function measureContent(node, st) {
+    const hOf = (el) => {
+        if (!el) return 0;
+        const rect = el.getBoundingClientRect?.().height || 0;
+        return Math.max(el.scrollHeight || 0, el.offsetHeight || 0, rect);
     };
+    const root = st.root;
+    const tabBar = root.querySelector(".hub-tab-bar");
+    const inner = root.querySelector(".hub-container-inner");
+    const presetRow = root.querySelector(".hub-preset-row");
+
+    let measured = hOf(tabBar) + hOf(presetRow);
+
+    if (inner) {
+        // Count the scroll viewport's own padding/border around the content.
+        let pad = 0;
+        const container = inner.parentElement;
+        if (container && typeof getComputedStyle === "function") {
+            try {
+                const cs = getComputedStyle(container);
+                pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0) +
+                    (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+            } catch (_) { pad = 0; }
+        }
+        measured += pad + hOf(inner);
+    } else {
+        measured += hOf(root.querySelector(".hub-container"));
+    }
+
+    // Bottom margin of the preset row is part of the visual content.
+    if (presetRow && typeof getComputedStyle === "function") {
+        try { measured += parseFloat(getComputedStyle(presetRow).marginBottom) || 0; } catch (_) {}
+    }
+    return Math.ceil(Math.max(measured, 24));
 }
 
-/** Full re-render layout: several settling passes after content changed. */
+function setNodeHeight(node, h) {
+    // Flag around our own setSize so onResize can tell user drags from
+    // automatic fits (hub_node.onResize consults this).
+    node.__hubAutoSizing = true;
+    try { node.setSize([node.size[0], h]); }
+    finally { node.__hubAutoSizing = false; }
+    node.setDirtyCanvas?.(true, true);
+}
+
+function applyHubLayout(node, st) {
+    if (node.flags?.collapsed) return;
+    const title = titleBarHeight();
+    const measured = measureContent(node, st);
+    const prevMeasured = st._prevMeasured ?? 0;
+    st._prevMeasured = measured;
+    st.wrap._hubH = measured; // legacy handle consumed by the auto computeSize
+
+    const userH = !!node.__hubUserH;
+    if (st.widget) {
+        st.widget.computeSize = userH
+            ? () => [node.size[0], Math.max(60, node.size[1] - title - SLOT_TOP_GAP)]
+            : () => [node.size[0], measured + SLOT_TOP_GAP + CHROME_H];
+    }
+
+    if (userH) {
+        // FILL mode. The content grew taller than the user's envelope
+        // (textarea stretched, row pinned, ...): lift the envelope instead
+        // of clipping. Shrinking content keeps the user's size - the
+        // stretchy container absorbs the difference, no dead space.
+        const needed = title + SLOT_TOP_GAP + measured + CHROME_H;
+        if (measured > prevMeasured && needed > node.size[1] + 0.5) {
+            setNodeHeight(node, needed);
+        }
+        const elH = Math.max(60, node.size[1] - title - SLOT_TOP_GAP - DOM_SLOT_MARGIN);
+        if (st.wrap.style.height !== `${elH}px`) st.wrap.style.height = `${elH}px`;
+        return;
+    }
+
+    // AUTO mode: natural element height + hug the node in both directions,
+    // so stale larger sizes can never linger as dead canvas space.
+    if (st.wrap.style.height) st.wrap.style.height = "";
+    const total = title + SLOT_TOP_GAP + measured + CHROME_H;
+    if (Math.abs(node.size[1] - total) > 0.5) setNodeHeight(node, total);
+}
+
+/** rAF-coalesced layout pass (safe to call at event frequency). */
+function scheduleLayout(node, st) {
+    if (!node || node.type !== "SettingsHub" || !st) return;
+    if (relayoutScheduled.has(node)) return;
+    relayoutScheduled.add(node);
+    requestAnimationFrame(() => {
+        relayoutScheduled.delete(node);
+        applyHubLayout(node, st);
+    });
+}
+
+/** Full re-render layout: immediate pass + several settling passes. */
 function layoutNode(node) {
     const st = stateMap.get(node);
     if (!st) return;
-    const m = measurer(node, st);
-    requestAnimationFrame(m);          // after paint (attached DOM)
-    setTimeout(m, 60);                 // settle pass for fonts/images
-    setTimeout(m, 250);                // final pass for async layout shifts
+    applyHubLayout(node, st);          // first paint is already correct
+    scheduleLayout(node, st);          // after paint (fonts/images settle)
+    setTimeout(() => scheduleLayout(node, st), 60);
+    setTimeout(() => scheduleLayout(node, st), 250);
 }
 
 const relayoutScheduled = new WeakSet();
@@ -486,14 +606,17 @@ const relayoutScheduled = new WeakSet();
  */
 export function relayoutHub(node) {
     if (!node || node.type !== "SettingsHub") return;
-    const st = stateMap.get(node);
-    if (!st || relayoutScheduled.has(node)) return;
-    relayoutScheduled.add(node);
-    requestAnimationFrame(() => {
-        relayoutScheduled.delete(node);
-        if (node.flags?.collapsed) return;
-        measurer(node, st)();
-    });
+    scheduleLayout(node, stateMap.get(node));
+}
+
+/**
+ * Test/RO hook: the hub CONTENT changed size outside a structural render
+ * (e.g. the user stretched a mirror textarea). Runs a normal layout pass;
+ * growth is detected via the measured diff inside applyHubLayout.
+ */
+export function notifyHubContentChanged(node) {
+    if (!node || node.type !== "SettingsHub") return;
+    scheduleLayout(node, stateMap.get(node));
 }
 
 // Delegated event wiring — bound ONCE per hub DOM.

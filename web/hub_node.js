@@ -39,9 +39,12 @@ function makeSettingsHubNodeClass(LGraphNode) {
         }
 
         onResize(size) {
-            // AUTO-HEIGHT behavior lives in relayoutHub: measures content and
-            // snaps the height back (both directions) while leaving the width
-            // free. rAF-coalesced, no innerHTML rebuild - safe mid-drag.
+            // Distinguish USER drags from our own automatic fits: automatic
+            // ones run with __hubAutoSizing raised (see setNodeHeight in
+            // hub_ui_renderer). A manual drag switches the hub into FILL
+            // mode - the user's height wins and the DOM adapts to it.
+            if (!this.__hubAutoSizing) this.__hubUserH = true;
+            // rAF-coalesced layout, no innerHTML rebuild - safe mid-drag.
             try { relayoutHub(this); } catch (_) {}
         }
     };
