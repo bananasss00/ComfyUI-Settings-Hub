@@ -12,6 +12,9 @@ function snapshotAll(node) {
     const cfg = getHubConfig(node);
     const snap = {};
     for (const item of cfg.items) {
+        // widget_portal items are deliberately NOT preset-able: there is no
+        // universal way to serialize/restore complex custom-widget states
+        // (lora lists, panels) across custom nodes.
         if (item.type !== "widget_binding") continue;
         // Prefer live value mirrored on the target node; fall back to DOM mirror.
         const targetNode = app.graph?.getNodeById(item.targetNodeId);

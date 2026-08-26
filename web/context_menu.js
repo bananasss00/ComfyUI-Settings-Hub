@@ -1,5 +1,7 @@
 import { app } from "../../scripts/app.js";
-import { getHubConfig, createBinding, createNewHub, HUB_NODE_NAME } from "./core.js";
+import {
+    getHubConfig, createBinding, createNewHub, HUB_NODE_NAME, detectWidgetType,
+} from "./core.js";
 
 // ============================================================================
 // 1) Standard node menu hook (canvas widgets)
@@ -49,11 +51,15 @@ export function attachContextMenu() {
 
 function buildPinSubmenu(node, widget, graph) {
     const hubs = (graph._nodes ?? []).filter((n) => n.type === HUB_NODE_NAME);
+    // Custom widgets (non-primitive values / unknown types) become live
+    // portals - mark those entries so users know what to expect.
+    const portal = detectWidgetType(widget) === "portal";
+    const mark = portal ? "🪟 " : "📌 ";
 
     if (hubs.length === 0) {
         return [
             {
-                content: "➕ Create New Settings Hub",
+                content: `${mark}Create New Settings Hub${portal ? " (live embed)" : ""}`,
                 callback: () => {
                     const newHub = createNewHub();
                     createBinding(newHub, node, widget, getActiveTabId(getHubConfig(newHub)));
@@ -70,7 +76,9 @@ function buildPinSubmenu(node, widget, graph) {
         const prefix = hubs.length > 1 ? hub.title || "Settings Hub" : null;
         for (const tab of cfg.tabs) {
             entries.push({
-                content: prefix ? `${prefix}: ${tab.name}` : tab.name,
+                content: prefix
+                    ? `${mark}${prefix}: ${tab.name}${portal ? " · live" : ""}`
+                    : `${mark}${tab.name}${portal ? " · live" : ""}`,
                 callback: () => {
                     createBinding(hub, node, widget, tab.id);
                 },
@@ -192,6 +200,9 @@ function attachDomWidgetPinMenu() {
         // Shift+RMB -> let the browser menu through (copy/paste etc.).
         if (e.shiftKey || e.defaultPrevented) return;
         if (!isTextField(e.target)) return;
+        // Text fields already relocated into a portal belong to that portal:
+        // their own menus must stay native, re-pinning them is meaningless.
+        if (e.target.closest?.(".hub-portal-host")) return;
 
         const owner = findDomWidgetOwner(e.target);
         if (!owner || owner.node.type === HUB_NODE_NAME) return;

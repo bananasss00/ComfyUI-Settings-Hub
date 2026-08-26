@@ -19,12 +19,13 @@ import { app } from "../../scripts/app.js";
 import {
     getHubConfig, getActiveTabId, sortedTabs, itemsOfTab, genId,
     liveComboValues, numericMerge, coerceNumeric, removeItem, detectWidgetType,
-    isMultilineWidget,
+    isMultilineWidget, portalKindOf,
 } from "./core.js";
 import { presetSave, presetNew, presetDelete, presetApply } from "./preset_manager.js";
 import { writeTargetValue, ensureHooksForItem } from "./sync_manager.js";
 import { beginEdit, endEdit, registerStructural, registerValues } from "./sync.js";
 import { initDrag } from "./dnd_manager.js";
+import * as Portals from "./portal_manager.js";
 
 // Layout allowances. The title bar height is taken from LiteGraph when
 // available (themes vary); SLOT_TOP_GAP is the canvas-side offset above the
@@ -192,10 +193,15 @@ function itemRowHtml(item) {
         `<button type="button" class="hub-btn hub-remove" data-action="unpin" title="Unpin from Hub">✕</button>`,
     ].join("");
 
+    // Portal items embed the custom widget itself instead of a value mirror.
+    const body = item.type === "widget_portal"
+        ? `<div class="hub-portal-host" data-role="portal-host" ` +
+          `title="Live embed: interactions go to the source widget (its own menus work). ` +
+          `Presets do not apply to portals."><span class="hub-portal-tag">🪟 live</span></div>`
+        : (ok ? mirrorHtml(item, tw) : "");
+
     return `<div class="hub-item-row${ok ? "" : " hub-orphan-row"}" data-hub-item="${esc(item.id)}" data-tab-id="${esc(item.tabId)}">` +
-        handle + labelEl +
-        (ok ? mirrorHtml(item, tw) : "") +
-        tools + `</div>`;
+        handle + labelEl + body + tools + `</div>`;
 }
 
 function dividerRowHtml(item) {
@@ -291,7 +297,7 @@ function refreshValuesDom(node) {
 
     for (const row of st.root.querySelectorAll("[data-hub-item].hub-item-row")) {
         const item = cfg.items.find((i) => i.id === row.dataset.hubItem);
-        if (!item || item.type !== "widget_binding") continue;
+        if (!item || (item.type !== "widget_binding" && item.type !== "widget_portal")) continue;
         const { tn, tw } = findTarget(item);
 
         // Orphan state may appear while values are unchanged.
@@ -445,10 +451,29 @@ function renderHub(node) {
     // Self-heal bindings: configs saved by older builds carry wrong values.
     // The live target widget is always authoritative.
     for (const item of cfg.items) {
-        if (item.type !== "widget_binding") continue;
+        if (item.type !== "widget_binding" && item.type !== "widget_portal") continue;
         const { tw } = findTarget(item);
         if (!tw) continue;
         const live = detectWidgetType(tw);
+        const liveIsPortal = live === "portal";
+        const itemIsPortal = item.type === "widget_portal";
+
+        if (liveIsPortal !== itemIsPortal) {
+            // The widget's character changed (custom widget swapped in/out).
+            // Migrate the binding kind so the row stays meaningful.
+            item.type = liveIsPortal ? "widget_portal" : "widget_binding";
+            item.widgetType = liveIsPortal ? "portal" : live;
+            if (liveIsPortal) {
+                let srcH = Number(tw.height ?? tw.options?.height);
+                if (!Number.isFinite(srcH) || srcH <= 0) srcH = 60;
+                item.options = { portalKind: portalKindOf(tw), srcH: Math.round(srcH) };
+            } else {
+                item.options = isMultilineWidget(tw) ? { multiline: true } : {};
+            }
+            continue;
+        }
+        if (itemIsPortal) continue; // portals carry no primitive values
+
         if (live !== item.widgetType) item.widgetType = live;
         if (live === "text") {
             const ml = isMultilineWidget(tw);
@@ -458,6 +483,10 @@ function renderHub(node) {
         }
     }
 
+    // Held DOM elements would be destroyed by the innerHTML swap below -
+    // return them home FIRST, then rebuild, then re-mount portals.
+    Portals.releaseAll(node);
+
     st.root.innerHTML =
         buildTabBarHtml(cfg) +
         containerHtml(node, cfg) +
@@ -465,6 +494,9 @@ function renderHub(node) {
 
     // Attach reactive hooks for every rendered binding.
     for (const item of cfg.items) ensureHooksForItem(item);
+
+    // Mount portal embeds (DOM relocation / canvas draw loops).
+    Portals.mountPortals(node, st.root);
 
     // The innerHTML swap rebuilt .hub-container-inner - re-attach the
     // content observer to the fresh element.
@@ -648,6 +680,7 @@ function wireEvents(node, st) {
                 const row = btn.closest("[data-hub-item]");
                 const item = cfg.items.find((i) => i.id === row?.dataset.hubItem);
                 if (item && confirm(`Unpin "${item.customLabel || item.widgetToBind}"?\n(The parameter stays on its original node.)`)) {
+                    if (item.type === "widget_portal") Portals.releaseItem(node, item);
                     removeItem(node, item);
                 }
                 break;

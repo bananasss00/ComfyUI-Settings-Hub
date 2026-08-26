@@ -29,7 +29,8 @@ export function recountPins(graph, HUB_NODE_NAME, cfgGetter) {
         if (node.type !== HUB_NODE_NAME) continue;
         const cfg = cfgGetter(node);
         for (const item of cfg?.items ?? []) {
-            if (item.type !== "widget_binding") continue;
+            // Portals count as pins too (their target node deserves the badge).
+            if (item.type !== "widget_binding" && item.type !== "widget_portal") continue;
             const id = item.targetNodeId;
             counts.set(id, (counts.get(id) || 0) + 1);
             canvases.add(id);

@@ -134,7 +134,7 @@ export function detectWidgetType(widget) {
         opts.max != null ||
         opts.step != null ||
         typeof widget?.value === "number";
-    if (!numericHints) return "text"; // unknown -> safest text mirror
+    if (!numericHints) return "portal"; // unknown/custom -> live portal embed
 
     const stepRaw = opts.step != null ? Number(opts.step) : NaN;
     const step = Number.isFinite(stepRaw) ? Math.abs(stepRaw) : NaN;
@@ -213,6 +213,23 @@ export function liveComboValues(item, targetWidget) {
 // Binding lifecycle
 // ---------------------------------------------------------------------------
 
+/**
+ * True when the widget cannot be mirrored as a primitive control and must be
+ * embedded as a live portal instead. Universal rule - no per-node code:
+ * anything that is not combo/toggle/text/number and whose value is not a
+ * primitive (rgthree Power Lora Loader lists, image pickers, custom panels)
+ * qualifies.
+ */
+export function isPortalWidget(widget) {
+    return detectWidgetType(widget) === "portal";
+}
+
+/** Portal embed flavor: real DOM element (relocate) vs canvas-drawn. */
+export function portalKindOf(widget) {
+    const el = widget?.element ?? widget?.inputEl ?? widget?.contentEl;
+    return el && typeof el.appendChild === "function" ? "dom" : "canvas";
+}
+
 export function createBinding(node, targetNode, widget, tabId, type, extra) {
     const cfg = getHubConfig(node);
     const item = {
@@ -224,6 +241,18 @@ export function createBinding(node, targetNode, widget, tabId, type, extra) {
     };
     if (type === "divider") {
         item.customLabel = extra?.label || "Section";
+    } else if (isPortalWidget(widget)) {
+        // Custom widget (custom panel, lora list, ...): live embed instead of
+        // a value mirror. Presets deliberately do NOT cover portals - there
+        // is no universal way to write complex widget states back.
+        item.type = "widget_portal";
+        item.targetNodeId = targetNode.id;
+        item.widgetToBind = widget.name;
+        item.widgetType = "portal";
+        item.customLabel = extra?.label || widget.label || widget.name || "panel";
+        let srcH = Number(widget.height ?? widget.options?.height);
+        if (!Number.isFinite(srcH) || srcH <= 0) srcH = 60;
+        item.options = { portalKind: portalKindOf(widget), srcH: Math.round(srcH) };
     } else {
         item.targetNodeId = targetNode.id;
         item.widgetToBind = widget.name;
