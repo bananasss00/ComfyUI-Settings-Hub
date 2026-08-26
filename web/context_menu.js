@@ -8,15 +8,19 @@ export function attachContextMenu() {
             if (!node || node.type === HUB_NODE_NAME) return [];
             if (!node.widgets?.length) return [];
 
-            // Widget under the cursor, or the last widget when right-clicking
-            // the node body.
+            // Widget strictly under the cursor. No body-click fallback:
+            // pinning the wrong widget silently was one of the sources of
+            // "wrong mirror type" reports.
             const canvas = app.canvas;
             let widget = null;
             try {
-                widget = node.getWidgetOnPos?.(canvas?.graph_mouse?.[0], canvas?.graph_mouse?.[1], true) ||
-                    node.widgets[node.widgets.length - 1];
+                widget = node.getWidgetOnPos?.(
+                    canvas?.graph_mouse?.[0],
+                    canvas?.graph_mouse?.[1],
+                    true,
+                );
             } catch {
-                widget = node.widgets[node.widgets.length - 1];
+                widget = null;
             }
             if (!widget) return [];
 

@@ -209,3 +209,135 @@
 .hub-menu-item:hover {
     background: #3a3a4e;
 }
+
+/* ==========================================================================
+   Additions for the DOM-widget based hub UI
+   ========================================================================== */
+
+.settings-hub-wrap {
+    overflow: hidden;
+    box-sizing: border-box;
+}
+
+.settings-hub * {
+    box-sizing: border-box;
+}
+
+/* Tab count chip */
+.hub-tab-count {
+    color: #6b6b8e;
+    font-size: 9px;
+}
+
+/* Inline rename input (tabs / labels / dividers) */
+.hub-inline-input,
+.hub-inline-divider {
+    background: #101020;
+    color: #fff;
+    border: 1px solid #6b6b8e;
+    border-radius: 2px;
+    font-size: 11px;
+    padding: 0 4px;
+    width: 90px;
+    outline: none;
+    caret-color: #fff;
+}
+
+.hub-inline-divider {
+    color: #a0a0c0;
+    font-style: italic;
+}
+
+/* Empty state */
+.hub-empty {
+    color: #555;
+    font-size: 11px;
+    text-align: center;
+    padding: 14px 6px;
+    border: 1px dashed #33334e;
+    border-radius: 4px;
+    margin: 4px 2px;
+}
+
+/* Orphan rows */
+.hub-orphan-row .hub-item-label {
+    color: #ff8866 !important;
+}
+
+/* Mirror widgets: range <-> number pairs */
+.hub-mirror-num {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+}
+
+.hub-mirror input[type="range"].hub-range {
+    accent-color: #6b8ecb;
+    width: 78px;
+    max-width: unset;
+    height: 12px;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+.hub-mirror input[type="number"].hub-num-input {
+    width: 52px;
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+.hub-mirror input[type="number"].hub-num-input::-webkit-outer-spin-button,
+.hub-mirror input[type="number"].hub-num-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.hub-text-area {
+    resize: vertical;
+    min-width: 130px;
+    min-height: 30px;
+}
+
+/* Dangerous hover for unpin buttons */
+.hub-btn.hub-remove:hover {
+    background: #5a2a2e;
+    border-color: #8a4a4e;
+    color: #ffb0b0;
+}
+
+/* Buttons disabled state */
+.hub-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+/* Drag visual states */
+.hub-dragging {
+    opacity: 0.35;
+}
+
+.hub-item-row.hub-drop-before {
+    box-shadow: inset 0 2px 0 #7ba0e0;
+}
+
+.hub-item-row.hub-drop-after {
+    box-shadow: inset 0 -2px 0 #7ba0e0;
+}
+
+.hub-tab-btn.hub-tab-drop-target {
+    outline: 1px dashed #7ba0e0;
+    background: #3a3a5e;
+    color: #fff;
+}
+
+.hub-item-row .hub-drag-handle[draggable="true"] {
+    touch-action: none;
+}
+
+/* Prevent tiny click targets around controls */
+.hub-item-row .hub-btn {
+    margin-left: 1px;
+}
+

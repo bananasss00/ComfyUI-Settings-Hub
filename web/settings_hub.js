@@ -1,28 +1,42 @@
+// ============================================================================
+// SettingsHub - extension entry point
+// ----------------------------------------------------------------------------
+// Import order matters: core/sync first, then feature modules.
+// Loading this file via ComfyUI's WEB_DIRECTORY registers:
+//   * the SettingsHub node type           (hub_node.js)
+//   * the DOM UI renderer                 (hub_ui_renderer.js)
+//   * the reactive two-way sync engine    (sync_manager.js + sync.js)
+//   * the "📌 Pin to Settings Hub" menu   (context_menu.js)
+//   * drag & drop reordering              (dnd_manager.js)
+// ============================================================================
+
 import { app } from "../../scripts/app.js";
+
+import "./sync.js";            // internal bus (locks, rAF queue)
+import "./pins.js";            // badge counter cache
+import "./hub_node.js";        // node registration + drawNode badge painter
+import "./hub_ui_renderer.js"; // DOM widget rendering
+import "./sync_manager.js";    // target-widget callback hooks (reactive sync)
+
 import { attachContextMenu } from "./context_menu.js";
 import { syncAll } from "./sync_manager.js";
-import "./hub_node.js";
-import "./hub_ui_renderer.js";
 
-// Load CSS via link tag to avoid module MIME type errors
+// Load CSS via link tag to avoid module MIME type errors.
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = "/extensions/ComfyUI-Settings-Hub/styles.css";
+    link.href = new URL("styles.css", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
-// Register the context-menu extension immediately. Extension registration is
-// safe at module scope: the frontend stores it and invokes the hooks when the
-// menu is built. (The "appReady" hook does not exist in current frontends.)
 attachContextMenu();
 
 app.registerExtension({
     name: "Comfy.SettingsHub.hooks",
-    "setup"() {
+    setup() {
         syncAll();
     },
-    "afterConfigureGraph"() {
+    afterConfigureGraph() {
         syncAll();
     },
 });

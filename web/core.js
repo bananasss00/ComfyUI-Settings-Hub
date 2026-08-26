@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { syncNode } from "./sync.js";
+import * as Pins from "./pins.js";
 
 export const HUB_NODE_NAME = "SettingsHub";
 
@@ -8,6 +9,10 @@ let idCounter = 0;
 export function genId(prefix) {
     return `${prefix}_${Date.now().toString(36)}_${(idCounter++).toString(36)}`;
 }
+
+// ---------------------------------------------------------------------------
+// Config access / migration
+// ---------------------------------------------------------------------------
 
 export function getHubConfig(node) {
     if (!node.properties.hubConfig) {
@@ -19,7 +24,11 @@ export function getHubConfig(node) {
             presets: {},
         };
     }
-    return node.properties.hubConfig;
+    const cfg = node.properties.hubConfig;
+    if (!Array.isArray(cfg.tabs)) cfg.tabs = [];
+    if (!Array.isArray(cfg.items)) cfg.items = [];
+    if (!cfg.presets || typeof cfg.presets !== "object") cfg.presets = {};
+    return cfg;
 }
 
 export function getActiveTabId(cfg) {
@@ -30,6 +39,16 @@ export function getActiveTabId(cfg) {
     return cfg.activeTabId;
 }
 
+export function sortedTabs(cfg) {
+    return [...cfg.tabs].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+export function itemsOfTab(cfg, tabId) {
+    return cfg.items
+        .filter((i) => i.tabId === tabId)
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
 export function nextOrder(cfg, tabId) {
     let order = 0;
     for (const item of cfg.items) {
@@ -38,27 +57,147 @@ export function nextOrder(cfg, tabId) {
     return order;
 }
 
+export function setOrders(items) {
+    items.forEach((item, i) => { item.order = i; });
+}
+
+// ---------------------------------------------------------------------------
+// Widget type detection (PROBLEM #1 FIX)
+// ---------------------------------------------------------------------------
+// LiteGraph / ComfyUI widget types come in every casing ("combo", "COMBO",
+// "toggle", "customtext", ...) and some widget factories never fill `type`
+// at all. Detection therefore relies on runtime facts first
+// (options.values, typeof value) and only then on the lowercased type tag.
+
 export function extractComboValues(widget) {
-    const opts = widget.options;
+    const opts = widget?.options;
     if (!opts) return null;
     let values = opts.values;
     if (typeof values === "function") {
         try { values = values.call(widget); } catch { return null; }
     }
-    return Array.isArray(values) ? values.slice() : null;
+    if (!Array.isArray(values)) return null;
+    // Stringify primitives so <option> comparisons stay consistent.
+    return values.map((v) => (typeof v === "object" && v !== null ? v : String(v)));
 }
 
+const COMBO_TYPES = new Set(["combo", "combobox", "dropdown", "enum"]);
+const BOOL_TYPES = new Set(["toggle", "boolean", "checkbox"]);
+const TEXT_TYPES = new Set([
+    "text", "string", "customtext", "textarea", "multiline",
+]);
+
 export function detectWidgetType(widget) {
-    if (widget.type === "BOOLEAN") return "checkbox";
-    if (widget.type === "COMBO") return "combo";
-    if (widget.type === "STRING") return "text";
-    const opts = widget.options;
-    if (opts && (opts.min != null || opts.max != null || opts.step != null)) {
-        const step = opts.step ?? 1;
-        return step === 1 ? "int" : "slider";
+    const rawType = widget?.type;
+    const type = typeof rawType === "string" ? rawType.toLowerCase() : "";
+    const opts = widget?.options || {};
+
+    // 1) Combo wins first: anything carrying a values list IS a combo,
+    //    regardless of its declared type. This is what used to fall through
+    //    to the slider branch and produce NaN.
+    const hasValues =
+        Array.isArray(opts.values) ||
+        typeof opts.values === "function";
+    if (hasValues || COMBO_TYPES.has(type)) return "combo";
+
+    // 2) Booleans / toggles.
+    if (BOOL_TYPES.has(type) || typeof widget?.value === "boolean") return "checkbox";
+
+    // 3) Strings and prompt boxes.
+    const declaresText =
+        TEXT_TYPES.has(type) ||
+        opts.multiline === true ||
+        typeof opts.placeholder === "string";
+    if (declaresText || typeof widget?.value === "string") return "text";
+
+    // 4) Numeric family.
+    const numericHints =
+        type.includes("number") ||
+        type.includes("slider") ||
+        type.includes("float") ||
+        type.includes("int") ||
+        opts.min != null ||
+        opts.max != null ||
+        opts.step != null ||
+        typeof widget?.value === "number";
+    if (!numericHints) return "text"; // unknown -> safest text mirror
+
+    const stepRaw = opts.step != null ? Number(opts.step) : NaN;
+    const step = Number.isFinite(stepRaw) ? Math.abs(stepRaw) : NaN;
+
+    let intLike = type.includes("int");
+    if (!Number.isFinite(step) || step >= 1) {
+        // Integer unless something explicitly says "float"/"slider".
+        intLike = !type.includes("float") && !type.includes("slider");
     }
-    return "slider";
+    return intLike ? "int" : "slider";
 }
+
+// ---------------------------------------------------------------------------
+// Live numeric options merge (target widget options win over snapshot)
+// ---------------------------------------------------------------------------
+
+function pickNum(...candidates) {
+    for (const c of candidates) {
+        const n = Number(c);
+        if (Number.isFinite(n)) return n;
+    }
+    return NaN;
+}
+
+export function stepDecimals(step) {
+    if (!(step > 0)) return 2;
+    if (step >= 1) return 0;
+    const s = String(step);
+    const i = s.indexOf(".");
+    return i < 0 ? 2 : Math.min(4, s.length - i - 1);
+}
+
+/**
+ * Merge numeric options: prefer the live target widget's options, fall back
+ * to the snapshot stored in the binding item, then to sane derived defaults.
+ */
+export function numericMerge(item, targetWidget) {
+    const live = targetWidget?.options || {};
+    const snap = item?.options || {};
+    let min = pickNum(live.min, snap.min, 0);
+    let max = pickNum(live.max, snap.max, 1);
+    if (!(max > min)) { max = min + 1; }
+
+    const range = max - min;
+    const fallbackStep = range <= 1 ? 0.01 : Math.max(range / 200, 0.01);
+    let step = pickNum(live.step, snap.step, fallbackStep);
+    if (!(step > 0)) step = fallbackStep;
+    if (step > range) step = range / 100 || 0.01;
+
+    return { min, max, step, decimals: stepDecimals(item?.widgetType === "int" ? 1 : step) };
+}
+
+/** Coerce any incoming value into a valid number clamped to merged options. */
+export function coerceNumeric(value, item, targetWidget, prevValue) {
+    const o = numericMerge(item, targetWidget);
+    let n = Number(typeof value === "number" ? value : parseFloat(String(value)));
+    if (!Number.isFinite(n)) n = Number(prevValue);
+    if (!Number.isFinite(n)) n = o.min;
+    n = Math.min(o.max, Math.max(o.min, n));
+    if (item?.widgetType === "int") n = Math.round(n);
+    else n = Number(n.toFixed(o.decimals));
+    return n;
+}
+
+/** Fetch fresh combo values from the live widget, falling back to snapshot. */
+export function liveComboValues(item, targetWidget) {
+    const fresh = targetWidget ? extractComboValues(targetWidget) : null;
+    if (fresh && fresh.length) return fresh;
+    const snap = Array.isArray(item?.options?.values)
+        ? item.options.values.map((v) => String(v))
+        : [];
+    return snap;
+}
+
+// ---------------------------------------------------------------------------
+// Binding lifecycle
+// ---------------------------------------------------------------------------
 
 export function createBinding(node, targetNode, widget, tabId, type, extra) {
     const cfg = getHubConfig(node);
@@ -74,25 +213,41 @@ export function createBinding(node, targetNode, widget, tabId, type, extra) {
     } else {
         item.targetNodeId = targetNode.id;
         item.widgetToBind = widget.name;
-        item.widgetType = detectWidgetType(widget);
+        item.widgetType = detectWidgetType(widget);           // fixed detection
+        item.customLabel = extra?.label || widget.label || widget.name || "";
         const values = extractComboValues(widget);
         if (values) {
             item.options = { values };
-        } else if (widget.options) {
+        } else if (widget.options && (widget.options.min != null || widget.options.max != null)) {
             item.options = {
-                min: widget.options.min ?? 0,
-                max: widget.options.max ?? 1,
-                step: widget.options.step ?? 1,
+                min: widget.options.min,
+                max: widget.options.max,
+                step: widget.options.step,
             };
         } else {
             item.options = {};
         }
     }
     cfg.items.push(item);
+    Pins.invalidatePins();
     node.setDirtyCanvas(true, true);
     syncNode(node);
     return item;
 }
+
+/** Remove an item (binding or divider) from hub config with pin invalidation. */
+export function removeItem(node, item) {
+    const cfg = getHubConfig(node);
+    const idx = cfg.items.findIndex((i) => i.id === item.id);
+    if (idx >= 0) cfg.items.splice(idx, 1);
+    Pins.invalidatePins();
+    node.setDirtyCanvas(true, true);
+    syncNode(node);
+}
+
+// ---------------------------------------------------------------------------
+// Hub creation helper (context menu -> Create New Settings Hub)
+// ---------------------------------------------------------------------------
 
 function getRootGraph() {
     const candidates = [];
@@ -104,7 +259,6 @@ function getRootGraph() {
         const store = window.comfyAPI && window.comfyAPI.app;
         if (store && store.graph) candidates.push(store.graph);
     } catch (_) {}
-    // Prefer the actual LGraph (has add/addNode) over any Vue wrapper.
     for (const g of candidates) {
         if (g && (typeof g.add === "function" || typeof g.addNode === "function")) return g;
     }
@@ -127,13 +281,14 @@ export function createNewHub() {
     if (!node) return null;
     node.title = "Settings Hub";
     try {
-        const canvas = (app && app.canvas) || (graph.canvas);
-        const pos = (canvas && canvas.graph_mouse) || (app && app.graph && app.graph.pos);
+        const canvas = app.canvas;
+        const pos = (canvas && canvas.graph_mouse) || (app.graph && app.graph.pos);
         if (pos && pos.length >= 2) {
             node.pos = [pos[0] + 40, pos[1] + 40];
         }
     } catch (_) {}
     getHubConfig(node);
+    Pins.invalidatePins();
     syncNode(node);
     return node;
 }

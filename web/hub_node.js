@@ -1,53 +1,62 @@
 import { app } from "../../scripts/app.js";
 import { getHubConfig } from "./core.js";
 import { syncNode } from "./sync.js";
+import * as Pins from "./pins.js";
 
 export const NODE_NAME = "SettingsHub";
 
 let registered = false;
 let pollTimer = null;
+let badgeInstalled = false;
+
+// ---------------------------------------------------------------------------
+// Node class
+// ---------------------------------------------------------------------------
+
+const resizeTimers = new WeakMap();
 
 function makeSettingsHubNodeClass(LGraphNode) {
-    return class SettingsHubNode extends LGraphNode {
+    return class SettingsHub extends LGraphNode {
         constructor() {
             super();
             this.type = NODE_NAME;
-            this.color = "#1a1a2e";
             this.title = "Settings Hub";
+            this.color = "#2a2a3e";
+            this.bgcolor = "#16162a";
             this.size = [340, 200];
             this.resizable = true;
             this.widgets = [];
         }
 
         onSerialize() {
-            return { properties: this.properties };
+            // Only properties.hubConfig matters; LiteGraph serializes the rest.
         }
 
         onConfigure(data) {
             if (data.properties?.hubConfig) {
                 this.properties.hubConfig = data.properties.hubConfig;
             }
-            syncNode(this);
-            return true;
+            syncNode(this); // rebuilds DOM widget from loaded config
         }
 
-        onDrawBackground(ctx) {
-            ctx.fillStyle = "#1a1a2e";
-            const w = this.size[0], h = this.size[1];
-            ctx.fillRect(-5, -5, w + 10, h + 10);
-        }
-
-        onDrawForeground(ctx) {
-            const cfg = getHubConfig(this);
-            const count = cfg.items.filter((i) => i.type === "widget_binding").length;
-            ctx.save();
-            ctx.fillStyle = "#ff6b6b";
-            ctx.font = "bold 12px sans-serif";
-            ctx.fillText(`📌 ${count}`, 10, 20);
-            ctx.restore();
+        onResize(size) {
+            // Re-layout while the user drags the corner - throttled so the
+            // DOM re-render does not run on every mouse-move frame.
+            if (resizeTimers.has(this)) return;
+            resizeTimers.set(
+                this,
+                setTimeout(() => {
+                    resizeTimers.delete(this);
+                    try { syncNode(this); } catch (_) {}
+                }, 150),
+            );
         }
     };
 }
+
+// ---------------------------------------------------------------------------
+// Registration (globals appear only after canvas init -> retry loop)
+// ---------------------------------------------------------------------------
 
 export function registerHubNode() {
     if (registered) return true;
@@ -57,6 +66,7 @@ export function registerHubNode() {
     try {
         LiteGraph.registerNodeType(NODE_NAME, makeSettingsHubNodeClass(LGraphNode));
         registered = true;
+        installBadgePainter();
         return true;
     } catch (e) {
         console.error("ComfyUI-Settings-Hub: registerNodeType failed:", e);
@@ -64,33 +74,82 @@ export function registerHubNode() {
     }
 }
 
-// The litegraph globals (window.LiteGraph / window.LGraphNode) are installed
-// by the frontend during canvas initialization, which may happen after
-// extension modules are imported. Try immediately and retry until they exist.
-if (!registerHubNode()) {
-    pollTimer = setInterval(() => {
-        if (pollTimer && registerHubNode()) clearInterval(pollTimer);
-    }, 100);
-    setTimeout(() => {
-        if (pollTimer) {
+// ---------------------------------------------------------------------------
+// "📌 n" badge on pinned target nodes (dev_plan phase 4)
+// ---------------------------------------------------------------------------
+// Wraps LGraphCanvas.prototype.drawNode once; after the node is drawn the
+// badge is painted on top - equivalent to an onDrawForeground hook without
+// touching every registered node class.
+
+function installBadgePainter() {
+    if (badgeInstalled) return;
+    const LGraphCanvasProto =
+        window.LGraphCanvas?.prototype ?? app.canvas?.constructor?.prototype;
+    if (!LGraphCanvasProto || !LGraphCanvasProto.drawNode) return;
+
+    if (LGraphCanvasProto.__hubBadgeInstalled) { badgeInstalled = true; return; }
+    LGraphCanvasProto.__hubBadgeInstalled = true;
+
+    const origDrawNode = LGraphCanvasProto.drawNode;
+    LGraphCanvasProto.drawNode = function (...args) {
+        const result = origDrawNode.apply(this, args);
+        try {
+            const [node, ctx] = args;
+            const count = Pins.getPinCount(node?.id);
+            if (count > 0 && !node.flags?.collapsed && ctx) {
+                ctx.save();
+                ctx.font = "10px sans-serif";
+                ctx.textAlign = "left";
+                ctx.textBaseline = "top";
+                const label = `📌${count}`;
+                const w = ctx.measureText(label).width + 6;
+                const x = (node.size?.[0] ?? 0) - w - 2;
+                const y = 2;
+                ctx.fillStyle = "rgba(30,30,52,0.85)";
+                ctx.strokeStyle = "#6b6b8e";
+                ctx.beginPath();
+                ctx.roundRect ? ctx.roundRect(x, y, w, 14, 3) : ctx.rect(x, y, w, 14);
+                ctx.fill();
+                ctx.stroke();
+                ctx.fillStyle = "#e0e0e0";
+                ctx.fillText(label, x + 3, y + 2.5);
+                ctx.restore();
+            }
+        } catch (_) {}
+        return result;
+    };
+    badgeInstalled = true;
+}
+
+function tryInstallBadgeSoon() {
+    if (badgeInstalled || installBadgePainter()) return;
+    pollTimer = pollTimer || setInterval(() => {
+        if ((registerHubNode() || installBadgePainter()) && pollTimer) {
             clearInterval(pollTimer);
             pollTimer = null;
         }
+    }, 100);
+    setTimeout(() => {
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     }, 60000);
 }
+tryInstallBadgeSoon();
 
 app.registerExtension({
     name: "Comfy.SettingsHub.node",
-    "nodeCreated"(node) {
+    nodeCreated(node) {
         if (node.type === NODE_NAME) {
             getHubConfig(node);
             syncNode(node);
         }
     },
-    "setup"() {
+    setup() {
         registerHubNode();
+        installBadgePainter();
     },
-    "afterConfigureGraph"() {
+    afterConfigureGraph() {
         registerHubNode();
+        installBadgePainter();
+        Pins.repaint(app); // badges for freshly loaded graph
     },
 });

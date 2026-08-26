@@ -1,65 +1,117 @@
 import { app } from "../../scripts/app.js";
-import { getHubConfig } from "./core.js";
-import { syncNode } from "./sync.js";
+import { getHubConfig, HUB_NODE_NAME } from "./core.js";
+import { syncNode, queueHubRefresh, inEdit, beginEdit, endEdit } from "./sync.js";
+import * as Pins from "./pins.js";
 
-export const HUB_NODE_NAME = "SettingsHub";
+export const HUB_NODE_NAME_LOCAL = HUB_NODE_NAME;
+
+const hookedWidgets = new WeakSet();
+
+/**
+ * Wrap a target widget's callback so manual edits on the source node are
+ * pushed into every hub mirror within one animation frame (reactive,
+ * polling-free). The original callback still runs first.
+ */
+function attachTargetHook(targetNode, targetWidget) {
+    if (!targetWidget || hookedWidgets.has(targetWidget)) return;
+    hookedWidgets.add(targetWidget);
+
+    const original = typeof targetWidget.callback === "function"
+        ? targetWidget.callback
+        : null;
+
+    targetWidget.callback = function (...args) {
+        let result;
+        if (original) {
+            try { result = original.apply(this, args); }
+            catch (err) { console.warn("[SettingsHub] target callback error:", err); }
+        }
+        // Only propagate user-driven changes; hub-initiated writes hold the
+        // edit lock so the loop cannot recurse back onto itself.
+        if (!inEdit()) {
+            for (const hub of iterHubs(targetNode.graph || app.graph)) {
+                if (hubBindsWidget(hub, targetNode.id, targetWidget.name)) {
+                    queueHubRefresh(hub);
+                }
+            }
+        }
+        return result;
+    };
+}
+
+export function ensureHooksForItem(item) {
+    if (!item || item.type !== "widget_binding") return;
+    const targetNode = app.graph?.getNodeById(item.targetNodeId);
+    const targetWidget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
+    attachTargetHook(targetNode, targetWidget);
+}
+
+/** Hub -> Target write with loop guard (the shared sync lock). */
+export function writeTargetValue(targetNode, targetWidget, value) {
+    beginEdit();
+    try {
+        targetWidget.value = value;
+        // Invoke LiteGraph's own machinery (side effects like
+        // control_after_generate), bypassing our wrapper is not required:
+        // our wrapper checks the lock and will no-op propagation.
+        if (typeof targetWidget.callback === "function") {
+            try { targetWidget.callback(value); } catch (_) {}
+        }
+    } finally {
+        endEdit();
+    }
+}
+
+function* iterHubs(graph) {
+    for (const node of graph?._nodes ?? []) {
+        if (node.type === HUB_NODE_NAME) yield node;
+    }
+}
+
+function hubBindsWidget(hubNode, targetNodeId, widgetName) {
+    const cfg = getHubConfig(hubNode);
+    for (const item of cfg.items) {
+        if (
+            item.type === "widget_binding" &&
+            item.targetNodeId === targetNodeId &&
+            item.widgetToBind === widgetName
+        ) return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Global helpers
+// ---------------------------------------------------------------------------
 
 export function isHubTarget(nodeId) {
-    const graph = app.graph ?? app.canvas?.graph;
-    for (const hubNode of graph?._nodes ?? []) {
-        if (hubNode.type === HUB_NODE_NAME) {
-            const cfg = getHubConfig(hubNode);
-            for (const item of cfg.items) {
-                if (item.targetNodeId === nodeId) return true;
-            }
+    for (const hub of iterHubs(app.graph ?? app.canvas?.graph)) {
+        const cfg = getHubConfig(hub);
+        for (const item of cfg.items) {
+            if (item.type === "widget_binding" && item.targetNodeId === nodeId) return true;
         }
     }
     return false;
 }
 
+/** Full re-render of every hub on the graph + pin recount. */
 export function syncAll() {
+    Pins.invalidatePins();
     const graph = app.graph ?? app.canvas?.graph;
-    for (const node of graph?._nodes ?? []) {
-        if (node.type === HUB_NODE_NAME) {
-            syncNode(node);
-        }
+    for (const hub of iterHubs(graph)) syncNode(hub);
+    // Attach hooks to widgets that are already bound at load time.
+    for (const hub of iterHubs(graph)) {
+        const cfg = getHubConfig(hub);
+        for (const item of cfg.items) ensureHooksForItem(item);
     }
 }
 
-function syncHubWidgetValues() {
-    for (const hubNode of app.graph?._nodes ?? []) {
-        if (hubNode.type !== HUB_NODE_NAME) continue;
-        const cfg = getHubConfig(hubNode);
-        for (const hubWidget of hubNode.widgets ?? []) {
-            if (!hubWidget.name?.startsWith("__hub_item_")) continue;
-            const itemId = hubWidget.name.replace("__hub_item_", "");
-            const item = cfg.items.find((i) => i.id === itemId);
-            if (!item || item.type !== "widget_binding") continue;
-            const targetNode = app.graph.getNodeById(item.targetNodeId);
-            const targetWidget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
-            if (targetWidget && hubWidget.value !== targetWidget.value) {
-                hubWidget.value = targetWidget.value;
-                hubNode.setDirtyCanvas(true, true);
-            }
-        }
-    }
-}
-
-function startSyncLoop() {
-    if (syncTimer) return;
-    syncTimer = setInterval(() => {
-        syncHubWidgetValues();
-    }, 300);
-}
-
-let syncTimer = null;
 app.registerExtension({
     name: "Comfy.SettingsHub.sync",
-    "setup"() {
+    setup() {
         syncAll();
-        startSyncLoop();
     },
-    "afterConfigureGraph"() {
+    afterConfigureGraph() {
         syncAll();
     },
 });
