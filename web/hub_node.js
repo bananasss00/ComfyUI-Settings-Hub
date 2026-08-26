@@ -12,6 +12,7 @@ class SettingsHubNode extends LGraphNode {
         this.title = "Settings Hub";
         this.size = [340, 200];
         this.resizable = true;
+        this.widgets = [];
     }
 
     onSerialize() {

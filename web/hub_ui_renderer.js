@@ -173,7 +173,7 @@ export function syncHubNode(node) {
     const cfg = getHubConfig(node);
 
     // Clear old widgets
-    node.widgets = node.widgets.filter((w) => !w.name?.startsWith("__hub_"));
+    node.widgets = (node.widgets || []).filter((w) => !w.name?.startsWith("__hub_"));
 
     // Add tab selector first
     renderTabSection(node, cfg);
