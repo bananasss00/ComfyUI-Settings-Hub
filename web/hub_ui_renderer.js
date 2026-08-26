@@ -4,7 +4,6 @@ import { presetSave, presetNew, presetApply } from "./preset_manager.js";
 import { registerSync } from "./sync.js";
 
 let syncLock = false;
-let isHubWidgetSyncing = false;
 
 function mapItemWidgetType(itemType) {
     switch (itemType) {
@@ -85,7 +84,7 @@ function renderPresetSection(node, cfg) {
     });
 }
 
-function renderItemWidget(node, cfg, item, index) {
+function renderItemWidget(node, cfg, item, index, previousItemValues) {
     const targetNode = app.graph.getNodeById(item.targetNodeId);
     const targetWidget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
 
@@ -96,7 +95,8 @@ function renderItemWidget(node, cfg, item, index) {
         const name = `__hub_item_${item.id}`;
         const label = item.customLabel || targetWidget.name;
         const hubWidgetType = mapItemWidgetType(item.widgetType);
-        const w = widgetFor(node, name, hubWidgetType, targetWidget.value,
+        const initialValue = previousItemValues.get(item.id) ?? targetWidget.value;
+        const w = widgetFor(node, name, hubWidgetType, initialValue,
             (val) => doSetValue(targetWidget, val));
         w.label = label;
         // Preserve combo values / slider range.
@@ -131,6 +131,19 @@ function renderTabSection(node, cfg) {
 export function syncHubNode(node) {
     if (!node || node.type !== "SettingsHub") return;
     const cfg = getHubConfig(node);
+    const isFullSync = !node.widgets?.length;
+    const previousItemValues = new Map();
+    if (!isFullSync) {
+        for (const hubWidget of node.widgets) {
+            if (hubWidget.name?.startsWith("__hub_item_")) {
+                const itemId = hubWidget.name.replace("__hub_item_", "");
+                const item = cfg.items.find((i) => i.id === itemId);
+                if (item && item.type === "widget_binding") {
+                    previousItemValues.set(item.id, hubWidget.value);
+                }
+            }
+        }
+    }
 
     // Clear old widgets
     node.widgets = (node.widgets || []).filter((w) => !w.name?.startsWith("__hub_"));
@@ -148,7 +161,7 @@ export function syncHubNode(node) {
         .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
     for (const item of tabItems) {
-        renderItemWidget(node, cfg, item, 0);
+        renderItemWidget(node, cfg, item, 0, previousItemValues);
     }
 
     // Auto-resize
