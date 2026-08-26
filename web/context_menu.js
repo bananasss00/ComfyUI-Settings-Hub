@@ -12,41 +12,137 @@ import {
 
 export function attachContextMenu() {
     attachDomWidgetPinMenu();
+    attachCtrlRmbOverride();
 
     app.registerExtension({
         name: "Comfy.SettingsHub.context",
         "getNodeMenuItems"(node) {
             if (!node || node.type === HUB_NODE_NAME) return [];
-            if (!node.widgets?.length) return [];
 
-            // Widget strictly under the cursor. No body-click fallback:
-            // pinning the wrong widget silently was one of the sources of
-            // "wrong mirror type" reports.
-            const canvas = app.canvas;
+            const graph = node.graph || app.graph;
+
+            // Path 1 (unchanged): the widget strictly under the cursor.
+            // Precise, but useless for rgthree-style panels whose surface
+            // is fully covered by their own handlers/menus - on the loras
+            // list their own menu wins and ours never fires.
             let widget = null;
             try {
                 widget = node.getWidgetOnPos?.(
-                    canvas?.graph_mouse?.[0],
-                    canvas?.graph_mouse?.[1],
+                    app.canvas?.graph_mouse?.[0],
+                    app.canvas?.graph_mouse?.[1],
                     true,
                 );
             } catch {
                 widget = null;
             }
-            if (!widget) return [];
 
-            const graph = node.graph || app.graph;
-            return [
-                {
+            const items = [];
+            if (widget && node.widgets?.length && !isHelperWidget(widget)) {
+                items.push({
                     content: "📌 Pin to Settings Hub",
                     has_submenu: true,
                     submenu: {
                         options: buildPinSubmenu(node, widget, graph),
                     },
-                },
-            ];
+                });
+            }
+
+            // Path 2 (NEW): deterministically list EVERY panel-classified
+            // widget of this node. Works even when the right-click lands on
+            // the safe node title bar (no widget handler underneath) and it
+            // removes the guesswork that previously mis-pinned "spacer"
+            // widgets ("empty space", "toggle all", ...).
+            const panels = listPanelWidgets(node);
+            if (panels.length) {
+                items.push({
+                    content: "🪟 Pin custom panel (live embed)",
+                    has_submenu: true,
+                    submenu: {
+                        options: buildPanelSubmenu(node, panels, graph),
+                    },
+                });
+            }
+            return items;
         },
     });
+}
+
+/** Declared helper widgets (bare buttons etc.) carry no state worth mirroring
+ *  and no panel worth embedding - they were the source of mis-pins like
+ *  "empty space" / stray toggles. */
+function isHelperWidget(w) {
+    const t = (typeof w?.type === "string" ? w.type : "").trim().toLowerCase();
+    return t === "button";
+}
+
+/** All widgets of the node classified as portals (custom panels).
+ *  Universal detection - zero per-custom-node hardcode. */
+function listPanelWidgets(node) {
+    const out = [];
+    for (const w of node.widgets ?? []) {
+        try {
+            if (isHelperWidget(w)) continue;
+            if (detectWidgetType(w) === "portal") out.push(w);
+        } catch (_) { /* defensive: exotic getters must not kill the menu */ }
+    }
+    return out;
+}
+
+/** Human-readable, truncated widget label for menu entries. */
+function panelLabel(w) {
+    const raw =
+        w?.label ||
+        w?.name ||
+        (typeof w?.type === "string" && w.type ? w.type : "");
+    const s = String(raw).replace(/\s+/g, " ").trim() || "panel";
+    return s.length > 26 ? `${s.slice(0, 25)}…` : s;
+}
+
+/** Flat "candidate -> hub -> tab" entries (the Vue menu converter only
+ *  supports ONE submenu level, so cross products stay flat). */
+function buildPanelSubmenu(node, panels, graph) {
+    const hubs = (graph._nodes ?? []).filter((n) => n.type === HUB_NODE_NAME);
+    const entries = [];
+
+    if (hubs.length === 0) {
+        for (const w of panels) {
+            entries.push({
+                content: `🪟 Create New Settings Hub (${panelLabel(w)})`,
+                callback: () => {
+                    const newHub = createNewHub();
+                    if (newHub) {
+                        createBinding(newHub, node, w, getActiveTabId(getHubConfig(newHub)));
+                    }
+                },
+            });
+        }
+        return entries;
+    }
+
+    for (const w of panels) {
+        for (const hub of hubs) {
+            const cfg = getHubConfig(hub);
+            const prefix = hubs.length > 1 ? `${hub.title || "Settings Hub"}: ` : "";
+            for (const tab of cfg.tabs) {
+                entries.push({
+                    content: `🪟 «${panelLabel(w)}» → ${prefix}${tab.name}`,
+                    callback: () => createBinding(hub, node, w, tab.id),
+                });
+            }
+            entries.push({
+                content: `➕ «${panelLabel(w)}» → ${prefix}New Tab`,
+                callback: () => {
+                    const name = prompt("New tab name:", "New Tab");
+                    if (name !== null) {
+                        const tabId = `tab_${Date.now().toString(36)}`;
+                        cfg.tabs.push({ id: tabId, name, order: cfg.tabs.length });
+                        createBinding(hub, node, w, tabId);
+                    }
+                },
+            });
+        }
+    }
+    return entries;
 }
 
 function buildPinSubmenu(node, widget, graph) {
@@ -148,7 +244,7 @@ function showHubMenu(x, y, entries) {
 
     const cancel = document.createElement("div");
     cancel.className = "hub-menu-item hub-menu-cancel";
-    cancel.textContent = "✖ Cancel  (Shift+RMB = browser menu)";
+    cancel.textContent = "✖ Cancel · Shift+RMB = native menu";
     cancel.addEventListener("click", closeHubMenu);
     menu.appendChild(cancel);
 
@@ -168,6 +264,61 @@ function showHubMenu(x, y, entries) {
     document.addEventListener("pointerdown", dismissHandlers.pointer, true);
     document.addEventListener("keydown", dismissHandlers.key, true);
     window.addEventListener("blur", dismissHandlers.blur);
+}
+
+// ============================================================================
+// 3) Ctrl/Cmd+RMB override - pin menu from INSIDE foreign panels
+// ============================================================================
+// Custom panels (rgthree Power Lora Loader etc.) consume right-clicks over
+// practically their whole surface for their own per-row menus, leaving no
+// reachable pixel to request a pin. Holding Ctrl/Cmd flips the priority:
+// our capture-phase handler answers BEFORE the panel's own contextmenu
+// logic and offers the standard pin menu instead.
+
+function attachCtrlRmbOverride() {
+    document.addEventListener("contextmenu", (e) => {
+        if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.defaultPrevented) return;
+        const t = e.target;
+        if (!t || typeof t.closest !== "function") return;
+        // Never intercept our own UI or panels already relocated into the hub.
+        if (t.closest(".hub-menu, .settings-hub-wrap, .hub-portal-host")) return;
+
+        let owner = null;
+        if (t.tagName === "CANVAS") {
+            // Canvas surface: resolve node+widget under the tracked graph-
+            // space pointer, exactly like ComfyUI's own menu does.
+            const mx = app.canvas?.graph_mouse?.[0];
+            const my = app.canvas?.graph_mouse?.[1];
+            if (typeof mx === "number" && typeof my === "number") {
+                let hit = null;
+                try {
+                    hit = (app.graph ?? app.canvas?.graph)?.getNodeOnPos?.(mx, my, true);
+                } catch (_) {
+                    hit = null;
+                }
+                if (hit && hit.type !== HUB_NODE_NAME) {
+                    try {
+                        const w = hit.getWidgetOnPos?.(mx, my, true);
+                        if (w) owner = { node: hit, widget: w };
+                    } catch (_) {
+                        owner = null;
+                    }
+                }
+            }
+        } else {
+            owner = findDomWidgetOwner(t);
+        }
+
+        if (!owner || owner.node.type === HUB_NODE_NAME) return;
+
+        const graph = owner.node.graph || app.graph;
+        const entries = buildPinSubmenu(owner.node, owner.widget, graph);
+        if (!entries.length) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        showHubMenu(e.clientX, e.clientY, entries);
+    }, true);
 }
 
 /** Find which node widget owns the given DOM element (textarea/input). */
@@ -197,8 +348,9 @@ function isTextField(el) {
 
 function attachDomWidgetPinMenu() {
     document.addEventListener("contextmenu", (e) => {
-        // Shift+RMB -> let the browser menu through (copy/paste etc.).
-        if (e.shiftKey || e.defaultPrevented) return;
+        // Plain RMB only. Shift stays the native-menu escape hatch;
+        // Ctrl/Cmd belongs to the override listener (section 3).
+        if (e.shiftKey || e.ctrlKey || e.metaKey || e.defaultPrevented) return;
         if (!isTextField(e.target)) return;
         // Text fields already relocated into a portal belong to that portal:
         // their own menus must stay native, re-pinning them is meaningless.
