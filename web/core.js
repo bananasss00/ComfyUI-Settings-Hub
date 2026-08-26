@@ -87,6 +87,20 @@ const TEXT_TYPES = new Set([
     "text", "string", "customtext", "textarea", "multiline",
 ]);
 
+/**
+ * True when the widget is a multiline text editor. ComfyUI expresses this in
+ * two different ways depending on widget vintage:
+ *   - options.multiline === true (canvas customtext widgets)
+ *   - the widget itself carries a real <textarea> DOM element
+ *     (DOM-based prompt widgets) - no flag at all.
+ */
+export function isMultilineWidget(widget) {
+    if (!widget) return false;
+    if (widget.options?.multiline === true) return true;
+    const el = widget.element ?? widget.inputEl ?? widget.contentEl;
+    return !!(el && el.tagName === "TEXTAREA");
+}
+
 export function detectWidgetType(widget) {
     const rawType = widget?.type;
     const type = typeof rawType === "string" ? rawType.toLowerCase() : "";
@@ -225,7 +239,9 @@ export function createBinding(node, targetNode, widget, tabId, type, extra) {
                 step: widget.options.step,
             };
         } else {
-            item.options = {};
+            // Text-family binding: remember multiline so the hub renders a
+            // growing <textarea> instead of a single-line input.
+            item.options = isMultilineWidget(widget) ? { multiline: true } : {};
         }
     }
     cfg.items.push(item);

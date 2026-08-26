@@ -19,6 +19,7 @@ import { app } from "../../scripts/app.js";
 import {
     getHubConfig, getActiveTabId, sortedTabs, itemsOfTab, genId,
     liveComboValues, numericMerge, coerceNumeric, removeItem, detectWidgetType,
+    isMultilineWidget,
 } from "./core.js";
 import { presetSave, presetNew, presetDelete, presetApply } from "./preset_manager.js";
 import { writeTargetValue, ensureHooksForItem } from "./sync_manager.js";
@@ -36,7 +37,6 @@ function titleBarHeight() {
 }
 const SLOT_TOP_GAP = 8;
 const CHROME_H = 12;
-const MIN_WIDTH = 300;
 
 const stateMap = new WeakMap();
 
@@ -73,8 +73,9 @@ function ensureHubDom(node) {
         if (widget) {
             widget.serializable = false;
             if (widget.options) widget.options.serialize = false;
-            // Slot height is driven dynamically after measuring content.
-            widget.computeSize = () => [wrap._hubWidth || node.size[0], wrap._hubH || 60];
+            // Slot height is driven by measured content; ComfyUI sizes the
+            // element itself per frame, so we never pin explicit pixel widths.
+            widget.computeSize = () => [node.size[0], (wrap._hubH ?? 60) + SLOT_TOP_GAP + CHROME_H];
         }
     } catch (err) {
         console.warn("[SettingsHub] addDOMWidget unavailable:", err);
@@ -148,8 +149,10 @@ function mirrorHtml(item, tw) {
         }
         default: {
             const val = tw?.value ?? "";
-            if (item.options?.multiline || tw?.options?.multiline) {
-                return `<span class="hub-mirror"><textarea class="hub-text-area" rows="3" data-role="text" data-hub-control>${esc(val)}</textarea></span>`;
+            // Multiline mirrors: persisted flag OR live widget carrying a
+            // real <textarea> element (DOM prompt widgets have no flag).
+            if (item.options?.multiline || isMultilineWidget(tw)) {
+                return `<span class="hub-mirror"><textarea class="hub-text-area" rows="3" spellcheck="false" data-role="text" data-hub-control>${esc(val)}</textarea></span>`;
             }
             return `<span class="hub-mirror"><input type="text" class="hub-text-input" data-role="text" data-hub-control value="${esc(val)}"></span>`;
         }
@@ -415,15 +418,19 @@ function renderHub(node) {
     const cfg = getHubConfig(node);
     getActiveTabId(cfg);
 
-    // Self-heal binding types: configs saved by the OLD build carry wrong
-    // widgetType values (e.g. combo stored as "slider" -> the NaN slider
-    // mirror on screen). The live target widget is authoritative.
+    // Self-heal bindings: configs saved by older builds carry wrong values.
+    // The live target widget is always authoritative.
     for (const item of cfg.items) {
         if (item.type !== "widget_binding") continue;
         const { tw } = findTarget(item);
-        if (tw) {
-            const live = detectWidgetType(tw);
-            if (live !== item.widgetType) item.widgetType = live;
+        if (!tw) continue;
+        const live = detectWidgetType(tw);
+        if (live !== item.widgetType) item.widgetType = live;
+        if (live === "text") {
+            const ml = isMultilineWidget(tw);
+            if (ml !== !!item.options?.multiline) {
+                item.options = { ...(item.options || {}), multiline: ml };
+            }
         }
     }
 
@@ -438,13 +445,8 @@ function renderHub(node) {
     layoutNode(node);
 }
 
-function layoutNode(node) {
-    const st = stateMap.get(node);
-    if (!st) return;
-    const width = Math.max(MIN_WIDTH, node.size[0]);
-    st.wrap.style.width = `${width - 4}px`;
-
-    const measure = () => {
+function measurer(node, st) {
+    return () => {
         if (node.flags?.collapsed) return;
         // max(scrollHeight, rect) covers both content growth and cases where
         // the element already has an explicitly sized wrapper.
@@ -452,19 +454,46 @@ function layoutNode(node) {
         const measured = Math.ceil(Math.max(st.root.scrollHeight, rectH, 24));
         st.wrap._hubH = measured;
         if (st.widget) {
-            st.widget.computeSize = () => [width, measured + SLOT_TOP_GAP + CHROME_H];
+            st.widget.computeSize = () => [node.size[0], measured + SLOT_TOP_GAP + CHROME_H];
         }
+        // AUTO-HEIGHT (dev_plan: "configurable width, auto height"): the node
+        // hugs its content in BOTH directions. User resizes adjust the width
+        // freely; manual height changes snap back - shrinking can no longer
+        // clip content, growing can no longer leave dead canvas space.
         const total = titleBarHeight() + SLOT_TOP_GAP + measured + CHROME_H;
         if (Math.abs(node.size[1] - total) > 0.5) {
-            node.setSize([width, total]);
+            node.setSize([node.size[0], total]);
             node.setDirtyCanvas(true, true);
         }
     };
+}
 
-    st.wrap._hubWidth = width;
-    requestAnimationFrame(measure);          // after paint (attached DOM)
-    setTimeout(measure, 60);                 // settle pass for fonts/images
-    setTimeout(measure, 250);                // final pass for async layout shifts
+/** Full re-render layout: several settling passes after content changed. */
+function layoutNode(node) {
+    const st = stateMap.get(node);
+    if (!st) return;
+    const m = measurer(node, st);
+    requestAnimationFrame(m);          // after paint (attached DOM)
+    setTimeout(m, 60);                 // settle pass for fonts/images
+    setTimeout(m, 250);                // final pass for async layout shifts
+}
+
+const relayoutScheduled = new WeakSet();
+
+/**
+ * Lightweight relayout for node resizes: NO innerHTML rebuild, one rAF-
+ * coalesced measure pass. Cheap enough to run during the whole drag.
+ */
+export function relayoutHub(node) {
+    if (!node || node.type !== "SettingsHub") return;
+    const st = stateMap.get(node);
+    if (!st || relayoutScheduled.has(node)) return;
+    relayoutScheduled.add(node);
+    requestAnimationFrame(() => {
+        relayoutScheduled.delete(node);
+        if (node.flags?.collapsed) return;
+        measurer(node, st)();
+    });
 }
 
 // Delegated event wiring — bound ONCE per hub DOM.

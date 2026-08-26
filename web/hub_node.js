@@ -1,6 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { getHubConfig } from "./core.js";
 import { syncNode } from "./sync.js";
+import { relayoutHub } from "./hub_ui_renderer.js";
 import * as Pins from "./pins.js";
 
 export const NODE_NAME = "SettingsHub";
@@ -12,8 +13,6 @@ let badgeInstalled = false;
 // ---------------------------------------------------------------------------
 // Node class
 // ---------------------------------------------------------------------------
-
-const resizeTimers = new WeakMap();
 
 function makeSettingsHubNodeClass(LGraphNode) {
     return class SettingsHub extends LGraphNode {
@@ -40,16 +39,10 @@ function makeSettingsHubNodeClass(LGraphNode) {
         }
 
         onResize(size) {
-            // Re-layout while the user drags the corner - throttled so the
-            // DOM re-render does not run on every mouse-move frame.
-            if (resizeTimers.has(this)) return;
-            resizeTimers.set(
-                this,
-                setTimeout(() => {
-                    resizeTimers.delete(this);
-                    try { syncNode(this); } catch (_) {}
-                }, 150),
-            );
+            // AUTO-HEIGHT behavior lives in relayoutHub: measures content and
+            // snaps the height back (both directions) while leaving the width
+            // free. rAF-coalesced, no innerHTML rebuild - safe mid-drag.
+            try { relayoutHub(this); } catch (_) {}
         }
     };
 }

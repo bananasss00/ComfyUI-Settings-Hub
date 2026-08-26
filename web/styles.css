@@ -249,8 +249,13 @@
    ========================================================================== */
 
 .settings-hub-wrap {
+    width: 100%;
     overflow: hidden;
     box-sizing: border-box;
+}
+
+.settings-hub {
+    width: 100%;
 }
 
 .settings-hub * {
@@ -331,7 +336,13 @@
 .hub-text-area {
     resize: vertical;
     min-width: 130px;
-    min-height: 30px;
+    min-height: 46px;
+    line-height: 1.35;
+    font-family: inherit;
+}
+
+.hub-mirror textarea.hub-text-area {
+    max-width: 170px;
 }
 
 /* Dangerous hover for unpin buttons */
