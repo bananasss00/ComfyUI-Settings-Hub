@@ -18,15 +18,24 @@
 import { app } from "../../scripts/app.js";
 import {
     getHubConfig, getActiveTabId, sortedTabs, itemsOfTab, genId,
-    liveComboValues, numericMerge, coerceNumeric, removeItem,
+    liveComboValues, numericMerge, coerceNumeric, removeItem, detectWidgetType,
 } from "./core.js";
 import { presetSave, presetNew, presetDelete, presetApply } from "./preset_manager.js";
 import { writeTargetValue, ensureHooksForItem } from "./sync_manager.js";
 import { beginEdit, endEdit, registerStructural, registerValues } from "./sync.js";
 import { initDrag } from "./dnd_manager.js";
 
-const TITLE_H = 30;     // litegraph title bar allowance
-const CHROME_H = 6;     // bottom padding allowance
+// Layout allowances. The title bar height is taken from LiteGraph when
+// available (themes vary); SLOT_TOP_GAP is the canvas-side offset above the
+// first widget slot. Both plus CHROME_H are deliberately generous: a few
+// spare pixels at the bottom are invisible, while a couple of missing ones
+// clip the preset row (reported bug).
+function titleBarHeight() {
+    const h = window.LiteGraph?.NODE_TITLE_HEIGHT;
+    return typeof h === "number" && h > 0 ? h : 30;
+}
+const SLOT_TOP_GAP = 8;
+const CHROME_H = 12;
 const MIN_WIDTH = 300;
 
 const stateMap = new WeakMap();
@@ -406,6 +415,18 @@ function renderHub(node) {
     const cfg = getHubConfig(node);
     getActiveTabId(cfg);
 
+    // Self-heal binding types: configs saved by the OLD build carry wrong
+    // widgetType values (e.g. combo stored as "slider" -> the NaN slider
+    // mirror on screen). The live target widget is authoritative.
+    for (const item of cfg.items) {
+        if (item.type !== "widget_binding") continue;
+        const { tw } = findTarget(item);
+        if (tw) {
+            const live = detectWidgetType(tw);
+            if (live !== item.widgetType) item.widgetType = live;
+        }
+    }
+
     st.root.innerHTML =
         buildTabBarHtml(cfg) +
         containerHtml(node, cfg) +
@@ -425,10 +446,15 @@ function layoutNode(node) {
 
     const measure = () => {
         if (node.flags?.collapsed) return;
-        const measured = Math.max(st.root.scrollHeight, 24) + CHROME_H;
+        // max(scrollHeight, rect) covers both content growth and cases where
+        // the element already has an explicitly sized wrapper.
+        const rectH = st.root.getBoundingClientRect?.().height || 0;
+        const measured = Math.ceil(Math.max(st.root.scrollHeight, rectH, 24));
         st.wrap._hubH = measured;
-        st.widget.computeSize = () => [width, measured];
-        const total = TITLE_H + measured;
+        if (st.widget) {
+            st.widget.computeSize = () => [width, measured + SLOT_TOP_GAP + CHROME_H];
+        }
+        const total = titleBarHeight() + SLOT_TOP_GAP + measured + CHROME_H;
         if (Math.abs(node.size[1] - total) > 0.5) {
             node.setSize([width, total]);
             node.setDirtyCanvas(true, true);
@@ -438,6 +464,7 @@ function layoutNode(node) {
     st.wrap._hubWidth = width;
     requestAnimationFrame(measure);          // after paint (attached DOM)
     setTimeout(measure, 60);                 // settle pass for fonts/images
+    setTimeout(measure, 250);                // final pass for async layout shifts
 }
 
 // Delegated event wiring — bound ONCE per hub DOM.

@@ -2,7 +2,7 @@ import { app } from "../../scripts/app.js";
 import { getHubConfig } from "./core.js";
 import { writeTargetValue } from "./sync_manager.js";
 import * as Pins from "./pins.js";
-import { syncNode } from "./sync.js";
+import { syncNode, refreshNodeValues } from "./sync.js";
 
 /**
  * Snapshot the CURRENT values of every widget binding of this hub
@@ -86,6 +86,10 @@ export function presetApply(node, presetName) {
         }
         writeTargetValue(targetNode, widget, v);
     }
+    // The wrapped target callbacks stay silent while the edit lock is held,
+    // so the hub mirrors must be refreshed explicitly once ALL writes are
+    // done (previously the DOM kept stale values after preset switching).
+    refreshNodeValues(node);
     (node.graph ?? app.graph)?.setDirtyCanvas?.(true, true);
     return true;
 }
