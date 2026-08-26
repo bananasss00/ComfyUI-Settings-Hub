@@ -1,0 +1,211 @@
+/* Settings Hub Styles */
+
+.settings-hub {
+    font-family: "Inter", -apple-system, sans-serif;
+    font-size: 11px;
+    color: #e0e0e0;
+    user-select: none;
+}
+
+/* Tab bar */
+.hub-tab-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 2px 4px;
+    background: #16162a;
+    border-bottom: 1px solid #333355;
+    min-height: 24px;
+}
+
+.hub-tab-btn {
+    background: #2a2a3e;
+    color: #aaa;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    position: relative;
+}
+
+.hub-tab-btn:hover {
+    background: #3a3a4e;
+    color: #fff;
+}
+
+.hub-tab-active {
+    background: #3a3a6e;
+    color: #fff;
+    border-color: #6b6b8e;
+}
+
+.hub-tab-del {
+    opacity: 0.4;
+    font-size: 9px;
+    margin-left: 3px;
+}
+
+.hub-tab-btn:hover .hub-tab-del {
+    opacity: 1;
+}
+
+.hub-add-tab {
+    background: #2a2a3e;
+    color: #888;
+    border: 1px dashed #444;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 12px;
+    cursor: pointer;
+    line-height: 1;
+}
+
+.hub-add-tab:hover {
+    background: #3a3a4e;
+    color: #fff;
+}
+
+/* Item container */
+.hub-container {
+    padding: 4px;
+}
+
+.hub-item-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 2px;
+    border-bottom: 1px solid #2a2a3e;
+    min-height: 22px;
+}
+
+.hub-item-row:hover {
+    background: #22223a;
+}
+
+/* Drag handle */
+.hub-drag-handle {
+    cursor: grab;
+    color: #555;
+    font-size: 10px;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.hub-drag-handle:hover {
+    color: #888;
+}
+
+/* Labels */
+.hub-item-label {
+    flex: 1;
+    color: #ccc;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hub-item-label:hover {
+    color: #fff;
+}
+
+/* Mirror widgets */
+.hub-mirror {
+    flex-shrink: 0;
+}
+
+.hub-mirror input,
+.hub-mirror select {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    border: 1px solid #444;
+    border-radius: 3px;
+    font-size: 11px;
+    padding: 2px 4px;
+    max-width: 100px;
+}
+
+.hub-mirror input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    max-width: unset;
+}
+
+/* Orphan indicator */
+.hub-orphan {
+    color: #ff8866;
+    font-size: 10px;
+    flex-shrink: 0;
+}
+
+/* Buttons */
+.hub-btn {
+    background: #2a2a3e;
+    color: #aaa;
+    border: 1px solid #444;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 10px;
+    cursor: pointer;
+    flex-shrink: 0;
+    line-height: 1.2;
+}
+
+.hub-btn:hover {
+    background: #3a3a4e;
+    color: #fff;
+}
+
+.hub-locate {
+    font-size: 11px;
+}
+
+/* Divider */
+.hub-divider-label {
+    flex: 1;
+    color: #6b6b8e;
+    font-size: 10px;
+    font-style: italic;
+    padding: 2px 0;
+}
+
+/* Preset row */
+.hub-preset-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 2px;
+    border-bottom: 1px solid #333355;
+    margin-bottom: 4px;
+}
+
+.hub-preset-select {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    border: 1px solid #444;
+    border-radius: 3px;
+    font-size: 10px;
+    padding: 1px 4px;
+    flex: 1;
+}
+
+/* Context menu */
+.hub-menu {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.hub-menu-item {
+    padding: 3px 8px;
+    cursor: pointer;
+    border-radius: 3px;
+}
+
+.hub-menu-item:hover {
+    background: #3a3a4e;
+}
