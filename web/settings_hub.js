@@ -1,3 +1,4 @@
+import { app } from "../../scripts/app.js";
 import { attachContextMenu } from "./context_menu.js";
 import { syncAll } from "./sync_manager.js";
 import "./hub_node.js";
