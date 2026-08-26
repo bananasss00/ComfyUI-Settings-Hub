@@ -5,17 +5,23 @@ export function attachContextMenu() {
     app.registerExtension({
         name: "Comfy.SettingsHub.context",
         "getNodeMenuItems"(node) {
-            // Resolve the widget under the cursor for pinning.
+            if (!node || node.type === HUB_NODE_NAME) return [];
+            if (!node.widgets?.length) return [];
+
+            // Widget under the cursor, or the last widget when right-clicking
+            // the node body.
             const canvas = app.canvas;
-            const widget = node.getWidgetOnPos?.(canvas.graph_mouse[0], canvas.graph_mouse[1], true);
+            let widget = null;
+            try {
+                widget = node.getWidgetOnPos?.(canvas?.graph_mouse?.[0], canvas?.graph_mouse?.[1], true) ||
+                    node.widgets[node.widgets.length - 1];
+            } catch {
+                widget = node.widgets[node.widgets.length - 1];
+            }
             if (!widget) return [];
 
             const graph = node.graph || app.graph;
-            const hubCount = graph._nodes?.filter((n) => n.type === HUB_NODE_NAME).length ?? 0;
-            if (!hubCount) return [];
-
             return [
-                null,
                 {
                     content: "📌 Pin to Settings Hub",
                     has_submenu: true,
@@ -29,48 +35,45 @@ export function attachContextMenu() {
 }
 
 function buildPinSubmenu(node, widget, graph) {
-    const entries = [];
+    const hubs = (graph._nodes ?? []).filter((n) => n.type === HUB_NODE_NAME);
 
-    for (const hubNode of graph._nodes ?? []) {
-        if (hubNode.type !== HUB_NODE_NAME) continue;
-        const cfg = getHubConfig(hubNode);
-        const tabSub = [];
-        for (const tab of cfg.tabs) {
-            tabSub.push({
-                content: tab.name,
+    if (hubs.length === 0) {
+        return [
+            {
+                content: "➕ Create New Settings Hub",
                 callback: () => {
-                    createBinding(hubNode, node, widget, tab.id);
+                    const newHub = createNewHub();
+                    createBinding(newHub, node, widget, getActiveTabId(getHubConfig(newHub)));
+                },
+            },
+        ];
+    }
+
+    // The Vue menu converter only supports one submenu level, so keep the
+    // list flat.
+    const entries = [];
+    for (const hub of hubs) {
+        const cfg = getHubConfig(hub);
+        const prefix = hubs.length > 1 ? hub.title || "Settings Hub" : null;
+        for (const tab of cfg.tabs) {
+            entries.push({
+                content: prefix ? `${prefix}: ${tab.name}` : tab.name,
+                callback: () => {
+                    createBinding(hub, node, widget, tab.id);
                 },
             });
         }
-        tabSub.push(null);
-        tabSub.push({
-            content: "➕ Add to New Tab",
+        entries.push({
+            content: prefix ? `➕ ${prefix}: New Tab` : "➕ Add to New Tab",
             callback: () => {
                 const name = prompt("New tab name:", "New Tab");
                 if (name !== null) {
                     const tabId = `tab_${Date.now().toString(36)}`;
                     cfg.tabs.push({ id: tabId, name, order: cfg.tabs.length });
-                    createBinding(hubNode, node, widget, tabId);
+                    createBinding(hub, node, widget, tabId);
                 }
             },
         });
-        entries.push({
-            content: hubNode.title || "Settings Hub",
-            has_submenu: true,
-            submenu: { options: tabSub },
-        });
     }
-
-    if (entries.length === 0) {
-        entries.push({
-            content: "➕ Create New Settings Hub",
-            callback: () => {
-                const newHub = createNewHub();
-                createBinding(newHub, node, widget, getActiveTabId(getHubConfig(newHub)));
-            },
-        });
-    }
-
     return entries;
 }

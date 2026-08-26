@@ -5,7 +5,8 @@ import { syncNode } from "./sync.js";
 export const HUB_NODE_NAME = "SettingsHub";
 
 export function isHubTarget(nodeId) {
-    for (const hubNode of app.graph._nodes ?? []) {
+    const graph = app.graph ?? app.canvas?.graph;
+    for (const hubNode of graph?._nodes ?? []) {
         if (hubNode.type === HUB_NODE_NAME) {
             const cfg = getHubConfig(hubNode);
             for (const item of cfg.items) {
@@ -17,7 +18,8 @@ export function isHubTarget(nodeId) {
 }
 
 export function syncAll() {
-    for (const node of app.graph._nodes ?? []) {
+    const graph = app.graph ?? app.canvas?.graph;
+    for (const node of graph?._nodes ?? []) {
         if (node.type === HUB_NODE_NAME) {
             syncNode(node);
         }
@@ -26,11 +28,10 @@ export function syncAll() {
 
 app.registerExtension({
     name: "Comfy.SettingsHub.sync",
-    "graphToCanvas.post"(graph) {
-        for (const node of graph._nodes ?? []) {
-            if (node.type === HUB_NODE_NAME) {
-                syncNode(node);
-            }
-        }
+    "setup"() {
+        syncAll();
+    },
+    "afterConfigureGraph"() {
+        syncAll();
     },
 });

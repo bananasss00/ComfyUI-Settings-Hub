@@ -12,10 +12,17 @@ import "./hub_ui_renderer.js";
     document.head.appendChild(link);
 })();
 
+// Register the context-menu extension immediately. Extension registration is
+// safe at module scope: the frontend stores it and invokes the hooks when the
+// menu is built. (The "appReady" hook does not exist in current frontends.)
+attachContextMenu();
+
 app.registerExtension({
     name: "Comfy.SettingsHub.hooks",
-    async "appReady"() {
-        attachContextMenu();
+    "setup"() {
+        syncAll();
+    },
+    "afterConfigureGraph"() {
         syncAll();
     },
 });
