@@ -58,4 +58,4 @@ app.registerExtension({
     },
 });
 
-app.registerNodeType(NODE_NAME, SettingsHubNode);
+LiteGraph.registerNodeType(NODE_NAME, SettingsHubNode);
