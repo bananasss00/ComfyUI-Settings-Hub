@@ -94,8 +94,45 @@ export function createBinding(node, targetNode, widget, tabId, type, extra) {
     return item;
 }
 
+function getRootGraph() {
+    const candidates = [];
+    try {
+        if (app && app.graph && typeof app.graph.add === "function") candidates.push(app.graph);
+        if (app && app.canvas && app.canvas.graph) candidates.push(app.canvas.graph);
+    } catch (_) {}
+    try {
+        const store = window.comfyAPI && window.comfyAPI.app;
+        if (store && store.graph) candidates.push(store.graph);
+    } catch (_) {}
+    // Prefer the actual LGraph (has add/addNode) over any Vue wrapper.
+    for (const g of candidates) {
+        if (g && (typeof g.add === "function" || typeof g.addNode === "function")) return g;
+    }
+    return null;
+}
+
 export function createNewHub() {
-    const node = app.graph.addNode({ type: HUB_NODE_NAME });
+    const graph = getRootGraph();
+    if (!graph) {
+        alert("Create New Settings Hub: no graph available");
+        return null;
+    }
+    let node = null;
+    try {
+        if (typeof graph.addNode === "function") node = graph.addNode({ type: HUB_NODE_NAME });
+        else node = graph.add({ type: HUB_NODE_NAME });
+    } catch (err) {
+        console.warn("Create New Settings Hub failed:", err);
+    }
+    if (!node) return null;
+    node.title = "Settings Hub";
+    try {
+        const canvas = (app && app.canvas) || (graph.canvas);
+        const pos = (canvas && canvas.graph_mouse) || (app && app.graph && app.graph.pos);
+        if (pos && pos.length >= 2) {
+            node.pos = [pos[0] + 40, pos[1] + 40];
+        }
+    } catch (_) {}
     getHubConfig(node);
     syncNode(node);
     return node;

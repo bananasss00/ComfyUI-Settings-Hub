@@ -5,6 +5,31 @@ import { registerSync } from "./sync.js";
 
 let syncLock = false;
 
+function mapItemWidgetType(itemType) {
+    switch (itemType) {
+        case "combo": return "combo";
+        case "checkbox": return "checkbox";
+        case "slider":
+        case "int": return "slider";
+        default: return "text";
+    }
+}
+
+function widgetFor(node, name, type, defaultValue, callback) {
+    const w = {
+        name,
+        type,
+        label: name,
+        defaultValue,
+        value: defaultValue,
+        serializable: false,
+        options: {},
+    };
+    if (callback) w.callback = callback;
+    node.widgets.push(w);
+    return w;
+}
+
 function doSetValue(targetWidget, val) {
     if (syncLock) return;
     syncLock = true;
@@ -33,43 +58,19 @@ function locateNode(hubNode, item) {
 }
 
 function renderPresetSection(node, cfg) {
-    // Add preset combo
     const presetNames = Object.keys(cfg.presets || {});
-    const presetWidget = {
-        name: "__hub_presets",
-        type: "COMBO",
-        options: { values: presetNames.length ? presetNames : ["— Default —"] },
-        default_value: presetNames.length ? presetNames[0] : "— Default —",
-    };
-    presetWidget.callback = function (val) {
-        if (val === "— Default —") return;
-        presetApply(node, val);
-    };
-    node.widgets.push(presetWidget);
-
-    // Add action buttons
-    const saveBtn = {
-        name: "__hub_save_btn",
-        type: "STRING",
-        default_value: "💾 Save Preset",
-    };
-    saveBtn.callback = function () { presetSave(node); };
-    node.widgets.push(saveBtn);
-
-    const newBtn = {
-        name: "__hub_new_btn",
-        type: "STRING",
-        default_value: "➕ New Preset",
-    };
-    newBtn.callback = function () { presetNew(node); };
-    node.widgets.push(newBtn);
-
-    const divBtn = {
-        name: "__hub_divider_btn",
-        type: "STRING",
-        default_value: "+ Add Divider",
-    };
-    divBtn.callback = function () {
+    const presetValues = presetNames.length ? presetNames : ["— Default —"];
+    const presetDefault = presetNames.length ? presetNames[0] : "— Default —";
+    const presetWidget = widgetFor(
+        node, "__hub_presets", "combo", presetDefault,
+        (val) => { if (val !== presetDefault) presetApply(node, val); },
+    );
+    presetWidget.options = { values: presetValues };
+    presetWidget.value = presetDefault;
+    presetWidget.defaultValue = presetDefault;
+    widgetFor(node, "__hub_save_btn", "text", "💾 Save Preset", () => presetSave(node));
+    widgetFor(node, "__hub_new_btn", "text", "➕ New Preset", () => presetNew(node));
+    widgetFor(node, "__hub_divider_btn", "text", "+ Add Divider", () => {
         const label = prompt("Divider label:", "");
         if (label === null) return;
         cfg.items.push({
@@ -80,92 +81,50 @@ function renderPresetSection(node, cfg) {
             customLabel: label || "Section",
         });
         syncHubNode(node);
-    };
-    node.widgets.push(divBtn);
+    });
 }
 
 function renderItemWidget(node, cfg, item, index) {
     const targetNode = app.graph.getNodeById(item.targetNodeId);
-    const widget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
+    const targetWidget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
 
     if (item.type === "divider") {
-        const w = {
-            name: `__hub_div_${item.id}`,
-            type: "STRING",
-            default_value: `--- ${item.customLabel || "Section"} ---`,
-        };
-        node.widgets.push(w);
-    } else if (targetNode && widget) {
+        widgetFor(node, `__hub_div_${item.id}`, "label",
+            `--- ${item.customLabel || "Section"} ---`);
+    } else if (targetNode && targetWidget) {
         const name = `__hub_item_${item.id}`;
-        const label = item.customLabel || widget.name;
-
+        const label = item.customLabel || targetWidget.name;
+        const hubWidgetType = mapItemWidgetType(item.widgetType);
+        const w = widgetFor(node, name, hubWidgetType, targetWidget.value,
+            (val) => doSetValue(targetWidget, val));
+        w.label = label;
+        // Preserve combo values / slider range.
         if (item.widgetType === "combo") {
-            const values = extractComboValues(widget) || item.options?.values || [];
-            const w = {
-                name,
-                type: "COMBO",
-                options: { values },
-                default_value: widget.value,
+            w.options.values = extractComboValues(targetWidget) || item.options?.values || [];
+        } else if (hubWidgetType === "slider") {
+            w.options = {
+                min: item.options?.min ?? 0,
+                max: item.options?.max ?? 1,
+                step: item.options?.step ?? 1,
             };
-            w.callback = (val) => doSetValue(widget, val);
-            node.widgets.push(w);
-        } else if (item.widgetType === "checkbox") {
-            const w = {
-                name,
-                type: "BOOLEAN",
-                default_value: !!widget.value,
-            };
-            w.callback = (val) => doSetValue(widget, val);
-            node.widgets.push(w);
-        } else if (item.widgetType === "slider" || item.widgetType === "int") {
-            const w = {
-                name,
-                type: "NUMBER",
-                options: item.options || {},
-                default_value: widget.value,
-            };
-            w.callback = (val) => doSetValue(widget, val);
-            node.widgets.push(w);
-        } else {
-            const w = {
-                name,
-                type: "STRING",
-                default_value: widget.value,
-            };
-            w.callback = (val) => doSetValue(widget, val);
-            node.widgets.push(w);
         }
     } else {
-        const w = {
-            name: `__hub_item_${item.id}`,
-            type: "STRING",
-            default_value: `⚠️ ${(item.customLabel || item.widgetToBind)} - target missing`,
-        };
-        node.widgets.push(w);
+        widgetFor(node, `__hub_item_${item.id}`, "label",
+            `⚠️ ${(item.customLabel || item.widgetToBind)} - target missing`);
     }
 }
 
 function renderTabSection(node, cfg) {
-    // Remove existing tab widget
-    const existingTab = node.widgets.find((w) => w.name === "__hub_tab");
-    const tabIdx = node.widgets.indexOf(existingTab);
-    if (tabIdx !== -1) node.widgets.splice(tabIdx, 1);
-
     const tabs = [...cfg.tabs].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-    const tabWidget = {
-        name: "__hub_tab",
-        type: "COMBO",
-        options: { values: tabs.map((t) => t.name) },
-        default_value: cfg.activeTabId,
-    };
-    tabWidget.callback = function (val) {
-        const tab = tabs.find((t) => t.name === val);
-        if (tab) {
-            cfg.activeTabId = tab.id;
-            syncHubNode(node);
-        }
-    };
-    node.widgets.push(tabWidget);
+    const tabWidget = widgetFor(node, "__hub_tab", "combo", cfg.activeTabId,
+        (val) => {
+            const tab = tabs.find((t) => t.name === val);
+            if (tab) {
+                cfg.activeTabId = tab.id;
+                syncHubNode(node);
+            }
+        });
+    tabWidget.options = { values: tabs.map((t) => t.name) };
 }
 
 export function syncHubNode(node) {
