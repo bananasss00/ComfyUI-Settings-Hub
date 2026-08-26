@@ -4,6 +4,7 @@ import { presetSave, presetNew, presetApply } from "./preset_manager.js";
 import { registerSync } from "./sync.js";
 
 let syncLock = false;
+let isHubWidgetSyncing = false;
 
 function mapItemWidgetType(itemType) {
     switch (itemType) {

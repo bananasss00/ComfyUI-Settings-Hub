@@ -26,10 +26,38 @@ export function syncAll() {
     }
 }
 
+function syncHubWidgetValues() {
+    for (const hubNode of app.graph?._nodes ?? []) {
+        if (hubNode.type !== HUB_NODE_NAME) continue;
+        const cfg = getHubConfig(hubNode);
+        for (const hubWidget of hubNode.widgets ?? []) {
+            if (!hubWidget.name?.startsWith("__hub_item_")) continue;
+            const itemId = hubWidget.name.replace("__hub_item_", "");
+            const item = cfg.items.find((i) => i.id === itemId);
+            if (!item || item.type !== "widget_binding") continue;
+            const targetNode = app.graph.getNodeById(item.targetNodeId);
+            const targetWidget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
+            if (targetWidget && hubWidget.value !== targetWidget.value) {
+                hubWidget.value = targetWidget.value;
+                hubNode.setDirtyCanvas(true, true);
+            }
+        }
+    }
+}
+
+function startSyncLoop() {
+    if (syncTimer) return;
+    syncTimer = setInterval(() => {
+        syncHubWidgetValues();
+    }, 300);
+}
+
+let syncTimer = null;
 app.registerExtension({
     name: "Comfy.SettingsHub.sync",
     "setup"() {
         syncAll();
+        startSyncLoop();
     },
     "afterConfigureGraph"() {
         syncAll();
