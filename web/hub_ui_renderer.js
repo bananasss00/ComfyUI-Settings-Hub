@@ -142,12 +142,17 @@ function buildTabBarHtml(cfg) {
 function mirrorHtml(item, tw) {
     switch (item.widgetType) {
         case "combo": {
+            // Searchable combo (like the ComfyUI frontend one): a compact
+            // trigger showing the current value; clicking it opens a live-
+            // filtered popup (see openComboPopup below). data-sig keeps the
+            // values-signature so refreshValuesDom can detect list changes.
             const vals = liveComboValues(item, tw);
             const cur = String(tw?.value ?? "");
             const sig = vals.join("¦");
-            const opts = vals.map((v) =>
-                `<option value="${esc(v)}"${String(v) === cur ? " selected" : ""}>${esc(v)}</option>`).join("");
-            return `<span class="hub-mirror"><select class="hub-combo" data-role="combo" data-hub-control data-sig="${esc(sig)}">${opts}</select></span>`;
+            return `<span class="hub-mirror hub-mirror-combo">` +
+                `<button type="button" class="hub-combo" data-role="combo" data-hub-control data-sig="${esc(sig)}" ` +
+                `title="Searchable list - filter parts separated by space, all must match, case-insensitive">` +
+                `<span class="hub-combo-label">${esc(cur)}</span><span class="hub-combo-caret">▾</span></button></span>`;
         }
         case "checkbox": {
             const checked = tw?.value === true || tw?.value === "true";
@@ -287,6 +292,175 @@ function updateSiblingControl(control, value) {
 }
 
 // ---------------------------------------------------------------------------
+// Searchable combo popup
+// ---------------------------------------------------------------------------
+// Mirrors the ComfyUI frontend combobox: a live-filtered list that opens near
+// the trigger. Filter grammar: space-separated parts, ALL of them must occur
+// in the option name (case-insensitive substrings) - "lor 1.2" finds
+// "myLora_v1.2". Popup lives on document.body (position:fixed) so the hub's
+// scroll viewport can never clip it; same pattern as .hub-menu.
+
+let comboPopState = null; // { node, trigger, cur, active, pop, search, list, filtered }
+let comboGlobalWired = false;
+
+/** Multi-token live filter - the user-facing contract of this feature. */
+export function comboTokensMatch(text, query) {
+    const hay = String(text).toLowerCase();
+    const toks = String(query ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!toks.length) return true; // empty / whitespace query -> everything matches
+    return toks.every((t) => hay.includes(t));
+}
+
+export function closeComboPopup() {
+    if (!comboPopState) return;
+    try { comboPopState.pop.remove(); } catch (_) {}
+    comboPopState = null;
+}
+
+function markComboActive() {
+    const st = comboPopState;
+    if (!st) return;
+    for (const el of st.list.querySelectorAll(".hub-combo-opt")) {
+        el.classList.toggle("hub-combo-active", Number(el.dataset.idx) === st.active);
+    }
+    try { st.list.querySelector(".hub-combo-active")?.scrollIntoView?.({ block: "nearest" }); } catch (_) {}
+}
+
+function paintComboList() {
+    const st = comboPopState;
+    if (!st) return;
+    st.filtered = st.vals.filter((v) => comboTokensMatch(v, st.search.value));
+    st.list.innerHTML = st.filtered.length
+        ? st.filtered.map((v, i) =>
+            `<div class="hub-combo-opt${v === st.cur ? " hub-combo-cur" : ""}" data-idx="${i}">${esc(v)}</div>`).join("")
+        : `<div class="hub-combo-none">no matches</div>`;
+    // Keep the keyboard cursor inside the filtered set (default: first hit).
+    st.active = st.filtered.length ? Math.max(0, Math.min(st.active || 0, st.filtered.length - 1)) : 0;
+    markComboActive();
+}
+
+function positionComboPopup(pop, trigger) {
+    let left = 6, top = 6;
+    try {
+        const r = trigger.getBoundingClientRect();
+        const vw = window.innerWidth || 1024;
+        const vh = window.innerHeight || 768;
+        const pw = pop.offsetWidth || 220;
+        const ph = pop.offsetHeight || 200;
+        left = Math.max(6, Math.min(r.left, vw - pw - 6));
+        top = r.bottom + 4;
+        if (top + ph > vh - 6) top = Math.max(6, r.top - ph - 4); // flip above
+    } catch (_) { /* jsdom / detached node - defaults are fine */ }
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+}
+
+/** One global closer pair for every combo popup ever opened. */
+function ensureComboGlobalListeners() {
+    if (comboGlobalWired) return;
+    comboGlobalWired = true;
+    document.addEventListener("mousedown", (e) => {
+        const st = comboPopState;
+        if (!st) return;
+        try {
+            if (st.pop.contains(e.target) || st.trigger.contains(e.target)) return;
+        } catch (_) {}
+        closeComboPopup();
+    }, true);
+    document.addEventListener("keydown", (e) => {
+        if (comboPopState && e.key === "Escape") closeComboPopup();
+    }, true);
+}
+
+function chooseComboValue(node, trigger, value) {
+    pushControlToTarget(node, trigger, value); // write-through under sync lock
+    const lbl = trigger.querySelector(".hub-combo-label");
+    if (lbl) lbl.textContent = String(value);  // reflect instantly (no re-render)
+    closeComboPopup();
+}
+
+function openComboPopup(node, trigger) {
+    // Clicking the same trigger again toggles the popup closed.
+    if (comboPopState?.trigger === trigger) { closeComboPopup(); return; }
+
+    const row = trigger.closest("[data-hub-item]");
+    if (!row) return;
+    const cfg = getHubConfig(node);
+    const item = cfg.items.find((i) => i.id === row.dataset.hubItem);
+    if (!item || item.type !== "widget_binding") return;
+    const { tn, tw } = findTarget(item);
+    if (!tn || !tw) return; // orphan rows have nothing to offer
+    closeComboPopup();
+
+    const vals = liveComboValues(item, tw).map(String); // always read LIVE options
+    if (!vals.length) return;
+    const cur = String(tw.value ?? "");
+
+    ensureComboGlobalListeners();
+
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-combo-pop";
+    pop.innerHTML =
+        `<input type="text" class="hub-combo-search" spellcheck="false" ` +
+        `placeholder="filter… parts separated by space">` +
+        `<div class="hub-combo-list"></div>` +
+        `<div class="hub-combo-hint">all parts must match · Enter apply · Esc close</div>`;
+    document.body.appendChild(pop);
+
+    comboPopState = {
+        node, trigger, cur,
+        active: Math.max(0, vals.indexOf(cur)), // start on the current value
+        pop,
+        search: pop.querySelector(".hub-combo-search"),
+        list: pop.querySelector(".hub-combo-list"),
+        vals, filtered: vals,
+    };
+
+    paintComboList();
+    positionComboPopup(pop, trigger);
+    try { comboPopState.search.focus(); } catch (_) {}
+
+    comboPopState.search.addEventListener("input", () => {
+        if (!comboPopState) return;
+        comboPopState.active = 0;
+        paintComboList();
+    });
+    comboPopState.search.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        const st = comboPopState;
+        if (!st) return;
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            const n = st.filtered.length;
+            if (!n) return;
+            st.active = e.key === "ArrowDown" ? (st.active + 1) % n : (st.active - 1 + n) % n;
+            markComboActive();
+        } else if (e.key === "Enter") {
+            e.preventDefault();
+            const v = st.filtered[st.active];
+            if (v !== undefined) chooseComboValue(node, trigger, v);
+            else closeComboPopup();
+        } else if (e.key === "Escape") {
+            e.preventDefault();
+            closeComboPopup();
+        }
+    });
+    comboPopState.list.addEventListener("click", (e) => {
+        const opt = e.target.closest(".hub-combo-opt");
+        if (!opt || !comboPopState) return;
+        const v = comboPopState.filtered[Number(opt.dataset.idx)];
+        if (v !== undefined) chooseComboValue(node, trigger, v);
+    });
+    comboPopState.list.addEventListener("mousemove", (e) => {
+        const opt = e.target.closest(".hub-combo-opt");
+        const st = comboPopState;
+        if (!opt || !st) return;
+        const idx = Number(opt.dataset.idx);
+        if (st.active !== idx) { st.active = idx; markComboActive(); }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Value plumbing: target node -> controls  (registered as the values bus fn)
 // ---------------------------------------------------------------------------
 
@@ -316,15 +490,15 @@ function refreshValuesDom(node) {
                     if (control.checked !== !!tw.value) control.checked = !!tw.value;
                     break;
                 case "combo": {
-                    const fresh = liveComboValues(item, tw);
-                    const sig = fresh.join("¦");
-                    if (sig !== control.dataset.sig) {
-                        control.innerHTML = fresh.map((v) =>
-                            `<option value="${esc(v)}">${esc(v)}</option>`).join("");
-                        control.dataset.sig = sig;
-                    }
+                    // Trigger button: keep the displayed value in lockstep with
+                    // the source widget and flag values missing from the live
+                    // list (dynamic combos can legally hold stale values).
+                    const fresh = liveComboValues(item, tw).map(String);
+                    control.dataset.sig = fresh.join("¦");
                     const cur = String(tw.value ?? "");
-                    if (String(control.value) !== cur && fresh.includes(cur)) control.value = cur;
+                    const lblEl = control.querySelector(".hub-combo-label");
+                    if (lblEl && lblEl.textContent !== cur) lblEl.textContent = cur;
+                    control.classList.toggle("hub-combo-missing", !fresh.includes(cur));
                     break;
                 }
                 case "text":
@@ -757,8 +931,7 @@ function wireEvents(node, st) {
     root.addEventListener("change", (e) => {
         const c = e.target.closest("[data-hub-control]");
         if (!c) return;
-        if (c.dataset.role === "combo") pushControlToTarget(node, c, c.value);
-        else if (c.dataset.role === "check") pushControlToTarget(node, c, c.checked);
+        if (c.dataset.role === "check") pushControlToTarget(node, c, c.checked);
         else if (c.dataset.role === "number") pushControlToTarget(node, c, c.value);
     });
     root.addEventListener("input", (e) => {
@@ -778,6 +951,12 @@ function wireEvents(node, st) {
     root.addEventListener("change", (e) => {
         const sel = e.target.closest('[data-role="preset-select"]');
         if (sel && sel.value) presetApply(node, sel.value);
+    });
+
+    // Combo triggers open the searchable list (toggle on repeat click).
+    root.addEventListener("click", (e) => {
+        const btn = e.target.closest('button[data-role="combo"]');
+        if (btn && !btn.disabled) openComboPopup(node, btn);
     });
 }
 

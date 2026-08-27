@@ -481,3 +481,133 @@ span.hub-mirror.hub-mirror-text {
     margin-left: 1px;
 }
 
+/* ------------------------------------------------------------------ */
+/* Searchable combo mirror                                            */
+/* ------------------------------------------------------------------ */
+
+/* Inline trigger (replaces the old native <select>): current value +
+   caret, ellipsized to the same visual budget the select had. */
+.hub-mirror.hub-mirror-combo {
+    display: inline-flex;
+    min-width: 0;
+}
+
+button.hub-combo {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    border: 1px solid #444;
+    border-radius: 3px;
+    font-size: 11px;
+    padding: 2px 6px;
+    max-width: 110px;
+    min-width: 0;
+    cursor: pointer;
+    font-family: inherit;
+    line-height: 1.3;
+}
+
+button.hub-combo:hover {
+    border-color: #6677aa;
+    background: #20203a;
+}
+
+.hub-combo-label {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.hub-combo-caret {
+    color: #8899bb;
+    font-size: 9px;
+    flex: 0 0 auto;
+}
+
+/* Current value absent from the live option list - amber hint */
+button.hub-combo.hub-combo-missing .hub-combo-label {
+    color: #e8b45a;
+}
+
+/* The popup itself lives on document.body (position:fixed), reusing
+   .hub-menu chrome (dark bg / border / shadow / font). */
+.hub-combo-pop {
+    padding: 5px;
+    min-width: 170px;
+    max-width: 300px;
+    user-select: none;
+}
+
+.hub-combo-search {
+    width: 100%;
+    box-sizing: border-box;
+    margin-bottom: 4px;
+    background: #0f0f22;
+    border: 1px solid #44445e;
+    border-radius: 3px;
+    color: #eaeaff;
+    font-size: 11px;
+    font-family: inherit;
+    padding: 3px 6px;
+    outline: none;
+}
+
+.hub-combo-search:focus {
+    border-color: #7788cc;
+}
+
+.hub-combo-list {
+    max-height: 190px;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+.hub-combo-opt {
+    padding: 3px 8px;
+    cursor: pointer;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-radius: 2px;
+}
+
+.hub-combo-opt:hover {
+    background: #2a2a40;
+}
+
+.hub-combo-opt.hub-combo-active {
+    background: #34345a;
+    color: #fff;
+}
+
+.hub-combo-opt.hub-combo-cur {
+    color: #9fd48a;
+    font-weight: 600;
+}
+
+.hub-combo-opt.hub-combo-cur::before {
+    content: "\2713\00a0";
+    color: #6fae58;
+}
+
+.hub-combo-none {
+    padding: 6px 8px;
+    color: #78789f;
+    font-style: italic;
+    font-size: 10px;
+}
+
+.hub-combo-hint {
+    margin-top: 4px;
+    padding-top: 3px;
+    border-top: 1px solid #2a2a3e;
+    color: #66668a;
+    font-size: 9px;
+    white-space: nowrap;
+}
+
+
