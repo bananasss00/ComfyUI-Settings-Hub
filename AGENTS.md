@@ -378,6 +378,26 @@ dev_plan.md            — исходный технический спек пр
   окно (якорь top-left стабилен), hub-pin-resizing глушит pointer-events
   тела. homeHub/dispose ничего не чистят — размер переживает unpin/repin.
 
+### v27.3: кнопки скачивания медиа + расширенный show/hide
+- Скачивание: общий хелпер `downloadMediaUrl(url, fallbackBase)` в
+  viewer_gallery.js. Предпочтительный маршрут fetch → blob → object-URL
+  `<a download>` (точные байты, честное имя файла), фолбэк — прямой клик по
+  `<a download>` (same-origin /view и blob: скачиваются и так). Имя файла:
+  параметр `filename` из /view → basename URL → расширение из blob.type →
+  `fallbackBase-<ts>`; blob:/data: имен не несут по определению.
+- Кнопки: ⬇ в галерее (`.hub-gal-dl`, слева от ⛶, скачивает ТЕКУЩИЙ кадр
+  батча), ⬇ в фуллскрине (`.hub-fs-dl`, слева от ✕, шорткат S/e.code=KeyS —
+  раскладконезависимо), ⬇ поверх self-rendered `<video>/<img>` вьювера
+  (`.hub-vid-dl`, portal_manager.js; handler читает el.currentSrc В МОМЕНТ
+  клика — поколения медиа меняют src на месте; видна на hover/focus,
+  release снимает кнопку вместе с записью).
+- 👁 chrome-toggle теперь прячет ВЕСЬ авторский чром, а не только ручки
+  строк: `.hub-gear` (⚙ min/max/step слайдера), `.hub-settings` (⚙ глобальных
+  настроек), `.hub-add-divider` (＋Div, класс добавлен), `.hub-add-tab` (+
+  таб). Селекторы расширены в правиле `.hub-chrome-hidden` (styles.css);
+  делители-строки, пресеты, поиск, 👁/📌 остаются видимыми — это контент и
+  управление самим режимом. Тогглится тем же cfg.hideChrome (v25).
+
 ### v25: фильтр виджетов, скрытие хрома, тихое удаление, очистка очереди
 - 🔍 фильтр (вход в таб-баре, свёрнут до линзы, :focus/.hub-search-active
   расширяет): подстрока по customLabel/widgetToBind/делителям АКТИВНОЙ

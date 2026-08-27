@@ -162,7 +162,7 @@ function buildTabBarHtml(cfg) {
         `<input type="text" class="hub-search" data-role="hub-search" spellcheck="false" ` +
         `placeholder="🔍" title="Filter widgets on this tab (substring, case-insensitive; Esc clears)">` +
         `<button type="button" class="hub-chrome-toggle${cfg.hideChrome ? " hub-chrome-off" : ""}" data-action="chrome-toggle" ` +
-        `title="Show / hide row handles (drag ⠿ and remove ✕)" ` +
+        `title="Show / hide row chrome (handles ⠿, ✕, slider ⚙, hub ⚙, ＋Div, + tab)" ` +
         `aria-pressed="${cfg.hideChrome ? "true" : "false"}">👁</button>` +
         `<button type="button" class="hub-pin-toggle${cfg.pinned ? " hub-pin-on" : ""}" data-action="pin-toggle" ` +
         `title="Keep this hub on screen - float above the canvas, survives panning/zoom" ` +
@@ -326,7 +326,7 @@ function presetRowHtml(cfg) {
         `<button type="button" class="hub-btn" data-action="preset-save" title="Save current values into selected preset">💾</button>` +
         `<button type="button" class="hub-btn" data-action="preset-new" title="New preset">➕</button>` +
         `<button type="button" class="hub-btn" data-action="preset-del" title="Delete selected preset">🗑️</button>` +
-        `<button type="button" class="hub-btn" data-action="add-divider" title="Add section divider">＋Div</button>` +
+        `<button type="button" class="hub-btn hub-add-divider" data-action="add-divider" title="Add section divider">＋Div</button>` +
         `<button type="button" class="hub-btn hub-settings" data-action="hub-settings" title="Hub settings (mirror update rate)">⚙</button>` +
         `</div>`;
 }
@@ -1875,7 +1875,7 @@ function renderHub(node) {
         applySearchFilter(node, st);
     } catch (_) {}
 
-    // v25: row-chrome visibility (drag handles + remove buttons) via the 👁
+    // v25/v27.3: row-chrome visibility (handles, ✕, gears, ＋Div, + tab) via 👁
     // toggle - a class on the root, CSS does the actual hiding.
     st.root.classList.toggle("hub-chrome-hidden", !!cfg.hideChrome);
 

@@ -479,6 +479,37 @@ span.hub-mirror.hub-mirror-text {
     background: #101020;
 }
 
+/* v27.3: download button over self-rendered <video>/<img> viewers
+   (portal_manager.js). Hover / keyboard-focus visible, like the
+   gallery overlay controls. The portal host is position:relative,
+   the "live" tag sits above the media - the button lands on the
+   media top-right corner, clear of the native controls. */
+.hub-vid-dl {
+    position: absolute;
+    right: 6px;
+    top: 16px;
+    border: 1px solid #3a3a5e;
+    background: rgba(16, 16, 32, 0.72);
+    color: #c6cbde;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 10px;
+    line-height: 1;
+    padding: 3px 6px;
+    opacity: 0;
+    transition: opacity 0.12s ease, background 0.12s ease;
+    pointer-events: auto;
+    z-index: 2;
+}
+.hub-portal-host:hover .hub-vid-dl,
+.hub-vid-dl:focus-visible {
+    opacity: 1;
+}
+.hub-vid-dl:hover {
+    background: #2a2a46;
+    color: #ffffff;
+}
+
 /* v27: batch image gallery (viewer_gallery.js) - the hub's OWN viewer fed
    from the frontend output store. Row layout: stage (main image + overlay
    controls) over a thumbnail strip; the row hugs the content. */
@@ -542,6 +573,7 @@ span.hub-mirror.hub-mirror-text {
 .hub-gal-prev { left: 4px; top: 50%; transform: translateY(-50%); }
 .hub-gal-next { right: 4px; top: 50%; transform: translateY(-50%); }
 .hub-gal-fs { right: 4px; top: 4px; font-size: 12px; padding: 3px 6px; }
+.hub-gal-dl { right: 34px; top: 4px; font-size: 12px; padding: 3px 6px; }
 
 .hub-gal-counter {
     position: absolute;
@@ -635,6 +667,7 @@ span.hub-mirror.hub-mirror-text {
 .hub-fs-prev { left: 14px; top: 50%; transform: translateY(-50%); font-size: 18px; }
 .hub-fs-next { right: 14px; top: 50%; transform: translateY(-50%); font-size: 18px; }
 .hub-fs-close { right: 14px; top: 14px; }
+.hub-fs-dl { right: 66px; top: 14px; }
 
 .hub-fs-counter {
     position: absolute;
@@ -1320,6 +1353,10 @@ button.hub-pin-back {
    reordering among filtered-out rows would corrupt the saved order. */
 .settings-hub.hub-chrome-hidden .hub-drag-handle,
 .settings-hub.hub-chrome-hidden .hub-remove,
+.settings-hub.hub-chrome-hidden .hub-gear,
+.settings-hub.hub-chrome-hidden .hub-settings,
+.settings-hub.hub-chrome-hidden .hub-add-divider,
+.settings-hub.hub-chrome-hidden .hub-add-tab,
 .settings-hub.hub-searching .hub-drag-handle {
     display: none !important;
 }

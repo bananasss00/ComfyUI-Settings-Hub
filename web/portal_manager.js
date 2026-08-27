@@ -44,7 +44,7 @@ import {
     getHubConfig, PORTAL_ROW_GAP, widgetNativeHeight, resolveBindingTarget,
 } from "./core.js";
 import { getVideoAudio, setVideoAudio, applyVideoAudio } from "./global_settings.js";
-import { mountImageGallery, closeGalleryFullscreen } from "./viewer_gallery.js";
+import { mountImageGallery, closeGalleryFullscreen, downloadMediaUrl } from "./viewer_gallery.js";
 
 /** node -> Set<record>; records live between structural renders. */
 const nodeRegistry = new WeakMap();
@@ -1034,6 +1034,23 @@ function mountMediaViewer(node, item, tn, host) {
         }
         host.appendChild(el);
 
+        // v27.3: download button over the self-rendered player / image.
+        // The src swaps in place between generations - the handler
+        // reads the CURRENT src at click time, never a captured one.
+        const dlBtn = document.createElement("button");
+        dlBtn.type = "button";
+        dlBtn.className = "hub-vid-dl";
+        dlBtn.title = src.kind === "video" ? "Download video" : "Download image";
+        dlBtn.textContent = "\u2b07";
+        dlBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            try {
+                const u = el.currentSrc || el.src || "";
+                if (u) downloadMediaUrl(u, src.kind === "video" ? "settingshub_video" : "settingshub_image");
+            } catch (_) {}
+        });
+        host.appendChild(dlBtn);
+
         const rec = {
             kind: "viewer", item, tn, host,
             media: el, srcKind: src.kind,
@@ -1095,6 +1112,7 @@ function mountMediaViewer(node, item, tn, host) {
                 try { el.removeEventListener("volumechange", persistAudio); } catch (_) {}
             }
             try { el.pause?.(); } catch (_) {}
+            try { dlBtn.remove(); } catch (_) {}
             try { el.remove(); } catch (_) {}
         };
         return rec;

@@ -95,6 +95,88 @@ function viewUrlFromSpec(spec) {
     } catch (_) { return ""; }
 }
 
+// ---------------------------------------------------------------------------
+// v27.3: media download - shared by the gallery, the fullscreen overlay and
+// the self-rendered video/img viewer (portal_manager.js imports this).
+// ---------------------------------------------------------------------------
+
+const MIME_EXT = {
+    "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp",
+    "image/gif": "gif", "image/avif": "avif", "image/bmp": "bmp",
+    "image/svg+xml": "svg", "image/tiff": "tif",
+    "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
+    "video/x-matroska": "mkv", "video/avi": "avi",
+    "audio/mpeg": "mp3", "audio/wav": "wav", "audio/wave": "wav",
+    "audio/x-wav": "wav", "audio/ogg": "ogg", "audio/flac": "flac",
+    "audio/aac": "aac", "audio/mp4": "m4a",
+};
+
+function extFromMime(m) {
+    const base = String(m || "").split(";")[0].trim().toLowerCase();
+    return MIME_EXT[base] || "";
+}
+
+/** Best-effort download name for a media URL: the /view filename param,
+ *  else the URL basename, else "" (the caller falls back to the blob mime
+ *  or a timestamped default). blob:/data: URLs carry no name by design. */
+export function mediaNameFromUrl(u) {
+    try {
+        if (u.startsWith("blob:") || u.startsWith("data:")) return "";
+        const m = /[?&]filename=([^&]+)/.exec(u);
+        if (m) {
+            const name = decodeURIComponent(m[1]).trim();
+            if (name) return name;
+        }
+        const path = u.split("?")[0].split("#")[0];
+        const base = path.slice(path.lastIndexOf("/") + 1).trim();
+        if (base) return base;
+    } catch (_) {}
+    return "";
+}
+
+/**
+ * Download the media behind `url`. Preferred route: fetch -> blob -> object
+ * URL anchor (exact bytes, honest filename even when the browser would
+ * ignore the download attribute); a direct `<a download>` click is the
+ * fallback (same-origin /view and blob: still download). Returns true when
+ * a download was triggered.
+ */
+export async function downloadMediaUrl(url, fallbackBase = "settingshub_media") {
+    if (typeof url !== "string" || !url) return false;
+    const fallback = `${fallbackBase}-${Date.now()}`;
+    const trigger = (href, name) => {
+        const a = document.createElement("a");
+        a.href = href;
+        if (name) a.download = name;
+        a.rel = "noopener";
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        try { a.remove(); } catch (_) {}
+    };
+    try {
+        if (typeof fetch === "function") {
+            const r = await fetch(url);
+            if (r && r.ok) {
+                const blob = await r.blob();
+                let name = mediaNameFromUrl(url);
+                if (!name) {
+                    const ext = extFromMime(blob?.type);
+                    name = `${fallback}${ext ? "." + ext : ""}`;
+                }
+                const obj = URL.createObjectURL(blob);
+                trigger(obj, name);
+                try { setTimeout(() => URL.revokeObjectURL(obj), 30000); } catch (_) {}
+                return true;
+            }
+        }
+    } catch (_) { /* offline / CORS / no fetch - the anchor below still works */ }
+    try {
+        trigger(url, mediaNameFromUrl(url) || fallback);
+        return true;
+    } catch (_) { return false; }
+}
+
 /** Candidate store keys for a node: exact root key plus every subgraph
  *  "<uuid>:<id>" key that points at this local id. */
 function locatorCandidates(tn) {
@@ -223,11 +305,15 @@ export function openGalleryFullscreen(rec, index = 0) {
         `<button type="button" class="hub-fs-btn hub-fs-prev" title="Previous (←)">◀</button>` +
         `<button type="button" class="hub-fs-btn hub-fs-next" title="Next (→)">▶</button>` +
         `<span class="hub-fs-counter"></span>` +
+                `<button type="button" class="hub-fs-btn hub-fs-dl" title="Download this image (S)">\u2b07</button>` +
         `<button type="button" class="hub-fs-btn hub-fs-close" title="Close (Esc)">✕</button>`;
     const close = () => closeGalleryFullscreen();
     ov.querySelector(".hub-fs-close").addEventListener("click", close);
     ov.querySelector(".hub-fs-prev").addEventListener("click", () => fsNav(-1));
     ov.querySelector(".hub-fs-next").addEventListener("click", () => fsNav(1));
+    ov.querySelector(".hub-fs-dl").addEventListener("click", () => {
+        if (fsRec) { downloadMediaUrl(fsRec.urls[fsIdx], "settingshub_image"); }
+    });
     // Click on the backdrop closes; clicks on the image / buttons do not.
     ov.addEventListener("pointerdown", (e) => {
         if (e.target === ov) close();
@@ -250,6 +336,7 @@ export function openGalleryFullscreen(rec, index = 0) {
         else if (e.key === "ArrowRight") { e.preventDefault(); e.stopPropagation(); fsNav(1); }
         else if (e.key === "Home") { e.preventDefault(); e.stopPropagation(); fsIdx = 0; fsPaint(); }
         else if (e.key === "End") { e.preventDefault(); e.stopPropagation(); fsIdx = (fsRec?.urls?.length || 1) - 1; fsPaint(); }
+        else if (e.code === "KeyS") { e.preventDefault(); e.stopPropagation(); if (fsRec) downloadMediaUrl(fsRec.urls[fsIdx], "settingshub_image"); }
         else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); }
     };
     document.addEventListener("keydown", fsKeyHandler, true);
@@ -349,7 +436,12 @@ export function mountImageGallery(node, item, tn, host) {
     fsBtn.className = "hub-gal-btn hub-gal-fs";
     fsBtn.title = "Fullscreen viewer";
     fsBtn.textContent = "⛶";
-    stage.append(prevBtn, nextBtn, counter, fsBtn);
+    const dlBtn = document.createElement("button");
+    dlBtn.type = "button";
+    dlBtn.className = "hub-gal-btn hub-gal-dl";
+    dlBtn.title = "Download this image";
+    dlBtn.textContent = "\u2b07";
+    stage.append(prevBtn, nextBtn, counter, fsBtn, dlBtn);
 
     const thumbs = document.createElement("div");
     thumbs.className = "hub-gallery-thumbs";
@@ -411,6 +503,11 @@ export function mountImageGallery(node, item, tn, host) {
     prevBtn.addEventListener("click", (e) => { e.stopPropagation(); goto((rec.idx - 1 + rec.urls.length) % rec.urls.length); });
     nextBtn.addEventListener("click", (e) => { e.stopPropagation(); goto((rec.idx + 1) % rec.urls.length); });
     fsBtn.addEventListener("click", (e) => { e.stopPropagation(); openGalleryFullscreen(rec, rec.idx); });
+    dlBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const u = rec.urls[rec.idx];
+        if (u) { downloadMediaUrl(u, "settingshub_image"); }
+    });
     // Click on the image itself = fullscreen (the universal gesture).
     img.addEventListener("click", () => openGalleryFullscreen(rec, rec.idx));
     stage.addEventListener("wheel", (e) => {
