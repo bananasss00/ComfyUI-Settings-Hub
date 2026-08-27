@@ -24,7 +24,7 @@
 // ============================================================================
 
 import { app } from "../../scripts/app.js";
-import { getHubConfig } from "./core.js";
+import { getHubConfig, PORTAL_ROW_GAP, widgetNativeHeight } from "./core.js";
 
 /** node -> Set<record>; records live between structural renders. */
 const nodeRegistry = new WeakMap();
@@ -33,6 +33,23 @@ function findWidget(item) {
     const tn = app.graph?.getNodeById?.(item.targetNodeId);
     const tw = tn?.widgets?.find((w) => w.name === item.widgetToBind);
     return { tn, tw };
+}
+
+/**
+ * Resolve the live widget objects behind a portal item. Group items
+ * ("whole panel") carry item.members[]; legacy single portals fall back to
+ * widgetToBind. Members that disappeared are skipped (partial survives).
+ */
+function resolveMembers(item, tn) {
+    const list = Array.isArray(item.members) && item.members.length
+        ? item.members
+        : [{ name: item.widgetToBind, srcH: Number(item.options?.srcH) || 30 }];
+    const out = [];
+    for (const m of list) {
+        const tw = tn.widgets?.find((w) => w.name === m.name);
+        if (tw) out.push({ widget: tw, srcH: Number(m.srcH) > 0 ? Number(m.srcH) : 30 });
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -100,27 +117,54 @@ function localPos(canvas, e) {
     }
 }
 
-function mountCanvasPortal(node, item, tn, tw, host) {
-    const srcHRaw = Number(item.options?.srcH);
-    const srcH = Number.isFinite(srcHRaw) && srcHRaw > 0 ? Math.min(400, Math.max(36, srcHRaw)) : 60;
-
+function mountCanvasPortal(node, item, tn, members, host) {
     const canvas = document.createElement("canvas");
     canvas.className = "hub-portal-canvas";
     canvas.title = "Live embed - click / right-click to use the source widget";
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const cssW = Math.max(
-        160,
-        host.clientWidth || (node.size?.[0] ?? 340) - 24,
-    );
-    canvas.width = Math.round(cssW * dpr);
-    canvas.height = Math.round(srcH * dpr);
-    canvas.style.height = `${srcH}px`;
     host.textContent = "";
     host.appendChild(canvas);
 
-    const rec = { kind: "canvas", item, tn, tw, canvas, host, timer: null, stale: 0, handlers: null };
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rec = {
+        kind: "canvas", item, tn, members, canvas, host, dpr,
+        W: 0, H: 0, timer: null, stale: 0, handlers: null,
+    };
 
-    const drawOnce = () => {
+    // Live row tracking: native growth (a lora added on the source node),
+    // hub resizing or viewport changes are all picked up WITHIN ONE TICK -
+    // no tab switch / page reload needed anymore.
+    const rowHeights = () =>
+        members.map((m) => Math.min(widgetNativeHeight(m.widget, m.srcH), 400));
+
+    // Authentic-size geometry: the draw width mirrors the SOURCE node's
+    // widget area (capped by what the hub row offers), and the CSS display
+    // size stays 1:1 with the backing buffer - so the embed reproduces the
+    // original styling/sizes instead of being stretched into the row.
+    const desired = () => {
+        let avail = Math.round(host.clientWidth || 0);
+        if (!(avail > 0)) avail = Math.max(160, (node.size?.[0] ?? 340) - 24);
+        let cap = Math.round(Number(tn.size?.[0]) || 340) - 14;
+        if (!(cap > 80)) cap = avail;
+        const hs = rowHeights();
+        const H = Math.min(
+            1600,
+            hs.reduce((a, b) => a + b, 0)
+                + PORTAL_ROW_GAP * Math.max(0, hs.length - 1),
+        );
+        return { W: Math.max(80, Math.min(avail, cap)), H, hs };
+    };
+
+    const applyGeometry = (g) => {
+        if (g.W === rec.W && g.H === rec.H) return;
+        rec.W = g.W;
+        rec.H = g.H;
+        canvas.width = Math.max(1, Math.round(g.W * dpr));
+        canvas.height = Math.max(1, Math.round(g.H * dpr));
+        canvas.style.width = `${g.W}px`;
+        canvas.style.height = `${g.H}px`;
+    };
+
+    const tick = () => {
         // Self-cleanup when the portal row was destroyed without a release
         // (node deleted while graph busy) - no orphaned intervals.
         if (!canvas.isConnected) {
@@ -129,24 +173,61 @@ function mountCanvasPortal(node, item, tn, tw, host) {
         }
         rec.stale = 0;
         if (node.flags?.collapsed || document.hidden) return;
+        let ctx = null;
+        try { ctx = canvas.getContext("2d"); } catch (_) { ctx = null; }
+        if (!ctx) return;
+
+        const g = desired();
+        applyGeometry(g); // buffer resize clears the surface automatically
+
+        // Persist live row heights so saved configs restart accurately.
+        let dirty = false;
+        let total = 0;
+        for (let i = 0; i < members.length; i++) {
+            const h = Math.round(Math.min(widgetNativeHeight(members[i].widget, members[i].srcH), 400));
+            total += h + (i < members.length - 1 ? PORTAL_ROW_GAP : 0);
+            if (Array.isArray(item.members) && members[i].srcH !== h) {
+                members[i].srcH = h;
+                if (item.members[i]) item.members[i].srcH = h;
+                dirty = true;
+            }
+        }
+        if (dirty) item.options.srcH = Math.round(total);
+
         try {
-            const ctx = canvas.getContext("2d");
-            if (!ctx) return;
-            const w = canvas.width / dpr;
-            const h = canvas.height / dpr;
             ctx.save();
-            ctx.clearRect(0, 0, w, h);
+            ctx.clearRect(0, 0, rec.W, rec.H);
             ctx.scale(dpr, dpr);
-            // The widget paints itself exactly like on its source node.
-            // y=0 keeps draw-space and mouse()-hitbox space aligned.
-            rec.tw.draw?.(ctx, rec.tn, w, 0, h);
+            // Every member paints itself exactly like on its source node,
+            // stacked vertically - the same order/layout LiteGraph uses.
+            let y = 0;
+            for (let i = 0; i < members.length; i++) {
+                const h = g.hs[i];
+                members[i].widget.draw?.(ctx, tn, rec.W, y, h);
+                y += h + PORTAL_ROW_GAP;
+            }
             ctx.restore();
         } catch (_) { /* custom draw code may expect graph-canvas globals */ }
     };
+    rec.tick = tick;
 
-    // Forward pointer interactions (incl. RMB -> the widget's own menu).
+    // Forward pointer interactions (incl. RMB -> each widget's own menu).
     const forward = (e) => {
-        try { rec.tw.mouse?.(e, localPos(canvas, e), rec.tn); } catch (_) {}
+        try {
+            const [px, py] = localPos(canvas, e);
+            const hs = rowHeights();
+            let top = 0;
+            let hit = -1;
+            for (let i = 0; i < members.length; i++) {
+                if (py >= top && py < top + hs[i]) { hit = i; break; }
+                top += hs[i] + PORTAL_ROW_GAP;
+            }
+            if (hit < 0) {
+                hit = members.length - 1;                 // past the last row
+                top = Math.max(0, top - PORTAL_ROW_GAP - hs[hit]);
+            }
+            members[hit].widget.mouse?.(e, [px, py - top], tn);
+        } catch (_) {}
     };
     rec.handlers = {
         pointerdown: (e) => { forward(e); },
@@ -163,8 +244,8 @@ function mountCanvasPortal(node, item, tn, tw, host) {
         canvas.addEventListener(type, fn, { passive: false });
     }
 
-    drawOnce(); // immediate first paint
-    rec.timer = setInterval(drawOnce, 80); // ~12fps: light but alive
+    tick(); // immediate first paint at the already-final geometry
+    rec.timer = setInterval(tick, 80); // ~12fps: light but alive
     return rec;
 }
 
@@ -208,18 +289,22 @@ export function mountPortals(node, root) {
             `[data-hub-item="${item.id}"] [data-role="portal-host"]`,
         );
         if (!host) continue;
-        const { tn, tw } = findWidget(item);
-        if (!tn || !tw) {
+        const { tn } = findWidget(item);
+        const members = tn ? resolveMembers(item, tn) : [];
+        if (!tn || !members.length) {
             host.textContent = "⚠️ target node / widget missing";
             host.classList.add("hub-portal-broken");
             continue;
         }
         host.classList.remove("hub-portal-broken");
         let rec = null;
-        if ((item.options?.portalKind ?? "canvas") === "dom") {
-            rec = mountDomPortal(item, tw, host);
+        // Only LEGACY single portals without members[] may relocate a DOM
+        // element; group embeds render onto their shared canvas.
+        if ((item.options?.portalKind ?? "canvas") === "dom"
+            && !Array.isArray(item.members)) {
+            rec = mountDomPortal(item, members[0].widget, host);
         }
-        if (!rec) rec = mountCanvasPortal(node, item, tn, tw, host);
+        if (!rec) rec = mountCanvasPortal(node, item, tn, members, host);
         if (rec) { rec.set = set; set.add(rec); }
     }
 }
@@ -230,6 +315,18 @@ export function releaseAll(node) {
     if (!set) return;
     for (const rec of [...set]) releaseRecord(rec);
     set.clear();
+}
+
+/** Immediate draw+geometry pass over a hub's mounted canvas portals
+ *  (used by the smoke harness; harmless no-op for DOM portals). */
+export function runPortalTicks(node) {
+    const set = node && nodeRegistry.get(node);
+    if (!set) return;
+    for (const rec of [...set]) {
+        if (rec.kind === "canvas" && typeof rec.tick === "function") {
+            try { rec.tick(); } catch (_) {}
+        }
+    }
 }
 
 /** Release a single portal (unpin / item removal). */

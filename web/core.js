@@ -230,6 +230,68 @@ export function portalKindOf(widget) {
     return el && typeof el.appendChild === "function" ? "dom" : "canvas";
 }
 
+// ---------------------------------------------------------------------------
+// Group portals ("whole panel" embeds)
+// ---------------------------------------------------------------------------
+// Custom panels are often drawn by SEVERAL sibling widgets on one node
+// (rgthree Power Lora Loader: a header widget, one widget per lora row, a
+// divider). Pinning them individually reproduces fragments only - users want
+// THE PANEL. A group portal binds all portal-classified widgets of a node
+// into ONE item whose members are stacked onto a shared canvas, mirroring
+// how the node itself stacks them vertically. Still fully universal.
+
+/** Vertical breathing room LiteGraph leaves between stacked widget rows. */
+export const PORTAL_ROW_GAP = 4;
+
+/** Best-effort current painted height of a widget row, in px. */
+export function widgetNativeHeight(widget, fallback = 30) {
+    let h = Number(widget?.height);
+    if (!Number.isFinite(h) || h <= 0) {
+        try { h = Number(widget?.computeSize?.()?.[1]); } catch (_) { h = NaN; }
+    }
+    if (!Number.isFinite(h) || h <= 0) h = Number(widget?.options?.height);
+    if (!Number.isFinite(h) || h <= 0) h = Number(fallback);
+    return Number.isFinite(h) && h > 0 ? h : 30;
+}
+
+/**
+ * Bind SEVERAL portal widgets of one node as a single live embed.
+ * members[] persists name+height so reloads survive; live geometry is still
+ * re-read every frame by the portal renderer (rows grow/shrink dynamically).
+ */
+export function createPortalBinding(node, targetNode, widgets, tabId, label) {
+    const cfg = getHubConfig(node);
+    const list = (Array.isArray(widgets) ? widgets : [widgets]).filter(Boolean);
+    if (!list.length) return null;
+
+    const primary = list[0];
+    const item = {
+        id: genId("item"),
+        type: "widget_portal",
+        tabId,
+        order: nextOrder(cfg, tabId),
+        customLabel: label || primary.label || primary.name || targetNode?.title || "panel",
+        targetNodeId: targetNode.id,
+        widgetToBind: primary.name ?? "",
+        widgetType: "portal",
+        members: list.map((w) => ({
+            name: w.name ?? "",
+            srcH: Math.round(widgetNativeHeight(w)),
+        })),
+    };
+    const totalH =
+        item.members.reduce((acc, m) => acc + m.srcH, 0) +
+        PORTAL_ROW_GAP * (item.members.length - 1);
+    item.options = { portalKind: "canvas", srcH: totalH };
+    if (list.length > 1) item.options.grouped = true;
+
+    cfg.items.push(item);
+    Pins.invalidatePins();
+    node.setDirtyCanvas(true, true);
+    syncNode(node);
+    return item;
+}
+
 export function createBinding(node, targetNode, widget, tabId, type, extra) {
     const cfg = getHubConfig(node);
     const item = {

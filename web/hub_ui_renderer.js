@@ -458,6 +458,11 @@ function renderHub(node) {
         const liveIsPortal = live === "portal";
         const itemIsPortal = item.type === "widget_portal";
 
+        // Whole-panel GROUP embeds: as long as the primary widget is still a
+        // panel there is nothing to heal - and the members[] list + grouped
+        // flag must survive (a single-widget migration would destroy them).
+        if (itemIsPortal && liveIsPortal && item.options?.grouped) continue;
+
         if (liveIsPortal !== itemIsPortal) {
             // The widget's character changed (custom widget swapped in/out).
             // Migrate the binding kind so the row stays meaningful.
@@ -466,7 +471,9 @@ function renderHub(node) {
             if (liveIsPortal) {
                 let srcH = Number(tw.height ?? tw.options?.height);
                 if (!Number.isFinite(srcH) || srcH <= 0) srcH = 60;
-                item.options = { portalKind: portalKindOf(tw), srcH: Math.round(srcH) };
+                const opts = { portalKind: portalKindOf(tw), srcH: Math.round(srcH) };
+                if (item.options?.grouped) opts.grouped = true; // keep whole-panel embeds
+                item.options = opts;
             } else {
                 item.options = isMultilineWidget(tw) ? { multiline: true } : {};
             }

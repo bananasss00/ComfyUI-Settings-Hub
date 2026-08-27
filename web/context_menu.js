@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 import {
-    getHubConfig, createBinding, createNewHub, HUB_NODE_NAME, detectWidgetType,
+    getHubConfig, createBinding, createPortalBinding, createNewHub, HUB_NODE_NAME, detectWidgetType,
 } from "./core.js";
 
 // ============================================================================
@@ -98,13 +98,65 @@ function panelLabel(w) {
     return s.length > 26 ? `${s.slice(0, 25)}…` : s;
 }
 
+/** Whole-panel entries: bind ALL portal-classified widgets of the node as ONE
+ *  group embed. rgthree's Power Lora Loader draws its header, every per-lora
+ *  row and the divider as SEPARATE sibling widgets - pinning fragments
+ *  reproduces only pieces, so the preferred action pins them together. */
+function buildWholeBlockEntries(node, panels, hubs) {
+    if (!panels || panels.length < 2) return [];
+    const what =
+        `whole panel «${String(node?.title || panelLabel(panels[0])).slice(0, 26)}» ` +
+        `(${panels.length} parts)`;
+    const entries = [];
+
+    if (hubs.length === 0) {
+        entries.push({
+            content: `🪟 ${what} → Create New Settings Hub`,
+            callback: () => {
+                const newHub = createNewHub();
+                if (newHub) {
+                    createPortalBinding(
+                        newHub, node, panels, getActiveTabId(getHubConfig(newHub)));
+                }
+            },
+        });
+        return entries;
+    }
+
+    for (const hub of hubs) {
+        const cfg = getHubConfig(hub);
+        const prefix = hubs.length > 1 ? `${hub.title || "Settings Hub"}: ` : "";
+        for (const tab of cfg.tabs) {
+            entries.push({
+                content: `🪟 ${what} → ${prefix}${tab.name}`,
+                callback: () => createPortalBinding(hub, node, panels, tab.id),
+            });
+        }
+        entries.push({
+            content: `➕ ${what} → ${prefix}New Tab`,
+            callback: () => {
+                const name = prompt("New tab name:", "New Tab");
+                if (name !== null) {
+                    const tabId = `tab_${Date.now().toString(36)}`;
+                    cfg.tabs.push({ id: tabId, name, order: cfg.tabs.length });
+                    createPortalBinding(hub, node, panels, tabId);
+                }
+            },
+        });
+    }
+    return entries;
+}
+
 /** Flat "candidate -> hub -> tab" entries (the Vue menu converter only
  *  supports ONE submenu level, so cross products stay flat). */
 function buildPanelSubmenu(node, panels, graph) {
     const hubs = (graph._nodes ?? []).filter((n) => n.type === HUB_NODE_NAME);
     const entries = [];
 
-    if (hubs.length === 0) {
+    // PREFERRED first: the whole custom block as ONE live embed.
+    entries.push(...buildWholeBlockEntries(node, panels, hubs));
+
+    if (!hubs.length) {
         for (const w of panels) {
             entries.push({
                 content: `🪟 Create New Settings Hub (${panelLabel(w)})`,
@@ -312,7 +364,13 @@ function attachCtrlRmbOverride() {
         if (!owner || owner.node.type === HUB_NODE_NAME) return;
 
         const graph = owner.node.graph || app.graph;
-        const entries = buildPinSubmenu(owner.node, owner.widget, graph);
+        // Offer the WHOLE-PANEL group embed first (the widget under the
+        // cursor is usually just one row of a multi-widget custom panel).
+        const entries = [
+            ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node),
+                (graph._nodes ?? []).filter((n) => n.type === HUB_NODE_NAME)),
+            ...buildPinSubmenu(owner.node, owner.widget, graph),
+        ];
         if (!entries.length) return;
 
         e.preventDefault();
