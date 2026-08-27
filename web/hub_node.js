@@ -1,5 +1,5 @@
 import { app } from "../../scripts/app.js";
-import { getHubConfig } from "./core.js";
+import { getHubConfig, trackHubNode, forgetHubNode } from "./core.js";
 import { syncNode } from "./sync.js";
 import { relayoutHub } from "./hub_ui_renderer.js";
 import * as Pins from "./pins.js";
@@ -46,6 +46,12 @@ function makeSettingsHubNodeClass(LGraphNode) {
             if (!this.__hubAutoSizing) this.__hubUserH = true;
             // rAF-coalesced layout, no innerHTML rebuild - safe mid-drag.
             try { relayoutHub(this); } catch (_) {}
+        }
+
+        onRemoved() {
+            // Keep the global registry truthful: removed hubs must stop
+            // appearing in pin menus and sync loops.
+            forgetHubNode(this);
         }
     };
 }
@@ -137,6 +143,7 @@ app.registerExtension({
         if (node.type === NODE_NAME) {
             getHubConfig(node);
             syncNode(node);
+            trackHubNode(node); // cross-graph discovery (subgraph-safe menus)
         }
     },
     setup() {

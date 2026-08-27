@@ -162,11 +162,27 @@ function mirrorHtml(item, tw) {
         case "slider": {
             const o = numericMerge(item, tw);
             const v = coerceNumeric(tw?.value, item, tw, o.min);
+            const finMin = Number.isFinite(o.min);
+            const finMax = Number.isFinite(o.max);
+            // Faithful attributes: undeclared bounds stay ABSENT (open-ended),
+            // never replaced by invented 0..1 walls. The range slider needs a
+            // finite box - omit it when either side is open-ended.
+            const numAttrs =
+                (finMin ? ` min="${o.min}"` : "") +
+                (finMax ? ` max="${o.max}"` : "") +
+                ` step="${o.step}"`;
+            // The editor is a TEXT input with inputmode=decimal, NOT
+            // type=number: native number fields SANITIZE the value ("0,9"
+            // becomes "", comma locales and exotic decimals die before our
+            // validation ever sees them). We own clamping/quantization in
+            // coerceNumeric, so the raw user text always reaches it intact.
             return `<span class="hub-mirror hub-mirror-num">` +
-                `<input type="number" class="hub-num-input" data-role="number" data-hub-control ` +
-                `value="${esc(String(v))}" min="${o.min}" max="${o.max}" step="${o.step}">` +
-                `<input type="range" class="hub-range" data-role="range" data-hub-control ` +
-                `value="${esc(String(v))}" min="${o.min}" max="${o.max}" step="${o.step}">` +
+                `<input type="text" inputmode="decimal" class="hub-num-input" data-role="number" data-hub-control ` +
+                `value="${esc(String(v))}"${numAttrs}>` +
+                (finMin && finMax
+                    ? `<input type="range" class="hub-range" data-role="range" data-hub-control ` +
+                      `value="${esc(String(v))}" min="${o.min}" max="${o.max}" step="${o.step}">`
+                    : "") +
                 `</span>`;
         }
         default: {
@@ -250,7 +266,7 @@ function presetRowHtml(cfg) {
 // Value plumbing: control -> target node (with shared lock)
 // ---------------------------------------------------------------------------
 
-function pushControlToTarget(node, control, rawValue) {
+function pushControlToTarget(node, control, rawValue, manualText = false) {
     const row = control.closest("[data-hub-item]");
     if (!row) return;
     const cfg = getHubConfig(node);
@@ -268,6 +284,11 @@ function pushControlToTarget(node, control, rawValue) {
             case "combo": v = String(rawValue); break;
             case "text": v = String(rawValue); break;
             case "number":
+                // Typed commits keep exact decimals: no step-grid snapping,
+                // only real declared bounds apply. manualText=true comes from
+                // the change event (user typed); arrows/programmatic stay quantized.
+                v = coerceNumeric(rawValue, item, tw, tw.value, { quantize: !manualText });
+                break;
             case "range": v = coerceNumeric(rawValue, item, tw, tw.value); break;
         }
         writeTargetValue(tn, tw, v); // already wrapped in the sync lock
@@ -505,6 +526,11 @@ function refreshValuesDom(node) {
                     if (control.value !== String(tw.value)) control.value = String(tw.value ?? "");
                     break;
                 default: { // number / range
+                    // While the user is editing this control, echoes from the
+                    // target must NOT stomp the value mid-typing (caret jumps,
+                    // partial strings like "0." overwritten). It resyncs right
+                    // after commit/blur via the normal flow.
+                    if (document.activeElement === control && control.dataset.role === "number") break;
                     const v = coerceNumeric(tw.value, item, tw, tw.value);
                     if (Number(control.value) !== v) control.value = String(v);
                     break;
@@ -836,6 +862,16 @@ export function notifyHubContentChanged(node) {
 function wireEvents(node, st) {
     const root = st.root;
 
+    // Tab switching is ALSO the only place a rename can be started: the
+    // browser's native dblclick can never fire on a tab button, because the
+    // FIRST click re-renders the whole bar (innerHTML swap) and the second
+    // physical click lands on a REPLACEMENT element - the dblclick chain is
+    // broken by design of our own render. So we detect the double click at
+    // the CLICK level: two clicks on the same tab within the window start
+    // the inline edit instead of re-switching.
+    const TAB_RENAME_WINDOW_MS = 400;
+    let lastTabClick = { id: null, ts: 0 };
+
     root.addEventListener("click", (e) => {
         const btn = e.target.closest("[data-action]");
         if (!btn || btn.disabled) return;
@@ -843,7 +879,24 @@ function wireEvents(node, st) {
         const action = btn.dataset.action;
 
         if (action === "switch-tab") {
-            cfg.activeTabId = btn.dataset.tab;
+            const tabId = btn.dataset.tab;
+            const now = Date.now();
+            if (lastTabClick.id === tabId && now - lastTabClick.ts < TAB_RENAME_WINDOW_MS) {
+                lastTabClick = { id: null, ts: 0 };
+                const tabBtn = btn.closest(".hub-tab-btn");
+                const tab = cfg.tabs.find((t) => t.id === tabId);
+                if (tab && tabBtn && !tabBtn.querySelector("input")) {
+                    startInlineEdit(tabBtn, tab.name, (val) => {
+                        tab.name = val;
+                        node.setDirtyCanvas(true, true);
+                        renderHub(node);
+                    });
+                }
+                return; // already active from the first click - no re-render,
+                //         otherwise the swap would kill the inline input
+            }
+            lastTabClick = { id: tabId, ts: now };
+            cfg.activeTabId = tabId;
             renderHub(node);
             return;
         }
@@ -932,19 +985,18 @@ function wireEvents(node, st) {
         const c = e.target.closest("[data-hub-control]");
         if (!c) return;
         if (c.dataset.role === "check") pushControlToTarget(node, c, c.checked);
-        else if (c.dataset.role === "number") pushControlToTarget(node, c, c.value);
+        else if (c.dataset.role === "number") pushControlToTarget(node, c, c.value, true);
     });
     root.addEventListener("input", (e) => {
         const c = e.target.closest("[data-hub-control]");
         if (!c) return;
         if (c.dataset.role === "range") pushControlToTarget(node, c, c.value);
-        else if (c.dataset.role === "text" || c.dataset.role === "number") {
-            if (c.tagName === "TEXTAREA" || c.dataset.role === "number") {
-                pushControlToTarget(node, c, c.value);
-            } else {
-                pushControlToTarget(node, c, c.value); // text inputs stream too
-            }
+        else if (c.dataset.role === "text") {
+            pushControlToTarget(node, c, c.value); // plain inputs + textareas stream
         }
+        // number deliberately NOT here: typing "0." / "1e" must not punch
+        // garbage through to the target on every keystroke - number inputs
+        // commit on the change event above.
     });
 
     // Preset select applies instantly.

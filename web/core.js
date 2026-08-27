@@ -11,6 +11,33 @@ export function genId(prefix) {
 }
 
 // ---------------------------------------------------------------------------
+// Global hub registry (cross-graph discovery)
+// ---------------------------------------------------------------------------
+// ComfyUI subgraphs make `node.graph`/`app.graph` graph-local: a hub living
+// on the ROOT canvas is invisible to menu code running while the user is
+// INSIDE a subgraph ("only Create New is offered"). All hubs are created on
+// the root graph anyway, so discovery must be GRAPH-INDEPENDENT. We keep our
+// own registry - nodeCreated tracks, onRemoved forgets - and everything that
+// enumerates hubs reads from it instead of scanning one graph's _nodes.
+
+const hubRegistry = new Set();
+
+/** Called from the extension's nodeCreated hook for EVERY hub instance. */
+export function trackHubNode(node) {
+    if (node?.type === HUB_NODE_NAME) hubRegistry.add(node);
+}
+
+/** Called from the hub class onRemoved hook. */
+export function forgetHubNode(node) {
+    if (node) hubRegistry.delete(node);
+}
+
+/** Live hubs across ALL graphs, in stable insertion order. */
+export function allHubs() {
+    return [...hubRegistry].filter((n) => n?.type === HUB_NODE_NAME);
+}
+
+// ---------------------------------------------------------------------------
 // Config access / migration
 // ---------------------------------------------------------------------------
 
@@ -164,18 +191,34 @@ export function detectWidgetType(widget) {
         opts.min != null ||
         opts.max != null ||
         opts.step != null ||
+        opts.precision != null ||
+        opts.round != null ||
         typeof widget?.value === "number";
     if (!numericHints) return "portal"; // unknown/custom -> live portal embed
 
     const stepRaw = opts.step != null ? Number(opts.step) : NaN;
     const step = Number.isFinite(stepRaw) ? Math.abs(stepRaw) : NaN;
 
-    let intLike = type.includes("int");
-    if (!Number.isFinite(step) || step >= 1) {
-        // Integer unless something explicitly says "float"/"slider".
-        intLike = !type.includes("float") && !type.includes("slider");
-    }
-    return intLike ? "int" : "slider";
+    // Modern frontends describe floats via options.precision (decimal digits)
+    // or options.round instead of step; a missing step must NOT silently
+    // degrade such widgets to ints.
+    const precision = opts.precision != null ? Number(opts.precision) : NaN;
+    const roundV = opts.round != null ? Number(opts.round) : NaN;
+    const wholeStep = Number.isFinite(step) ? step >= 1 : null;
+
+    const suggestsInt = type.includes("int") || wholeStep === true;
+    const suggestsFloat =
+        type.includes("float") ||
+        type.includes("slider") ||
+        precision > 0 ||
+        (Number.isFinite(roundV) && roundV > 0 && roundV < 1);
+
+    if (suggestsInt && !suggestsFloat) return "int";
+    if (suggestsFloat) return "slider";
+
+    // No declarations at all: fall back to how the CURRENT value looks.
+    const v = Number(widget?.value);
+    return Number.isFinite(v) ? (Number.isInteger(v) ? "int" : "slider") : "int";
 }
 
 // ---------------------------------------------------------------------------
@@ -200,33 +243,83 @@ export function stepDecimals(step) {
 
 /**
  * Merge numeric options: prefer the live target widget's options, fall back
- * to the snapshot stored in the binding item, then to sane derived defaults.
+ * to the snapshot stored in the binding item, then to derived defaults.
+ *
+ * The mirror must be FAITHFUL: whatever step/min/max the source declares is
+ * what the mirror uses - no invented walls (the old code clamped everything
+ * into an implicit [0..1]), no ×10 mangled steps. A side with NO declared
+ * bound stays open-ended: min/max come out as ±Infinity so the renderer can
+ * omit the attribute and coercion skips that clamp.
+ *
+ * Step resolution order: declared step -> round -> precision-derived
+ * (10^-digits) -> range-based fallback. The merged snapshot is also written
+ * back into item.options (self-heal) so orphaned rows keep real geometry.
  */
 export function numericMerge(item, targetWidget) {
     const live = targetWidget?.options || {};
     const snap = item?.options || {};
-    let min = pickNum(live.min, snap.min, 0);
-    let max = pickNum(live.max, snap.max, 1);
-    if (!(max > min)) { max = min + 1; }
 
-    const range = max - min;
-    const fallbackStep = range <= 1 ? 0.01 : Math.max(range / 200, 0.01);
-    let step = pickNum(live.step, snap.step, fallbackStep);
+    let min = pickNum(live.min, snap.min, NaN);
+    let max = pickNum(live.max, snap.max, NaN);
+    if (Number.isFinite(min) && Number.isFinite(max) && !(max > min)) {
+        max = min + Math.abs(min || 1); // degenerate equal bounds - keep them usable
+    }
+
+    const declaredStep = pickNum(live.step, snap.step, NaN);
+    const rangeKnown = Number.isFinite(min) && Number.isFinite(max);
+    const range = rangeKnown ? max - min : NaN;
+    const fallbackStep = rangeKnown
+        ? (range <= 1 ? 0.01 : Math.max(range / 200, 0.01))
+        : 0.01;
+
+    let step = declaredStep;
+    if (!(step > 0) && optsHas(live, snap, "round")) step = pickNum(live.round, snap.round, NaN);
+    if (!(step > 0) && optsHas(live, snap, "precision")) {
+        const p = pickNum(live.precision, snap.precision, NaN);
+        if (p >= 0) step = Math.pow(10, -Math.min(p, 6));
+    }
     if (!(step > 0)) step = fallbackStep;
-    if (step > range) step = range / 100 || 0.01;
+    // Never override a DECLARED step with range math; only the synthetic
+    // fallback may adapt itself to a tiny range.
+    if (!(declaredStep > 0) && rangeKnown && step > range) step = range / 100 || 0.01;
+
+    // Self-heal the persisted snapshot so pins survive orphaning.
+    try {
+        if (item && typeof item === "object") {
+            const so = (item.options && typeof item.options === "object")
+                ? item.options : (item.options = {});
+            if (so.min !== min && Number.isFinite(min)) so.min = min;
+            if (so.max !== max && Number.isFinite(max)) so.max = max;
+            if (so.step !== step && step > 0) so.step = step;
+        }
+    } catch (_) { /* frozen configs must not break rendering */ }
 
     return { min, max, step, decimals: stepDecimals(item?.widgetType === "int" ? 1 : step) };
 }
 
-/** Coerce any incoming value into a valid number clamped to merged options. */
-export function coerceNumeric(value, item, targetWidget, prevValue) {
+function optsHas(a, b, key) {
+    return a?.[key] != null || b?.[key] != null;
+}
+
+/**
+ * Coerce any incoming value into a number against the REAL merged options.
+ * quantize=false is used for MANUAL typed commits: values keep their exact
+ * decimals (no step-grid snapping) and are only kept inside DECLARED bounds;
+ * open-ended sides pass through untouched. Accepts comma decimals (ru).
+ */
+export function coerceNumeric(value, item, targetWidget, prevValue, opts = {}) {
     const o = numericMerge(item, targetWidget);
-    let n = Number(typeof value === "number" ? value : parseFloat(String(value)));
+    const rawStr = typeof value === "string" && value.includes(",")
+        ? value.replace(/\s/g, "").replace(",", ".")
+        : value;
+    let n = Number(typeof rawStr === "number" ? rawStr : parseFloat(String(rawStr)));
     if (!Number.isFinite(n)) n = Number(prevValue);
-    if (!Number.isFinite(n)) n = o.min;
-    n = Math.min(o.max, Math.max(o.min, n));
+    if (!Number.isFinite(n)) n = Number.isFinite(o.min) ? o.min : 0;
+    if (Number.isFinite(o.min)) n = Math.max(o.min, n);
+    if (Number.isFinite(o.max)) n = Math.min(o.max, n);
     if (item?.widgetType === "int") n = Math.round(n);
-    else n = Number(n.toFixed(o.decimals));
+    else if (opts.quantize !== false) n = Number(n.toFixed(o.decimals));
+    else n = Number(n.toPrecision(10)); // strip float noise, keep user digits
     return n;
 }
 

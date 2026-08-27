@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import {
     getHubConfig, createBinding, createPortalBinding, createNewHub, HUB_NODE_NAME,
-    detectWidgetType, portalKindOf,
+    detectWidgetType, portalKindOf, allHubs,
 } from "./core.js";
 
 // ============================================================================
@@ -20,8 +20,6 @@ export function attachContextMenu() {
         name: "Comfy.SettingsHub.context",
         "getNodeMenuItems"(node) {
             if (!node || node.type === HUB_NODE_NAME) return [];
-
-            const graph = node.graph || app.graph;
 
             // Path 1 (unchanged): the widget strictly under the cursor.
             // Precise, but useless for rgthree-style panels whose surface
@@ -44,7 +42,7 @@ export function attachContextMenu() {
                     content: "📌 Pin to Settings Hub",
                     has_submenu: true,
                     submenu: {
-                        options: buildPinSubmenu(node, widget, graph),
+                        options: buildPinSubmenu(node, widget),
                     },
                 });
             }
@@ -60,7 +58,7 @@ export function attachContextMenu() {
                     content: "🪟 Pin custom panel (live embed)",
                     has_submenu: true,
                     submenu: {
-                        options: buildPanelSubmenu(node, panels, graph),
+                        options: buildPanelSubmenu(node, panels),
                     },
                 });
             }
@@ -167,9 +165,12 @@ function buildWholeBlockEntries(node, panels, hubs) {
 }
 
 /** Flat "candidate -> hub -> tab" entries (the Vue menu converter only
- *  supports ONE submenu level, so cross products stay flat). */
-function buildPanelSubmenu(node, panels, graph) {
-    const hubs = (graph._nodes ?? []).filter((n) => n.type === HUB_NODE_NAME);
+ *  supports ONE submenu level, so cross products stay flat).
+ *  Hubs come from the GLOBAL registry, not graph._nodes: from inside a
+ *  subgraph the root-canvas hubs must still be offered (they always live
+ *  on the root anyway - see createNewHub). */
+function buildPanelSubmenu(node, panels) {
+    const hubs = allHubs();
     const entries = [];
 
     // PREFERRED first: the whole custom block as ONE live embed.
@@ -216,8 +217,10 @@ function buildPanelSubmenu(node, panels, graph) {
     return entries;
 }
 
-function buildPinSubmenu(node, widget, graph) {
-    const hubs = (graph._nodes ?? []).filter((n) => n.type === HUB_NODE_NAME);
+function buildPinSubmenu(node, widget) {
+    // Global registry again: works identically on the root canvas and inside
+    // any subgraph.
+    const hubs = allHubs();
     // Custom widgets (non-primitive values / unknown types) become live
     // portals - mark those entries so users know what to expect.
     const portal = detectWidgetType(widget) === "portal";
@@ -357,7 +360,7 @@ function attachCtrlRmbOverride() {
         let owner = null;
         if (t.tagName === "CANVAS") {
             // Canvas surface: resolve node+widget under the tracked graph-
-            // space pointer, exactly like ComfyUI's own menu does.
+            // space pointer against the ACTIVE canvas graph (root or sub).
             const mx = app.canvas?.graph_mouse?.[0];
             const my = app.canvas?.graph_mouse?.[1];
             if (typeof mx === "number" && typeof my === "number") {
@@ -382,13 +385,11 @@ function attachCtrlRmbOverride() {
 
         if (!owner || owner.node.type === HUB_NODE_NAME) return;
 
-        const graph = owner.node.graph || app.graph;
         // Offer the WHOLE-PANEL group embed first (the widget under the
         // cursor is usually just one row of a multi-widget custom panel).
         const entries = [
-            ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node),
-                (graph._nodes ?? []).filter((n) => n.type === HUB_NODE_NAME)),
-            ...buildPinSubmenu(owner.node, owner.widget, graph),
+            ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node), allHubs()),
+            ...buildPinSubmenu(owner.node, owner.widget),
         ];
         if (!entries.length) return;
 
@@ -421,11 +422,9 @@ function attachPanelSurfacePinMenu() {
         // Panel-classified widgets only - everything else has its own handler.
         if (detectWidgetType(owner.widget) !== "portal") return;
 
-        const graph = owner.node.graph || app.graph;
-        const hubs = (graph._nodes ?? []).filter((n) => n.type === HUB_NODE_NAME);
         const entries = [
-            ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node), hubs),
-            ...buildPinSubmenu(owner.node, owner.widget, graph),
+            ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node), allHubs()),
+            ...buildPinSubmenu(owner.node, owner.widget),
         ];
         if (!entries.length) return;
 
@@ -473,8 +472,7 @@ function attachDomWidgetPinMenu() {
         const owner = findDomWidgetOwner(e.target);
         if (!owner || owner.node.type === HUB_NODE_NAME) return;
 
-        const graph = owner.node.graph || app.graph;
-        const entries = buildPinSubmenu(owner.node, owner.widget, graph);
+        const entries = buildPinSubmenu(owner.node, owner.widget);
         if (!entries.length) return;
 
         e.preventDefault();

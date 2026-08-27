@@ -1,5 +1,5 @@
 import { app } from "../../scripts/app.js";
-import { getHubConfig, HUB_NODE_NAME } from "./core.js";
+import { getHubConfig, HUB_NODE_NAME, allHubs } from "./core.js";
 import { syncNode, queueHubRefresh, inEdit, beginEdit, endEdit } from "./sync.js";
 import * as Pins from "./pins.js";
 
@@ -27,9 +27,11 @@ function attachTargetHook(targetNode, targetWidget) {
             catch (err) { console.warn("[SettingsHub] target callback error:", err); }
         }
         // Only propagate user-driven changes; hub-initiated writes hold the
-        // edit lock so the loop cannot recurse back onto itself.
+        // edit lock so the loop cannot recurse back onto itself. ALL hubs are
+        // considered - including those on other graphs (target in a subgraph,
+        // hub on the root canvas and vice versa).
         if (!inEdit()) {
-            for (const hub of iterHubs(targetNode.graph || app.graph)) {
+            for (const hub of allHubs()) {
                 if (hubBindsWidget(hub, targetNode.id, targetWidget.name)) {
                     queueHubRefresh(hub);
                 }
@@ -62,11 +64,9 @@ export function writeTargetValue(targetNode, targetWidget, value) {
     }
 }
 
-function* iterHubs(graph) {
-    for (const node of graph?._nodes ?? []) {
-        if (node.type === HUB_NODE_NAME) yield node;
-    }
-}
+// ---------------------------------------------------------------------------
+// Global helpers
+// ---------------------------------------------------------------------------
 
 function hubBindsWidget(hubNode, targetNodeId, widgetName) {
     const cfg = getHubConfig(hubNode);
@@ -80,12 +80,8 @@ function hubBindsWidget(hubNode, targetNodeId, widgetName) {
     return false;
 }
 
-// ---------------------------------------------------------------------------
-// Global helpers
-// ---------------------------------------------------------------------------
-
 export function isHubTarget(nodeId) {
-    for (const hub of iterHubs(app.graph ?? app.canvas?.graph)) {
+    for (const hub of allHubs()) {
         const cfg = getHubConfig(hub);
         for (const item of cfg.items) {
             if (item.type === "widget_binding" && item.targetNodeId === nodeId) return true;
@@ -94,13 +90,12 @@ export function isHubTarget(nodeId) {
     return false;
 }
 
-/** Full re-render of every hub on the graph + pin recount. */
+/** Full re-render of every hub on every graph + pin recount. */
 export function syncAll() {
     Pins.invalidatePins();
-    const graph = app.graph ?? app.canvas?.graph;
-    for (const hub of iterHubs(graph)) syncNode(hub);
+    for (const hub of allHubs()) syncNode(hub);
     // Attach hooks to widgets that are already bound at load time.
-    for (const hub of iterHubs(graph)) {
+    for (const hub of allHubs()) {
         const cfg = getHubConfig(hub);
         for (const item of cfg.items) ensureHooksForItem(item);
     }

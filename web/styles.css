@@ -340,16 +340,9 @@
     padding: 0;
 }
 
-.hub-mirror input[type="number"].hub-num-input {
+.hub-mirror input.hub-num-input {
     width: 52px;
-    -moz-appearance: textfield;
     appearance: textfield;
-}
-
-.hub-mirror input[type="number"].hub-num-input::-webkit-outer-spin-button,
-.hub-mirror input[type="number"].hub-num-input::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
 }
 
 .hub-text-area {
