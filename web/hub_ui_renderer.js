@@ -155,8 +155,14 @@ function buildTabBarHtml(cfg) {
     const btns = tabs.map((t) =>
         tabBtnHtml(t, t.id === getActiveTabId(cfg),
             cfg.items.filter((i) => i.tabId === t.id).length)).join("");
-    // v24: 📌 floats the whole hub UI in an always-on-screen window.
+    // v25 right-side group: 🔍 compact filter, 👁 row-handles visibility,
+    // 📌 screen pin, + new tab.
     return `<div class="hub-tab-bar">${btns}` +
+        `<input type="text" class="hub-search" data-role="hub-search" spellcheck="false" ` +
+        `placeholder="🔍" title="Filter widgets on this tab (substring, case-insensitive; Esc clears)">` +
+        `<button type="button" class="hub-chrome-toggle${cfg.hideChrome ? " hub-chrome-off" : ""}" data-action="chrome-toggle" ` +
+        `title="Show / hide row handles (drag ⠿ and remove ✕)" ` +
+        `aria-pressed="${cfg.hideChrome ? "true" : "false"}">👁</button>` +
         `<button type="button" class="hub-pin-toggle${cfg.pinned ? " hub-pin-on" : ""}" data-action="pin-toggle" ` +
         `title="Keep this hub on screen - float above the canvas, survives panning/zoom" ` +
         `aria-pressed="${cfg.pinned ? "true" : "false"}">📌</button>` +
@@ -333,19 +339,20 @@ function parseQueueCount(v) {
 
 function queueRowHtml(cfg) {
     const n = parseQueueCount(cfg.queueCount);
-    // v24 layout: [▶ Queue] ×[N] [badge][⏹]. The badge mirrors ComfyUI's
-    // queue_remaining so the bar keeps showing LIVE state instead of
-    // snapping back to an idle-looking "▶ Queue" right after enqueueing;
-    // ⏹ reproduces the native Cancel/Interrupt affordance and is enabled
-    // exactly while something is queued or executing.
+    // v25 layout: [▶ Queue] ×[N] [badge][🗑]. The badge mirrors ComfyUI's
+    // queue_remaining; 🗑 is ALWAYS enabled and wipes the ENTIRE queue -
+    // it interrupts the running job and removes every pending entry
+    // (POST /queue {"clear":true}, the native Clear payload). It used to
+    // be a state-dependent Cancel, which read as "a cross that never
+    // activates" - the user asked for full-queue clearing instead.
     return `<div class="hub-queue-row">` +
         `<button type="button" class="hub-btn hub-queue-run" data-action="queue-run" title="Queue prompt (same as ComfyUI Queue button)">▶ Queue</button>` +
         `<span class="hub-queue-times">×</span>` +
         `<input type="text" inputmode="numeric" class="hub-queue-count" data-role="queue-count" ` +
         `value="${esc(String(n))}" title="Run the workflow this many times (1–${MAX_QUEUE_BATCH})">` +
         `<span class="hub-queue-badge" data-role="queue-badge" title="ComfyUI queue remaining"></span>` +
-        `<button type="button" class="hub-btn hub-interrupt" data-action="queue-interrupt" disabled ` +
-        `title="Cancel the current task (same as ComfyUI Interrupt)">⏹</button>` +
+        `<button type="button" class="hub-btn hub-interrupt" data-action="queue-clear" ` +
+        `title="Clear the whole queue: stop the current job + remove all pending">🗑</button>` +
         `</div>`;
 }
 
@@ -442,9 +449,9 @@ export function initQueueStatus(api) {
  *  (innerHTML swaps would kill open popups and inline editors). */
 function paintQueueBarDom(root) {
     const btn = root.querySelector('[data-action="queue-run"]');
-    const intBtn = root.querySelector('[data-action="queue-interrupt"]');
+    const clearBtn = root.querySelector('[data-action="queue-clear"]');
     const badge = root.querySelector('[data-role="queue-badge"]');
-    if (!btn && !intBtn && !badge) return;
+    if (!btn && !clearBtn && !badge) return;
     const rem = Number(qStatus.remaining);
     const hasRem = Number.isFinite(rem) && rem > 0;
     if (badge) {
@@ -453,9 +460,10 @@ function paintQueueBarDom(root) {
         badge.classList.toggle("hub-queue-has", hasRem);
     }
     btn?.classList.toggle("hub-queue-live", qStatus.running === true);
-    if (intBtn) {
-        intBtn.disabled = !(qStatus.running === true || hasRem);
-        intBtn.classList.toggle("hub-interrupt-on", qStatus.running === true || hasRem);
+    // The clear button is always clickable (v25); this class is now purely a
+    // "there is something to wipe" visual hint.
+    if (clearBtn) {
+        clearBtn.classList.toggle("hub-interrupt-on", qStatus.running === true || hasRem);
     }
 }
 
@@ -466,24 +474,39 @@ function paintAllQueues() {
     }
 }
 
-async function interruptQueueFlow(node) {
+/** v25: the 🗑 button wipes the ENTIRE queue - interrupts the running job
+ *  AND removes every pending entry. Always enabled: clicking with an empty
+ *  queue is a harmless no-op. api.clearQueue() is preferred where exposed;
+ *  the fallback POSTs exactly what the native Clear button does
+ *  (POST /queue {"clear":true}) plus POST /interrupt for the live job. */
+async function clearQueueFlow(node) {
     const st = stateMap.get(node);
-    const btn = st?.root?.querySelector('[data-action="queue-interrupt"]');
+    const btn = st?.root?.querySelector('[data-action="queue-clear"]');
     const api = app.api;
+    let stopped = false;
+    let wiped = false;
     try {
         if (typeof api?.interrupt === "function") {
-            await api.interrupt();
+            await api.interrupt(); stopped = true;
         } else if (typeof api?.fetchApi === "function") {
-            await api.fetchApi("/interrupt", { method: "POST" });
-        } else {
-            throw new Error("no interrupt API in this frontend");
+            await api.fetchApi("/interrupt", { method: "POST" }); stopped = true;
         }
-        // Server truth arrives via execution_* events; flip optimistically
-        // so the UI answers instantly even on silent transports.
-        setQueueState({ running: false });
+    } catch (_) { /* the wipe below still runs */ }
+    try {
+        if (typeof api?.clearQueue === "function") {
+            await api.clearQueue(); wiped = true;
+        } else if (typeof api?.fetchApi === "function") {
+            await api.fetchApi("/queue", { method: "POST", body: JSON.stringify({ clear: true }) });
+            wiped = true;
+        }
+    } catch (_) { /* reported below */ }
+    if (stopped || wiped) {
+        // Server truth re-syncs via status/execution_* events; flip locally
+        // right away so the badge and the LIVE mark answer instantly.
+        setQueueState({ running: false, remaining: 0 });
         flashBtn(btn, "✓");
-    } catch (err) {
-        console.warn("[SettingsHub] interrupt failed:", err);
+    } else {
+        console.warn("[SettingsHub] queue clear unavailable in this frontend");
         flashBtn(btn, "⚠");
     }
 }
@@ -1541,6 +1564,52 @@ function deleteTabFlow(node, cfg, tabId) {
 }
 
 // ---------------------------------------------------------------------------
+// v25 widget filter (🔍): substring match on custom label / widget name /
+// divider titles of the ACTIVE tab. Purely presentational: rows get a
+// -hidden class (no innerHTML rebuild - typing keeps focus), the query
+// itself lives in the session state (stateMap), NOT in the persisted config.
+// While a query is active, drag handles hide too - reordering among
+// filtered-out rows would corrupt the saved order.
+// ---------------------------------------------------------------------------
+
+function applySearchFilter(node, st) {
+    if (!st?.root) return;
+    const root = st.root;
+    const raw = String(st.searchQuery ?? "");
+    const q = raw.trim().toLowerCase();
+    root.classList.toggle("hub-searching", !!q);
+    const sInp = root.querySelector('[data-role="hub-search"]');
+    if (sInp) sInp.classList.toggle("hub-search-active", !!q);
+    if (!root.querySelector(".hub-container .hub-item-row")) return;
+
+    const cfg = getHubConfig(node);
+    const rows = root.querySelectorAll(".hub-container .hub-item-row");
+    let visible = 0;
+    for (const row of rows) {
+        const item = cfg.items.find((i) => i.id === row.dataset.hubItem);
+        const hay = item
+            ? `${item.customLabel ?? ""} ${item.type === "divider" ? "" : item.widgetToBind ?? ""}`
+            : (row.textContent ?? "");
+        const hit = !q || String(hay).toLowerCase().includes(q);
+        row.classList.toggle("hub-row-hidden", !hit);
+        if (hit) visible++;
+    }
+
+    let note = root.querySelector(".hub-search-empty");
+    if (q && rows.length && !visible) {
+        if (!note) {
+            note = document.createElement("div");
+            note.className = "hub-search-empty";
+            (root.querySelector(".hub-container-inner") ??
+                root.querySelector(".hub-container"))?.appendChild(note);
+        }
+        note.textContent = `No widgets match "${raw.trim()}"`;
+    } else {
+        note?.remove();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main structural render + events
 // ---------------------------------------------------------------------------
 
@@ -1622,6 +1691,18 @@ function renderHub(node) {
 
     // v24 queue bar: paint current server truth immediately after rebuild.
     try { paintQueueBarDom(st.root); } catch (_) {}
+
+    // v25: restore the session search query on the fresh DOM (the innerHTML
+    // swap rebuilt the input) and re-apply the row filter.
+    try {
+        const sInp = st.root.querySelector('[data-role="hub-search"]');
+        if (sInp) sInp.value = String(st.searchQuery ?? "");
+        applySearchFilter(node, st);
+    } catch (_) {}
+
+    // v25: row-chrome visibility (drag handles + remove buttons) via the 👁
+    // toggle - a class on the root, CSS does the actual hiding.
+    st.root.classList.toggle("hub-chrome-hidden", !!cfg.hideChrome);
 
     // v24 screen pinning: restore the floating window whenever the config
     // says pinned (including right after a page reload). If the wrap is
@@ -1839,7 +1920,11 @@ function wireEvents(node, st) {
             case "add-tab": addTabFlow(node, cfg); break;
             case "del-tab": deleteTabFlow(node, cfg, btn.closest(".hub-tab-btn")?.dataset.tab); break;
             case "queue-run": runQueueFlow(node); break;
-            case "queue-interrupt": interruptQueueFlow(node); break;
+            case "queue-clear": clearQueueFlow(node); break;
+            case "chrome-toggle":
+                cfg.hideChrome = !cfg.hideChrome;
+                renderHub(node);
+                break;
             case "pin-toggle": toggleHubPinned(node); break;
             case "locate": {
                 const row = btn.closest("[data-hub-item]");
@@ -1852,9 +1937,12 @@ function wireEvents(node, st) {
                 break;
             }
             case "unpin": {
+                // v25: NO confirmation - the action is one small ✕ click and
+                // the parameter stays on its original node, so re-pinning
+                // from the node menu trivially undoes it.
                 const row = btn.closest("[data-hub-item]");
                 const item = cfg.items.find((i) => i.id === row?.dataset.hubItem);
-                if (item && confirm(`Unpin "${item.customLabel || item.widgetToBind}"?\n(The parameter stays on its original node.)`)) {
+                if (item) {
                     if (item.type === "widget_portal") Portals.releaseItem(node, item);
                     removeItem(node, item);
                 }
@@ -1936,6 +2024,14 @@ function wireEvents(node, st) {
         else if (c.dataset.role === "number") pushControlToTarget(node, c, c.value, true);
     });
     root.addEventListener("input", (e) => {
+        // v25: the compact widget filter streams on every keystroke - it is
+        // NOT a data-hub-control and never touches target values.
+        if (e.target.closest?.('[data-role="hub-search"]')) {
+            const st2 = stateMap.get(node);
+            st2.searchQuery = e.target.value;
+            applySearchFilter(node, st2);
+            return;
+        }
         const c = e.target.closest("[data-hub-control]");
         if (!c) return;
         if (c.dataset.role === "range") pushControlToTarget(node, c, c.value);
@@ -1975,6 +2071,17 @@ function wireEvents(node, st) {
 
     // Enter inside the queue count fires the queue right away.
     root.addEventListener("keydown", (e) => {
+        // v25: Esc in the widget filter clears it instantly.
+        if (e.target.closest?.('[data-role="hub-search"]') && e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            e.target.value = "";
+            const st2 = stateMap.get(node);
+            st2.searchQuery = "";
+            applySearchFilter(node, st2);
+            e.target.blur();
+            return;
+        }
         if (e.key !== "Enter") return;
         if (!e.target.closest?.('[data-role="queue-count"]')) return;
         e.preventDefault();

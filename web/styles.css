@@ -863,14 +863,14 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
                 0 0 8px rgba(123, 160, 224, 0.35);
 }
 
+/* The clear button (v25) is ALWAYS clickable - base state reads as a normal
+   button; the -on state is a "there is something to wipe" accent. */
 .hub-btn.hub-interrupt {
     min-width: 24px;
     padding: 2px 6px;
-    opacity: 0.32;
 }
 
 .hub-btn.hub-interrupt.hub-interrupt-on {
-    opacity: 1;
     background: #40272b;
     border-color: #8a4a4e;
     color: #ffc9c9;
@@ -1004,4 +1004,70 @@ button.hub-pin-back {
     opacity: 1;
     border-color: #8a7a45;
     box-shadow: 0 0 6px rgba(255, 212, 121, 0.35);
+}
+
+/* ---------------------------------------------------------------------------
+   v25: widget filter + row-chrome visibility
+   --------------------------------------------------------------------------- */
+
+/* Compact widget filter: collapses to a lens until focused or active. */
+.hub-tab-bar .hub-search {
+    margin-left: auto;
+    width: 46px;
+    min-width: 0;
+    background: #10101e;
+    color: #e8e8ff;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font-size: 10px;
+    padding: 2px 5px;
+    outline: none;
+    transition: width 0.15s ease;
+}
+
+.hub-tab-bar .hub-search:focus,
+.hub-tab-bar .hub-search.hub-search-active {
+    width: 120px;
+}
+
+.hub-tab-bar .hub-search::placeholder {
+    color: #77789e;
+}
+
+/* 👁 toggle: row handles (drag ⠿ + remove ✕) visibility. */
+.hub-tab-bar .hub-chrome-toggle {
+    background: #20202f;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 10px;
+    cursor: pointer;
+}
+
+.hub-tab-bar .hub-chrome-toggle:hover {
+    background: #303048;
+}
+
+.hub-tab-bar .hub-chrome-toggle.hub-chrome-off {
+    opacity: 0.45;
+}
+
+/* Hidden row chrome. While a search is active the drag handles hide too:
+   reordering among filtered-out rows would corrupt the saved order. */
+.settings-hub.hub-chrome-hidden .hub-drag-handle,
+.settings-hub.hub-chrome-hidden .hub-remove,
+.settings-hub.hub-searching .hub-drag-handle {
+    display: none !important;
+}
+
+/* Search-filtered rows (class toggle - no innerHTML rebuild while typing). */
+.hub-item-row.hub-row-hidden {
+    display: none !important;
+}
+
+.hub-search-empty {
+    color: #77789e;
+    font-size: 10px;
+    text-align: center;
+    padding: 8px 6px;
 }

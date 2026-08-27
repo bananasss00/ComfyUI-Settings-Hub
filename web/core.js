@@ -356,6 +356,8 @@ export function getHubConfig(node) {
         cfg.pinPos = null;
     }
     if (cfg.pinMin !== true) cfg.pinMin = false;
+    // v25: row chrome (drag handles + remove buttons) hidden by the 👁 toggle.
+    if (cfg.hideChrome !== true) cfg.hideChrome = false;
     return cfg;
 }
 
