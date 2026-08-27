@@ -964,6 +964,24 @@ button.hub-pin-back {
     display: none;
 }
 
+/* Floating wrap: parked out of node.widgets so the frontend's per-frame
+   DOM-widget manager cannot hide it at low zoom or rewrite its geometry
+   from the ghost slot. Frontends tracking elements elsewhere may still
+   leave stale inline writes - neutralize them (same belt-and-suspenders
+   pattern as .hub-portal-ghost). */
+.settings-hub-wrap.hub-wrap-floating {
+    position: static !important;
+    display: flex !important;
+    visibility: visible !important;
+    width: 100% !important;
+    height: auto !important;
+    inset: auto !important;
+    transform: none !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    z-index: auto !important;
+}
+
 /* Tab-bar pin toggle */
 .hub-tab-bar .hub-pin-toggle {
     background: #20202f;

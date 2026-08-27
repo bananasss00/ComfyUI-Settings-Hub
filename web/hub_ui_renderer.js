@@ -70,7 +70,10 @@ function findTarget(item) {
 
 function ensureHubDom(node) {
     let st = stateMap.get(node);
-    if (st && st.widget && node.widgets?.includes(st.widget)) return st;
+    // st.__widgetDetached: while the hub floats in a screen-pinned panel the
+    // DOM widget is parked OUT of node.widgets (detachHubWidget) - that is a
+    // healthy state, it must not trigger a duplicate rebuild here.
+    if (st && st.widget && (st.__widgetDetached || node.widgets?.includes(st.widget))) return st;
 
     const root = document.createElement("div");
     root.className = "settings-hub";
@@ -484,6 +487,14 @@ async function interruptQueueFlow(node) {
 // the floating window stays fully functional while the canvas node shrinks
 // to a slim ghost. State persists in the hub config: pinned / pinPos /
 // pinMin survive reloads (getHubConfig normalization in core.js).
+//
+// v24.1 zoom fix: the frontend's DOM-widget manager rewrites the element's
+// visibility and geometry EVERY frame from the NODE's slot rect (hides at
+// low zoom, culls offscreen, crushes to the slot height). While the element
+// lives in the floating panel those writes are garbage - a zoom-out/zoom-in
+// cycle left the window with a bare header. While floating, the widget is
+// therefore parked OUT of node.widgets (detachHubWidget) so the manager
+// cannot see the element at all; homeHub re-attaches it verbatim.
 // ---------------------------------------------------------------------------
 
 const pinPanels = new WeakMap(); // hub node -> { panel, head, body, btnMin, btnPin }
@@ -492,6 +503,47 @@ let pinCascade = 0;
 function isWrapInPanel(st) {
     try { return !!(st?.wrap && st.panelBody && st.wrap.parentElement === st.panelBody); }
     catch (_) { return false; }
+}
+
+/** Park the DOM widget out of node.widgets while the wrap lives in the
+ *  floating panel (rationale in the section comment above). The original
+ *  slot index is remembered so homeHub can put it back 1:1. On frontends
+ *  where node.widgets is not a plain array we skip the detach - the
+ *  .hub-wrap-floating CSS shield below still neutralizes their writes. */
+function detachHubWidget(node, st) {
+    if (!st?.widget || st.__widgetDetached) return;
+    const list = node.widgets;
+    if (!Array.isArray(list)) return;
+    st.__widgetIndex = list.indexOf(st.widget);
+    if (st.__widgetIndex < 0) return;
+    list.splice(st.__widgetIndex, 1);
+    st.__widgetDetached = true;
+}
+
+function reattachHubWidget(node, st) {
+    if (!st?.widget || !st.__widgetDetached) return;
+    const list = node.widgets;
+    if (Array.isArray(list) && !list.includes(st.widget)) {
+        const at = Number.isInteger(st.__widgetIndex) && st.__widgetIndex >= 0
+            ? Math.min(st.__widgetIndex, list.length)
+            : list.length;
+        list.splice(at, 0, st.widget);
+    }
+    st.__widgetDetached = false;
+    st.__widgetIndex = -1;
+}
+
+/** Drop inline styles the frontend's DOM-widget manager may have parked on
+ *  the element before the detach (display:none survives reparenting!) and
+ *  restore the width contract that belongs to US, not to the slot. */
+function resetWrapGeometry(wrap) {
+    if (!wrap) return;
+    const s = wrap.style;
+    for (const k of ["position", "inset", "left", "top", "right", "bottom",
+        "transform", "visibility", "zIndex", "margin", "display", "height"]) {
+        s[k] = "";
+    }
+    s.width = "100%";
 }
 
 /** Live check: is THIS hub currently shown in a floating window? */
@@ -622,8 +674,14 @@ function floatHub(node) {
     const cfg = getHubConfig(node);
     const p = ensurePinPanel(node, st);
     if (!isWrapInPanel(st)) {
+        // Leave the frontend's per-frame DOM-widget management FIRST (it may
+        // have just parked display:none on the element during a zoom-out),
+        // clean its stale inline writes, then move the element.
+        detachHubWidget(node, st);
         st.__hubHomeParent = st.wrap.parentElement ?? null;
         st.__hubHomeNext = st.wrap.nextSibling;
+        resetWrapGeometry(st.wrap);
+        st.wrap.classList.add("hub-wrap-floating");
         p.body.appendChild(st.wrap);
     }
     p.panel.classList.toggle("hub-pin-collapsed", !!cfg.pinMin);
@@ -650,6 +708,13 @@ function floatHub(node) {
 
 function homeHub(node) {
     const st = stateMap.get(node);
+    if (st?.wrap) {
+        // Hand the widget back to the frontend BEFORE the element moves home,
+        // so a same-tick canvas draw can position it into the slot again.
+        reattachHubWidget(node, st);
+        st.wrap.classList.remove("hub-wrap-floating");
+        resetWrapGeometry(st.wrap);
+    }
     if (st?.wrap && st.__hubHomeParent) {
         try {
             st.__hubHomeParent.insertBefore(st.wrap, st.__hubHomeNext ?? null);
@@ -1514,9 +1579,15 @@ function renderHub(node) {
     try { paintQueueBarDom(st.root); } catch (_) {}
 
     // v24 screen pinning: restore the floating window whenever the config
-    // says pinned (including right after a page reload).
+    // says pinned (including right after a page reload). If the wrap is
+    // already floating but the widget reappeared in node.widgets (a graph
+    // reconfigure rebuilt the array), park it out again - the floating
+    // element must stay invisible to the DOM-widget manager.
     try {
-        if (getHubConfig(node).pinned && !isWrapInPanel(st)) floatHub(node);
+        if (getHubConfig(node).pinned) {
+            if (!isWrapInPanel(st)) floatHub(node);
+            else detachHubWidget(node, st);
+        }
     } catch (_) {}
 
     // The innerHTML swap rebuilt .hub-container-inner - re-attach the
