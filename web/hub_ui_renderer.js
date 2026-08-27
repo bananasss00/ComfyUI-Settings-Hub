@@ -1785,6 +1785,41 @@ function applySearchFilter(node, st) {
 }
 
 // ---------------------------------------------------------------------------
+// v27.4: user-resizable multiline mirrors
+// ---------------------------------------------------------------------------
+// The browser writes inline height while the user drags a textarea's native
+// resize grip ("resize: vertical" in styles.css); an empty inline height
+// means "never resized". That px height is persisted on the hub item
+// (item.textH - a plain item field, serialized with the graph) and
+// re-applied after every innerHTML rebuild, which would otherwise reset the
+// mirror to its rows="3" default. The content ResizeObserver re-fits the
+// node height on its own, so no extra layout work happens here.
+
+function applySavedTextHeights(node, cfg) {
+    const root = stateMap.get(node)?.root;
+    if (!root) return;
+    for (const ta of root.querySelectorAll("textarea.hub-text-area")) {
+        const row = ta.closest("[data-hub-item]");
+        const item = cfg.items.find((i) => i.id === row?.dataset?.hubItem);
+        const h = Number(item?.textH);
+        if (Number.isFinite(h) && h > 0) ta.style.height = `${h}px`;
+    }
+}
+
+function saveUserTextHeight(node, ta) {
+    try {
+        const row = ta?.closest?.("[data-hub-item]");
+        if (!row) return;
+        const item = getHubConfig(node).items.find((i) => i.id === row.dataset.hubItem);
+        if (!item) return;
+        const px = parseFloat(ta.style?.height);
+        if (Number.isFinite(px) && px > 0 && item.textH !== Math.round(px)) {
+            item.textH = Math.round(px);
+        }
+    } catch (_) { /* a resize probe must never break rendering */ }
+}
+
+// ---------------------------------------------------------------------------
 // Main structural render + events
 // ---------------------------------------------------------------------------
 
@@ -1905,6 +1940,10 @@ function renderHub(node) {
             if (inner) st.contentRO.observe(inner);
         } catch (_) {}
     }
+
+    // v27.4: the innerHTML swap reset every textarea to rows="3" - restore
+    // user-resized heights BEFORE the layout pass measures the content.
+    try { applySavedTextHeights(node, cfg); } catch (_) {}
 
     layoutNode(node);
 }
@@ -2272,6 +2311,17 @@ function wireEvents(node, st) {
         e.stopPropagation();
         runQueueFlow(node);
     });
+
+    // v27.4: end of a native textarea resize grip drag - persist the height.
+    // The UA keeps it as inline height on the element; pointerup covers
+    // mouse/pen/touch, mouseup is a belt-and-braces fallback for synthetic
+    // environments. Both are idempotent.
+    const textResizeEnd = (e) => {
+        const ta = e.target?.closest?.("textarea.hub-text-area");
+        if (ta) saveUserTextHeight(node, ta);
+    };
+    root.addEventListener("pointerup", textResizeEnd);
+    root.addEventListener("mouseup", textResizeEnd);
 }
 
 // ============================================================================

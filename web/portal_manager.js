@@ -143,6 +143,10 @@ function mountDomPortal(item, tw, host, opts = {}) {
         // sync for <video> mirrors).
         viewer: !!opts.viewer,
         videoSync: [],  // [sourceVideo, timeupdateFn] pairs
+        // v27.4: baseline of inline textarea heights taken right after each
+        // (re)apply - lets us tell a real user resize apart from a plain
+        // click on a textarea that merely carries the SOURCE widget height.
+        ghostTszBase: null,
     };
 
     // --- clone -> original: re-dispatch real events on the counterpart ---
@@ -205,6 +209,13 @@ function mountDomPortal(item, tw, host, opts = {}) {
             "dragstart", "drag", "dragend", "drop", "pointercancel", "click"]) {
             target.addEventListener(t, rec.touchHandler, { capture: true, passive: true });
         }
+        // v27.4: end of a native textarea grip drag inside the ghost -
+        // persist the new height(s). pointerup covers mouse/pen/touch,
+        // mouseup is a belt-and-braces fallback; both are idempotent.
+        target.addEventListener("pointerup", captureGhostTextHs);
+        target.addEventListener("mouseup", captureGhostTextHs);
+        rec.handlers.push(["pointerup", captureGhostTextHs, target]);
+        rec.handlers.push(["mouseup", captureGhostTextHs, target]);
     };
     const unbindClone = (target) => {
         for (const [t, fn, elem] of rec.handlers.splice(0)) {
@@ -216,6 +227,54 @@ function mountDomPortal(item, tw, host, opts = {}) {
         }
     };
     rec.unbind = () => unbindClone(rec.clone);
+
+    // --- v27.4: user-resized ghost textareas ------------------------------
+    // The native resize grip writes inline height while the user drags; we
+    // persist those px per item (item.ghostTextHs, one entry per textarea in
+    // querySelectorAll order - serialized with the graph) and re-apply after
+    // the initial mount AND after every re-clone swap, which would otherwise
+    // reset the mirror to the source widget's own height. The baseline
+    // snapshot taken right after each apply keeps a plain click from saving
+    // the source height (a fresh clone legally carries it).
+    const ghostTextareas = (rootEl) => {
+        try { return rootEl?.querySelectorAll?.("textarea") ?? []; }
+        catch (_) { return []; }
+    };
+    const applyGhostTextHs = (rootEl) => {
+        try {
+            const hs = rec.item?.ghostTextHs;
+            const tas = ghostTextareas(rootEl);
+            const base = [];
+            for (let i = 0; i < tas.length; i++) {
+                const saved = Number(Array.isArray(hs) ? hs[i] : NaN);
+                if (Number.isFinite(saved) && saved > 0) {
+                    tas[i].style.height = `${saved}px`;
+                    base.push(saved);
+                } else {
+                    const cur = parseFloat(tas[i]?.style?.height);
+                    base.push(Number.isFinite(cur) && cur > 0 ? cur : 0);
+                }
+            }
+            rec.ghostTszBase = base;
+        } catch (_) { rec.ghostTszBase = null; }
+    };
+    const captureGhostTextHs = () => {
+        try {
+            const tas = ghostTextareas(rec.clone);
+            if (!tas.length || !rec.item) return;
+            const base = Array.isArray(rec.ghostTszBase) ? rec.ghostTszBase : [];
+            const next = [];
+            let changed = false;
+            for (let i = 0; i < tas.length; i++) {
+                const cur = parseFloat(tas[i]?.style?.height);
+                const v = Number.isFinite(cur) && cur > 0 ? Math.round(cur) : 0;
+                next.push(v);
+                if (v > 0 && v !== (Number(base[i]) || 0)) changed = true;
+            }
+            rec.ghostTszBase = next;
+            if (changed) rec.item.ghostTextHs = next;
+        } catch (_) {}
+    };
 
     // --- original -> clone: debounced full re-clone swap ----------------
     // Defer ONLY while the user is mid-typing / a native popup is open.
@@ -262,6 +321,7 @@ function mountDomPortal(item, tw, host, opts = {}) {
             } catch (_) {}
         }
         normalizeGhostMedia(rec, fresh);
+        applyGhostTextHs(fresh); // v27.4: restore user-resized textareas
         if (rec.viewer) syncViewerVideoTime(rec);
     };
     const scheduleSync = (delay = SYNC_DEBOUNCE) => {
@@ -299,6 +359,7 @@ function mountDomPortal(item, tw, host, opts = {}) {
     // v26.1: media inside the ghost must survive the hub row (viewer embeds
     // and video-preview panels used to come out cropped).
     normalizeGhostMedia(rec, rec.clone);
+    applyGhostTextHs(rec.clone); // v27.4: restore user-resized textareas
     if (rec.viewer) syncViewerVideos(rec);
     return rec;
 }

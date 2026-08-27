@@ -367,6 +367,18 @@ span.hub-mirror.hub-mirror-text {
     width: 100%;
 }
 
+/* v27.4: ghost-mirror multiline textareas are user-resizable too. The UA
+   writes inline height while the grip is dragged; portal_manager persists
+   it per item (item.ghostTextHs) and re-applies after every re-clone swap.
+   !important outranks the frontend's own resize:none for
+   .comfy-multiline-input. Vertical only - rows are full-width, horizontal
+   dragging would break the row layout. */
+.hub-portal-ghost textarea {
+    resize: vertical !important;
+    min-height: 46px;
+    max-width: 100%;
+}
+
 /* Dangerous hover for unpin buttons */
 .hub-btn.hub-remove:hover {
     background: #5a2a2e;
