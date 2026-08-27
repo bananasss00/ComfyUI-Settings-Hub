@@ -1071,3 +1071,51 @@ button.hub-pin-back {
     text-align: center;
     padding: 8px 6px;
 }
+
+/* ---------------------------------------------------------------------------
+   v26: global hub settings (⚙ in the preset row) + viewer embeds
+   --------------------------------------------------------------------------- */
+
+/* The settings popup itself reuses .hub-menu chrome; only the layout of the
+   rate row is specific. The select mirrors the combo search visuals. */
+.hub-set-pop {
+    min-width: 240px;
+    max-width: 300px;
+    padding: 8px;
+}
+
+.hub-set-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+    color: #c9c9e8;
+    margin: 8px 2px;
+    white-space: nowrap;
+}
+
+.hub-set-row select {
+    background: #10101e;
+    color: #e8e8ff;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font-size: 11px;
+    padding: 2px 4px;
+    outline: none;
+    max-width: 150px;
+}
+
+.hub-set-row select:focus {
+    border-color: #5a5a9e;
+}
+
+/* ⚙ in the preset row: quiet by default, accent when any non-default rate
+   is active (the poller is running). */
+.hub-btn.hub-settings.hub-settings-on {
+    border-color: #8a7a45;
+    color: #ffd479;
+}
+
+/* Viewer embed tag (🖼 live) shares the portal-tag look - no extra rule
+   needed; the class is the same .hub-portal-tag. */

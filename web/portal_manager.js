@@ -227,7 +227,7 @@ function mountDomPortal(item, tw, host) {
     }
 
     try {
-        host.textContent = "";
+        keepPortalTag(host);
         host.appendChild(clone);
     } catch (err) {
         console.warn("[SettingsHub] dom ghost mount failed:", err);
@@ -302,14 +302,26 @@ function scanCanvas(canvas) {
     }
 }
 
+/** The 🪟/🖼 live tag span (itemRowHtml) must SURVIVE mounting: it sits above
+ *  the embed (flex column, see styles.css) and keeps telling panel and
+ *  node-level embeds apart. The old blanket host.textContent = "" erased it
+ *  the moment the portal mounted. */
+function keepPortalTag(host) {
+    const tag = host?.querySelector?.(".hub-portal-tag") ?? null;
+    host.textContent = "";
+    if (tag) {
+        try { host.appendChild(tag); } catch (_) {}
+    }
+}
+
 /** Subtle placeholder painted when neither widget nor node hooks render. */
-function drawPortalHint(ctx, w, h) {
+function drawPortalHint(ctx, w, h, text) {
     try {
         ctx.fillStyle = "#3c3c54";
         ctx.font = "10px sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText("⚠ live embed: source panel renders nothing", Math.max(60, w / 2), h / 2);
+        ctx.fillText(text || "⚠ live embed: source panel renders nothing", Math.max(60, w / 2), h / 2);
     } catch (_) {}
 }
 
@@ -317,7 +329,7 @@ function mountCanvasPortal(node, item, tn, members, host) {
     const canvas = document.createElement("canvas");
     canvas.className = "hub-portal-canvas";
     canvas.title = "Live embed - click / right-click to use the source widget";
-    host.textContent = "";
+    keepPortalTag(host);
     host.appendChild(canvas);
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -333,6 +345,10 @@ function mountCanvasPortal(node, item, tn, members, host) {
         // autoH == null means "grace not started yet".
         hAdj: 0,
         autoH: null,
+        // v26 viewer portals show a friendlier waiting hint before the
+        // source paints its first preview.
+        hintText: item?.options?.viewer
+            ? "🖼 viewer: waiting for the source preview…" : null,
     };
 
     // --- geometry model ----------------------------------------------------
@@ -525,7 +541,7 @@ function mountCanvasPortal(node, item, tn, members, host) {
             const scan2 = scanCanvas(canvas);
             if (!scan2.blank) { settleAutoHeight(scan2, g); return; }
             rec.mode = "blank";
-            paint(() => drawPortalHint(ctx, rec.W, rec.H));
+            paint(() => drawPortalHint(ctx, rec.W, rec.H, rec.hintText));
             return;
         }
 
@@ -546,7 +562,7 @@ function mountCanvasPortal(node, item, tn, members, host) {
         }
         if (rec.mode === "blank") {
             // Keep the hint painted (each pass clears the surface).
-            paint(() => drawPortalHint(ctx, rec.W, rec.H));
+            paint(() => drawPortalHint(ctx, rec.W, rec.H, rec.hintText));
             return;
         }
         rec.probes++;
@@ -564,7 +580,7 @@ function mountCanvasPortal(node, item, tn, members, host) {
             }
         }
         rec.mode = "blank";
-        paint(() => drawPortalHint(ctx, rec.W, rec.H));
+        paint(() => drawPortalHint(ctx, rec.W, rec.H, rec.hintText));
     };
     rec.tick = tick;
 
@@ -656,6 +672,35 @@ function releaseRecord(rec) {
 }
 
 // ---------------------------------------------------------------------------
+// v26 viewer portal: the source node's own onDrawBackground IS the viewer.
+// Classic PreviewImage / LoadImage / SaveImage builds and many custom nodes
+// (video combiners, galleries) paint their media straight onto the node - no
+// widget exists to embed. We re-render that painter onto the portal canvas
+// through a pseudo-member (the node surface maps 1:1 onto our origin), so
+// the hub shows exactly the pixels the source node shows. Read-only: the
+// usual pointer forwarding is deliberately skipped (viewers are not
+// interactive surfaces; the row's 🎯 locates the source instead).
+// ---------------------------------------------------------------------------
+
+function mountViewerPortal(node, item, tn, host) {
+    const persistedH = Number(item.options?.srcH);
+    const srcH = Math.max(60, Number.isFinite(persistedH) && persistedH > 0
+        ? persistedH
+        : Math.round(Number(tn.size?.[1]) || 200));
+    const painterWidget = {
+        name: "__viewer__",
+        label: item.customLabel || "viewer",
+        // Draw contract of the canvas-portal stack: (ctx, node, W, top, h).
+        // The viewer painter ignores top/h - it addresses node-local space,
+        // which is exactly what our portal surface reproduces.
+        draw: (ctx) => {
+            try { tn.onDrawBackground?.call(tn, ctx, app.canvas ?? undefined, app.canvas ?? undefined); } catch (_) {}
+        },
+    };
+    return mountCanvasPortal(node, item, tn, [{ widget: painterWidget, srcH }], host);
+}
+
+// ---------------------------------------------------------------------------
 // Mount / release API (called by hub_ui_renderer around structural renders)
 // ---------------------------------------------------------------------------
 
@@ -679,6 +724,22 @@ export function mountPortals(node, root) {
         );
         if (!host) continue;
         const { tn } = findWidget(item);
+
+        // v26: node-level viewer embeds have no real widget behind them
+        // (widgetToBind is the VIEWER_SENTINEL) - branch before member
+        // resolution, which would otherwise report the row broken.
+        if (item.options?.viewer) {
+            if (!tn) {
+                host.textContent = "⚠️ target node missing";
+                host.classList.add("hub-portal-broken");
+                continue;
+            }
+            host.classList.remove("hub-portal-broken");
+            const vrec = mountViewerPortal(node, item, tn, host);
+            if (vrec) { vrec.set = set; set.add(vrec); }
+            continue;
+        }
+
         const members = tn ? resolveMembers(item, tn) : [];
         if (!tn || !members.length) {
             host.textContent = "⚠️ target node / widget missing";

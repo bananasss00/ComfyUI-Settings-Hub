@@ -2,6 +2,7 @@ import { app } from "../../scripts/app.js";
 import {
     getHubConfig, getActiveTabId, createBinding, createPortalBinding,
     createNewHub, HUB_NODE_NAME, detectWidgetType, portalKindOf, allHubs,
+    isViewerNode, createViewerBinding,
 } from "./core.js";
 
 // ============================================================================
@@ -62,6 +63,20 @@ export function attachContextMenu() {
                     },
                 });
             }
+
+            // v26: viewers that paint straight in onDrawBackground (classic
+            // PreviewImage / LoadImage / SaveImage builds, video combiners,
+            // custom gallery nodes) own NO widget to pin - offer the whole
+            // NODE as one live canvas embed instead.
+            if (isViewerNode(node)) {
+                items.push({
+                    content: "🖼 Pin viewer (live embed)",
+                    has_submenu: true,
+                    submenu: {
+                        options: buildViewerSubmenu(node),
+                    },
+                });
+            }
             return items;
         },
     });
@@ -76,6 +91,51 @@ function isHelperWidget(w) {
     const t = (typeof w?.type === "string" ? w.type : "").trim().toLowerCase();
     if (t !== "button") return false;
     return typeof w?.callback !== "function";
+}
+
+/** v26 viewer entries: hub x tab flat list + Create New / New Tab.
+ *  Mirrors the panel submenu shape (the Vue menu converter supports ONE
+ *  submenu level, so cross products stay flat). */
+function buildViewerSubmenu(node) {
+    const hubs = allHubs();
+    const title = String(node?.title || "").trim().slice(0, 26) || "node";
+    const what = `🖼 viewer «${title}»`;
+    const bind = (hub, tabId) => createViewerBinding(hub, node, tabId);
+
+    if (!hubs.length) {
+        return [{
+            content: `${what} → Create New Settings Hub`,
+            callback: () => {
+                const newHub = createNewHub();
+                if (!newHub) return;
+                bind(newHub, getActiveTabId(getHubConfig(newHub)));
+            },
+        }];
+    }
+
+    const entries = [];
+    for (const hub of hubs) {
+        const cfg = getHubConfig(hub);
+        const prefix = hubs.length > 1 ? `${hub.title || "Settings Hub"}: ` : "";
+        for (const tab of cfg.tabs) {
+            entries.push({
+                content: `${what} → ${prefix}${tab.name}`,
+                callback: () => bind(hub, tab.id),
+            });
+        }
+        entries.push({
+            content: `➕ ${what} → ${prefix}New Tab`,
+            callback: () => {
+                const name = prompt("New tab name:", "New Tab");
+                if (name !== null) {
+                    const tabId = `tab_${Date.now().toString(36)}`;
+                    cfg.tabs.push({ id: tabId, name, order: cfg.tabs.length });
+                    bind(hub, tabId);
+                }
+            },
+        });
+    }
+    return entries;
 }
 
 /** All widgets of the node classified as portals (custom panels).
@@ -392,9 +452,11 @@ function attachCtrlRmbOverride() {
         if (!owner || owner.node.type === HUB_NODE_NAME) return;
 
         // Offer the WHOLE-PANEL group embed first (the widget under the
-        // cursor is usually just one row of a multi-widget custom panel).
+        // cursor is usually just one row of a multi-widget custom panel),
+        // then node-level viewer embeds, then the under-cursor widget pin.
         const entries = [
             ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node), allHubs()),
+            ...(isViewerNode(owner.node) ? buildViewerSubmenu(owner.node) : []),
             ...buildPinSubmenu(owner.node, owner.widget),
         ];
         if (!entries.length) return;
@@ -430,6 +492,7 @@ function attachPanelSurfacePinMenu() {
 
         const entries = [
             ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node), allHubs()),
+            ...(isViewerNode(owner.node) ? buildViewerSubmenu(owner.node) : []),
             ...buildPinSubmenu(owner.node, owner.widget),
         ];
         if (!entries.length) return;

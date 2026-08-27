@@ -215,9 +215,13 @@ function reportUnresolved(item, graphsScanned, nodesScanned) {
         const key = `${item?.targetNodeId}|${item?.targetTitle}|${item?.widgetToBind}`;
         if (diagReported.has(key)) return;
         diagReported.add(key);
+        // Viewer embeds bind the whole NODE (no real widget name) - showing
+        // the internal sentinel would just confuse field reports.
+        const widgetLabel = item?.options?.viewer
+            ? "(whole node embed)" : item?.widgetToBind;
         console.info(
             "[SettingsHub] pin unresolved:", JSON.stringify({
-                title: item?.targetTitle, widget: item?.widgetToBind,
+                title: item?.targetTitle, widget: widgetLabel,
                 nodeId: item?.targetNodeId,
             }),
             `- scanned ${graphsScanned} graph(s), ${nodesScanned} node(s).` +
@@ -992,6 +996,73 @@ export function isPortalWidget(widget) {
 export function portalKindOf(widget) {
     const el = widget?.element ?? widget?.inputEl ?? widget?.contentEl;
     return el && typeof el.appendChild === "function" ? "dom" : "canvas";
+}
+
+// ---------------------------------------------------------------------------
+// Viewer nodes (v26): "вынести вьювер с картинкой/видео в хаб"
+// ---------------------------------------------------------------------------
+// Many viewers do NOT own a widget at all: classic PreviewImage / LoadImage /
+// SaveImage builds paint their image straight in node.onDrawBackground, and
+// plenty of custom nodes (video combiners, feed viewers, gallery panels) do
+// the same. There is nothing to right-click, so pinning by widget can never
+// see them. For those we offer a NODE-level pin: the portal canvas re-renders
+// the node's own onDrawBackground, which reproduces the viewer 1:1 - exactly
+// the pixels the user sees on the source node, custom node or not.
+
+/** Sentinel widgetToBind for node-level viewer portals (no real widget). */
+export const VIEWER_SENTINEL = "__viewer__";
+
+const VIEWER_NAME_RE = /preview|viewer|image|video|media|combine|show/i;
+const VIEWER_MEDIA_KEYS = [
+    "images", "imgs", "image", "videos", "video", "media", "previewImages",
+];
+
+/**
+ * A node whose onDrawBackground paints meaningful content (a viewer).
+ * Gate: the painter hook must exist; qualification: either the node already
+ * carries media state (post-execution) OR its type name looks like a viewer.
+ * The name check alone keeps the menu entry discoverable BEFORE the first
+ * generation (PreviewImage / LoadImage / SaveImage / VHS_VideoCombine / ...).
+ */
+export function isViewerNode(node) {
+    if (!node || node.type === HUB_NODE_NAME) return false;
+    if (typeof node.onDrawBackground !== "function") return false;
+    for (const k of VIEWER_MEDIA_KEYS) {
+        let v;
+        try { v = node[k]; } catch (_) { continue; }
+        if (Array.isArray(v) ? v.length > 0 : (v != null && v !== "" && v !== false)) return true;
+    }
+    try { return VIEWER_NAME_RE.test(String(node.type ?? "")); } catch (_) { return false; }
+}
+
+/**
+ * Bind a VIEWER NODE (not a widget) as one live canvas embed. The portal
+ * re-renders the node's own onDrawBackground - the universal viewer surface.
+ * Persisted like every other item; presets deliberately skip portals.
+ */
+export function createViewerBinding(node, targetNode, tabId, label) {
+    const cfg = getHubConfig(node);
+    const item = {
+        id: genId("item"),
+        type: "widget_portal",
+        tabId,
+        order: nextOrder(cfg, tabId),
+        customLabel: label || targetNode?.title || "viewer",
+        targetNodeId: targetNode.id,
+        targetTitle: targetNode?.title ?? "",   // drift repair anchor
+        widgetToBind: VIEWER_SENTINEL,
+        widgetType: "portal",
+        options: {
+            portalKind: "canvas",
+            viewer: true,
+            srcH: Math.max(60, Math.round(Number(targetNode?.size?.[1]) || 200)),
+        },
+    };
+    cfg.items.push(item);
+    Pins.invalidatePins();
+    node.setDirtyCanvas(true, true);
+    syncNode(node);
+    return item;
 }
 
 // ---------------------------------------------------------------------------

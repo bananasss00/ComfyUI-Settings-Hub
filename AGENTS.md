@@ -66,6 +66,10 @@ web/portal_manager.js  — живые встраивания: DOM-панели �
                          лок на фокус/недавний ввод), canvas-порталы,
                          групповые whole-panel embeds, геометрия/тикер
 web/preset_manager.js  — снапшоты ВСЕХ widget_binding хаба (порталы исключены)
+web/global_settings.js — ГЛОБАЛЬНЫЕ настройки хаба (v26): скорость обновления
+                         зеркал (localStorage "settingshub.refreshMs"),
+                         опциональный catch-up поллер refreshNodeValues по
+                         всем хабам; 0 = только события (дефолт)
 web/dnd_manager.js     — HTML5 DnD: reorder строк, drop на вкладку = перенос
 web/pins.js            — кэш счётчиков пинов для бейджа 📌
 web/styles.css         — все стили (тёмная тема); классы *.hub-*
@@ -344,6 +348,41 @@ dev_plan.md            — исходный технический спек пр
   v24; после очистки оптимистичный сброс running/remaining (сервер
   пересинхронизирует событиями).
 
+### v26: глобальные настройки (⚙) и пин вьюверов
+- ⚙ в строке пресетов открывает .hub-set-pop (тот же body-level паттерн,
+  что combo/num попапы; toggle-повторный клик, Esc/клик-вне закрывают).
+  Единственная настройка — «Mirror update rate»: 0 (Events only, дефолт)
+  / 100 / 250 / 500 / 1000 / 2000 мс. Состояние — в global_settings.js
+  (REFRESH_CHOICES, getRefreshMs/setRefreshMs, refreshLabel), персист в
+  localStorage (ключ settingshub.refreshMs) — это ПРЕДПОЧТЕНИЕ
+  пользователя, НЕ состояние воркфлоу (не в node.properties).
+- Зачем: реактивный движок ловит только изменения через callback виджета;
+  onExecuted-патчи, прямые присваивания widget.value в коде нод и бекенд
+  значения событий НЕ дают — зеркала ждали структурного ре-рендера. Поллер
+  (setInterval → refreshNodeValues по всем хабам, value-only БЕЗ innerHTML,
+  document.hidden гвардия) догоняет такие значения на выбранной скорости.
+- ⚙ получает класс .hub-settings-on, когда поллер активен (и после
+  ре-рендера тоже — рендер-хвост синхронизирует с getRefreshMs()).
+- Инвариант «БЕЗ поллинга» не сломан: дефолт 0 = ноль фоновой активности;
+  поллер — явный opt-in пользователя.
+- Вьюверы (🖼): классические PreviewImage/LoadImage/SaveImage и многие
+  кастомные ноды рисуют картинку/видео прямо в node.onDrawBackground —
+  виджета НЕТ, виджет-пин невозможен. Новое NODE-уровневое встраивание:
+  isViewerNode(n) (гейт onDrawBackground + (media-поля ИЛИ имя ноды по
+  /preview|viewer|image|video|media|combine|show/i)); пункт «🖼 Pin viewer
+  (live embed)» в меню ноды + в Ctrl/Cmd+ПКМ override + в DOM-surface меню.
+- createViewerBinding: item type widget_portal, options.viewer=true,
+  widgetToBind=__viewer__ (VIEWER_SENTINEL), targetTitle — drift-якорь.
+  mountViewerPortal скармливает mountCanvasPortal псевдо-виджет, чей draw()
+  вызывает tn.onDrawBackground(ctx) — поверхность портала = начало ноды;
+  pixel-settle цикл подгоняет высоту. Read-only (форвардинг мыши выключен).
+- Тег 🖼 live отличает вьювер-строки от панельных (🪟 live); keepPortalTag
+  тепер СОХРАНЯЕТ тег при монтировании портала (прежде host.textContent=""
+  стирал его мгновенно) — тег живёт над встраиванием.
+- Orphan-гигиена: itemRowHtml и refreshValuesDom считают viewer-строку
+  живой, если резолвится НОДА (tw не требуется); reportUnresolved для
+  viewer печатает «(whole node embed)» вместо внутреннего sentinel.
+
 ### Резолвер целей v24 (крест-граф, вложенные сабграфы)
 - allGraphs: BFS по УРОВНЯМ (глубина — уровни иерархии, дефолт 12), списки
   нод = union `_nodes` + публичный `nodes`; реестры `_subgraphs`/`subgraphs`/
@@ -507,9 +546,23 @@ ZF4 пин — panel на document.body, wrap перенесён (не клон)
 (jsdom rect нулевой — считай от (0,0)), JSON round-trip трёх полей,
 collapse-тогл, возврат домой + восстановление КОНВЕРТА (FILL-хаб!),
 disposeHubVisuals безопасен для посторонних нод.
+ZH — v26 глобальные настройки: дефолт/лестница/лейблы, нормализация мусора,
+localStorage round-trip, «тихое» изменение НЕ течёт при events-only, один
+тик догоняет, живой интервал 100мс догоняет сам, ⚙-попап (open/select/
+persist/акцент/Esc/ре-рендер/выкл).
+ZI — v26 вьюверы: isViewerNode-матрица (painter+имя / без painter /
+не-вьювер имя / media-поля / хаб), пункт меню только у вьюверов, колбэк
+меню биндит, sentinel, srcH, тег «🖼 live», НЕ orphan, locate активен,
+canvas смонтирован, тик без бросков, value-refresh не флагает orphan,
+тихий ✕, orphan после удаления ноды-источника.
+
+⚠ грабль ZI: фазы не диспатчат onRemoved (ноды вырезаются splice'ом), поэтому
+в глобальном реестре копятся хабы прошлых фаз — перед меню-ассертами
+очищай реестр (core.forgetHubNode для всех, кроме хаба фазы), иначе
+колбэк пункта меню биндит в ПЕРВЫЙ stale-хаб.
 
 ```bash
-node scripts/smoke_hub.mjs   # базовая линия: >=533 зелёных, 0 упавших
+node scripts/smoke_hub.mjs   # базовая линия: >=630 зелёных, 0 упавших
 ```
 
 Подводные камни харнеса:
@@ -527,6 +580,9 @@ node scripts/smoke_hub.mjs   # базовая линия: >=533 зелёных, 
   (голый идентификатор в модулях песочницы не определён).
 - События вкладок — click по `[data-action="switch-tab"]`; у LiteGraph-like
   колбэков цель дергается вручную (`tw.callback(v)`), затем flush.
+- JSDOM создаётся с `url: "http://localhost/"` (иначе opaque origin без
+  localStorage), а `globalThis.localStorage = dom.window.localStorage`
+  прописан ДО импорта модулей — global_settings читает его на boot.
 
 Правило: любое изменение зеркальных фич сопровождается регресс-проверкой в
 подходящей фазе (или новой фазой по букве).

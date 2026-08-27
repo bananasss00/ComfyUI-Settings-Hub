@@ -32,6 +32,7 @@ import { writeTargetValue, ensureHooksForItem, invokeTargetButton } from "./sync
 import { beginEdit, endEdit, registerStructural, registerValues } from "./sync.js";
 import { initDrag } from "./dnd_manager.js";
 import * as Portals from "./portal_manager.js";
+import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel } from "./global_settings.js";
 
 // Layout allowances. The title bar height is taken from LiteGraph when
 // available (themes vary); SLOT_TOP_GAP is the canvas-side offset above the
@@ -257,8 +258,12 @@ function mirrorHtml(item, tw) {
 
 function itemRowHtml(item) {
     const { tn, tw } = findTarget(item);
-    const ok = !!(tn && tw);
-    const label = item.customLabel || tw?.label || tw?.name || item.widgetToBind || "widget";
+    // v26 viewer rows embed the whole NODE: no widget needs to resolve -
+    // a missing widget would otherwise render the row as an orphan.
+    const isViewer = item.type === "widget_portal" && !!item.options?.viewer;
+    const ok = !!(tn && (tw || isViewer));
+    const label = item.customLabel || tw?.label || tw?.name ||
+        (isViewer ? "viewer" : item.widgetToBind) || "widget";
 
     const handle = `<span class="hub-drag-handle" draggable="true" title="Drag to reorder (drop on a tab to move)">⠿</span>`;
     const labelEl = ok
@@ -275,10 +280,13 @@ function itemRowHtml(item) {
     ].join("");
 
     // Portal items embed the custom widget itself instead of a value mirror.
+    // v26 viewer embeds pin the whole SOURCE NODE (its own background painter
+    // IS the viewer) - mark the tag so users can tell the two embed kinds
+    // apart at a glance.
     const body = item.type === "widget_portal"
         ? `<div class="hub-portal-host" data-role="portal-host" ` +
           `title="Live embed: interactions go to the source widget (its own menus work). ` +
-          `Presets do not apply to portals."><span class="hub-portal-tag">🪟 live</span></div>`
+          `Presets do not apply to portals."><span class="hub-portal-tag">${item.options?.viewer ? "🖼 live" : "🪟 live"}</span></div>`
         : (ok ? mirrorHtml(item, tw) : "");
 
     return `<div class="hub-item-row${ok ? "" : " hub-orphan-row"}" data-hub-item="${esc(item.id)}" data-tab-id="${esc(item.tabId)}">` +
@@ -319,6 +327,7 @@ function presetRowHtml(cfg) {
         `<button type="button" class="hub-btn" data-action="preset-new" title="New preset">➕</button>` +
         `<button type="button" class="hub-btn" data-action="preset-del" title="Delete selected preset">🗑️</button>` +
         `<button type="button" class="hub-btn" data-action="add-divider" title="Add section divider">＋Div</button>` +
+        `<button type="button" class="hub-btn hub-settings" data-action="hub-settings" title="Hub settings (mirror update rate)">⚙</button>` +
         `</div>`;
 }
 
@@ -1288,6 +1297,76 @@ function openNumPopup(node, trigger) {
 }
 
 // ---------------------------------------------------------------------------
+// Global hub settings popup (⚙ in the preset row, v26)
+// ---------------------------------------------------------------------------
+// Same body-level fixed-popup pattern as the combo / gear popups (immune to
+// hub scroll clipping, one global closer pair). The backing state lives in
+// global_settings.js - GLOBAL across hubs, persisted in localStorage.
+
+let setPopState = null; // { node, trigger, pop }
+let setPopGlobalWired = false;
+
+function closeSettingsPopup() {
+    if (!setPopState) return;
+    try { setPopState.pop.remove(); } catch (_) {}
+    setPopState = null;
+}
+
+function ensureSettingsPopupGlobalListeners() {
+    if (setPopGlobalWired) return;
+    setPopGlobalWired = true;
+    document.addEventListener("mousedown", (e) => {
+        const st = setPopState;
+        if (!st) return;
+        try {
+            if (st.pop.contains(e.target) || st.trigger.contains(e.target)) return;
+        } catch (_) {}
+        closeSettingsPopup();
+    }, true);
+    document.addEventListener("keydown", (e) => {
+        if (setPopState && e.key === "Escape") closeSettingsPopup();
+    }, true);
+}
+
+function openSettingsPopup(node, trigger) {
+    // Toggle behavior mirrors the combo / gear triggers.
+    if (setPopState?.trigger === trigger) { closeSettingsPopup(); return; }
+    closeComboPopup();
+    closeNumPopup();
+    closeSettingsPopup();
+
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-set-pop";
+    pop.innerHTML =
+        `<div class="hub-menu-title">⚙ Hub settings</div>` +
+        `<label class="hub-set-row"><span>Mirror update rate</span>` +
+        `<select data-set-role="refresh">` +
+        REFRESH_CHOICES.map((ms) =>
+            `<option value="${ms}">${esc(refreshLabel(ms))}</option>`).join("") +
+        `</select></label>` +
+        `<div class="hub-pop-hint">How fast mirrors follow values that change WITHOUT events ` +
+        `(node scripts, backend updates, onExecuted patches). "Events only" = zero background polling. ` +
+        `Global for every hub.</div>`;
+    document.body.appendChild(pop);
+
+    setPopState = { node, trigger, pop };
+    ensureSettingsPopupGlobalListeners();
+
+    const sel = pop.querySelector('[data-set-role="refresh"]');
+    sel.value = String(getRefreshMs());
+    if (sel.value !== String(getRefreshMs())) sel.value = "0"; // stale persisted value
+    sel.addEventListener("change", () => {
+        const applied = setRefreshMs(sel.value);
+        sel.value = String(applied);
+        trigger.classList.toggle("hub-settings-on", getRefreshMs() > 0);
+        flashBtn(trigger, "✓");
+    });
+
+    positionNumPopup(pop, trigger);
+    try { sel.focus(); } catch (_) {}
+}
+
+// ---------------------------------------------------------------------------
 // Value plumbing: target node -> controls  (registered as the values bus fn)
 // ---------------------------------------------------------------------------
 
@@ -1299,10 +1378,14 @@ function refreshValuesDom(node) {
     for (const row of st.root.querySelectorAll("[data-hub-item].hub-item-row")) {
         const item = cfg.items.find((i) => i.id === row.dataset.hubItem);
         if (!item || (item.type !== "widget_binding" && item.type !== "widget_portal")) continue;
+        // v26: viewer portal rows have NO widget behind them (node-level
+        // embed) - only the NODE must resolve, or the row would flash as
+        // an orphan on every refresh.
+        const isViewerItem = item.type === "widget_portal" && !!item.options?.viewer;
         const { tn, tw } = findTarget(item);
 
         // Orphan state may appear while values are unchanged.
-        if (!tn || !tw) {
+        if (!tn || (!tw && !isViewerItem)) {
             if (!row.classList.contains("hub-orphan-row")) {
                 row.classList.add("hub-orphan-row");
                 const lbl = row.querySelector(".hub-item-label");
@@ -1704,6 +1787,11 @@ function renderHub(node) {
     // toggle - a class on the root, CSS does the actual hiding.
     st.root.classList.toggle("hub-chrome-hidden", !!cfg.hideChrome);
 
+    // v26: accent the ⚙ settings trigger while a non-default update rate is
+    // active (the background catch-up poller is running).
+    st.root.querySelector('[data-action="hub-settings"]')
+        ?.classList.toggle("hub-settings-on", getRefreshMs() > 0);
+
     // v24 screen pinning: restore the floating window whenever the config
     // says pinned (including right after a page reload). If the wrap is
     // already floating but the widget reappeared in node.widgets (a graph
@@ -1934,6 +2022,10 @@ function wireEvents(node, st) {
             }
             case "num-settings": {
                 openNumPopup(node, btn);
+                break;
+            }
+            case "hub-settings": {
+                openSettingsPopup(node, btn);
                 break;
             }
             case "unpin": {
