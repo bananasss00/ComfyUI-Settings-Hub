@@ -436,6 +436,30 @@ export function numericMerge(item, targetWidget) {
     // fallback may adapt itself to a tiny range.
     if (!(declaredStep > 0) && rangeKnown && step > range) step = range / 100 || 0.01;
 
+    // SLIDER-STEP RELAXATION (v21 field report: PrimitiveFloat ships a
+    // default options.step of 1 -> the mirror's range input locked drags to
+    // the 0,1,2,... grid and "no other values are reachable").
+    // Contract: an INTEGRAL step >=1 on a NON-int source encodes a whole-
+    // unit convenience default (ComfyUI convention for seeds/steps), NOT a
+    // wish to forbid decimals on a float mirror. `step` stays faithful to
+    // the source, while `sliderStep` - what the range control and program
+    // quantization actually use - falls back to the finer resolution chain:
+    // fractional round -> precision-derived -> range-based -> 0.01.
+    // True int bindings keep their exact coarse grid.
+    const isIntFamily = item?.widgetType === "int";
+    let sliderStep = step;
+    if (!isIntFamily && Number.isInteger(step) && step >= 1) {
+        let fine = NaN;
+        const r = pickNum(live.round, snap.round, NaN);
+        if (r > 0 && r < 1) fine = r;
+        if (!(fine > 0) && optsHas(live, snap, "precision")) {
+            const p = pickNum(live.precision, snap.precision, NaN);
+            if (p >= 0) fine = Math.pow(10, -Math.min(p, 6));
+        }
+        if (!(fine > 0)) fine = fallbackStep;
+        if (fine > 0 && fine < step) sliderStep = fine;
+    }
+
     // Self-heal the persisted snapshot so pins survive orphaning.
     try {
         if (item && typeof item === "object") {
@@ -447,7 +471,12 @@ export function numericMerge(item, targetWidget) {
         }
     } catch (_) { /* frozen configs must not break rendering */ }
 
-    return { min, max, step, decimals: stepDecimals(item?.widgetType === "int" ? 1 : step) };
+    const decSrc = isIntFamily ? 1 : (sliderStep > 0 ? sliderStep : step);
+    return {
+        min, max, step,
+        sliderStep: sliderStep > 0 ? sliderStep : step,
+        decimals: stepDecimals(decSrc),
+    };
 }
 
 function optsHas(a, b, key) {
@@ -495,6 +524,169 @@ export function growSynthWindow(min, max, value) {
     return { min: lo, max: hi };
 }
 
+// ---------------------------------------------------------------------------
+// Per-binding slider overrides: custom min / max / step for numeric mirrors
+// ---------------------------------------------------------------------------
+// item.sliderOverride = { min?, max?, step?, applySliderOverride? }
+// Stored in the hub config, so it survives reloads/presets like every other
+// per-item field. An absent side means "no wall on this end" (the source's
+// own declared bound still applies in that case). `applySliderOverride` is
+// the user's consent (checkbox in the gear popup) to PUSH these numbers onto
+// the REAL node widgets; it defaults to ON and drives session re-apply.
+
+const OV_KEYS = ["min", "max", "step"];
+
+/**
+ * Normalized view of an item's slider override - only genuinely finite
+ * numbers survive here ("", null, undefined, NaN and non-positive steps are
+ * silently dropped), so callers can trust `"min" in result`.
+ */
+export function getSliderOverride(item) {
+    const raw = item?.sliderOverride;
+    const out = {};
+    if (!raw || typeof raw !== "object") return out;
+    for (const k of OV_KEYS) {
+        const n = Number(raw[k]);
+        if (raw[k] == null || raw[k] === "") continue;
+        if (!Number.isFinite(n)) continue;
+        if (k === "step" && !(n > 0)) continue;
+        out[k] = n;
+    }
+    return out;
+}
+
+/**
+ * Write an override onto a binding item with MERGE semantics:
+ *  - a field present in `patch`  -> sets that wall/step;
+ *  - a field null / "" / undef  -> CLEARS that side (source semantics back);
+ *  - a field omitted entirely    -> keeps the previously stored value.
+ * A full clear removes the whole key unless auto-apply persistence must be
+ * remembered. Returns the normalized snapshot after the change.
+ */
+export function setSliderOverride(item, patch = {}, { autoApply } = {}) {
+    if (!item || typeof item !== "object") return {};
+    const prevFlag = item.sliderOverride?.applySliderOverride;
+    // Contract: a BARE patch (no min/max/step keys at all) means "wipe the
+    // override" (the renderer's Clear button); any explicit key turns the
+    // call into a MERGE where null/"" clears that side and omissions keep it.
+    const hasExplicitKeys =
+        !!patch && OV_KEYS.some((k) => k in patch);
+    let want = {};
+    if (hasExplicitKeys) {
+        want = { ...getSliderOverride(item) }; // merge base
+        for (const k of OV_KEYS) {
+            if (!(k in (patch || {}))) continue;
+            const rawV = patch[k];
+            if (rawV == null || rawV === "") { delete want[k]; continue; }
+            const n = Number(rawV);
+            if (!Number.isFinite(n)) continue;
+            if (k === "step" && !(n > 0)) continue;
+            want[k] = n;
+        }
+    }
+    const flag =
+        autoApply === undefined ? prevFlag : (autoApply === true);
+    const keys = Object.keys(want);
+    if (keys.length) {
+        item.sliderOverride = { ...want };
+    } else if (flag === false) {
+        item.sliderOverride = {}; // remember "never touch real widgets"
+    } else {
+        delete item.sliderOverride;
+        return {};
+    }
+    if (flag !== undefined && flag !== null) {
+        item.sliderOverride.applySliderOverride = flag;
+    }
+    return getSliderOverride(item);
+}
+
+/** True when at least one overridden field exists on this binding. */
+export function hasSliderOverride(item) {
+    const ov = getSliderOverride(item);
+    return OV_KEYS.some((k) => k in ov);
+}
+
+/**
+ * Final numeric geometry for a mirror row: source merge (with slider-step
+ * relaxation) overlaid by the user override. Shape mirrors numericMerge's
+ * contract so renderers can switch transparently.
+ */
+export function effectiveSliderParams(item, targetWidget) {
+    const base = numericMerge(item, targetWidget);
+    const ov = getSliderOverride(item);
+    let min = "min" in ov ? ov.min : base.min;
+    let max = "max" in ov ? ov.max : base.max;
+    if (Number.isFinite(min) && Number.isFinite(max) && !(max > min)) {
+        max = min + Math.abs(min || 1);
+    }
+    const isIntFamily = item?.widgetType === "int";
+    const ovStep = "step" in ov ? ov.step : NaN;
+    let sliderStep = Number.isFinite(ovStep) && ovStep > 0 ? ovStep : base.sliderStep;
+    if (!(sliderStep > 0)) sliderStep = base.step > 0 ? base.step : 0.01;
+    return {
+        min,
+        max,
+        step: base.step,
+        sliderStep,
+        decimals: isIntFamily ? 0 : stepDecimals(sliderStep),
+        isIntFamily,
+        overridden: OV_KEYS.some((k) => k in ov),
+    };
+}
+
+/**
+ * Push override values ONTO the live widget(s) resolved for this binding -
+ * feature request #3 ("применять кастомные настройки к виджету в реальной
+ * ноде"). Only explicitly present fields are written; missing ones leave the
+ * node untouched. The target canvas is marked dirty so native sliders repaint.
+ * Returns 1 when applied to a live widget, 0 when resolution failed.
+ */
+export function applyOverrideToTargetWidgets(item) {
+    const ov = getSliderOverride(item);
+    if (!OV_KEYS.some((k) => k in ov)) return 0;
+    // resolveBindingTarget returns the TARGET NODE itself (or null):
+    // destructure defensively, never assume a {tn,tw} pair shape.
+    const tn = resolveBindingTarget(item ?? {});
+    const tw = tn?.widgets?.find((w) => w && w.name === item.widgetToBind);
+    if (!tn || !tw) return 0;
+    try {
+        if (!tw.options || typeof tw.options !== "object") tw.options = {};
+        for (const k of OV_KEYS) {
+            if (k in ov) tw.options[k] = ov[k];
+        }
+        try { (tn.graph ?? app.graph)?.setDirtyCanvas?.(true, true); } catch (_) {}
+        return 1;
+    } catch (_) {
+        return 0;
+    }
+}
+
+// Session-latch so structural renders never spam patches onto widgets:
+// one re-apply per binding per page life (a fresh reload resets it, which is
+// exactly when ComfyUI rebuilds widgets from their definitions).
+const _overrideApplied = new Set();
+
+/**
+ * Called from renderHub self-heal: silently restores overrides onto freshly
+ * (re)created node widgets AFTER a page reload, honoring the user's flag and
+ * applying once per binding per session.
+ */
+export function maybeReapplySliderOverride(item) {
+    if (!item?.sliderOverride || typeof item.sliderOverride !== "object") return false;
+    if (item.sliderOverride.applySliderOverride === false) return false;
+    if (item.type !== "widget_binding") return false;
+    if (item.widgetType !== "int" && item.widgetType !== "slider") return false;
+    if (_overrideApplied.has(item.id)) return false;
+    _overrideApplied.add(item.id); // latched even if resolution fails this round
+    return applyOverrideToTargetWidgets(item) === 1;
+}
+
+/** Test hook: forget the per-session latch. */
+export function resetOverrideAppliedTracking() {
+    _overrideApplied.clear();
+}
+
 /**
  * Coerce any incoming value into a number against the REAL merged options.
  * quantize=false is used for MANUAL typed commits: values keep their exact
@@ -509,8 +701,16 @@ export function coerceNumeric(value, item, targetWidget, prevValue, opts = {}) {
     let n = Number(typeof rawStr === "number" ? rawStr : parseFloat(String(rawStr)));
     if (!Number.isFinite(n)) n = Number(prevValue);
     if (!Number.isFinite(n)) n = Number.isFinite(o.min) ? o.min : 0;
-    if (Number.isFinite(o.min)) n = Math.max(o.min, n);
-    if (Number.isFinite(o.max)) n = Math.min(o.max, n);
+    // User-authored slider overrides are DECLARED walls for this binding:
+    // they clamp manual commits exactly like source-declared bounds do, on
+    // top of (and in addition to) whatever the source widget declares.
+    const ov = getSliderOverride(item);
+    let lo = o.min;
+    let hi = o.max;
+    if ("min" in ov) lo = Number.isFinite(lo) ? Math.max(lo, ov.min) : ov.min;
+    if ("max" in ov) hi = Number.isFinite(hi) ? Math.min(hi, ov.max) : ov.max;
+    if (Number.isFinite(lo)) n = Math.max(lo, n);
+    if (Number.isFinite(hi)) n = Math.min(hi, n);
     if (item?.widgetType === "int") n = Math.round(n);
     else if (opts.quantize !== false) n = Number(n.toFixed(o.decimals));
     else n = Number(n.toPrecision(10)); // strip float noise, keep user digits

@@ -18,9 +18,11 @@
 import { app } from "../../scripts/app.js";
 import {
     getHubConfig, getActiveTabId, sortedTabs, itemsOfTab, genId,
-    liveComboValues, numericMerge, coerceNumeric, removeItem, detectWidgetType,
+    liveComboValues, coerceNumeric, removeItem, detectWidgetType,
     isMultilineWidget, portalKindOf, resolveBindingTarget, findHolderChainOf,
     synthSliderWindow, growSynthWindow,
+    effectiveSliderParams, getSliderOverride, hasSliderOverride,
+    setSliderOverride, applyOverrideToTargetWidgets, maybeReapplySliderOverride,
 } from "./core.js";
 import { presetSave, presetNew, presetDelete, presetApply } from "./preset_manager.js";
 import { writeTargetValue, ensureHooksForItem } from "./sync_manager.js";
@@ -163,8 +165,12 @@ function mirrorHtml(item, tw) {
         }
         case "int":
         case "slider": {
-            const o = numericMerge(item, tw);
-            const v = coerceNumeric(tw?.value, item, tw, o.min);
+            // Effective view = source merge (incl. integral-step relaxation:
+            // a float source declaring step=1 still gets a FINE drag grid) /
+            // user override walls via the gear popup when present.
+            const o = effectiveSliderParams(item, tw);
+            const sStep = o.sliderStep > 0 ? o.sliderStep : o.step;
+            const v = coerceNumeric(tw?.value, item, tw, Number.isFinite(o.min) ? o.min : undefined);
             const finMin = Number.isFinite(o.min);
             const finMax = Number.isFinite(o.max);
             // Faithful attributes on the TEXT editor: undeclared bounds stay
@@ -172,20 +178,20 @@ function mirrorHtml(item, tw) {
             const numAttrs =
                 (finMin ? ` min="${o.min}"` : "") +
                 (finMax ? ` max="${o.max}"` : "") +
-                ` step="${o.step}"`;
+                ` step="${sStep}"`;
             // Slider box: declared bounds win; open sides get an ADAPTIVE
             // nudge window around the current value (data-synth-range).
             // Display-only helper for PrimitiveFloat-style widgets whose
             // bounds are effectively ±infinity: typed commits stay free,
-            // coercion still clamps ONLY by declared bounds.
+            // coercion still clamps ONLY by declared bounds (+ overrides).
             let slider;
             if (finMin && finMax) {
-                slider = `<input type="range" class="hub-range" data-role="range" data-hub-control ` +
-                    `value="${esc(String(v))}" min="${o.min}" max="${o.max}" step="${o.step}">`;
+                slider = `<input type="range" class="hub-range${o.overridden ? " hub-range-ovr" : ""}" data-role="range" data-hub-control ` +
+                    `value="${esc(String(v))}" min="${o.min}" max="${o.max}" step="${sStep}">`;
             } else {
                 const w = synthSliderWindow(v);
-                slider = `<input type="range" class="hub-range hub-range-synth" data-role="range" data-hub-control ` +
-                    `data-synth-range="1" value="${esc(String(v))}" min="${w.min}" max="${w.max}" step="${o.step}" ` +
+                slider = `<input type="range" class="hub-range hub-range-synth${o.overridden ? " hub-range-ovr" : ""}" data-role="range" data-hub-control ` +
+                    `data-synth-range="1" value="${esc(String(v))}" min="${w.min}" max="${w.max}" step="${sStep}" ` +
                     `title="No declared source bounds - adaptive nudge around the current value; exact values via the text field">`;
             }
             // The editor is a TEXT input with inputmode=decimal, NOT
@@ -221,7 +227,12 @@ function itemRowHtml(item) {
     const labelEl = ok
         ? `<span class="hub-item-label" data-action="rename-item" title="Dbl-click to rename">${esc(label)}</span>`
         : `<span class="hub-item-label hub-orphan" title="⚠️ Target node missing">⚠️ ${esc(label)}</span>`;
+    const isNumericMirror = ok &&
+        (item.widgetType === "int" || item.widgetType === "slider");
     const tools = [
+        isNumericMirror
+            ? `<button type="button" class="hub-btn hub-gear${hasSliderOverride(item) ? " hub-gear-on" : ""}" data-action="num-settings" title="Custom min / max / step for this slider (+ push to the real node)">⚙</button>`
+            : "",
         `<button type="button" class="hub-btn hub-locate" data-action="locate" ${ok ? "" : "disabled"} title="Locate source node">🎯</button>`,
         `<button type="button" class="hub-btn hub-remove" data-action="unpin" title="Unpin from Hub">✕</button>`,
     ].join("");
@@ -507,6 +518,178 @@ function openComboPopup(node, trigger) {
         const idx = Number(opt.dataset.idx);
         if (st.active !== idx) { st.active = idx; markComboActive(); }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Slider override gear popover (custom min / max / step per numeric row)
+// ---------------------------------------------------------------------------
+// Body-level fixed popup (same pattern as the combo list, immune to hub
+// scroll clipping). Fields left EMPTY mean "no user wall on this side - use
+// the source's semantics". Apply re-renders the row; Push writes the numbers
+// onto the REAL node widget(s); auto-apply re-pushes after page reloads
+// (ComfyUI rebuilds widgets from definitions on load).
+
+let numPopState = null; // { node, item, trigger, pop }
+let numPopGlobalWired = false;
+
+function closeNumPopup() {
+    if (!numPopState) return;
+    try { numPopState.pop.remove(); } catch (_) {}
+    numPopState = null;
+}
+
+/** One global closer pair for every gear popup ever opened (cheap no-op
+ *  while closed - same pattern as ensureComboGlobalListeners). */
+function ensureNumPopupGlobalListeners() {
+    if (numPopGlobalWired) return;
+    numPopGlobalWired = true;
+    document.addEventListener("mousedown", (e) => {
+        const st = numPopState;
+        if (!st) return;
+        try {
+            if (st.pop.contains(e.target) || st.trigger.contains(e.target)) return;
+        } catch (_) {}
+        closeNumPopup();
+    }, true);
+    document.addEventListener("keydown", (e) => {
+        if (numPopState && e.key === "Escape") closeNumPopup();
+    }, true);
+}
+
+function positionNumPopup(pop, trigger) {
+    // Same clamp-into-viewport math as the combo popup.
+    let left = 6, top = 6;
+    try {
+        const r = trigger.getBoundingClientRect();
+        const vw = window.innerWidth || 1024;
+        const vh = window.innerHeight || 768;
+        const pw = pop.offsetWidth || 240;
+        const ph = pop.offsetHeight || 220;
+        left = Math.max(6, Math.min(r.left, vw - pw - 6));
+        top = r.bottom + 4;
+        if (top + ph > vh - 6) top = Math.max(6, r.top - ph - 4);
+    } catch (_) { /* jsdom / detached node - defaults are fine */ }
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+}
+
+function parsePopField(el) {
+    // Returns {clear:true} for empty input, {ok:true,v:Number} or {error}.
+    const t = String(el.value ?? "").trim().replace(",", ".");
+    if (t === "") return { clear: true };
+    if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t)) return { error: true };
+    const n = Number(t);
+    return Number.isFinite(n) ? { ok: true, v: n } : { error: true };
+}
+
+function flashBtn(btn, text) {
+    if (!btn) return;
+    const prev = btn.textContent;
+    btn.textContent = text;
+    setTimeout(() => { try { btn.textContent = prev; } catch (_) {} }, 900);
+}
+
+function applyNumPopover(node, st) {
+    const fields = {
+        min: st.pop.querySelector('[data-pop-field="min"]'),
+        max: st.pop.querySelector('[data-pop-field="max"]'),
+        step: st.pop.querySelector('[data-pop-field="step"]'),
+    };
+    let bad = null;
+    for (const k of Object.keys(fields)) {
+        const res = parsePopField(fields[k]);
+        const isBad = res.error || (k === "step" && !res.clear && !(res.v > 0));
+        fields[k].classList.toggle("hub-pop-bad", !!isBad);
+        if (isBad && !bad) bad = k;
+    }
+    if (bad) return false;
+
+    const patch = {};
+    for (const k of Object.keys(fields)) {
+        const res = parsePopField(fields[k]);
+        if (res.clear) patch[k] = null;             // explicit clear of a side
+        else if (res.ok) patch[k] = res.v;
+    }
+    const autoApply = st.pop.querySelector('[data-pop-role="auto"]').checked;
+    setSliderOverride(st.item, patch, { autoApply });
+    node.setDirtyCanvas?.(true, true);
+    closeNumPopup();
+    renderHub(node); // fresh attrs on range/text pair + gear highlight state
+    return true;
+}
+
+function openNumPopup(node, trigger) {
+    const row = trigger.closest("[data-hub-item]");
+    if (!row) return;
+    const cfg = getHubConfig(node);
+    const item = cfg.items.find((i) => i.id === row.dataset.hubItem);
+    if (!item || item.type !== "widget_binding") return;
+    if (!(item.widgetType === "int" || item.widgetType === "slider")) return;
+
+    // Toggle behavior mirrors the combo trigger.
+    if (numPopState?.trigger === trigger) { closeNumPopup(); return; }
+    closeComboPopup();
+    closeNumPopup();
+
+    const ov = getSliderOverride(item);
+    const eff = effectiveSliderParams(item, findTarget(item).tw);
+    const fmt = (x) => Number.isFinite(x) ? String(x) : "";
+    const autoChecked = item.sliderOverride?.applySliderOverride !== false;
+
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-num-pop";
+    pop.innerHTML =
+        `<div class="hub-menu-title">⚙ ${esc(item.customLabel || item.widgetToBind || "slider")}</div>` +
+        `<div class="hub-pop-grid">` +
+        `<label>min</label><input data-pop-field="min" inputmode="decimal" spellcheck="false" placeholder="${fmt(eff.min)}·src" value="${ov.min !== undefined ? esc(String(ov.min)) : ""}">` +
+        `<label>max</label><input data-pop-field="max" inputmode="decimal" spellcheck="false" placeholder="${fmt(eff.max)}·src" value="${ov.max !== undefined ? esc(String(ov.max)) : ""}">` +
+        `<label>step</label><input data-pop-field="step" inputmode="decimal" spellcheck="false" placeholder="${fmt(eff.sliderStep)}·auto" value="${ov.step !== undefined ? esc(String(ov.step)) : ""}">` +
+        `</div>` +
+        `<label class="hub-pop-auto"><input type="checkbox" data-pop-role="auto"${autoChecked ? " checked" : ""}> auto-apply to real nodes (incl. reload)</label>` +
+        `<div class="hub-pop-hint">empty field = keep source side · step &gt; 0</div>` +
+        `<div class="hub-pop-btns">` +
+        `<button type="button" data-pop-btn="apply" title="Save for this binding">✓</button>` +
+        `<button type="button" data-pop-btn="push" title="Write min/max/step onto the REAL node widgets right now">⤴ push</button>` +
+        `<button type="button" data-pop-btn="clear" title="Remove override completely">clear</button>` +
+        `<button type="button" data-pop-btn="close" title="Close">✕</button>` +
+        `</div>`;
+    document.body.appendChild(pop);
+
+    numPopState = { node, item, trigger, pop };
+    ensureNumPopupGlobalListeners();
+
+    pop.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-pop-btn]");
+        if (!btn || !numPopState) return;
+        e.stopPropagation();
+        const act = btn.dataset.popBtn;
+        if (act === "close") { closeNumPopup(); return; }
+        if (act === "apply") { applyNumPopover(node, numPopState); return; }
+        if (act === "clear") {
+            setSliderOverride(numPopState.item, {});
+            node.setDirtyCanvas?.(true, true);
+            closeNumPopup();
+            renderHub(node);
+            return;
+        }
+        if (act === "push") {
+            // Persist what the fields hold FIRST (empty=inputless sides stay),
+            // then write onto live widgets without waiting for a reload.
+            const okApply = applyNumPopover(node, numPopState);
+            if (!okApply) return;
+            const cnt = applyOverrideToTargetWidgets(
+                getHubConfig(node).items.find((i) => i.id === item.id) ?? {});
+            // The popup was closed and the hub re-rendered - flash the FRESH
+            // gear button of this row (the old one died in the innerHTML swap).
+            const freshGear = document.querySelector(
+                `[data-hub-item="${item.id}"] .hub-gear`);
+            if (freshGear) flashBtn(freshGear, cnt ? "✓" : "⚠");
+            return;
+        }
+    });
+
+    positionNumPopup(pop, trigger);
+    try { pop.querySelector('[data-pop-field="min"]').focus(); } catch (_) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -800,6 +983,9 @@ function renderHub(node) {
         if (item.type !== "widget_binding" && item.type !== "widget_portal") continue;
         const { tw } = findTarget(item);
         if (!tw) continue;
+        // Slider overrides requested to stick on real nodes: re-push them
+        // once per session onto freshly rebuilt widgets (post-reload).
+        if (item.type === "widget_binding") maybeReapplySliderOverride(item);
         const live = detectWidgetType(tw);
         const liveIsPortal = live === "portal";
         const itemIsPortal = item.type === "widget_portal";
@@ -1054,6 +1240,10 @@ function wireEvents(node, st) {
                 const row = btn.closest("[data-hub-item]");
                 const item = cfg.items.find((i) => i.id === row?.dataset.hubItem);
                 if (item) locateItem(item);
+                break;
+            }
+            case "num-settings": {
+                openNumPopup(node, btn);
                 break;
             }
             case "unpin": {

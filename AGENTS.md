@@ -35,13 +35,20 @@ web/core.js            — конфиг хаба, detectWidgetType (самоле
                          findHolderChainOf (цепочка SubgraphNode-владельцев);
                          synthSliderWindow (первичный центр) /
                          growSynthWindow (липкий односторонний рост окна);
+                         числовые: numericMerge (+ sliderStep-релаксация интегральных
+                         шагов не-int источников), effectiveSliderParams;
+                         override-модель слайдеров: get/setSliderOverride /
+                         hasSliderOverride / applyOverrideToTargetWidgets /
+                         maybeReapplySliderOverride (одноразовый session-latch);
                          createNewHub — канонический LiteGraph.createNode -> graph.add
 web/sync.js            — шина структурных/values-обновлений + shared edit-lock
                          (beginEdit/endEdit), rAF-очередь queueHubRefresh
 web/sync_manager.js    — хуки реактивности на целевых виджетах (обёртка callback),
                          writeTargetValue под lock'ом, self-healing вызовы
 web/hub_ui_renderer.js — весь UI хаба: табы, строки зеркал, searchable combo
-                         popup, layout-движок (AUTO/FILL), события (делегирование)
+                         popup, gear-поповер кастомных min/max/step (.hub-num-pop,
+                         Apply/Push/Clear + checkbox auto-apply), layout-движок
+                         (AUTO/FILL), события (делегирование)
 web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode
 web/context_menu.js    — пиннинг: ПКМ по hover-виджету; пункт меню ноды
@@ -133,6 +140,12 @@ dev_plan.md            — исходный технический спек пр
   range-фолбэк (только синтетический может подстраиваться под диапазон).
   Классификация int/slider учитывает precision/round: float без step больше
   не деградирует в int.
+- SLIDERSTEP-релаксация v21: `step` остаётся ВЕРНЫМ источнику, а для ДРАГА и
+  программного квантования служит `sliderStep` (= step во всех случаях,
+  КРОМЕ интегрального step>=1 у НЕ-int зеркала — тогда цепочка fine-фолбэков:
+  дробный round > precision > range/0.01). Целый шаг PrimitiveFloat=1 больше
+  не запирает ползунок на сетке 0,1,2 (полевой инцидент v21). decimals
+  программного квантования считаются от sliderStep. Семейство int — нетронуто.
 - Редактор зеркала — `type="text" inputmode="decimal"`: нативный type=number
   САНТИЗИРУЕТ value на сеттере ("0,9" -> "") и убивает ввод до нашей
   валидации. Полный пайплайн наш — в `coerceNumeric`: ручной ввод (change,
@@ -143,6 +156,32 @@ dev_plan.md            — исходный технический спек пр
   бьют в цель); коммит только на change. refreshValuesDom НЕ перетирает
   сфокусированный контрол (эхо-гвардия; ресинк после blur/commit).
 - merged min/max/step лечатся обратно в item.options (выживание орфанов).
+
+### Slider overrides (⚙ на числовой строке)
+- Модель: `item.sliderOverride = { min?, max?, step?, applySliderOverride? }`
+  живёт в конфиге хаба (переживает reload/presets). Присутствие поля = стена;
+  отсутствие = семантика источника той стороны.
+- Контракт setSliderOverride(item, patch): BARE patch {} — ПОЛНАЯ зачистка
+  (кнопка clear); любой явный ключ — MERGE: значение ставит стену, null/""
+  снимает сторону, опущенный ключ сохраняет прежнее. step строго >0.
+- Рендер — ТОЛЬКО через effectiveSliderParams(item,tw)= numericMerge ⊕ override;
+  override-границы действуют как стены и для ручных коммитов (coerceNumeric
+  клэмпит по объединению source∪override). Парность «статичный ↔ синтетический»
+  выбирается по эффективным границам; overridden-слайдер носит класс
+  .hub-range-ovr, гайка строки подсвечена (.hub-gear-on).
+- Поповер — body-level fixed (.hub-num-pop); валидация полей inline
+  (.hub-pop-bad), пустое поле = снять сторону; кнопки ✓apply / ⤴push / clear / ✕.
+  Push пишет числа в ЖИВОЙ виджет ноды немедленно (после apply без переоткрытия);
+  флэш-фидбек идёт на СВЕЖУЮ кнопку после innerHTML-свопа.
+
+### Авто-применение override к реальным нодам
+- Флаг applySliderOverride (чекбокс поповера, дефолт ON) разрешает пушь на
+  целевые виджеты. После перезагрузки страницы ComfyUI пересоздаёт виджеты из
+  определений — renderHub self-heal вызывает maybeReapplySliderOverride(item):
+  одноразовый session-latch по item.id (тест resetOverrideAppliedTracking()),
+  чтобы структурные рендеры не спамили патчи. OFF блокирует даже пост-reload путь.
+- resolveBindingTarget возвращает ГОЛУЮ НОДУ (не пару {tn,tw}) — деструктурировать
+  оборонительно (инцидент ZC-написания: TypeError при orphan-resolve).
 
 ### Вкладки — переименование поверх перерендера
 - Нативный dblclick по кнопке вкладки НЕВОЗМОЖЕН: первый клик пересобирает
@@ -225,6 +264,12 @@ dev_plan.md            — исходный технический спек пр
    всегда по центру», полевой инцидент v20) и дёргала шкалу под пальцем.
    Окно ЧИСТО ДИСПЛЕЙНОЕ; во время редактирования контрола (фокус = typing
    ИЛИ drag) эхо-обновления его не трогают вовсе.
+   ДОПОЛНЕНИЕ v21: интегральный заявленный шаг НЕ-int источника не запирает
+   зеркало на целочисленной сетке — drags/стрелки/эхо используют sliderStep-
+   релаксацию (см. "Числовые зеркала"), ручной ввод остаётся свободным.
+   Кастомные стены пользователя (sliderOverride) приравнены к объявленным:
+   клэмп коммитов по их объединению с исходными границами; проталкивание их
+   на реальные виджеты согласовано флагом applySliderOverride (дефолт ON).
 13. Создание хаба — ТОЛЬКО каноническое: `LiteGraph.createNode(HUB_NODE_NAME)`
    -> реальный ИНСТАННС -> `graph.add(node)`. Конфиг-объект `{type}` в
    add()/addNode() ЗАПРЕЩЁН: современный LGraph.add дёргает методы ноды
@@ -234,6 +279,10 @@ dev_plan.md            — исходный технический спек пр
    Класс регрессий «ReferenceError внутри колбэка меню» закрывается статик-
    линтом фазы Z2: каждый используемый экспорт core.js обязан стоять в
    import-списке модуля (инцидент: getActiveTabId вызывался без импорта).
+14. resolveBindingTarget возвращает НАГУЮ НОДУ или null — никогда не пару
+   {tn,tw}; потребители ищут виджет сами (tw = tn.widgets.find(...)). Новые
+   вызовы обязаны null-check'ить до destructuring (инцидент v21: TypeError
+   при orphan-resolve в push-фиче).
 
 ## 5. Тесты
 
@@ -259,9 +308,16 @@ ZB1–ZB4 — locate входит ВЛАДЕЛЬЧЕСКИЙ граф (цепо�
 ZB5 — липнущий nudge-слайдер безграничных float'ов: рост одной стороны,
 ползунок НЕ приколот к середине (static feel как у KJ), стабильная шкала
 в mid-drag; статичный слайдер объявленных границ не изменился.
+ZC — слайдер-шаг и кастомные min/max/step: релаксация integral-step>=1 у
+float-источников (drags доходят до дробей, decimal-эхо не схлопывается,
+int-семейство нетронуто), API override'ов (bare-clear / merge / side-clear /
+валидация мусора), статичный рендер с кастомной геометрией + клэмпы typed
+коммитов, пушь на реальный виджет, авто-реапплай после симулированного reload
+с latch-семантикой и отказным чекбоксом, поповер (open/invalid-keep/clear-side
+/close-on-apply), JSON-persistence флага.
 
 ```bash
-node scripts/smoke_hub.mjs   # базовая линия: >=394 зелёных, 0 упавших
+node scripts/smoke_hub.mjs   # базовая линия: >=433 зелёных, 0 упавших
 ```
 
 Подводные камни харнеса:
