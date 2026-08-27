@@ -74,6 +74,16 @@ function ensureHubDom(node) {
     // DOM widget is parked OUT of node.widgets (detachHubWidget) - that is a
     // healthy state, it must not trigger a duplicate rebuild here.
     if (st && st.widget && (st.__widgetDetached || node.widgets?.includes(st.widget))) return st;
+    // v24.2: a FLOATING hub owns its DOM inside the panel - whatever happened
+    // to the widget registry, never spawn a second wrap into the canvas slot
+    // (field report: a zoom out+in cycle rebuilt the UI inside the node and
+    // left the floating window stale). The render tail re-asserts
+    // float + detach instead.
+    {
+        let pinnedNow = false;
+        try { pinnedNow = !!getHubConfig(node).pinned; } catch (_) {}
+        if (st && st.wrap && pinnedNow) return st;
+    }
 
     const root = document.createElement("div");
     root.className = "settings-hub";
@@ -571,11 +581,13 @@ function savePinPosFromRect(node, panel) {
 /** While floating, the canvas node collapses to a title-bar ghost so no
  *  dead rectangle lingers under the cursor. The PRE-PIN envelope is saved
  *  and restored verbatim on unpin - a user-sized (FILL) hub must get back
- *  exactly the height it had, an auto hub re-hugs from there. */
+ *  exactly the height it had, an auto hub re-hugs from there. Idempotent
+ *  and RE-RUNNABLE: an external rebuild/re-inflation of the node while
+ *  floating (frontend widget manager, graph configure) is re-slimmed on
+ *  the next float pass; the pre-pin envelope is captured exactly once. */
 function slimHubSlot(node, st) {
-    if (st.__slimApplied) return;
+    if (!st.__prePinSize) st.__prePinSize = [node.size[0], node.size[1]];
     st.__slimApplied = true;
-    st.__prePinSize = [node.size[0], node.size[1]];
     const title = titleBarHeight();
     if (st.widget) st.widget.computeSize = () => [node.size[0], 4];
     node.__hubAutoSizing = true;
@@ -668,6 +680,31 @@ function ensurePinPanel(node, st) {
     return p;
 }
 
+let wrapHealCrumbShown = false;
+
+/** v24.2 home-keeper: while the wrap lives in the floating panel, NOTHING
+ *  else may move it (a frontend DOM-widget manager, a subgraph view
+ *  rebuild, ...). If the element is yanked out, put it straight back.
+ *  Event-driven (MutationObserver on the panel body) - zero polling. */
+function armWrapHomeKeeper(node, st, body) {
+    try { st.wrapObserver?.disconnect(); } catch (_) {}
+    st.wrapObserver = null;
+    if (typeof MutationObserver !== "function") return;
+    st.wrapObserver = new MutationObserver(() => {
+        try {
+            if (!getHubConfig(node).pinned) return;
+            if (!st.wrap || st.wrap.parentElement === body) return;
+            if (!document.body.contains(body)) return;
+            body.appendChild(st.wrap); // appendChild MOVES the element back
+            if (!wrapHealCrumbShown) {
+                wrapHealCrumbShown = true;
+                console.info("[SettingsHub] floating hub content was pulled back to the canvas by the frontend - restored to the floating window automatically.");
+            }
+        } catch (_) {}
+    });
+    st.wrapObserver.observe(body, { childList: true });
+}
+
 function floatHub(node) {
     const st = stateMap.get(node);
     if (!st?.wrap) return false;
@@ -684,6 +721,7 @@ function floatHub(node) {
         st.wrap.classList.add("hub-wrap-floating");
         p.body.appendChild(st.wrap);
     }
+    armWrapHomeKeeper(node, st, p.body);
     p.panel.classList.toggle("hub-pin-collapsed", !!cfg.pinMin);
     let pos = (cfg.pinPos && Number.isFinite(Number(cfg.pinPos.x)))
         ? { x: cfg.pinPos.x, y: cfg.pinPos.y } : null;
@@ -708,6 +746,10 @@ function floatHub(node) {
 
 function homeHub(node) {
     const st = stateMap.get(node);
+    // Disarm the home-keeper BEFORE touching the wrap: its pending mutation
+    // records would otherwise pull the wrap straight back into the panel.
+    try { st?.wrapObserver?.disconnect(); } catch (_) {}
+    if (st) st.wrapObserver = null;
     if (st?.wrap) {
         // Hand the widget back to the frontend BEFORE the element moves home,
         // so a same-tick canvas draw can position it into the slot again.
@@ -763,6 +805,9 @@ export function toggleHubPinned(node, want) {
 
 /** Full teardown (hub deleted from the graph): no orphan windows left. */
 export function disposeHubVisuals(node) {
+    const st = stateMap.get(node);
+    try { st?.wrapObserver?.disconnect(); } catch (_) {}
+    if (st) st.wrapObserver = null;
     const p = pinPanels.get(node);
     try { p?.panel.remove(); } catch (_) {}
     pinPanels.delete(node);
@@ -1959,4 +2004,7 @@ try {
 export function syncHubNode(node) {
     renderHub(node);
 }
+
+/** Test hook: internal per-node renderer state (smoke phases ZF4+). */
+export function __hubTestState(node) { return stateMap.get(node) ?? null; }
 
