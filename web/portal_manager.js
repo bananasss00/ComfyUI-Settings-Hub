@@ -117,6 +117,36 @@ function localPos(canvas, e) {
     }
 }
 
+/**
+ * True when EVERY pixel of the canvas is fully transparent. Used to detect
+ * mode-gated widgets whose draw() is a no-op outside the Vue frontend
+ * (e.g. TrixNodes bypasser: "if (!isVueMode) return;"). Those panels paint
+ * through NODE-level hooks instead - see the foreground fallback in tick().
+ */
+function canvasIsBlank(canvas) {
+    try {
+        const ctx = canvas.getContext("2d");
+        const data = ctx.getImageData(0, 0, canvas.width || 1, canvas.height || 1).data;
+        for (let i = 3; i < data.length; i += 4) {
+            if (data[i] !== 0) return false;
+        }
+        return true;
+    } catch (_) {
+        return false; // tainted canvas etc. - assume it painted something
+    }
+}
+
+/** Subtle placeholder painted when neither widget nor node hooks render. */
+function drawPortalHint(ctx, w, h) {
+    try {
+        ctx.fillStyle = "#3c3c54";
+        ctx.font = "10px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("⚠ live embed: source panel renders nothing", Math.max(60, w / 2), h / 2);
+    } catch (_) {}
+}
+
 function mountCanvasPortal(node, item, tn, members, host) {
     const canvas = document.createElement("canvas");
     canvas.className = "hub-portal-canvas";
@@ -128,6 +158,11 @@ function mountCanvasPortal(node, item, tn, members, host) {
     const rec = {
         kind: "canvas", item, tn, members, canvas, host, dpr,
         W: 0, H: 0, timer: null, stale: 0, handlers: null,
+        // Render routing: undefined = per-widget draw (classic portal),
+        // "foreground" = node.onDrawFallback engaged, "blank" = nothing
+        // drawable (hint shown). See tick().
+        mode: undefined,
+        probes: 0,
     };
 
     // Live row tracking: native growth (a lora added on the source node),
@@ -140,10 +175,12 @@ function mountCanvasPortal(node, item, tn, members, host) {
     // widget area (capped by what the hub row offers), and the CSS display
     // size stays 1:1 with the backing buffer - so the embed reproduces the
     // original styling/sizes instead of being stretched into the row.
+    // The cap keeps a small margin (draw code often insets by ~10px, so a
+    // -4px cap never clips content painted at the node's own width).
     const desired = () => {
         let avail = Math.round(host.clientWidth || 0);
         if (!(avail > 0)) avail = Math.max(160, (node.size?.[0] ?? 340) - 24);
-        let cap = Math.round(Number(tn.size?.[0]) || 340) - 14;
+        let cap = Math.round(Number(tn.size?.[0]) || 340) - 4;
         if (!(cap > 80)) cap = avail;
         const hs = rowHeights();
         const H = Math.min(
@@ -194,24 +231,81 @@ function mountCanvasPortal(node, item, tn, members, host) {
         }
         if (dirty) item.options.srcH = Math.round(total);
 
-        try {
+        // All drawing happens through this wrapper: scaled to CSS pixels,
+        // fully cleared every pass (scale FIRST so the clear covers the
+        // whole backing buffer at any DPR).
+        const paint = (fn) => {
             ctx.save();
-            ctx.clearRect(0, 0, rec.W, rec.H);
-            ctx.scale(dpr, dpr);
-            // Every member paints itself exactly like on its source node,
-            // stacked vertically - the same order/layout LiteGraph uses.
+            try {
+                ctx.scale(dpr, dpr);
+                ctx.clearRect(0, 0, rec.W, rec.H);
+                fn();
+            } catch (_) { /* custom draw code may expect graph-canvas globals */ }
+            ctx.restore();
+        };
+
+        // Every member paints itself exactly like on its source node,
+        // stacked vertically - the same order/layout LiteGraph uses.
+        const paintWidgetStack = () => {
             let y = 0;
             for (let i = 0; i < members.length; i++) {
                 const h = g.hs[i];
                 members[i].widget.draw?.(ctx, tn, rec.W, y, h);
                 y += h + PORTAL_ROW_GAP;
             }
-            ctx.restore();
-        } catch (_) { /* custom draw code may expect graph-canvas globals */ }
+        };
+
+        if (rec.mode === "foreground") {
+            // NODE-level render (TrixNodes-style panels). Their hook is in
+            // node-local coordinates with the body origin at (0,0) - which
+            // is exactly what our portal surface represents.
+            paint(() => { tn.onDrawForeground?.call(tn, ctx); });
+            if (!canvasIsBlank(canvas)) return;
+            // The hook went dark (frontend mode flipped / node teardown).
+            // Re-probe the widget stack instead of leaving a void.
+            rec.mode = undefined;
+            rec.probes = 0;
+            paint(paintWidgetStack);
+            if (!canvasIsBlank(canvas)) return; // back on widget rendering
+            rec.mode = "blank";
+            paint(() => drawPortalHint(ctx, rec.W, rec.H));
+            return;
+        }
+
+        paint(paintWidgetStack);
+
+        // Probe whether the widget actually painted. The first ticks decide
+        // the routing; "widget" mode stops probing (normal portals).
+        if (!canvasIsBlank(canvas)) {
+            if (rec.mode === "blank") { rec.mode = undefined; rec.probes = 0; } // panel came alive
+            else if (rec.mode === undefined && rec.probes >= 3) rec.mode = "widget";
+            return;
+        }
+        if (rec.mode === "blank") {
+            // Keep the hint painted (each pass clears the surface).
+            paint(() => drawPortalHint(ctx, rec.W, rec.H));
+            return;
+        }
+        rec.probes++;
+        if (rec.probes <= 3 && typeof tn.onDrawForeground === "function") {
+            // Mode-gated widget.draw (classic-LiteGraph-only panel):
+            // retry through the node's own foreground hook.
+            paint(() => { tn.onDrawForeground.call(tn, ctx); });
+            if (!canvasIsBlank(canvas)) {
+                rec.mode = "foreground";
+                return;
+            }
+        }
+        rec.mode = "blank";
+        paint(() => drawPortalHint(ctx, rec.W, rec.H));
     };
     rec.tick = tick;
 
-    // Forward pointer interactions (incl. RMB -> each widget's own menu).
+    // Forward pointer interactions. Widget-level mouse() runs FIRST (Vue-
+    // frontend panels, rgthree rows). When it does not claim the event
+    // (mode-gated widgets return false outside Vue mode), the NODE-level
+    // handlers get it with node-local coordinates - our portal surface
+    // maps 1:1 onto the node body origin (same contract as onDrawForeground).
     const forward = (e) => {
         try {
             const [px, py] = localPos(canvas, e);
@@ -226,12 +320,31 @@ function mountCanvasPortal(node, item, tn, members, host) {
                 hit = members.length - 1;                 // past the last row
                 top = Math.max(0, top - PORTAL_ROW_GAP - hs[hit]);
             }
-            members[hit].widget.mouse?.(e, [px, py - top], tn);
+            const pos = [px, py - top];
+            let handled = false;
+            try { handled = !!members[hit].widget.mouse?.(e, pos, tn); } catch (_) { handled = true; }
+            if (handled) return;
+            const fn = e.type === "pointerdown" ? tn.onMouseDown
+                : e.type === "pointerup" ? tn.onMouseUp
+                : e.type === "pointermove" ? tn.onMouseMove
+                : null;
+            if (typeof fn === "function") {
+                fn.call(tn, e, pos, app.canvas);
+            }
         } catch (_) {}
     };
     rec.handlers = {
         pointerdown: (e) => { forward(e); },
         pointerup: (e) => { forward(e); },
+        pointermove: (e) => { forward(e); },
+        pointerleave: (e) => {
+            // Legacy drag cancellation lives on the node (widget level has
+            // no leave concept) - best effort, never swallows anything.
+            try {
+                const [px, py] = localPos(canvas, e);
+                tn.onMouseLeave?.call(tn, e, [px, py], app.canvas);
+            } catch (_) {}
+        },
         wheel: (e) => { e.preventDefault(); forward(e); },
         contextmenu: (e) => {
             // The source widget's custom menu handles this (rgthree etc.).
