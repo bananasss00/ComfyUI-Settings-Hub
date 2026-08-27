@@ -252,6 +252,70 @@ dev_plan.md            — исходный технический спек пр
   персистится (change и каждый клик коммитят значение поля); Enter в поле =
   запуск очереди. Высота бара включена в measureContent (по частям).
 
+### Живой статус очереди и Cancel (v24)
+- Источник истины — события на `app.api` (ПОЛЛИНГ ЗАПРЕЩЕН инвариантом #1):
+  «status» → queue_remaining (парсер BFS до глубины 6 ловит и глубоко
+  вложенные варианты payload'а, строковые числа), «execution_start»/
+  «executing» → running=true, «execution_success/error/interrupted» →
+  running=false. Подписка — `initQueueStatus(api)`, идемпотентна; вызывается
+  из extension-хуков setup/afterConfigureGraph (в момент setup api уже есть).
+- paintQueueBarDom обновляет ПОДОБРАННЫЕ DOM-узлы БЕЗ innerHTML-свапа
+  (иначе убил бы открытые попапы): бейдж `.hub-queue-badge` (server
+  queue_remaining), класс `hub-queue-live` на ▶, disabled у ⏹
+  (`.hub-interrupt-on`) — активен пока running ИЛИ remaining>0.
+- Cancel: `api.interrupt?.()` иначе `fetchApi("/interrupt",{method:"POST"})`;
+  после успеха — оптимистичный setQueueState({running:false}) (серверная
+  правда всё равно догонит событиями); нет ни того ни другого — флэш ⚠.
+- Состояние модульное (qStatus), шарится ВСЕМИ хабами; paintAllQueues
+  обходит allHubs().
+
+### Комбо — читаемость длинных путей (v24)
+- Закрытый триггер остаётся компактным (эллипсис), но title несет ПОЛНОЕ
+  значение + подсказку фильтра (refreshValuesDom держит его в lockstep).
+- Попап: `width:max-content; max-width:min(520px,88vw)` — растёт, а не режет.
+- Опции ≥34 символов С разделителем пути — двухстрочные (`.hc-two`):
+  `.hc-base` жирный basename + `.hc-dir` приглушенный моноширинный dirname;
+  title каждой опции = исходная строка. Галочка текущего — CSS ::before
+  (у .hc-two переносится на :first-child): textContent опций чище,
+  НЕ засоряется символом ✓ (на это опираются ассерты фаз C/R).
+- `splitComboPathText` экспортирован (контракт: {dir с сепаратором, base};
+  null без разделителя). Порог/грамматика — в одном месте рендерера.
+
+### Пин хаба на экран (v24)
+- 📌 в таб-баре → `toggleHubPinned(node[, want])`: wrap-элемент DOM-виджета
+  ПЕРЕНОСИТСЯ (appendChild, слушатели живут) в фиксированную панель
+  `.hub-pin-panel` на document.body: заголовок с драгом (pointer capture,
+  клэмп в вьюпорт), «–» collapse (cfg.pinMin), «📌» возврат. НЕ клонирование!
+- Персист в конфиге (нормализация в getHubConfig): pinned / pinPos / pinMin;
+  renderHub в хвосте сам переподнимает панель после reload.
+- Нода-призрак: slimHubSlot сохраняет __prePinSize и жмёт слот до
+  титульной строки; homeHub возвращает конверт ДО рендера — FILL-хабы
+  (userH) обязаны получить ровно свой прежний размер (см. фазу ZF4),
+  applyHubLayout при floating — ранний выход (панель правит геометрию).
+- Collapsed нода НЕ прячет запиненный UI (guard в renderHub учитывает
+  cfg.pinned). Удаление хаба — disposeHubVisuals из hub_node.onRemoved
+  (никаких окон-сирот).
+- Известная грань: canvas-порталы рисуют через draw()-цикл ноды — при
+  collapsed ноде их картинка в панели может замирать (не критично,
+  порталы живут на видимых нодах).
+
+### Резолвер целей v24 (крест-граф, вложенные сабграфы)
+- allGraphs: BFS по УРОВНЯМ (глубина — уровни иерархии, дефолт 12), списки
+  нод = union `_nodes` + публичный `nodes`; реестры `_subgraphs`/`subgraphs`/
+  `subgraphsById` читаются как Array / Map|Set / объект-словарь; ПЛЮС
+  duck-typing сбор: любой OWN ключ ноды, чьё значение похоже на LGraph
+  (имеет массив `_nodes`/`nodes`) — считается дочерним холстом (имена
+  полей холдеров больше не критичны); дедуп по identity (циклы безопасны).
+- findNodeByIdEverywhere: точное `n.id === id` имеет ПРИОРИТЕТ на всём
+  пространстве; loose-проход `String(n.id)===String(id)` — только фолбэк
+  (поглощает ремапы в строки; не даёт мусорным совпадениям затирать точные).
+- resolveBindingTarget: как раньше (id → targetTitle+widget), добавлены
+  lastResolverStats() и одноразовый console.info-хлебный крош
+  reportUnresolved (дескриптор пина + сколько графов/нод сканировано) —
+  для воспроизводимых полевых багрепортов.
+- findHolderChainOf ходит по ТЕМ ЖЕ шейпам (locate видит всё, что видит
+  резолвер); графы из реестров без холдера получают chain без ступени.
+
 ### Locate (🎯) — прыжок внутрь сабграфа
 - Порядок: `resolveBindingTarget` → владельческий граф из `tn.graph`, а если
   оно не задано (не все фронтенды его пишут) — из хвоста `findHolderChainOf`
@@ -382,9 +446,25 @@ data-hub-control, изоляция броска хендлера, ok:false на 
 change'ом, queuePrompt(undefined,N) на клик, спам-клики appending, Enter,
 нормализация мусора в 1, клэмп капа 1000, мягкая деградация без
 app.queuePrompt, JSON round-trip queueCount.
+ZF — v24 (4 фазы): ZF1 резолвер — Map-реестр `_subgraphs`, uuid-холдер БЕЗ
+.subgraph, переименованный холдер-ключ `__instanceRef`, публичный `nodes`
+вместо `_nodes`, циклический граф, string-id 911090901 + числовой близнец,
+title-drift до глубинного листа, статистика скана; ⚠ ids фич-фаз выбирай
+ДАЛЕКО за максимумом, который мог наминтить свит (graphAddNode переиспользует
+числа после удалений). ZF2 комбо — сплиттер (POSIX/Windows/bare), тултип
+закрытого триггера = полный путь, 2×двухстрочные опции c title==dir+base,
+короткие остаются плоскими. ZF3 очередь — EventTarget-заглушка app.api,
+initQueueStatus идемпотентен, официальный И глубоко-вложенный payload
+(строковое число), execution_start → hub-queue-live, Cancel через
+api.interrupt() и фолбэк fetchApi('/interrupt',POST), возврат в disabled.
+ZF4 пин — panel на document.body, wrap перенесён (не клон), маркер таб-бара,
+слот-ghost ≤36px, render при collapsed+пин, драг клэмпит и пишет pinPos
+(jsdom rect нулевой — считай от (0,0)), JSON round-trip трёх полей,
+collapse-тогл, возврат домой + восстановление КОНВЕРТА (FILL-хаб!),
+disposeHubVisuals безопасен для посторонних нод.
 
 ```bash
-node scripts/smoke_hub.mjs   # базовая линия: >=486 зелёных, 0 упавших
+node scripts/smoke_hub.mjs   # базовая линия: >=533 зелёных, 0 упавших
 ```
 
 Подводные камни харнеса:

@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { getHubConfig, trackHubNode, forgetHubNode } from "./core.js";
 import { syncNode } from "./sync.js";
-import { relayoutHub } from "./hub_ui_renderer.js";
+import { relayoutHub, disposeHubVisuals } from "./hub_ui_renderer.js";
 import * as Pins from "./pins.js";
 
 export const NODE_NAME = "SettingsHub";
@@ -52,6 +52,8 @@ function makeSettingsHubNodeClass(LGraphNode) {
             // Keep the global registry truthful: removed hubs must stop
             // appearing in pin menus and sync loops.
             forgetHubNode(this);
+            // v24: a screen-pinned hub must not leave a ghost floating window.
+            try { disposeHubVisuals(this); } catch (_) {}
         }
     };
 }

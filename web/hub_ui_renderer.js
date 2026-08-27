@@ -22,7 +22,7 @@ import {
     getHubConfig, getActiveTabId, sortedTabs, itemsOfTab, genId,
     liveComboValues, coerceNumeric, removeItem, detectWidgetType,
     isMultilineWidget, portalKindOf, resolveBindingTarget, findHolderChainOf,
-    synthSliderWindow, growSynthWindow,
+    synthSliderWindow, growSynthWindow, allHubs,
     effectiveSliderParams, getSliderOverride, hasSliderOverride,
     setSliderOverride, clearSliderOverride, applyOverrideToTargetWidgets,
     maybeReapplySliderOverride,
@@ -142,7 +142,11 @@ function buildTabBarHtml(cfg) {
     const btns = tabs.map((t) =>
         tabBtnHtml(t, t.id === getActiveTabId(cfg),
             cfg.items.filter((i) => i.tabId === t.id).length)).join("");
+    // v24: 📌 floats the whole hub UI in an always-on-screen window.
     return `<div class="hub-tab-bar">${btns}` +
+        `<button type="button" class="hub-pin-toggle${cfg.pinned ? " hub-pin-on" : ""}" data-action="pin-toggle" ` +
+        `title="Keep this hub on screen - float above the canvas, survives panning/zoom" ` +
+        `aria-pressed="${cfg.pinned ? "true" : "false"}">📌</button>` +
         `<button type="button" class="hub-add-tab" data-action="add-tab" title="Add tab">+</button>` +
         `</div>`;
 }
@@ -154,12 +158,15 @@ function mirrorHtml(item, tw) {
             // trigger showing the current value; clicking it opens a live-
             // filtered popup (see openComboPopup below). data-sig keeps the
             // values-signature so refreshValuesDom can detect list changes.
+            // v24: the CLOSED trigger keeps its compact ellipsized look, but
+            // the native tooltip now carries the FULL value (model paths are
+            // routinely longer than the control) on top of the filter hint.
             const vals = liveComboValues(item, tw);
             const cur = String(tw?.value ?? "");
             const sig = vals.join("¦");
             return `<span class="hub-mirror hub-mirror-combo">` +
                 `<button type="button" class="hub-combo" data-role="combo" data-hub-control data-sig="${esc(sig)}" ` +
-                `title="Searchable list - filter parts separated by space, all must match, case-insensitive">` +
+                `title="${esc(cur)}${cur ? "\n" : ""}Searchable list - filter parts separated by space, all must match, case-insensitive">` +
                 `<span class="hub-combo-label">${esc(cur)}</span><span class="hub-combo-caret">▾</span></button></span>`;
         }
         case "checkbox": {
@@ -313,11 +320,19 @@ function parseQueueCount(v) {
 
 function queueRowHtml(cfg) {
     const n = parseQueueCount(cfg.queueCount);
+    // v24 layout: [▶ Queue] ×[N] [badge][⏹]. The badge mirrors ComfyUI's
+    // queue_remaining so the bar keeps showing LIVE state instead of
+    // snapping back to an idle-looking "▶ Queue" right after enqueueing;
+    // ⏹ reproduces the native Cancel/Interrupt affordance and is enabled
+    // exactly while something is queued or executing.
     return `<div class="hub-queue-row">` +
         `<button type="button" class="hub-btn hub-queue-run" data-action="queue-run" title="Queue prompt (same as ComfyUI Queue button)">▶ Queue</button>` +
         `<span class="hub-queue-times">×</span>` +
         `<input type="text" inputmode="numeric" class="hub-queue-count" data-role="queue-count" ` +
         `value="${esc(String(n))}" title="Run the workflow this many times (1–${MAX_QUEUE_BATCH})">` +
+        `<span class="hub-queue-badge" data-role="queue-badge" title="ComfyUI queue remaining"></span>` +
+        `<button type="button" class="hub-btn hub-interrupt" data-action="queue-interrupt" disabled ` +
+        `title="Cancel the current task (same as ComfyUI Interrupt)">⏹</button>` +
         `</div>`;
 }
 
@@ -342,6 +357,350 @@ async function runQueueFlow(node) {
         console.warn("[SettingsHub] queue failed:", err);
         flashBtn(btn, "⚠");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Live queue state (v24 field report: "кнопка почти сразу меняется на Queue,
+// отменить задачу неактивна"). The frontend pushes everything we need as
+// events on app.api - no polling: "status" carries queue_remaining,
+// execution_start/executing turn the bar live, *_success/error/interrupted
+// clear it. The Cancel button posts /interrupt exactly like the native UI.
+// ---------------------------------------------------------------------------
+
+const qStatus = { remaining: null, running: false }; // last seen server truth
+let qApiWiredOnce = false;
+
+/** Robust reader for queue_remaining: official payloads put it under
+ *  detail.exec_info, some builds nest it deeper - search shallow-first. */
+export function parseQueueRemaining(detail) {
+    const found = { v: null };
+    const walk = (obj, depth) => {
+        if (found.v != null || !obj || typeof obj !== "object" || depth > 6) return;
+        for (const k of Object.keys(obj)) {
+            const v = obj[k];
+            if (k === "queue_remaining" && Number.isFinite(Number(v))) {
+                found.v = Number(v);
+                return;
+            }
+            walk(v, depth + 1);
+            if (found.v != null) return;
+        }
+    };
+    try { walk(detail, 0); } catch (_) {}
+    return found.v;
+}
+
+function setQueueState(patch) {
+    let changed = false;
+    for (const k of Object.keys(patch)) {
+        if (qStatus[k] !== patch[k]) { qStatus[k] = patch[k]; changed = true; }
+    }
+    if (changed) paintAllQueues();
+}
+
+/**
+ * Subscribe the shared queue-status engine to the ComfyUI api event source.
+ * Idempotent; tolerates being called with nothing (called again from the
+ * extension setup / afterConfigureGraph once the api object exists).
+ */
+export function initQueueStatus(api) {
+    if (qApiWiredOnce || !api || typeof api.addEventListener !== "function") return false;
+    qApiWiredOnce = true;
+    const on = (ev, fn) => {
+        try {
+            api.addEventListener(ev, (e) => {
+                try { fn(e?.detail); } catch (_) { /* listeners must never throw */ }
+            });
+        } catch (_) {}
+    };
+    on("status", (d) => {
+        const r = parseQueueRemaining(d);
+        if (r != null) setQueueState({ remaining: r });
+    });
+    on("execution_start", () => setQueueState({ running: true }));
+    on("executing", (nid) => { if (nid != null) setQueueState({ running: true }); });
+    on("execution_success", () => setQueueState({ running: false }));
+    on("execution_error", () => setQueueState({ running: false }));
+    on("execution_interrupted", () => setQueueState({ running: false }));
+    return true;
+}
+
+/** Mirror qStatus into every rendered hub's queue bar WITHOUT a re-render
+ *  (innerHTML swaps would kill open popups and inline editors). */
+function paintQueueBarDom(root) {
+    const btn = root.querySelector('[data-action="queue-run"]');
+    const intBtn = root.querySelector('[data-action="queue-interrupt"]');
+    const badge = root.querySelector('[data-role="queue-badge"]');
+    if (!btn && !intBtn && !badge) return;
+    const rem = Number(qStatus.remaining);
+    const hasRem = Number.isFinite(rem) && rem > 0;
+    if (badge) {
+        const txt = hasRem ? String(rem) : "";
+        if (badge.textContent !== txt) badge.textContent = txt;
+        badge.classList.toggle("hub-queue-has", hasRem);
+    }
+    btn?.classList.toggle("hub-queue-live", qStatus.running === true);
+    if (intBtn) {
+        intBtn.disabled = !(qStatus.running === true || hasRem);
+        intBtn.classList.toggle("hub-interrupt-on", qStatus.running === true || hasRem);
+    }
+}
+
+function paintAllQueues() {
+    for (const hub of allHubs()) {
+        const st = stateMap.get(hub);
+        if (st?.root) paintQueueBarDom(st.root);
+    }
+}
+
+async function interruptQueueFlow(node) {
+    const st = stateMap.get(node);
+    const btn = st?.root?.querySelector('[data-action="queue-interrupt"]');
+    const api = app.api;
+    try {
+        if (typeof api?.interrupt === "function") {
+            await api.interrupt();
+        } else if (typeof api?.fetchApi === "function") {
+            await api.fetchApi("/interrupt", { method: "POST" });
+        } else {
+            throw new Error("no interrupt API in this frontend");
+        }
+        // Server truth arrives via execution_* events; flip optimistically
+        // so the UI answers instantly even on silent transports.
+        setQueueState({ running: false });
+        flashBtn(btn, "✓");
+    } catch (err) {
+        console.warn("[SettingsHub] interrupt failed:", err);
+        flashBtn(btn, "⚠");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Screen pinning (v24 feature request: "чтобы UI хаба оставался всегда на
+// экране"). The whole hub DOM widget element (`wrap`) is MOVED out of the
+// LiteGraph slot into a fixed-position panel on document.body. Moving (not
+// cloning) preserves every listener; renderHub keeps rebuilding
+// `st.root.innerHTML`, portals and observers are location-independent, so
+// the floating window stays fully functional while the canvas node shrinks
+// to a slim ghost. State persists in the hub config: pinned / pinPos /
+// pinMin survive reloads (getHubConfig normalization in core.js).
+// ---------------------------------------------------------------------------
+
+const pinPanels = new WeakMap(); // hub node -> { panel, head, body, btnMin, btnPin }
+let pinCascade = 0;
+
+function isWrapInPanel(st) {
+    try { return !!(st?.wrap && st.panelBody && st.wrap.parentElement === st.panelBody); }
+    catch (_) { return false; }
+}
+
+/** Live check: is THIS hub currently shown in a floating window? */
+export function isHubFloating(node) {
+    return isWrapInPanel(stateMap.get(node));
+}
+
+function clampPinPos(x, y) {
+    const vw = Number(window.innerWidth) > 0 ? Number(window.innerWidth) : 1280;
+    const vh = Number(window.innerHeight) > 0 ? Number(window.innerHeight) : 800;
+    return {
+        x: Math.min(Math.max(8, Number(x) || 8), Math.max(8, vw - 200)),
+        y: Math.min(Math.max(8, Number(y) || 8), Math.max(8, vh - 64)),
+    };
+}
+
+function savePinPosFromRect(node, panel) {
+    try {
+        const x = parseFloat(panel.style.left || "0") || 0;
+        const y = parseFloat(panel.style.top || "0") || 0;
+        getHubConfig(node).pinPos = clampPinPos(x, y);
+    } catch (_) {}
+}
+
+/** While floating, the canvas node collapses to a title-bar ghost so no
+ *  dead rectangle lingers under the cursor. The PRE-PIN envelope is saved
+ *  and restored verbatim on unpin - a user-sized (FILL) hub must get back
+ *  exactly the height it had, an auto hub re-hugs from there. */
+function slimHubSlot(node, st) {
+    if (st.__slimApplied) return;
+    st.__slimApplied = true;
+    st.__prePinSize = [node.size[0], node.size[1]];
+    const title = titleBarHeight();
+    if (st.widget) st.widget.computeSize = () => [node.size[0], 4];
+    node.__hubAutoSizing = true;
+    try { node.setSize([node.size[0], title + 2]); }
+    finally { node.__hubAutoSizing = false; }
+    node.setDirtyCanvas?.(true, true);
+}
+
+function ensurePinPanel(node, st) {
+    let p = pinPanels.get(node);
+    if (p && p.isConnected !== false) return p;
+
+    const panel = document.createElement("div");
+    panel.className = "hub-pin-panel";
+    panel.dataset.hubPin = "1";
+
+    const head = document.createElement("div");
+    head.className = "hub-pin-head";
+    const grip = document.createElement("span");
+    grip.className = "hub-pin-grip";
+    grip.title = "Drag the window";
+    grip.textContent = "⠿";
+    const ttl = document.createElement("span");
+    ttl.className = "hub-pin-title";
+    ttl.textContent = node.title?.replace(/\s+/g, " ").trim() || "Settings Hub";
+    const btnMin = document.createElement("button");
+    btnMin.type = "button";
+    btnMin.className = "hub-pin-btn hub-pin-min";
+    btnMin.textContent = "–";
+    btnMin.title = "Collapse / expand the pinned window";
+    const btnBack = document.createElement("button");
+    btnBack.type = "button";
+    btnBack.className = "hub-pin-back hub-pin-btn";
+    btnBack.textContent = "📌";
+    btnBack.title = "Return the hub onto the canvas";
+    head.appendChild(grip);
+    head.appendChild(ttl);
+    head.appendChild(btnMin);
+    head.appendChild(btnBack);
+
+    const body = document.createElement("div");
+    body.className = "hub-pin-body";
+    panel.appendChild(head);
+    panel.appendChild(body);
+    document.body.appendChild(panel);
+
+    // Dragging moves the WINDOW, never interferes with row-level dnd (the
+    // handle lives here, rows' reorder handles stay inside the hub root).
+    let drag = null;
+    head.addEventListener("pointerdown", (e) => {
+        if (e.target.closest?.(".hub-pin-btn")) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const r = panel.getBoundingClientRect();
+        drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+        try { head.setPointerCapture?.(e.pointerId); } catch (_) {}
+    });
+    head.addEventListener("pointermove", (e) => {
+        if (!drag) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const pos = clampPinPos(e.clientX - drag.dx, e.clientY - drag.dy);
+        panel.style.left = `${pos.x}px`;
+        panel.style.top = `${pos.y}px`;
+    });
+    const endDrag = () => {
+        if (!drag) return;
+        drag = null;
+        savePinPosFromRect(node, panel);
+    };
+    head.addEventListener("pointerup", endDrag);
+    head.addEventListener("pointercancel", endDrag);
+    head.addEventListener("dblclick", (e) => e.stopPropagation());
+
+    btnMin.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const cfg = getHubConfig(node);
+        cfg.pinMin = !cfg.pinMin;
+        panel.classList.toggle("hub-pin-collapsed", cfg.pinMin);
+        savePinPosFromRect(node, panel);
+    });
+    btnBack.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleHubPinned(node, false);
+    });
+
+    p = { panel, head, body, btnMin, btnBack };
+    pinPanels.set(node, p);
+    st.panelBody = body;
+    return p;
+}
+
+function floatHub(node) {
+    const st = stateMap.get(node);
+    if (!st?.wrap) return false;
+    const cfg = getHubConfig(node);
+    const p = ensurePinPanel(node, st);
+    if (!isWrapInPanel(st)) {
+        st.__hubHomeParent = st.wrap.parentElement ?? null;
+        st.__hubHomeNext = st.wrap.nextSibling;
+        p.body.appendChild(st.wrap);
+    }
+    p.panel.classList.toggle("hub-pin-collapsed", !!cfg.pinMin);
+    let pos = (cfg.pinPos && Number.isFinite(Number(cfg.pinPos.x)))
+        ? { x: cfg.pinPos.x, y: cfg.pinPos.y } : null;
+    if (!pos) {
+        pos = { x: 120 + (pinCascade % 7) * 26, y: 90 + (pinCascade % 7) * 26 };
+        pinCascade++;
+        cfg.pinPos = pos;
+    }
+    const c = clampPinPos(pos.x, pos.y);
+    p.panel.style.left = `${c.x}px`;
+    p.panel.style.top = `${c.y}px`;
+    slimHubSlot(node, st);
+    // Reflect the state on the (already mounted) tab-bar marker instantly.
+    const tgl = st.root.querySelector('[data-action="pin-toggle"]');
+    if (tgl) {
+        tgl.classList.add("hub-pin-on");
+        tgl.setAttribute("aria-pressed", "true");
+    }
+    paintQueueBarDom(st.root);
+    return true;
+}
+
+function homeHub(node) {
+    const st = stateMap.get(node);
+    if (st?.wrap && st.__hubHomeParent) {
+        try {
+            st.__hubHomeParent.insertBefore(st.wrap, st.__hubHomeNext ?? null);
+        } catch (_) {
+            try { st.__hubHomeParent.appendChild(st.wrap); } catch (_) {}
+        }
+        st.__hubHomeParent = null;
+        st.__hubHomeNext = null;
+    }
+    const p = pinPanels.get(node);
+    try { p?.panel.remove(); } catch (_) {}
+    if (p) pinPanels.delete(node);
+    if (st) {
+        // Give the node back its pre-pin envelope BEFORE the follow-up
+        // render/layout pass - FILL hubs must not adopt the ghost height.
+        if (st.__slimApplied && st.__prePinSize) {
+            node.__hubAutoSizing = true;
+            try { node.setSize([st.__prePinSize[0], st.__prePinSize[1]]); }
+            finally { node.__hubAutoSizing = false; }
+            st.__prePinSize = null;
+        }
+        st.panelBody = null;
+        st.__slimApplied = false;
+    }
+    return true;
+}
+
+/**
+ * Toggle (or force) the floating screen-pinned window for a hub.
+ * Returns the resulting pinned state.
+ */
+export function toggleHubPinned(node, want) {
+    if (!node || node.type !== "SettingsHub") return false;
+    const cfg = getHubConfig(node);
+    const target = typeof want === "boolean" ? want : !cfg.pinned;
+    cfg.pinned = target;
+    node.setDirtyCanvas?.(true, true);
+    if (target) {
+        floatHub(node);
+    } else {
+        homeHub(node);
+        renderHub(node); // restores canvas slot sizing + normal layout
+    }
+    return target;
+}
+
+/** Full teardown (hub deleted from the graph): no orphan windows left. */
+export function disposeHubVisuals(node) {
+    const p = pinPanels.get(node);
+    try { p?.panel.remove(); } catch (_) {}
+    pinPanels.delete(node);
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +789,39 @@ export function comboTokensMatch(text, query) {
     return toks.every((t) => hay.includes(t));
 }
 
+// ---------------------------------------------------------------------------
+// v24 long-path readability. Model dropdown values are routinely full paths
+// ("checkpoints/sdxl/jibMixReal_v60.safetensors"). The popup widens instead
+// of clipping and very long entries render as TWO lines: highlighted file
+// name over a dim monospace directory strip. Full text stays one hover away
+// via native tooltips, so the compact look of the hub is never sacrificed.
+
+/** Split a combo value into {base, dir} for the two-line display.
+ *  base is the LAST path segment (file name); dir keeps its separator.
+ *  Returns null when there is no meaningful split (no separator at all). */
+export function splitComboPathText(text) {
+    const s = String(text ?? "");
+    const m = s.match(/^(.*[\/\\:])([^\/\\:]+)$/);
+    if (!m || !m[1]) return null;
+    return { dir: m[1], base: m[2] };
+}
+
+const COMBO_TWO_LINE_MIN_LEN = 34;
+
+function comboOptionHtml(v, idx, isCur) {
+    const split = splitComboPathText(v);
+    // NOTE: no literal check-mark in the markup - the .hub-combo-cur tick
+    // comes from CSS ::before, keeping textContent clean for a11y/tests.
+    if (split && v.length >= COMBO_TWO_LINE_MIN_LEN) {
+        return `<div class="hub-combo-opt hc-two${isCur ? " hub-combo-cur" : ""}" data-idx="${idx}" ` +
+            `title="${esc(v)}">` +
+            `<span class="hc-base">${esc(split.base)}</span>` +
+            `<span class="hc-dir">${esc(split.dir)}</span></div>`;
+    }
+    return `<div class="hub-combo-opt${isCur ? " hub-combo-cur" : ""}" data-idx="${idx}" ` +
+        `title="${esc(v)}">${esc(v)}</div>`;
+}
+
 export function closeComboPopup() {
     if (!comboPopState) return;
     try { comboPopState.pop.remove(); } catch (_) {}
@@ -450,8 +842,7 @@ function paintComboList() {
     if (!st) return;
     st.filtered = st.vals.filter((v) => comboTokensMatch(v, st.search.value));
     st.list.innerHTML = st.filtered.length
-        ? st.filtered.map((v, i) =>
-            `<div class="hub-combo-opt${v === st.cur ? " hub-combo-cur" : ""}" data-idx="${i}">${esc(v)}</div>`).join("")
+        ? st.filtered.map((v, i) => comboOptionHtml(v, i, v === st.cur)).join("")
         : `<div class="hub-combo-none">no matches</div>`;
     // Keep the keyboard cursor inside the filtered set (default: first hit).
     st.active = st.filtered.length ? Math.max(0, Math.min(st.active || 0, st.filtered.length - 1)) : 0;
@@ -796,11 +1187,14 @@ function refreshValuesDom(node) {
                     // Trigger button: keep the displayed value in lockstep with
                     // the source widget and flag values missing from the live
                     // list (dynamic combos can legally hold stale values).
+                    // v24: keep the full-value tooltip in lockstep as well.
                     const fresh = liveComboValues(item, tw).map(String);
                     control.dataset.sig = fresh.join("¦");
                     const cur = String(tw.value ?? "");
                     const lblEl = control.querySelector(".hub-combo-label");
                     if (lblEl && lblEl.textContent !== cur) lblEl.textContent = cur;
+                    const fullTip = `${cur}${cur ? "\n" : ""}Searchable list - filter parts separated by space, all must match, case-insensitive`;
+                    if (control.getAttribute("title") !== fullTip) control.setAttribute("title", fullTip);
                     control.classList.toggle("hub-combo-missing", !fresh.includes(cur));
                     break;
                 }
@@ -1042,7 +1436,14 @@ function deleteTabFlow(node, cfg, tabId) {
 
 function renderHub(node) {
     if (!node || node.type !== "SettingsHub") return;
-    if (node.flags?.collapsed) return; // DOM widget hidden while collapsed
+    // DOM widget is hidden while the node is collapsed - EXCEPT when the hub
+    // is pinned to the screen: the floating window lives on document.body,
+    // independent of canvas visibility, exactly what users asked for.
+    {
+        let cfgC = null;
+        try { cfgC = getHubConfig(node); } catch (_) { /* properties not ready */ }
+        if (node.flags?.collapsed && !cfgC?.pinned) return;
+    }
 
     const st = ensureHubDom(node);
     const cfg = getHubConfig(node);
@@ -1108,6 +1509,15 @@ function renderHub(node) {
 
     // Mount portal embeds (DOM relocation / canvas draw loops).
     Portals.mountPortals(node, st.root);
+
+    // v24 queue bar: paint current server truth immediately after rebuild.
+    try { paintQueueBarDom(st.root); } catch (_) {}
+
+    // v24 screen pinning: restore the floating window whenever the config
+    // says pinned (including right after a page reload).
+    try {
+        if (getHubConfig(node).pinned && !isWrapInPanel(st)) floatHub(node);
+    } catch (_) {}
 
     // The innerHTML swap rebuilt .hub-container-inner - re-attach the
     // content observer to the fresh element.
@@ -1185,7 +1595,11 @@ function setNodeHeight(node, h) {
 }
 
 function applyHubLayout(node, st) {
+    if (!st) return;
     if (node.flags?.collapsed) return;
+    // While the hub DOM lives in a floating panel the NODE's slot geometry
+    // stays frozen (slim ghost) - layout passes must not fight it.
+    if (st.panelBody && st.wrap?.parentElement === st.panelBody) return;
     const title = titleBarHeight();
     const measured = measureContent(node, st);
     const prevMeasured = st._prevMeasured ?? 0;
@@ -1309,6 +1723,8 @@ function wireEvents(node, st) {
             case "add-tab": addTabFlow(node, cfg); break;
             case "del-tab": deleteTabFlow(node, cfg, btn.closest(".hub-tab-btn")?.dataset.tab); break;
             case "queue-run": runQueueFlow(node); break;
+            case "queue-interrupt": interruptQueueFlow(node); break;
+            case "pin-toggle": toggleHubPinned(node); break;
             case "locate": {
                 const row = btn.closest("[data-hub-item]");
                 const item = cfg.items.find((i) => i.id === row?.dataset.hubItem);
@@ -1458,6 +1874,16 @@ function wireEvents(node, st) {
 registerStructural(renderHub);
 
 registerValues(refreshValuesDom);
+
+// Queue-status engine binding point: by setup() time app.api exists in real
+// frontends. Idempotent - safe to retry on every graph (re)configuration.
+try {
+    app.registerExtension({
+        name: "Comfy.SettingsHub.queuestat",
+        setup() { try { initQueueStatus(app.api); } catch (_) {} },
+        afterConfigureGraph() { try { initQueueStatus(app.api); } catch (_) {} },
+    });
+} catch (_) { /* duplicate extension name on hot reloads is harmless */ }
 
 export function syncHubNode(node) {
     renderHub(node);

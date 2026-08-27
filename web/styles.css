@@ -768,3 +768,222 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
     background: #2e2e4a;
     border-color: #4a4a6e;
 }
+
+/* ---------------------------------------------------------------------------
+   v24: searchable combo - long path readability
+   --------------------------------------------------------------------------- */
+
+/* The popup grows with its content (long model paths) but never swallows
+   the viewport; options still ellipsize individually at the hard cap. */
+.hub-combo-pop {
+    width: max-content;
+    max-width: min(520px, 88vw);
+}
+
+/* Two-line option: highlighted file name over a dim monospace directory. */
+.hub-combo-opt.hc-two {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.25;
+    padding: 4px 8px;
+}
+
+.hub-combo-opt .hc-base {
+    font-weight: 600;
+    color: #eaeaef;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.hub-combo-opt .hc-dir {
+    font-size: 9px;
+    color: #7e7ea6;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.hub-combo-opt:hover .hc-dir,
+.hub-combo-opt.hub-combo-active .hc-dir {
+    color: #9a9ac2;
+}
+
+/* The current-value tick moves onto the first line for two-line rows
+   (::before on a flex-column parent would steal its own row). */
+.hub-combo-opt.hub-combo-cur::before {
+    content: none;
+}
+
+.hub-combo-opt.hub-combo-cur > :first-child::before {
+    content: "\2713\00a0";
+    color: #6fae58;
+}
+
+/* Single-line current keeps the classic tick via first-child too (the whole
+   text node is inside no span - so keep the old rule ONLY when needed). */
+.hub-combo-opt.hub-combo-cur:not(.hc-two)::before {
+    content: "\2713\00a0";
+    color: #6fae58;
+}
+
+/* ---------------------------------------------------------------------------
+   v24: queue bar live state + Cancel (interrupt)
+   --------------------------------------------------------------------------- */
+
+/* Persistent queue chip: shows server-side queue_remaining while positive */
+.hub-queue-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 16px;
+    padding: 0 5px;
+    border-radius: 8px;
+    background: #23233a;
+    border: 1px solid #3a3a55;
+    color: #9aa0c0;
+    font-size: 10px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.hub-queue-badge.hub-queue-has {
+    background: #2b3550;
+    border-color: #45538a;
+    color: #dce8ff;
+}
+
+/* The run button breathes while execution is live - the "state reverted"
+   complaint is answered by visible persistent activity. */
+.hub-btn.hub-queue-run.hub-queue-live {
+    border-color: #7ba0e0;
+    box-shadow: 0 0 0 1px rgba(123, 160, 224, 0.35),
+                0 0 8px rgba(123, 160, 224, 0.35);
+}
+
+.hub-btn.hub-interrupt {
+    min-width: 24px;
+    padding: 2px 6px;
+    opacity: 0.32;
+}
+
+.hub-btn.hub-interrupt.hub-interrupt-on {
+    opacity: 1;
+    background: #40272b;
+    border-color: #8a4a4e;
+    color: #ffc9c9;
+}
+
+.hub-btn.hub-interrupt.hub-interrupt-on:hover {
+    background: #573036;
+    color: #ffe1e1;
+}
+
+/* ---------------------------------------------------------------------------
+   v24: screen-pinned floating hub window
+   --------------------------------------------------------------------------- */
+
+.hub-pin-panel {
+    position: fixed;
+    z-index: 99990;
+    width: 380px;
+    max-width: calc(100vw - 16px);
+    background: #16162acc;
+    backdrop-filter: blur(6px);
+    border: 1px solid #44445e;
+    border-radius: 8px;
+    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    font-family: "Inter", -apple-system, sans-serif;
+    user-select: none;
+}
+
+.hub-pin-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 7px;
+    cursor: grab;
+    background: #10101fdd;
+    border-bottom: 1px solid #33334e;
+    touch-action: none; /* own the gesture: no text selection / scroll jank */
+}
+
+.hub-pin-head:active {
+    cursor: grabbing;
+}
+
+.hub-pin-grip {
+    color: #66668a;
+    font-size: 11px;
+}
+
+.hub-pin-title {
+    flex: 1;
+    font-size: 11px;
+    color: #cfcfe6;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.hub-pin-btn {
+    background: #23233a;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    color: #c9c9de;
+    font-size: 10px;
+    padding: 1px 6px;
+    cursor: pointer;
+    line-height: 1.3;
+    flex-shrink: 0;
+}
+
+.hub-pin-btn:hover {
+    background: #2e2e4a;
+    color: #fff;
+}
+
+button.hub-pin-back {
+    font-size: 12px;
+    padding: 1px 7px;
+}
+
+.hub-pin-body {
+    max-height: min(76vh, 720px);
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* Collapsed state: only the header remains (state persists in cfg.pinMin) */
+.hub-pin-panel.hub-pin-collapsed .hub-pin-body {
+    display: none;
+}
+
+/* Tab-bar pin toggle */
+.hub-tab-bar .hub-pin-toggle {
+    background: #20202f;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 10px;
+    cursor: pointer;
+    filter: grayscale(1);
+    opacity: 0.65;
+}
+
+.hub-tab-bar .hub-pin-toggle:hover {
+    opacity: 1;
+    background: #303048;
+}
+
+.hub-tab-bar .hub-pin-toggle.hub-pin-on {
+    filter: none;
+    opacity: 1;
+    border-color: #8a7a45;
+    box-shadow: 0 0 6px rgba(255, 212, 121, 0.35);
+}

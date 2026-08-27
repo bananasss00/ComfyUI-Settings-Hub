@@ -65,76 +65,209 @@ export function allHubs() {
 
 /**
  * Every LGraph-like object reachable right now: the root graph, whatever
- * graph the canvas is showing, plus any nested subgraph objects duck-typed
- * off the nodes. Defensive throughout - field names differ between frontend
- * generations, and an exotic node getter must never break enumeration.
+ * graph the canvas is showing, plus any nested subgraph objects.
+ *
+ * v24 - FIELD-HARDENED (report: hub on root, pin inside subgraph1->subgraph2
+ * showed "!"). The old walker only understood `_nodes` arrays plus a short
+ * hand-list of holder fields (`n.subgraph`, `n.subgraphs`) and read
+ * `g._subgraphs` ONLY when it was an Array. Real frontends break every one
+ * of those assumptions somewhere: newer builds keep subgraph registries in
+ * a Map (or expose nested definitions only through less obvious refs), id
+ * types drift between number and string after re-mapping, and deep nesting
+ * adds levels the old per-item depth budget could cut off. The walker now:
+ *   1. walks LEVELS, not queue items (maxDepth counts hierarchy depth);
+ *   2. scans BOTH `_nodes` and public `nodes` node lists;
+ *   3. accepts Array / Map / plain-object registries (`_subgraphs`,
+ *      `subgraphs`, `subgraphsById`);
+ *   4. DUCK-TYPE HARVESTS candidate graphs from EVERY own enumerable node
+ *      property that looks like an LGraph (owns `_nodes`/`nodes` array) -
+ *      naming conventions stop mattering; cycles are deduped by identity.
  */
-export function allGraphs(maxDepth = 6) {
-    const seen = new Set();
+function looksLikeGraph(obj) {
+    return !!(obj && typeof obj === "object" &&
+        (Array.isArray(obj._nodes) || Array.isArray(obj.nodes)));
+}
+
+function nodeListOf(g) {
+    // Union of the raw + public lists; nodes may legally appear in both,
+    // callers tolerate duplicates cheaply (Map/Set by reference).
     const out = [];
-    const queue = [];
-
-    const push = (g) => {
-        if (g && typeof g === "object" && !seen.has(g)) {
-            seen.add(g);
-            out.push(g);
-            queue.push(g);
-        }
-    };
-
-    try { push(app.graph); } catch (_) {}
-    try { push(app.canvas?.graph); } catch (_) {}
-    try { push(window.comfyAPI?.app?.graph); } catch (_) {}
-
-    for (let i = 0; i < queue.length && i < maxDepth * 64; i++) {
-        const g = queue[i];
-        for (const n of g?._nodes ?? []) {
-            try { push(n.subgraph); } catch (_) {}      // SubgraphNode holder
-            if (Array.isArray(n.subgraphs)) {
-                for (const s of n.subgraphs) { try { push(s); } catch (_) {} }
-            }
-        }
-        if (Array.isArray(g?._subgraphs)) {
-            for (const s of g._subgraphs) { try { push(s); } catch (_) {} }
-        }
-        if (--maxDepth <= 0) break;
+    if (Array.isArray(g?._nodes)) out.push(...g._nodes);
+    if (Array.isArray(g?.nodes) && g.nodes !== g._nodes) {
+        for (const n of g.nodes) if (!out.includes(n)) out.push(n);
     }
     return out;
 }
 
-/** Node by numeric id across root graph AND every reachable subgraph. */
+/** Registries of subgraph DEFINITIONS held on a graph itself. */
+function registryEntriesOf(g) {
+    const out = [];
+    for (const key of ["_subgraphs", "subgraphs", "subgraphsById"]) {
+        let reg;
+        try { reg = g?.[key]; } catch (_) { continue; }
+        try {
+            if (!reg) continue;
+            if (Array.isArray(reg)) { out.push(...reg); continue; }
+            if (typeof reg.forEach === "function") {          // Map / Set
+                reg.forEach((v) => { if (v && typeof v === "object") out.push(v); });
+                continue;
+            }
+            if (typeof reg === "object") {
+                for (const k of Object.keys(reg)) {           // {uuid: Subgraph}
+                    const v = reg[k];
+                    if (v && typeof v === "object") out.push(v);
+                }
+            }
+        } catch (_) {}
+    }
+    return out;
+}
+
+function seedRootGraphs(push) {
+    try { push(app.graph); } catch (_) {}
+    try { push(app.canvas?.graph); } catch (_) {}
+    try { push(window.comfyAPI?.app?.graph); } catch (_) {}
+}
+
+/** Child graphs directly reachable off one node's own properties. */
+export function childGraphsOfNode(n) {
+    const found = [];
+    const consider = (v) => { if (looksLikeGraph(v)) found.push(v); };
+    try { consider(n.subgraph); } catch (_) {}
+    try {
+        if (Array.isArray(n.subgraphs)) {
+            for (const s of n.subgraphs) consider(s);
+        }
+    } catch (_) {}
+    // Duck-type harvest over remaining OWN keys - future-proof against
+    // renamed holder fields without touching widget values or callbacks.
+    try {
+        for (const k of Object.getOwnPropertyNames(n ?? {})) {
+            if (k === "subgraph" || k === "subgraphs") continue;
+            let v;
+            try { v = n[k]; } catch (_) { continue; }
+            if (v && typeof v === "object") consider(v);
+        }
+    } catch (_) {}
+    return found;
+}
+
+export function allGraphs(maxDepth = 12) {
+    const seen = new Set();
+    const out = [];
+    const push = (g) => {
+        if (looksLikeGraph(g) && !seen.has(g)) {
+            seen.add(g);
+            out.push(g);
+            return true;
+        }
+        return false;
+    };
+
+    seedRootGraphs(push);
+    // Root-seeded graphs first, then level-by-level expansion.
+    let frontier = [...out];
+    for (let depth = 0; depth < maxDepth && frontier.length; depth++) {
+        const next = [];
+        for (const g of frontier) {
+            for (const n of nodeListOf(g)) {
+                for (const child of childGraphsOfNode(n)) {
+                    if (push(child)) next.push(child);
+                }
+            }
+            for (const def of registryEntriesOf(g)) {
+                if (push(def)) next.push(def);
+            }
+        }
+        frontier = next;
+    }
+    return out;
+}
+
+/** Node by numeric OR stringified id across root graph AND every reachable
+ *  subgraph. The loose second pass absorbs frontend generations that re-map
+ *  inner ids to strings (a stored numeric pin id still matches). Exact id
+ *  equality ALWAYS wins everywhere before any type-loose comparison runs -
+ *  reused/garbage-collected legacy ids must never shadow real ones. */
 export function findNodeByIdEverywhere(id) {
     try {
         const local = app.graph?.getNodeById?.(id);
-        if (local) return local;
+        if (local != null) return local;
     } catch (_) {}
+    const key = String(id);
+    let looseHit = null;
     for (const g of allGraphs()) {
-        const hit = (g?._nodes ?? []).find((n) => n.id === id);
-        if (hit) return hit;
+        for (const n of nodeListOf(g)) {
+            if (n.id === id) return n;              // authoritative exact hit
+            if (looseHit == null && String(n.id) === key) looseHit = n;
+        }
     }
+    return looseHit;
+}
+
+const diagReported = new Set();
+
+/** One-line console breadcrumb when a pin stays unresolved - turns future
+ *  field reports into actionable data (how many graphs/nodes were scanned).
+ *  Fired once per target identity, never spams. */
+function reportUnresolved(item, graphsScanned, nodesScanned) {
+    try {
+        const key = `${item?.targetNodeId}|${item?.targetTitle}|${item?.widgetToBind}`;
+        if (diagReported.has(key)) return;
+        diagReported.add(key);
+        console.info(
+            "[SettingsHub] pin unresolved:", JSON.stringify({
+                title: item?.targetTitle, widget: item?.widgetToBind,
+                nodeId: item?.targetNodeId,
+            }),
+            `- scanned ${graphsScanned} graph(s), ${nodesScanned} node(s).` +
+            "\nIf this persists please report it with your ComfyUI frontend version.");
+    } catch (_) {}
+}
+
+let lastScanStats = { graphs: 0, nodes: 0 };
+
+/** Diagnostic snapshot of the most recent cross-graph scan (tests/support). */
+export function lastResolverStats() { return { ...lastScanStats }; }
+
+function scanAllNodesFor(pred) {
+    const graphs = allGraphs();
+    let visited = 0;
+    for (const g of graphs) {
+        for (const n of nodeListOf(g)) {
+            visited++;
+            if (pred(n)) {
+                lastScanStats = { graphs: graphs.length, nodes: visited };
+                return n;
+            }
+        }
+    }
+    lastScanStats = { graphs: graphs.length, nodes: visited };
     return null;
 }
 
 /**
  * Resolve the live target node behind a binding ITEM.
- * Pass 1: stored node id, searched everywhere (the common case).
+ * Pass 1: stored node id (exact or stringified), searched everywhere.
  * Pass 2 (drift repair): if the id died (reloads renumber nodes under some
  * frontends) fall back to the persisted source TITLE + widget-name pair -
  * far better than orphaning a perfectly good pin. "targetTitle" is written
  * by createBinding/createPortalBinding; older configs simply skip this.
  */
 export function resolveBindingTarget(item) {
-    let tn = findNodeByIdEverywhere(item?.targetNodeId);
-    if (tn) return tn;
+    const tn = findNodeByIdEverywhere(item?.targetNodeId);
+    if (tn != null) return tn;
     const wantTitle = item?.targetTitle != null ? String(item.targetTitle) : "";
-    if (!wantTitle) return null;
-    for (const g of allGraphs()) {
-        const hit = (g?._nodes ?? []).find((n) =>
-            String(n.title ?? "") === wantTitle &&
-            (!item.widgetToBind ||
-             n.widgets?.some((w) => w.name === item.widgetToBind)));
-        if (hit) return hit;
+    if (!wantTitle) {
+        reportUnresolved(item, lastResolverStats().graphs, lastResolverStats().nodes);
+        return null;
     }
+    const hit = scanAllNodesFor((n) =>
+        String(n.title ?? "") === wantTitle &&
+        (!item.widgetToBind ||
+         n.widgets?.some((w) => w.name === item.widgetToBind)));
+    if (hit) return hit;
+    reportUnresolved(item, lastResolverStats().graphs, lastResolverStats().nodes);
     return null;
 }
 
@@ -146,46 +279,52 @@ export function resolveBindingTarget(item) {
  *
  * Locate navigation uses this to hop INTO nested subgraphs instead of just
  * panning the wrong canvas.
+ *
+ * v24: walks the SAME hardened shape space as allGraphs() - union node
+ * lists, Array/Map/object subgraph registries and duck-typed holder refs -
+ * so a target discovered by the resolver is ALWAYS navigable by locate.
  */
 export function findHolderChainOf(targetNode) {
     if (!targetNode || typeof targetNode !== "object") return null;
     const chains = new Map();   // graph -> holders[] to reach it
     const seen = new Set();
-    const queue = [];
+    let frontier = [];
 
     const seed = (g) => {
-        if (g && typeof g === "object" && !seen.has(g)) {
+        if (looksLikeGraph(g) && !seen.has(g)) {
             seen.add(g);
             chains.set(g, []);
-            queue.push(g);
+            frontier.push(g);
         }
     };
-    try { seed(app.graph); } catch (_) {}
-    try { seed(app.canvas?.graph); } catch (_) {}
-    try { seed(window.comfyAPI?.app?.graph); } catch (_) {}
+    seedRootGraphs(seed);
 
-    for (let qi = 0; qi < queue.length; qi++) {
-        const g = queue[qi];
-        const path = chains.get(g) ?? [];
-        for (const n of g?._nodes ?? []) {
-            if (n === targetNode) return [...path];
-            try {
-                if (n.subgraph && !seen.has(n.subgraph)) {
-                    seen.add(n.subgraph);
-                    chains.set(n.subgraph, [...path, n]);
-                    queue.push(n.subgraph);
-                }
-            } catch (_) {}
-            if (Array.isArray(n.subgraphs)) {
-                for (const s of n.subgraphs) {
-                    if (s && typeof s === "object" && !seen.has(s)) {
-                        seen.add(s);
-                        chains.set(s, [...path, n]);
-                        queue.push(s);
+    for (let depth = 0; depth < 16 && frontier.length; depth++) {
+        const next = [];
+        for (const g of frontier) {
+            const path = chains.get(g) ?? [];
+            for (const n of nodeListOf(g)) {
+                if (n === targetNode) return [...path];
+                for (const child of childGraphsOfNode(n)) {
+                    if (!seen.has(child)) {
+                        seen.add(child);
+                        chains.set(child, [...path, n]);
+                        next.push(child);
                     }
                 }
             }
+            for (const def of registryEntriesOf(g)) {
+                // Definition registries lack a specific holder node; the
+                // outermost entry carries the graph itself (holders chain
+                // stays as-is - locate only needs A valid entry ladder).
+                if (!seen.has(def)) {
+                    seen.add(def);
+                    chains.set(def, [...path]);
+                    next.push(def);
+                }
+            }
         }
+        frontier = next;
     }
     return null;
 }
@@ -208,6 +347,15 @@ export function getHubConfig(node) {
     if (!Array.isArray(cfg.tabs)) cfg.tabs = [];
     if (!Array.isArray(cfg.items)) cfg.items = [];
     if (!cfg.presets || typeof cfg.presets !== "object") cfg.presets = {};
+    // v24 screen-pin state (boolean, viewport position, collapsed panel).
+    if (cfg.pinned !== true) cfg.pinned = false;
+    if (cfg.pinPos && typeof cfg.pinPos === "object" &&
+        Number.isFinite(Number(cfg.pinPos.x)) && Number.isFinite(Number(cfg.pinPos.y))) {
+        cfg.pinPos = { x: Number(cfg.pinPos.x), y: Number(cfg.pinPos.y) };
+    } else {
+        cfg.pinPos = null;
+    }
+    if (cfg.pinMin !== true) cfg.pinMin = false;
     return cfg;
 }
 
