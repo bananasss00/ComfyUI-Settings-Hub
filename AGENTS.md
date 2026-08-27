@@ -58,6 +58,11 @@ dev_plan.md            — исходный технический спек пр
   самолечит типы по живому виджету (`widget_binding ↔ widget_portal`).
 - НЕ примитивный value или null с кастомным DOM ⇒ `"portal"` (без хардкода
   под конкретные ноды; type:"button" исключён как helper).
+- Правило DOM-панелей: виджет с РЕАЛЬНЫМ контейнером (`element`/`contentEl`,
+  не textarea) — это `"portal"`, ДАЖЕ если value — строка (LTX/PlagueKind
+  «LoRA Loader Stack»: один addDOMWidget + непрозрачный JSON). Гвардии:
+  textarea остаётся multiline-зеркалом; объявленные примитивы (values,
+  min/max/step, number/slider/int/float в типе) не переклассифицируются.
 
 ### Порталы (живые встраивания)
 - Перед ЛЮБЫМ `innerHTML` рендера: `Portals.releaseAll(node)` — иначе
@@ -106,9 +111,12 @@ dev_plan.md            — исходный технический спек пр
   `pushControlToTarget` (sync-lock), затем мгновенное обновление label.
 
 ### Пиннинг и меню
-- Три пути: (1) ПКМ по hover-виджету — `getWidgetOnPos`; (2) пункт меню ноды
-  со детерминированным списком portal-виджетов (+ "whole panel" первым для
-  >=2 частей); (3) Ctrl/Cmd+ПКМ — capture-override раньше родных меню панелей.
+- Четыре пути: (1) ПКМ по hover-виджету — `getWidgetOnPos`; (2) пункт меню ноды
+  со детерминированным списком portal-виджетов ("whole panel" первым для >=2
+  частей ИЛИ одиночной addDOMWidget-панели — она без members[], через
+  relocation); (3) Ctrl/Cmd+ПКМ — capture-override раньше родных меню панелей;
+  (4) ПРОСТОЙ ПКМ по поверхности DOM-панели (`attachPanelSurfacePinMenu`) —
+  там меню LiteGraph не бывает, открывалось сырое браузерное.
 - Shift+ПКМ везде — эскейп-хатч к браузерному/native меню. Не ломать.
 - Поверхности хаба (`.hub-menu`, `.settings-hub-wrap`, `.hub-portal-host`)
   никогда не перехватываются.

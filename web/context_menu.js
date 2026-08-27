@@ -1,6 +1,7 @@
 import { app } from "../../scripts/app.js";
 import {
-    getHubConfig, createBinding, createPortalBinding, createNewHub, HUB_NODE_NAME, detectWidgetType,
+    getHubConfig, createBinding, createPortalBinding, createNewHub, HUB_NODE_NAME,
+    detectWidgetType, portalKindOf,
 } from "./core.js";
 
 // ============================================================================
@@ -13,6 +14,7 @@ import {
 export function attachContextMenu() {
     attachDomWidgetPinMenu();
     attachCtrlRmbOverride();
+    attachPanelSurfacePinMenu();
 
     app.registerExtension({
         name: "Comfy.SettingsHub.context",
@@ -101,12 +103,29 @@ function panelLabel(w) {
 /** Whole-panel entries: bind ALL portal-classified widgets of the node as ONE
  *  group embed. rgthree's Power Lora Loader draws its header, every per-lora
  *  row and the divider as SEPARATE sibling widgets - pinning fragments
- *  reproduces only pieces, so the preferred action pins them together. */
+ *  reproduces only pieces, so the preferred action pins them together.
+ *
+ *  A panel that lives ENTIRELY inside ONE addDOMWidget container (LTX /
+ *  MiniMax H3 "LoRA Loader Stack": per-lora rows AND the add-button are all
+ *  children of a single element) gets the same friendly whole-panel wording.
+ *  Those single-container panels deliberately DO NOT build members[] groups:
+ *  mountPortals RELOCATES live DOM containers (all listeners stay native), a
+ *  canvas group would only paint nothing. */
 function buildWholeBlockEntries(node, panels, hubs) {
-    if (!panels || panels.length < 2) return [];
-    const what =
-        `whole panel «${String(node?.title || panelLabel(panels[0])).slice(0, 26)}» ` +
-        `(${panels.length} parts)`;
+    if (!panels || !panels.length) return [];
+    const multi = panels.length > 1;
+    const loneDomPanel =
+        !multi && portalKindOf(panels[0]) === "dom" ? panels[0] : null;
+    if (!multi && !loneDomPanel) return [];
+
+    const title = String(node?.title || "").trim().slice(0, 26);
+    const what = multi
+        ? `whole panel «${title || panelLabel(panels[0])}» (${panels.length} parts)`
+        : `whole panel «${title || panelLabel(loneDomPanel)}»`;
+    const bindSingle = (hub, tabId) =>
+        createBinding(hub, node, loneDomPanel, tabId, undefined,
+            { label: node?.title || undefined });
+    const bindGroup = (hub, tabId) => createPortalBinding(hub, node, panels, tabId);
     const entries = [];
 
     if (hubs.length === 0) {
@@ -115,8 +134,8 @@ function buildWholeBlockEntries(node, panels, hubs) {
             callback: () => {
                 const newHub = createNewHub();
                 if (newHub) {
-                    createPortalBinding(
-                        newHub, node, panels, getActiveTabId(getHubConfig(newHub)));
+                    const tid = getActiveTabId(getHubConfig(newHub));
+                    if (loneDomPanel) bindSingle(newHub, tid); else bindGroup(newHub, tid);
                 }
             },
         });
@@ -129,7 +148,7 @@ function buildWholeBlockEntries(node, panels, hubs) {
         for (const tab of cfg.tabs) {
             entries.push({
                 content: `🪟 ${what} → ${prefix}${tab.name}`,
-                callback: () => createPortalBinding(hub, node, panels, tab.id),
+                callback: () => (loneDomPanel ? bindSingle(hub, tab.id) : bindGroup(hub, tab.id)),
             });
         }
         entries.push({
@@ -139,7 +158,7 @@ function buildWholeBlockEntries(node, panels, hubs) {
                 if (name !== null) {
                     const tabId = `tab_${Date.now().toString(36)}`;
                     cfg.tabs.push({ id: tabId, name, order: cfg.tabs.length });
-                    createPortalBinding(hub, node, panels, tabId);
+                    if (loneDomPanel) bindSingle(hub, tabId); else bindGroup(hub, tabId);
                 }
             },
         });
@@ -369,6 +388,43 @@ function attachCtrlRmbOverride() {
         const entries = [
             ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node),
                 (graph._nodes ?? []).filter((n) => n.type === HUB_NODE_NAME)),
+            ...buildPinSubmenu(owner.node, owner.widget, graph),
+        ];
+        if (!entries.length) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        showHubMenu(e.clientX, e.clientY, entries);
+    }, true);
+}
+
+// ============================================================================
+// 4) Plain RMB over rendered DOM-panel surfaces (LTX LoRA Stack etc.)
+// ============================================================================
+// Panels drawn ENTIRELY inside an addDOMWidget container have NO canvas
+// surface: their elements sit in ComfyUI's DOM overlay, so the LiteGraph
+// node menu never fires there and the raw BROWSER menu used to open instead.
+// Such surfaces have no native context menu worth preserving -> plain RMB
+// offers the standard pin menu. Shift+RMB stays the native escape hatch,
+// Ctrl/Cmd belongs to the override listener; text fields and canvas-drawn
+// panels keep their dedicated paths above.
+function attachPanelSurfacePinMenu() {
+    document.addEventListener("contextmenu", (e) => {
+        if (e.shiftKey || e.ctrlKey || e.metaKey || e.defaultPrevented) return;
+        const t = e.target;
+        if (!t || typeof t.closest !== "function") return;
+        // Never intercept our own UI or panels already relocated into the hub.
+        if (t.closest(".hub-menu, .settings-hub-wrap, .hub-portal-host")) return;
+
+        const owner = findDomWidgetOwner(t);
+        if (!owner || owner.node.type === HUB_NODE_NAME) return;
+        // Panel-classified widgets only - everything else has its own handler.
+        if (detectWidgetType(owner.widget) !== "portal") return;
+
+        const graph = owner.node.graph || app.graph;
+        const hubs = (graph._nodes ?? []).filter((n) => n.type === HUB_NODE_NAME);
+        const entries = [
+            ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node), hubs),
             ...buildPinSubmenu(owner.node, owner.widget, graph),
         ];
         if (!entries.length) return;

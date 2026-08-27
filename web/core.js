@@ -117,6 +117,37 @@ export function detectWidgetType(widget) {
     // 2) Booleans / toggles.
     if (BOOL_TYPES.has(type) || typeof widget?.value === "boolean") return "checkbox";
 
+    // 2.5) Real DOM panel containers (addDOMWidget-based custom UIs).
+    //      Their serialized value is OPAQUE application state ("[]" stacks,
+    //      objects...) - never mirror it into a primitive editor just
+    //      because the value happens to be a string. The LTX / MiniMax H3
+    //      "LoRA Loader Stack" lives entirely inside one such container and
+    //      used to render as a bare text field bound to its JSON blob.
+    //      Guards: a real <textarea> prompt stays a multiline mirror, and
+    //      widgets that DECLARE a primitive shape (values list, min/max/
+    //      step, numeric family types, plain text inputs) keep their old
+    //      classifications even when they carry an element.
+    const panelEl = widget?.element ?? widget?.contentEl ?? null;
+    const declaresPrimitiveShape =
+        opts.min != null ||
+        opts.max != null ||
+        opts.step != null ||
+        type.includes("number") ||
+        type.includes("slider") ||
+        type.includes("int") ||
+        type.includes("float");
+    if (
+        panelEl &&
+        typeof panelEl.querySelector === "function" &&
+        !isMultilineWidget(widget) &&
+        !declaresPrimitiveShape &&
+        !COMBO_TYPES.has(type) &&
+        !BOOL_TYPES.has(type) &&
+        !TEXT_TYPES.has(type)
+    ) {
+        return "portal";
+    }
+
     // 3) Strings and prompt boxes.
     const declaresText =
         TEXT_TYPES.has(type) ||
