@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import {
-    getHubConfig, createBinding, createPortalBinding, createNewHub, HUB_NODE_NAME,
-    detectWidgetType, portalKindOf, allHubs,
+    getHubConfig, getActiveTabId, createBinding, createPortalBinding,
+    createNewHub, HUB_NODE_NAME, detectWidgetType, portalKindOf, allHubs,
 } from "./core.js";
 
 // ============================================================================
@@ -131,10 +131,9 @@ function buildWholeBlockEntries(node, panels, hubs) {
             content: `🪟 ${what} → Create New Settings Hub`,
             callback: () => {
                 const newHub = createNewHub();
-                if (newHub) {
-                    const tid = getActiveTabId(getHubConfig(newHub));
-                    if (loneDomPanel) bindSingle(newHub, tid); else bindGroup(newHub, tid);
-                }
+                if (!newHub) return; // creation failed - error already surfaced
+                const tid = getActiveTabId(getHubConfig(newHub));
+                if (loneDomPanel) bindSingle(newHub, tid); else bindGroup(newHub, tid);
             },
         });
         return entries;
@@ -182,9 +181,8 @@ function buildPanelSubmenu(node, panels) {
                 content: `🪟 Create New Settings Hub (${panelLabel(w)})`,
                 callback: () => {
                     const newHub = createNewHub();
-                    if (newHub) {
-                        createBinding(newHub, node, w, getActiveTabId(getHubConfig(newHub)));
-                    }
+                    if (!newHub) return;
+                    createBinding(newHub, node, w, getActiveTabId(getHubConfig(newHub)));
                 },
             });
         }
@@ -232,6 +230,7 @@ function buildPinSubmenu(node, widget) {
                 content: `${mark}Create New Settings Hub${portal ? " (live embed)" : ""}`,
                 callback: () => {
                     const newHub = createNewHub();
+                    if (!newHub) return; // never leave a bare empty hub behind
                     createBinding(newHub, node, widget, getActiveTabId(getHubConfig(newHub)));
                 },
             },

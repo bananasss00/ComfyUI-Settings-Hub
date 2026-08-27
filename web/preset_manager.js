@@ -1,5 +1,5 @@
 import { app } from "../../scripts/app.js";
-import { getHubConfig } from "./core.js";
+import { getHubConfig, resolveBindingTarget } from "./core.js";
 import { writeTargetValue } from "./sync_manager.js";
 import * as Pins from "./pins.js";
 import { syncNode, refreshNodeValues } from "./sync.js";
@@ -17,7 +17,7 @@ function snapshotAll(node) {
         // (lora lists, panels) across custom nodes.
         if (item.type !== "widget_binding") continue;
         // Prefer live value mirrored on the target node; fall back to DOM mirror.
-        const targetNode = app.graph?.getNodeById(item.targetNodeId);
+        const targetNode = resolveBindingTarget(item);
         const widget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
         if (widget && widget.value !== undefined) {
             snap[item.id] = widget.value;
@@ -74,7 +74,7 @@ export function presetApply(node, presetName) {
     for (const [itemId, value] of Object.entries(preset)) {
         const item = cfg.items.find((i) => i.id === itemId);
         if (!item || item.type !== "widget_binding") continue;
-        const targetNode = app.graph.getNodeById(item.targetNodeId);
+        const targetNode = resolveBindingTarget(item);
         const widget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
         if (!widget) continue;
 

@@ -19,7 +19,7 @@ import { app } from "../../scripts/app.js";
 import {
     getHubConfig, getActiveTabId, sortedTabs, itemsOfTab, genId,
     liveComboValues, numericMerge, coerceNumeric, removeItem, detectWidgetType,
-    isMultilineWidget, portalKindOf,
+    isMultilineWidget, portalKindOf, resolveBindingTarget,
 } from "./core.js";
 import { presetSave, presetNew, presetDelete, presetApply } from "./preset_manager.js";
 import { writeTargetValue, ensureHooksForItem } from "./sync_manager.js";
@@ -50,8 +50,10 @@ function esc(s) {
         .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/** Target lookup is CROSS-GRAPH: pinned widgets may live inside any subgraph
+ *  while the hub sits on the root canvas (see core.resolveBindingTarget). */
 function findTarget(item) {
-    const tn = app.graph?.getNodeById?.(item.targetNodeId);
+    const tn = resolveBindingTarget(item);
     const tw = tn?.widgets?.find((w) => w.name === item.widgetToBind);
     return { tn, tw };
 }
@@ -545,9 +547,12 @@ function refreshValuesDom(node) {
 // ---------------------------------------------------------------------------
 
 function locateItem(item) {
-    const tn = app.graph?.getNodeById?.(item.targetNodeId);
+    const tn = resolveBindingTarget(item);
     if (!tn || !app.canvas?.centerOnNode) return;
     app.canvas.centerOnNode(tn);
+    // The target may belong to a DIFFERENT graph than the active one - dirty
+    // its OWNER so the highlight repaints even when reached cross-graph.
+    try { (tn.graph ?? app.graph)?.setDirtyCanvas?.(true, true); } catch (_) {}
     const origColor = tn._origColorHub ?? tn.color ?? "#333333";
     tn._origColorHub = origColor;
     tn.color = "#4a4a2e";
@@ -555,9 +560,8 @@ function locateItem(item) {
     locateItem._t = setTimeout(() => {
         tn.color = tn._origColorHub ?? origColor;
         delete tn._origColorHub;
-        app.graph.setDirtyCanvas(true, true);
+        try { (tn.graph ?? app.graph)?.setDirtyCanvas?.(true, true); } catch (_) {}
     }, 1200);
-    app.graph.setDirtyCanvas(true, true);
 }
 
 // ---------------------------------------------------------------------------

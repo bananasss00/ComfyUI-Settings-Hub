@@ -29,7 +29,10 @@ py/settings_hub.py     — Python-заглушка (FUNCTION = "noop", возв�
                          логики НЕТ
 web/settings_hub.js    — точка входа: app.registerExtension, загрузка CSS
 web/core.js            — конфиг хаба, detectWidgetType (самолечение типов),
-                         createBinding, liveComboValues, comboTokensMatch-контракт
+                         createBinding, liveComboValues, comboTokensMatch-контракт;
+                         кросс-графовый поиск: allGraphs / findNodeByIdEverywhere /
+                         resolveBindingTarget (id + title-drift repair);
+                         createNewHub — канонический LiteGraph.createNode -> graph.add
 web/sync.js            — шина структурных/values-обновлений + shared edit-lock
                          (beginEdit/endEdit), rAF-очередь queueHubRefresh
 web/sync_manager.js    — хуки реактивности на целевых виджетах (обёртка callback),
@@ -186,17 +189,32 @@ dev_plan.md            — исходный технический спек пр
    на root (`createNewHub` -> getRootGraph), а пины делают ноды изнутри
    сабграфов — их меню обязано видеть root-хабы. `nodeCreated` трекает,
    `onRemoved` забывает; sync_manager тоже смотрит в реестр (реверберация
-   таргет-хуков кросс-графовая). Известный пробел (не регрессия):
-   `ensureHooksForItem` ищет цель через `app.graph.getNodeById` — цели из
-   сабграфов хуками пока не покрываются.
+   таргет-хуков кросс-графовая). Реестр может быть ХОЛОДНЫМ (кэш-микс
+   чанков/рейс загрузки пропустил nodeCreated) — тогда `allHubs()` обязан
+   делать live-scan всех достижимых графов, иначе меню теряет существующий
+   хаб (полевой инцидент v18).
+   ЦЕЛИ ПИНОВ резолвятся только через `resolveBindingTarget` (core.js):
+   id по всем графам + фолбэк targetTitle+widgetToBind (renumber после
+   перезагрузки). Голый `app.graph.getNodeById` ВНЕ core.js ЗАПРЕЩЁН:
+   он невидит сабграфы — пины деградировали в ⚠️-орфанов (полевой
+   инцидент «хаб стал пустым после обновления страницы», v18).
 12. Числовые зеркала верны источнику: границы/шаг только реальные или
    precision-производные (см. "Числовые зеркала"); свободный набор с точным
    десятичным коммитом — контракт пользователя, не ломать quantize=false.
+13. Создание хаба — ТОЛЬКО каноническое: `LiteGraph.createNode(HUB_NODE_NAME)`
+   -> реальный ИНСТАННС -> `graph.add(node)`. Конфиг-объект `{type}` в
+   add()/addNode() ЗАПРЕЩЁН: современный LGraph.add дёргает методы ноды
+   («TypeError: e.snapToGrid is not a function» — полевой инцидент v18),
+   legacy-ветка терпела объект и маскировала баг. Колбэки меню обязаны
+   null-guard'ить результат createNewHub — иначе остаётся пустой хаб-осирота.
+   Класс регрессий «ReferenceError внутри колбэка меню» закрывается статик-
+   линтом фазы Z2: каждый используемый экспорт core.js обязан стоять в
+   import-списке модуля (инцидент: getActiveTabId вызывался без импорта).
 
 ## 5. Тесты
 
 Харнес: Node ESM + jsdom (`scripts/smoke_hub.mjs` ВНЕ репозитория), стабы
-app.js/LiteGraph, копия реальных `web/*.js` в песочницу. Фазы A–Y покрывают
+app.js/LiteGraph, копия реальных `web/*.js` в песочницу. Фазы A–Z покрывают
 детекцию типов, зеркала, write-through, пресеты, табы, DnD, multiline,
 layout, порталы, whole-panel группы, пиннинг, searchable combo, аутентичную
 геометрию/клики порталов (масштаб-компенсация, last_y-стек с гвардом,
@@ -205,10 +223,16 @@ TrixNodes-класса), DOM-панели (LTX LoRA Stack) как ghost-зерк
 двусторонняя синхронизация, лок ввода, недеструктивный unpin; Y1 — rename
 вкладок кликовым double-detect, Y2 — числовая верность (precision-step,
 открытые границы, свободный набор/запятые, echo-гвардия, self-heal),
-Y3 — поиск root-хабов из сабграфа + гигиена реестра.
+Y3 — поиск root-хабов из сабграфа + гигиена реестра;
+Z1 — канонический путь создания хаба (createNode->add(ИНСТАННС), snapToGrid)
++ отказные ветки (тип не готов, add упал — null, alert, мусора нет);
+Z2 — статический линт импортов core.js для всех web/*.js;
+Z3 — холодный реестр allHubs: live-scan находит все хабы + дедупликация;
+Z4 — кросс-графовые цели: subgraph-пины живые, title-drift repair,
+реверб значения из сабграфа в зеркало.
 
 ```bash
-node scripts/smoke_hub.mjs   # базовая линия: >=328 зелёных, 0 упавших
+node scripts/smoke_hub.mjs   # базовая линия: >=365 зелёных, 0 упавших
 ```
 
 Подводные камни харнеса:
@@ -235,7 +259,7 @@ node scripts/smoke_hub.mjs   # базовая линия: >=328 зелёных, 
 ```bash
 # артефакт для установки в ComfyUI/custom_nodes (без .git/__pycache__)
 zip -rq ComfyUI-Settings-Hub.zip ComfyUI-Settings-Hub \
-    -x "*/.git/*" -x "*__pycache__*" -x "*.pyc"
+    -x "*.git*" -x "*__pycache__*" -x "*.pyc"
 ```
 
 Коммиты — Conventional Commits (`feat(scope): ...`, `fix(ui): ...`,

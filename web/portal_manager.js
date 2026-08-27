@@ -40,13 +40,16 @@
 // ============================================================================
 
 import { app } from "../../scripts/app.js";
-import { getHubConfig, PORTAL_ROW_GAP, widgetNativeHeight } from "./core.js";
+import {
+    getHubConfig, PORTAL_ROW_GAP, widgetNativeHeight, resolveBindingTarget,
+} from "./core.js";
 
 /** node -> Set<record>; records live between structural renders. */
 const nodeRegistry = new WeakMap();
 
+/** Cross-graph lookup: portal sources may live inside any subgraph. */
 function findWidget(item) {
-    const tn = app.graph?.getNodeById?.(item.targetNodeId);
+    const tn = resolveBindingTarget(item);
     const tw = tn?.widgets?.find((w) => w.name === item.widgetToBind);
     return { tn, tw };
 }

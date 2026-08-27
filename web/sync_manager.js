@@ -1,5 +1,5 @@
 import { app } from "../../scripts/app.js";
-import { getHubConfig, HUB_NODE_NAME, allHubs } from "./core.js";
+import { getHubConfig, HUB_NODE_NAME, allHubs, resolveBindingTarget } from "./core.js";
 import { syncNode, queueHubRefresh, inEdit, beginEdit, endEdit } from "./sync.js";
 import * as Pins from "./pins.js";
 
@@ -43,7 +43,8 @@ function attachTargetHook(targetNode, targetWidget) {
 
 export function ensureHooksForItem(item) {
     if (!item || item.type !== "widget_binding") return;
-    const targetNode = app.graph?.getNodeById(item.targetNodeId);
+    // Cross-graph: the binding's source node may live inside any subgraph.
+    const targetNode = resolveBindingTarget(item);
     const targetWidget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
     attachTargetHook(targetNode, targetWidget);
 }

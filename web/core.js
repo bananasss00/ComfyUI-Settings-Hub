@@ -32,9 +32,110 @@ export function forgetHubNode(node) {
     if (node) hubRegistry.delete(node);
 }
 
-/** Live hubs across ALL graphs, in stable insertion order. */
+/** Live hubs across ALL graphs, in stable insertion order.
+ *
+ *  The registry is the primary source, but it can be COLD through no fault
+ *  of the user: extension nodeCreated may have been missed entirely on exotic
+ *  load paths (stale-cached chunks mixing versions, hot-swapped bundles,
+ *  loader races during configureGraph). A hub sitting right there on the
+ *  canvas MUST never vanish from pin menus just because our bookkeeping
+ *  missed it - so when the registry comes up empty we fall back to a live
+ *  scan over every graph we can reach. Cheap (only when empty) and always
+ *  truthful. */
 export function allHubs() {
-    return [...hubRegistry].filter((n) => n?.type === HUB_NODE_NAME);
+    const found = [...hubRegistry].filter((n) => n?.type === HUB_NODE_NAME);
+    if (found.length) return found;
+    try {
+        for (const g of allGraphs()) {
+            for (const n of g?._nodes ?? []) {
+                if (n?.type === HUB_NODE_NAME && !found.includes(n)) found.push(n);
+            }
+        }
+    } catch (_) { /* enumeration must never kill a menu build */ }
+    return found;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-graph traversal + node lookup
+// ---------------------------------------------------------------------------
+// Pinned targets may live INSIDE any subgraph while the hub sits on the root
+// canvas (that is the whole point of the global registry above). app.graph
+// lookups only see the ROOT graph, so every target resolution goes through
+// the helpers below instead of raw getNodeById.
+
+/**
+ * Every LGraph-like object reachable right now: the root graph, whatever
+ * graph the canvas is showing, plus any nested subgraph objects duck-typed
+ * off the nodes. Defensive throughout - field names differ between frontend
+ * generations, and an exotic node getter must never break enumeration.
+ */
+export function allGraphs(maxDepth = 6) {
+    const seen = new Set();
+    const out = [];
+    const queue = [];
+
+    const push = (g) => {
+        if (g && typeof g === "object" && !seen.has(g)) {
+            seen.add(g);
+            out.push(g);
+            queue.push(g);
+        }
+    };
+
+    try { push(app.graph); } catch (_) {}
+    try { push(app.canvas?.graph); } catch (_) {}
+    try { push(window.comfyAPI?.app?.graph); } catch (_) {}
+
+    for (let i = 0; i < queue.length && i < maxDepth * 64; i++) {
+        const g = queue[i];
+        for (const n of g?._nodes ?? []) {
+            try { push(n.subgraph); } catch (_) {}      // SubgraphNode holder
+            if (Array.isArray(n.subgraphs)) {
+                for (const s of n.subgraphs) { try { push(s); } catch (_) {} }
+            }
+        }
+        if (Array.isArray(g?._subgraphs)) {
+            for (const s of g._subgraphs) { try { push(s); } catch (_) {} }
+        }
+        if (--maxDepth <= 0) break;
+    }
+    return out;
+}
+
+/** Node by numeric id across root graph AND every reachable subgraph. */
+export function findNodeByIdEverywhere(id) {
+    try {
+        const local = app.graph?.getNodeById?.(id);
+        if (local) return local;
+    } catch (_) {}
+    for (const g of allGraphs()) {
+        const hit = (g?._nodes ?? []).find((n) => n.id === id);
+        if (hit) return hit;
+    }
+    return null;
+}
+
+/**
+ * Resolve the live target node behind a binding ITEM.
+ * Pass 1: stored node id, searched everywhere (the common case).
+ * Pass 2 (drift repair): if the id died (reloads renumber nodes under some
+ * frontends) fall back to the persisted source TITLE + widget-name pair -
+ * far better than orphaning a perfectly good pin. "targetTitle" is written
+ * by createBinding/createPortalBinding; older configs simply skip this.
+ */
+export function resolveBindingTarget(item) {
+    let tn = findNodeByIdEverywhere(item?.targetNodeId);
+    if (tn) return tn;
+    const wantTitle = item?.targetTitle != null ? String(item.targetTitle) : "";
+    if (!wantTitle) return null;
+    for (const g of allGraphs()) {
+        const hit = (g?._nodes ?? []).find((n) =>
+            String(n.title ?? "") === wantTitle &&
+            (!item.widgetToBind ||
+             n.widgets?.some((w) => w.name === item.widgetToBind)));
+        if (hit) return hit;
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +497,7 @@ export function createPortalBinding(node, targetNode, widgets, tabId, label) {
         order: nextOrder(cfg, tabId),
         customLabel: label || primary.label || primary.name || targetNode?.title || "panel",
         targetNodeId: targetNode.id,
+        targetTitle: targetNode?.title ?? "",  // drift repair anchor (see resolveBindingTarget)
         widgetToBind: primary.name ?? "",
         widgetType: "portal",
         members: list.map((w) => ({
@@ -441,6 +543,7 @@ export function createBinding(node, targetNode, widget, tabId, type, extra) {
         item.options = { portalKind: portalKindOf(widget), srcH: Math.round(srcH) };
     } else {
         item.targetNodeId = targetNode.id;
+        item.targetTitle = targetNode?.title ?? ""; // drift repair anchor
         item.widgetToBind = widget.name;
         item.widgetType = detectWidgetType(widget);           // fixed detection
         item.customLabel = extra?.label || widget.label || widget.name || "";
@@ -496,20 +599,54 @@ function getRootGraph() {
     return null;
 }
 
+/**
+ * Create a hub node on the ROOT graph - the CANONICAL way.
+ *
+ * History: we used to call graph.addNode({ type }) with a plain CONFIG
+ * OBJECT. Legacy builds tolerated it; the modern ComfyUI frontend's
+ * LGraph.add() dereferences real-node methods on the argument and dies with
+ * "TypeError: e.snapToGrid is not a function", leaving NOTHING behind.
+ * The only correct sequence is LiteGraph.createNode(type) -> graph.add(
+ * INSTANCE): the instance is a true LGraphNode subclass, so every graph
+ * bookkeeping path works exactly like a manual drag-in.
+ */
 export function createNewHub() {
     const graph = getRootGraph();
     if (!graph) {
         alert("Create New Settings Hub: no graph available");
         return null;
     }
+
     let node = null;
     try {
-        if (typeof graph.addNode === "function") node = graph.addNode({ type: HUB_NODE_NAME });
-        else node = graph.add({ type: HUB_NODE_NAME });
+        const LG = window.LiteGraph;
+        if (LG && typeof LG.createNode === "function") {
+            node = LG.createNode(HUB_NODE_NAME);
+        }
+    } catch (_) { /* fall through to the ctor fallback */ }
+
+    if (!node) {
+        try {
+            const Ctor = window.LiteGraph?.registered_node_types?.[HUB_NODE_NAME];
+            if (Ctor) node = new Ctor();
+        } catch (err) {
+            console.warn("Create New Settings Hub failed:", err);
+        }
+    }
+
+    if (!node) {
+        console.warn("Create New Settings Hub: node type not registered yet");
+        alert("Settings Hub node type is still loading - try again in a second.");
+        return null;
+    }
+
+    try {
+        graph.add(node);   // real instance - NEVER a bare {type} config object
     } catch (err) {
         console.warn("Create New Settings Hub failed:", err);
+        alert("Could not add the Settings Hub node to the canvas:\n" + err?.message);
+        return null;
     }
-    if (!node) return null;
     node.title = "Settings Hub";
     try {
         const canvas = app.canvas;
@@ -521,5 +658,8 @@ export function createNewHub() {
     getHubConfig(node);
     Pins.invalidatePins();
     syncNode(node);
+    // Registry safety net: normally extension nodeCreated does this during
+    // graph.add - but programmatic adds must never depend on that dispatch.
+    try { trackHubNode(node); } catch (_) {}
     return node;
 }
