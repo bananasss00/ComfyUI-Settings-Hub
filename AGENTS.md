@@ -35,8 +35,11 @@ web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode
 web/context_menu.js    — пиннинг: ПКМ по hover-виджету; пункт меню ноды
                          "Pin custom panel"; перехват Ctrl/Cmd+ПКМ (capture)
-web/portal_manager.js  — живые встраивания: DOM-relocation, canvas-порталы,
-                         групповые whole-panel embeds, геометрия/тикер
+web/portal_manager.js  — живые встраивания: DOM-relocation (липкий hold:
+                         MutationObserver возвращает украденный элемент,
+                         release снимает наблюдение ДО перемещения домой),
+                         canvas-порталы, групповые whole-panel embeds,
+                         геометрия/тикер
 web/preset_manager.js  — снапшоты ВСЕХ widget_binding хаба (порталы исключены)
 web/dnd_manager.js     — HTML5 DnD: reorder строк, drop на вкладку = перенос
 web/pins.js            — кэш счётчиков пинов для бейджа 📌
@@ -135,19 +138,27 @@ dev_plan.md            — исходный технический спек пр
 7. Меню / попапы живут на document.body c position:fixed (клиппинг
    скролл-вьюпортом хаба недопустим).
 8. JS-строки HTML экранировать `esc()` — значения виджетов произвольные.
+9. Липкость DOM-порталов: пока пин активен, relocate-элемент принадлежит
+   хабу; любое внешнее переподчинение (циклы скрытие/показ DOM-виджетов при
+   зуме/прокрутке ноды за край) откатывается событийно — MutationObserver
+   на documentElement + rAF-heal. ПОЛЛИНГ ЗАПРЕЩЁН. Флаги `releasing`/
+   `dead` ставятся ДО любого нашего перемещения элемента; observer
+   отключается в releaseDom; home-снапшот обновляется по последнему
+   внешнему владельцу (unpin возвращает актуальному хозяину).
 
 ## 5. Тесты
 
 Харнес: Node ESM + jsdom (`scripts/smoke_hub.mjs` ВНЕ репозитория), стабы
-app.js/LiteGraph, копия реальных `web/*.js` в песочницу. Фазы A–V покрывают
+app.js/LiteGraph, копия реальных `web/*.js` в песочницу. Фазы A–X покрывают
 детекцию типов, зеркала, write-through, пресеты, табы, DnD, multiline,
 layout, порталы, whole-panel группы, пиннинг, searchable combo, аутентичную
 геометрию/клики порталов (масштаб-компенсация, last_y-стек с гвардом,
 клип-рост, анти-схлопывание, pixel-settle высоты и title-less sizing
-TrixNodes-класса).
+TrixNodes-класса), DOM-панели (LTX LoRA Stack) и липкий hold против
+remount-циклов зума/offscreen.
 
 ```bash
-node scripts/smoke_hub.mjs   # базовая линия: >=247 зелёных, 0 упавших
+node scripts/smoke_hub.mjs   # базовая линия: >=279 зелёных, 0 упавших
 ```
 
 Подводные камни харнеса:
@@ -160,6 +171,9 @@ node scripts/smoke_hub.mjs   # базовая линия: >=247 зелёных, 
   требуют нескольких тиков: grace 3 → рост по +30 → обрезка. Тик-бюджет
   в тестах: 8–12 `runPortalTicks` на стабилизацию высоты.
 - После структурных изменений давай `await sleep(40)` (flush одного rAF).
+- Phase X синхронна до `sleep(60)`: mutation batch + rAF heal успевают в
+  один сон; jsdom MutationObserver доступен только через `window` realm
+  (голый идентификатор в модулях песочницы не определён).
 - События вкладок — click по `[data-action="switch-tab"]`; у LiteGraph-like
   колбэков цель дергается вручную (`tw.callback(v)`), затем flush.
 

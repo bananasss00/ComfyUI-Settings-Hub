@@ -13,6 +13,20 @@
 //            place. A `.hub-portal-held` style clamp defeats ComfyUI's
 //            per-frame inline positioning (position/top/left...).
 //
+//            STICKY HOLD: while pinned, a MutationObserver watches for any
+//            reparent of the held element. ComfyUI's DOM-widget machinery
+//            re-appends elements into its own wrappers on every
+//            show/hide cycle (zoom out below the threshold, node scrolled
+//            off-screen and back) - without the observer such a remount
+//            silently "un-pins" relocated panels (LTX LoRA Loader Stack:
+//            zoom cycle -> stack back at the node, hub row empty). The
+//            heal is event-driven (NO polling) and never fights our own
+//            release path: `releasing`/`dead` flags are set BEFORE we move
+//            the element ourselves, and the observer is disconnected on
+//            release. Each external relocation also refreshes the saved
+//            home snapshot, so unpin returns the element to wherever the
+//            frontend currently considers its home.
+//
 //   canvas - the widget paints itself (draw()). The portal hosts a <canvas>
 //            that continuously re-renders via the widget's own draw(), and
 //            forwards pointer events (incl. right-click) to the widget's
@@ -65,15 +79,74 @@ function mountDomPortal(item, tw, host) {
         item,
         el,
         host,
+        // Set BEFORE any relocation WE initiate; the sticky-hold observer
+        // bails out immediately when either flag is up - no tug-of-war.
+        releasing: false,
+        dead: false,
+        healQueued: false,
+        observer: null,
         // Where to put the element back + its own inline styles (ComfyUI
         // rewrites top/left/width/height every frame; we snapshot once and
-        // restore verbatim on release).
+        // restore verbatim on release. External relocations refresh parent/
+        // next so release follows the CURRENT owner, not a stale one).
         saved: {
             parent: el.parentNode,
             next: el.nextSibling,
             css: el.getAttribute("style"),
         },
     };
+
+    // --- Sticky hold (see header comment): reclaim externally snatched
+    // --- panels on the next animation frame after the mutation batch.
+    const scheduleHeal = () => {
+        if (rec.healQueued || rec.releasing || rec.dead) return;
+        rec.healQueued = true;
+        const check = () => {
+            rec.healQueued = false;
+            if (rec.releasing || rec.dead) return;
+            try {
+                if (el.parentNode === host || !host.isConnected) return;
+                // Refresh the home snapshot from the LAST external owner.
+                if (el.isConnected && el.parentNode) {
+                    rec.saved.parent = el.parentNode;
+                    rec.saved.next = el.nextSibling;
+                }
+                if (host.isConnected) {
+                    el.classList.add("hub-portal-held");
+                    host.appendChild(el); // move back into the hub row
+                }
+            } catch (_) { /* detached mid-teardown - transient */ }
+        };
+        const raf = globalThis.window?.requestAnimationFrame;
+        if (typeof raf === "function") raf.call(globalThis.window, check);
+        else setTimeout(check, 16);
+    };
+    // Resolve the constructor through globalThis/window: extension realms
+    // without bare DOM globals still reach it via the window object.
+    const MO = typeof MutationObserver !== "undefined"
+        ? MutationObserver
+        : globalThis.window?.MutationObserver ?? null;
+    if (MO) {
+        rec.observer = new MO((muts) => {
+            if (rec.releasing || rec.dead) return;
+            for (const m of muts) {
+                // React only to records that INSERTED our element somewhere
+                // else - pure removals are transient states inside a move,
+                // their final insert produces its own record.
+                let hit = false;
+                for (const n of m.addedNodes) {
+                    if (n === el && el.parentNode !== host) { hit = true; break; }
+                }
+                if (hit) { scheduleHeal(); break; }
+            }
+        });
+        try {
+            rec.observer.observe(document.documentElement, { childList: true, subtree: true });
+        } catch (_) {
+            try { rec.observer.observe(document.body, { childList: true, subtree: true }); } catch (_) {}
+        }
+    }
+
     try {
         el.classList.add("hub-portal-held");
         host.textContent = "";
@@ -81,6 +154,8 @@ function mountDomPortal(item, tw, host) {
         return rec;
     } catch (err) {
         console.warn("[SettingsHub] dom portal mount failed:", err);
+        try { rec.observer.disconnect(); } catch (_) {}
+        rec.observer = null;
         el.classList.remove("hub-portal-held");
         return null;
     }
@@ -88,6 +163,11 @@ function mountDomPortal(item, tw, host) {
 
 function releaseDom(rec) {
     const { el, saved } = rec;
+    // Disarm the sticky hold FIRST - moving the element home must not be
+    // interpreted as an external snatch by our own observer.
+    rec.releasing = true;
+    try { rec.observer?.disconnect(); } catch (_) {}
+    rec.observer = null;
     try { el.classList.remove("hub-portal-held"); } catch (_) {}
     try {
         if (saved.parent) {
@@ -553,6 +633,8 @@ export function mountPortals(node, root) {
 
 /** Release everything this hub currently holds (before innerHTML swap!). */
 export function releaseAll(node) {
+    // Note: releaseRecord -> releaseDom arms `releasing` before touching
+    // the DOM, so sticky holds cannot fight the innerHTML rebuild.
     const set = node && nodeRegistry.get(node);
     if (!set) return;
     for (const rec of [...set]) releaseRecord(rec);
