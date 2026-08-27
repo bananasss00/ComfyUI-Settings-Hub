@@ -35,11 +35,12 @@ web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode
 web/context_menu.js    — пиннинг: ПКМ по hover-виджету; пункт меню ноды
                          "Pin custom panel"; перехват Ctrl/Cmd+ПКМ (capture)
-web/portal_manager.js  — живые встраивания: DOM-relocation (липкий hold:
-                         MutationObserver возвращает украденный элемент,
-                         release снимает наблюдение ДО перемещения домой),
-                         canvas-порталы, групповые whole-panel embeds,
-                         геометрия/тикер
+web/portal_manager.js  — живые встраивания: DOM-панели — GHOST-ЗЕРКАЛА
+                         (неcтруктивный клон в хабе, оригинал НИКОГДА не
+                         покидает ноду; события клона → реэвент на
+                         counterpart, мутации оригинала → debounce-rebuild;
+                         лок на фокус/недавний ввод), canvas-порталы,
+                         групповые whole-panel embeds, геометрия/тикер
 web/preset_manager.js  — снапшоты ВСЕХ widget_binding хаба (порталы исключены)
 web/dnd_manager.js     — HTML5 DnD: reorder строк, drop на вкладку = перенос
 web/pins.js            — кэш счётчиков пинов для бейджа 📌
@@ -138,13 +139,17 @@ dev_plan.md            — исходный технический спек пр
 7. Меню / попапы живут на document.body c position:fixed (клиппинг
    скролл-вьюпортом хаба недопустим).
 8. JS-строки HTML экранировать `esc()` — значения виджетов произвольные.
-9. Липкость DOM-порталов: пока пин активен, relocate-элемент принадлежит
-   хабу; любое внешнее переподчинение (циклы скрытие/показ DOM-виджетов при
-   зуме/прокрутке ноды за край) откатывается событийно — MutationObserver
-   на documentElement + rAF-heal. ПОЛЛИНГ ЗАПРЕЩЁН. Флаги `releasing`/
-   `dead` ставятся ДО любого нашего перемещения элемента; observer
-   отключается в releaseDom; home-снапшот обновляется по последнему
-   внешнему владельцу (unpin возвращает актуальному хозяину).
+9. DOM-порталы — только GHOST-зеркала: перемещение relocate элемента в хаб
+   ЗАПРЕЩЕНО (раньше крало панель у ноды и ломалось о remount-циклы
+   ComfyUI). Синхронизация двусторонняя и событийная: (a) клон→оригинал —
+   те же типы Event диспетчатся на counterpart по index-path, value/checked
+   копируются свойствами ДО dispatch (без echo — observer смотрит ТОЛЬКО
+   оригинал); (b) оригинал→клон — debounce 180мс полный re-clone swap;
+   ребилд ОТКЛАДЫВАЕТСЯ пока фокус внутри зеркала или <900мс с последнего
+   касания (pointerdown/wheel/key/focusin); занятая цепочка
+   перезаказывается по 400мс, не теряется. contextmenu НЕ форвардится.
+10. Липкость relocate-порталов устарела вместе с самим relocate: не двигай
+   элементы — проблемы remount-циклов зума/offscreen неприменимы к клону.
 
 ## 5. Тесты
 
@@ -154,11 +159,11 @@ app.js/LiteGraph, копия реальных `web/*.js` в песочницу. 
 layout, порталы, whole-panel группы, пиннинг, searchable combo, аутентичную
 геометрию/клики порталов (масштаб-компенсация, last_y-стек с гвардом,
 клип-рост, анти-схлопывание, pixel-settle высоты и title-less sizing
-TrixNodes-класса), DOM-панели (LTX LoRA Stack) и липкий hold против
-remount-циклов зума/offscreen.
+TrixNodes-класса), DOM-панели (LTX LoRA Stack) как ghost-зеркала:
+двусторонняя синхронизация, лок ввода, недеструктивный unpin.
 
 ```bash
-node scripts/smoke_hub.mjs   # базовая линия: >=279 зелёных, 0 упавших
+node scripts/smoke_hub.mjs   # базовая линия: >=284 зелёных, 0 упавших
 ```
 
 Подводные камни харнеса:

@@ -7,25 +7,27 @@
 // unknown type -> portal). Two embed flavors, zero per-node code:
 //
 //   dom    - the widget owns a real element (element/inputEl/contentEl).
-//            The element is physically RELOCATED into the hub with all its
-//            listeners, so its own buttons AND its own custom context menu
-//            keep working natively. On release it returns to its original
-//            place. A `.hub-portal-held` style clamp defeats ComfyUI's
-//            per-frame inline positioning (position/top/left...).
+//            GHOST MIRROR (non-destructive): the hub shows a LIVE CLONE of
+//            the panel; the ORIGINAL never leaves its node and stays fully
+//            functional there. Interaction routing:
+//              clone -> original  real DOM events on the clone are
+//                                 re-dispatched on the matching original
+//                                 element (index-path correspondence), with
+//                                 value/checked copied BEFORE dispatch, so
+//                                 the pack's own listeners drive the state;
+//              original -> clone  a subtree MutationObserver debounces
+//                                 structural/attr/text changes into a
+//                                 full re-clone swap.
+//            Feedback-safe by construction: we observe ONLY the original,
+//            value copying uses properties (no attr writes, no echo).
+//            Rebuilds defer while the user is mid-interaction (focus or
+//            recent pointer/key inside the clone) - no lost keystrokes,
+//            no closed popups.
 //
-//            STICKY HOLD: while pinned, a MutationObserver watches for any
-//            reparent of the held element. ComfyUI's DOM-widget machinery
-//            re-appends elements into its own wrappers on every
-//            show/hide cycle (zoom out below the threshold, node scrolled
-//            off-screen and back) - without the observer such a remount
-//            silently "un-pins" relocated panels (LTX LoRA Loader Stack:
-//            zoom cycle -> stack back at the node, hub row empty). The
-//            heal is event-driven (NO polling) and never fights our own
-//            release path: `releasing`/`dead` flags are set BEFORE we move
-//            the element ourselves, and the observer is disconnected on
-//            release. Each external relocation also refreshes the saved
-//            home snapshot, so unpin returns the element to wherever the
-//            frontend currently considers its home.
+//            Historical note: pins used to RELOCATE the element into the
+//            hub ("live embed"). That stole the panel from its node and
+//            fought ComfyUI's show/hide remounts (zoom cycles yanked it
+//            back) - ghosts make both problem classes impossible.
 //
 //   canvas - the widget paints itself (draw()). The portal hosts a <canvas>
 //            that continuously re-renders via the widget's own draw(), and
@@ -67,121 +69,183 @@ function resolveMembers(item, tn) {
 }
 
 // ---------------------------------------------------------------------------
-// DOM relocation flavor
+// DOM ghost-mirror flavor (the original stays on its node)
 // ---------------------------------------------------------------------------
+
+const GHOST_CLASS = "hub-portal-ghost";
+const SYNC_DEBOUNCE = 180;   // batch bursts of original-side mutations
+const RETRY_DELAY = 400;     // re-check the interaction lock later
+const TOUCH_LOCK = 900;      // ms after clone interaction before rebuilds
+
+/** Element-only child index path from `root` down to `node` (or null). */
+function indexPath(root, node) {
+    const path = [];
+    let cur = node;
+    while (cur && cur !== root) {
+        const p = cur.parentElement;
+        if (!p) return null;
+        path.push(Array.from(p.children).indexOf(cur));
+        cur = p;
+    }
+    return cur === root ? path.reverse() : null;
+}
 
 function mountDomPortal(item, tw, host) {
     const el = tw.element ?? tw.inputEl ?? tw.contentEl;
     if (!el || typeof el.appendChild !== "function") return null;
+    // Constructor access via window: some extension realms lack bare globals.
+    const win = globalThis.window;
+    const MO = typeof MutationObserver !== "undefined"
+        ? MutationObserver : win?.MutationObserver ?? null;
+    if (!MO) return null;
+
+    let clone;
+    try { clone = el.cloneNode(true); } catch (_) { return null; }
+    try { clone.classList.add(GHOST_CLASS); } catch (_) {}
 
     const rec = {
         kind: "dom",
         item,
-        el,
+        el,             // the ORIGINAL - never moved, only observed
+        clone,
         host,
-        // Set BEFORE any relocation WE initiate; the sticky-hold observer
-        // bails out immediately when either flag is up - no tug-of-war.
         releasing: false,
         dead: false,
-        healQueued: false,
+        syncQueued: false,
+        lastTouch: 0,
         observer: null,
-        // Where to put the element back + its own inline styles (ComfyUI
-        // rewrites top/left/width/height every frame; we snapshot once and
-        // restore verbatim on release. External relocations refresh parent/
-        // next so release follows the CURRENT owner, not a stale one).
-        saved: {
-            parent: el.parentNode,
-            next: el.nextSibling,
-            css: el.getAttribute("style"),
-        },
+        handlers: [],   // [type, fn] pairs bound on the current clone
+        touchHandler: null,
     };
 
-    // --- Sticky hold (see header comment): reclaim externally snatched
-    // --- panels on the next animation frame after the mutation batch.
-    const scheduleHeal = () => {
-        if (rec.healQueued || rec.releasing || rec.dead) return;
-        rec.healQueued = true;
-        const check = () => {
-            rec.healQueued = false;
-            if (rec.releasing || rec.dead) return;
-            try {
-                if (el.parentNode === host || !host.isConnected) return;
-                // Refresh the home snapshot from the LAST external owner.
-                if (el.isConnected && el.parentNode) {
-                    rec.saved.parent = el.parentNode;
-                    rec.saved.next = el.nextSibling;
-                }
-                if (host.isConnected) {
-                    el.classList.add("hub-portal-held");
-                    host.appendChild(el); // move back into the hub row
-                }
-            } catch (_) { /* detached mid-teardown - transient */ }
-        };
-        const raf = globalThis.window?.requestAnimationFrame;
-        if (typeof raf === "function") raf.call(globalThis.window, check);
-        else setTimeout(check, 16);
-    };
-    // Resolve the constructor through globalThis/window: extension realms
-    // without bare DOM globals still reach it via the window object.
-    const MO = typeof MutationObserver !== "undefined"
-        ? MutationObserver
-        : globalThis.window?.MutationObserver ?? null;
-    if (MO) {
-        rec.observer = new MO((muts) => {
-            if (rec.releasing || rec.dead) return;
-            for (const m of muts) {
-                // React only to records that INSERTED our element somewhere
-                // else - pure removals are transient states inside a move,
-                // their final insert produces its own record.
-                let hit = false;
-                for (const n of m.addedNodes) {
-                    if (n === el && el.parentNode !== host) { hit = true; break; }
-                }
-                if (hit) { scheduleHeal(); break; }
-            }
-        });
-        try {
-            rec.observer.observe(document.documentElement, { childList: true, subtree: true });
-        } catch (_) {
-            try { rec.observer.observe(document.body, { childList: true, subtree: true }); } catch (_) {}
+    // --- clone -> original: re-dispatch real events on the counterpart ---
+    const counterpart = (target) => {
+        const path = indexPath(clone, target);
+        if (!path) return null;
+        let node = el;
+        for (const idx of path) {
+            node = node?.children?.[idx] ?? null;
+            if (!node) return null;   // structure drifted - sync will catch up
         }
+        return node;
+    };
+    const forward = (e) => {
+        try {
+            if (!clone.contains(e.target)) return;         // bubbling guests
+            const origTarget = counterpart(e.target);
+            if (!origTarget || e.hubForwarded) return;
+            // Carry typed state over first - their handler reads .value/.checked.
+            if ("value" in origTarget && "value" in e.target && origTarget.value !== e.target.value) {
+                origTarget.value = e.target.value;
+            }
+            if ("checked" in origTarget && "checked" in e.target) {
+                origTarget.checked = e.target.checked;
+            }
+            const Evt = win?.Event || Event;
+            const ne = new Evt(e.type, { bubbles: true, cancelable: true });
+            try {
+                for (const k of ["clientX", "clientY", "button", "detail", "key", "code"] ) {
+                    if (e[k] !== undefined) ne[k] = e[k];
+                }
+                for (const k of ["ctrlKey", "shiftKey", "altKey", "metaKey"]) ne[k] = !!e[k];
+            } catch (_) {}
+            try { Object.defineProperty(ne, "hubForwarded", { value: true }); } catch (_) {}
+            origTarget.dispatchEvent(ne);
+        } catch (_) { /* a half-detached tree must never break rendering */ }
+    };
+    const TYPES = ["click", "auxclick", "dblclick", "pointerdown", "pointerup",
+        "pointermove", "mousedown", "mouseup", "mousemove", "keydown", "keyup",
+        "input", "change"];
+    const bindClone = (target) => {
+        for (const t of TYPES) {
+            const fn = forward;
+            target.addEventListener(t, fn);
+            rec.handlers.push([t, fn, target]);
+        }
+        rec.touchHandler = () => { rec.lastTouch = Date.now(); };
+        for (const t of ["pointerdown", "wheel", "keydown", "input", "focusin"]) {
+            target.addEventListener(t, rec.touchHandler, { capture: true, passive: true });
+        }
+    };
+    const unbindClone = (target) => {
+        for (const [t, fn, elem] of rec.handlers.splice(0)) {
+            try { elem.removeEventListener(t, fn); } catch (_) {}
+        }
+        try { target?.removeEventListener("pointerdown", rec.touchHandler, { capture: true }); } catch (_) {}
+        try { target?.removeEventListener("wheel", rec.touchHandler, { capture: true }); } catch (_) {}
+        try { target?.removeEventListener("keydown", rec.touchHandler, { capture: true }); } catch (_) {}
+        try { target?.removeEventListener("input", rec.touchHandler, { capture: true }); } catch (_) {}
+        try { target?.removeEventListener("focusin", rec.touchHandler, { capture: true }); } catch (_) {}
+    };
+    rec.unbind = () => unbindClone(rec.clone);
+
+    // --- original -> clone: debounced full re-clone swap ----------------
+    const busyLocked = () => {
+        try {
+            const ae = document.activeElement;
+            if (ae && rec.clone.contains(ae)) return true;      // typing/focus
+        } catch (_) {}
+        return Date.now() - rec.lastTouch < TOUCH_LOCK;         // drag/menu open
+    };
+    const rebuild = () => {
+        if (rec.releasing || rec.dead || !el.isConnected) return;
+        let fresh;
+        try { fresh = el.cloneNode(true); } catch (_) { return; }
+        try { fresh.classList.add(GHOST_CLASS); } catch (_) {}
+        unbindClone(rec.clone);
+        rec.clone.remove();
+        // Keep the closure's `clone` reference on the LIVE mirror - the
+        // event router computes counterparts against this exact subtree.
+        clone = fresh;
+        bindClone(fresh);
+        try { host.appendChild(fresh); } catch (_) { return; }
+        rec.clone = fresh;
+    };
+    const scheduleSync = (delay = SYNC_DEBOUNCE) => {
+        if (rec.syncQueued || rec.releasing || rec.dead) return;
+        rec.syncQueued = true;
+        setTimeout(() => {
+            rec.syncQueued = false;
+            if (rec.releasing || rec.dead) return;
+            if (busyLocked()) { scheduleSync(RETRY_DELAY); return; } // deferred, not dropped
+            rebuild();
+        }, delay);
+    };
+    rec.observer = new MO(() => scheduleSync());
+    try {
+        rec.observer.observe(el, {
+            childList: true, subtree: true,
+            attributes: true, characterData: true,
+        });
+    } catch (_) {
+        rec.observer.disconnect();
+        rec.observer = null;
+        return null;
     }
 
     try {
-        el.classList.add("hub-portal-held");
         host.textContent = "";
-        host.appendChild(el); // appendChild MOVES the node (listeners kept)
-        return rec;
+        host.appendChild(clone);
     } catch (err) {
-        console.warn("[SettingsHub] dom portal mount failed:", err);
-        try { rec.observer.disconnect(); } catch (_) {}
+        console.warn("[SettingsHub] dom ghost mount failed:", err);
+        rec.observer.disconnect();
         rec.observer = null;
-        el.classList.remove("hub-portal-held");
         return null;
     }
+    bindClone(rec.clone);
+    return rec;
 }
 
 function releaseDom(rec) {
-    const { el, saved } = rec;
-    // Disarm the sticky hold FIRST - moving the element home must not be
-    // interpreted as an external snatch by our own observer.
+    // Ghost semantics: the original was NEVER moved - there is nothing to
+    // put back. Discard the mirror and stop every background activity.
     rec.releasing = true;
     try { rec.observer?.disconnect(); } catch (_) {}
     rec.observer = null;
-    try { el.classList.remove("hub-portal-held"); } catch (_) {}
-    try {
-        if (saved.parent) {
-            if (saved.next && saved.next.parentNode === saved.parent) {
-                saved.parent.insertBefore(el, saved.next);
-            } else {
-                saved.parent.appendChild(el);
-            }
-        }
-    } catch (_) {}
-    try {
-        if (saved.css === null) el.removeAttribute("style");
-        else el.setAttribute("style", saved.css);
-    } catch (_) {}
+    try { rec.unbind?.(); } catch (_) {}
+    rec.unbind = null;
+    try { rec.clone?.remove(); } catch (_) {}
+    rec.clone = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -620,8 +684,8 @@ export function mountPortals(node, root) {
         }
         host.classList.remove("hub-portal-broken");
         let rec = null;
-        // Only LEGACY single portals without members[] may relocate a DOM
-        // element; group embeds render onto their shared canvas.
+        // Single DOM panels without members[] become GHOST MIRRORS; group
+        // embeds render onto their shared canvas.
         if ((item.options?.portalKind ?? "canvas") === "dom"
             && !Array.isArray(item.members)) {
             rec = mountDomPortal(item, members[0].widget, host);
@@ -633,8 +697,8 @@ export function mountPortals(node, root) {
 
 /** Release everything this hub currently holds (before innerHTML swap!). */
 export function releaseAll(node) {
-    // Note: releaseRecord -> releaseDom arms `releasing` before touching
-    // the DOM, so sticky holds cannot fight the innerHTML rebuild.
+    // releaseRecord -> releaseDom flags `releasing` and drops the ghost
+    // mirror BEFORE any DOM surgery - pending sync timers bail out safely.
     const set = node && nodeRegistry.get(node);
     if (!set) return;
     for (const rec of [...set]) releaseRecord(rec);

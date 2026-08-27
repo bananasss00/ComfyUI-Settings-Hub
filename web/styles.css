@@ -431,16 +431,15 @@ span.hub-mirror.hub-mirror-text {
     pointer-events: auto;
 }
 
-/* DOM flavor clamp: the relocated element must lay out INSIDE the hub row.
-   !important beats ComfyUI's per-frame inline positioning (position / top /
-   left / width / height / display / pointer-events). */
-.hub-portal-held {
+/* DOM ghost-mirror flavor: the hub holds a LIVE CLONE of the panel; the
+   original stays on its node untouched. The clone must lay out INSIDE the
+   hub row like a normal block (ComfyUI wrapper styles do not apply to it,
+   but panel code may have baked inline sizing assumptions). */
+.hub-portal-ghost {
     position: static !important;
     display: block !important;
     width: 100% !important;
-    height: auto !important;
     max-width: none !important;
-    min-height: 0 !important;
     top: auto !important;
     left: auto !important;
     right: auto !important;

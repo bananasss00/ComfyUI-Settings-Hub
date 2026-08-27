@@ -466,7 +466,7 @@ function attachDomWidgetPinMenu() {
         // Ctrl/Cmd belongs to the override listener (section 3).
         if (e.shiftKey || e.ctrlKey || e.metaKey || e.defaultPrevented) return;
         if (!isTextField(e.target)) return;
-        // Text fields already relocated into a portal belong to that portal:
+        // Text fields living under our portal rows belong to that mirror:
         // their own menus must stay native, re-pinning them is meaningless.
         if (e.target.closest?.(".hub-portal-host")) return;
 
