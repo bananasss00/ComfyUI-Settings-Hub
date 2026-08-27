@@ -1170,6 +1170,64 @@ button.hub-pin-back {
     display: none;
 }
 
+/* v27.2: user-resized window - the panel gets explicit px width/height and
+   the body becomes the flexible scroll area. The unsized path above keeps
+   hugging content (max-height still applies). */
+.hub-pin-panel.hub-pin-sized .hub-pin-body {
+    max-height: none;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.hub-pin-resize {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 16px;
+    height: 16px;
+    cursor: nwse-resize;
+    touch-action: none; /* own the gesture */
+    z-index: 2;
+    opacity: 0.55;
+    transition: opacity 0.12s ease;
+    border-bottom-right-radius: 8px;
+    background: linear-gradient(135deg,
+        transparent 0 52%,
+        #66668a55 52% 58%,
+        transparent 58% 68%,
+        #66668a55 68% 74%,
+        transparent 74% 84%,
+        #66668a55 84% 90%,
+        transparent 90%);
+}
+
+.hub-pin-resize:hover {
+    opacity: 1;
+    background: linear-gradient(135deg,
+        transparent 0 52%,
+        #8888b088 52% 58%,
+        transparent 58% 68%,
+        #8888b088 68% 74%,
+        transparent 74% 84%,
+        #8888b088 84% 90%,
+        transparent 90%);
+}
+
+/* Collapsed windows cannot be resized - the grip would float on the header */
+.hub-pin-panel.hub-pin-collapsed .hub-pin-resize {
+    display: none;
+}
+
+/* While a resize gesture is live: no text selection, body ignores pointers
+   (pointer capture retargets everything to the grip anyway). */
+.hub-pin-panel.hub-pin-resizing {
+    user-select: none;
+}
+
+.hub-pin-panel.hub-pin-resizing .hub-pin-body {
+    pointer-events: none;
+}
+
 /* Floating wrap: parked out of node.widgets so the frontend's per-frame
    DOM-widget manager cannot hide it at low zoom or rewrite its geometry
    from the ghost slot. Frontends tracking elements elsewhere may still

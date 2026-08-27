@@ -360,6 +360,24 @@ dev_plan.md            — исходный технический спек пр
   collapsed ноде их картинка в панели может замирать (не критично,
   порталы живут на видимых нодах).
 
+### v27.2: ресайз плавающего окна (пин на экран)
+- SE-грип `.hub-pin-resize` (16x16, absolute right-bottom; панель
+  overflow:hidden — грип всегда внутри). Pointer-capture, тот же паттерн,
+  что у драга заголовка: pointerdown (только ЛКМ, игнор при pinMin) →
+  pointermove (clampPinSize) → pointerup/cancel = savePinSizeFromRect.
+- Размер живёт в конфиге: `cfg.pinSize = {w,h} | null` (нормализация в
+  getHubConfig рядом с pinPos). null = авто-режим: панель обнимает контент
+  (старый CSS), max-height прежний. Не-null: панель получает inline
+  width/height + класс `.hub-pin-sized` → тело становится flex-скроллом
+  (max-height:none, flex:1, min-height:0).
+- clampPinSize: min 280x120 (ниже ломается хром строк), max = вьюпорт -16/-40.
+  floatHub применяет сохранённый размер при КАЖДОМ монтировании (reload,
+  re-pin) — applyPinSize; dblclick по грипу = сброс в авто (pinSize=null).
+- Инварианты: grip не мешает драгу окна (отдельный элемент, stopPropagation),
+  collapsed скрывает грип (CSS) и pointerdown игнорирует, resize НЕ двигает
+  окно (якорь top-left стабилен), hub-pin-resizing глушит pointer-events
+  тела. homeHub/dispose ничего не чистят — размер переживает unpin/repin.
+
 ### v25: фильтр виджетов, скрытие хрома, тихое удаление, очистка очереди
 - 🔍 фильтр (вход в таб-баре, свёрнут до линзы, :focus/.hub-search-active
   расширяет): подстрока по customLabel/widgetToBind/делителям АКТИВНОЙ

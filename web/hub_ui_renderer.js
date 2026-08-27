@@ -610,6 +610,53 @@ function savePinPosFromRect(node, panel) {
     } catch (_) {}
 }
 
+// --- v27.2: user-resizable floating window ---------------------------------
+const PIN_MIN_W = 280;   // rows keep their chrome (handles/buttons) below this
+const PIN_MIN_H = 120;   // header + a couple of rows
+
+function clampPinSize(w, h) {
+    const vw = Number(window.innerWidth) > 0 ? Number(window.innerWidth) : 1280;
+    const vh = Number(window.innerHeight) > 0 ? Number(window.innerHeight) : 800;
+    const maxW = Math.max(PIN_MIN_W, vw - 16);
+    const maxH = Math.max(PIN_MIN_H, vh - 40);
+    return {
+        w: Math.min(Math.max(PIN_MIN_W, Math.round(Number(w) || 0)), maxW),
+        h: Math.min(Math.max(PIN_MIN_H, Math.round(Number(h) || 0)), maxH),
+    };
+}
+
+/** Materialize cfg.pinSize on the panel (or reset to the auto/hug mode).
+ *  Explicit height turns the panel into a real flex column: the body fills
+ *  the remaining space and scrolls (.hub-pin-sized CSS); without pinSize the
+ *  legacy CSS keeps hugging content up to max-height. */
+function applyPinSize(node, panel) {
+    let size = null;
+    try {
+        const raw = getHubConfig(node).pinSize;
+        size = raw ? clampPinSize(raw.w, raw.h) : null;
+    } catch (_) { size = null; }
+    if (size) {
+        try { getHubConfig(node).pinSize = size; } catch (_) {}
+        panel.classList.add("hub-pin-sized");
+        panel.style.width = `${size.w}px`;
+        panel.style.height = `${size.h}px`;
+    } else {
+        panel.classList.remove("hub-pin-sized");
+        panel.style.width = "";
+        panel.style.height = "";
+    }
+}
+
+/** Persist the on-screen size (called at the end of a resize gesture). */
+function savePinSizeFromRect(node, panel) {
+    try {
+        const r = panel.getBoundingClientRect();
+        const w = parseFloat(panel.style.width || "0") || r.width || 0;
+        const h = parseFloat(panel.style.height || "0") || r.height || 0;
+        getHubConfig(node).pinSize = clampPinSize(w, h);
+    } catch (_) {}
+}
+
 /** While floating, the canvas node collapses to a title-bar ghost so no
  *  dead rectangle lingers under the cursor. The PRE-PIN envelope is saved
  *  and restored verbatim on unpin - a user-sized (FILL) hub must get back
@@ -662,8 +709,13 @@ function ensurePinPanel(node, st) {
 
     const body = document.createElement("div");
     body.className = "hub-pin-body";
+    // v27.2: SE resize grip (size persists in cfg.pinSize, dblclick resets).
+    const rsz = document.createElement("div");
+    rsz.className = "hub-pin-resize";
+    rsz.title = "Resize the window (double-click resets the size)";
     panel.appendChild(head);
     panel.appendChild(body);
+    panel.appendChild(rsz);
     document.body.appendChild(panel);
 
     // Dragging moves the WINDOW, never interferes with row-level dnd (the
@@ -706,7 +758,46 @@ function ensurePinPanel(node, st) {
         toggleHubPinned(node, false);
     });
 
-    p = { panel, head, body, btnMin, btnBack };
+    // --- v27.2: SE-corner resize (same pointer-capture pattern as the drag)
+    let rszDrag = null;
+    rsz.addEventListener("pointerdown", (e) => {
+        if (e.button !== undefined && e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (getHubConfig(node).pinMin) return;      // collapsed: nothing to size
+        const r = panel.getBoundingClientRect();
+        rszDrag = { x: e.clientX, y: e.clientY, w: r.width, h: r.height };
+        panel.classList.add("hub-pin-resizing");
+        try { rsz.setPointerCapture?.(e.pointerId); } catch (_) {}
+    });
+    rsz.addEventListener("pointermove", (e) => {
+        if (!rszDrag) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const s = clampPinSize(
+            rszDrag.w + (e.clientX - rszDrag.x),
+            rszDrag.h + (e.clientY - rszDrag.y),
+        );
+        panel.classList.add("hub-pin-sized");
+        panel.style.width = `${s.w}px`;
+        panel.style.height = `${s.h}px`;
+    });
+    const endRsz = (e) => {
+        if (!rszDrag) return;
+        rszDrag = null;
+        panel.classList.remove("hub-pin-resizing");
+        try { rsz.releasePointerCapture?.(e?.pointerId); } catch (_) {}
+        savePinSizeFromRect(node, panel);
+    };
+    rsz.addEventListener("pointerup", endRsz);
+    rsz.addEventListener("pointercancel", endRsz);
+    rsz.addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+        try { getHubConfig(node).pinSize = null; } catch (_) {}
+        applyPinSize(node, panel);                  // back to hug-content mode
+    });
+
+    p = { panel, head, body, btnMin, btnBack, rsz };
     pinPanels.set(node, p);
     st.panelBody = body;
     return p;
@@ -765,6 +856,7 @@ function floatHub(node) {
     const c = clampPinPos(pos.x, pos.y);
     p.panel.style.left = `${c.x}px`;
     p.panel.style.top = `${c.y}px`;
+    applyPinSize(node, p.panel);   // v27.2: restore the persisted window size
     slimHubSlot(node, st);
     // Reflect the state on the (already mounted) tab-bar marker instantly.
     const tgl = st.root.querySelector('[data-action="pin-toggle"]');

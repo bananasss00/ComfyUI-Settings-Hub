@@ -360,6 +360,14 @@ export function getHubConfig(node) {
         cfg.pinPos = null;
     }
     if (cfg.pinMin !== true) cfg.pinMin = false;
+    // v27.2: user-resized floating window (explicit px size; null = auto,
+    // the panel hugs its content like it always did).
+    if (cfg.pinSize && typeof cfg.pinSize === "object" &&
+        Number.isFinite(Number(cfg.pinSize.w)) && Number.isFinite(Number(cfg.pinSize.h))) {
+        cfg.pinSize = { w: Number(cfg.pinSize.w), h: Number(cfg.pinSize.h) };
+    } else {
+        cfg.pinSize = null;
+    }
     // v25: row chrome (drag handles + remove buttons) hidden by the 👁 toggle.
     if (cfg.hideChrome !== true) cfg.hideChrome = false;
     return cfg;
