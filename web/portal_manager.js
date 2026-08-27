@@ -127,41 +127,31 @@ function localPos(canvas, e, dpr) {
 }
 
 /**
- * True when EVERY pixel of the canvas is fully transparent. Used to detect
- * mode-gated widgets whose draw() is a no-op outside the Vue frontend
- * (e.g. TrixNodes bypasser: "if (!isVueMode) return;"). Those panels paint
- * through NODE-level hooks instead - see the foreground fallback in tick().
+ * Single-pass bitmap scan used by the tick's blank-probe AND the auto-height
+ * settle loop. blank -> mode-gated widgets whose draw() is a no-op outside
+ * the Vue frontend (TrixNodes: "if (!isVueMode) return;") paint through
+ * NODE-level hooks instead (see the foreground fallback). pb -> the LAST
+ * painted row, the only measurable truth about "how tall the panel really
+ * is" - panels routinely draw far beyond their declared widget slot.
  */
-function canvasIsBlank(canvas) {
+function scanCanvas(canvas) {
+    const res = { blank: true, bottom: false, pb: -1 };
     try {
         const ctx = canvas.getContext("2d");
-        const data = ctx.getImageData(0, 0, canvas.width || 1, canvas.height || 1).data;
-        for (let i = 3; i < data.length; i += 4) {
-            if (data[i] !== 0) return false;
-        }
-        return true;
-    } catch (_) {
-        return false; // tainted canvas etc. - assume it painted something
-    }
-}
-
-/**
- * True when content reached the LAST pixel row. Custom panels often draw far
- * beyond their declared widget height (TrixNodes paints its whole panel from
- * a one-slot "legacy" widget) - the bottom-edge clip is the only signal we
- * can read back, and it reliably means "the embed is cut short".
- */
-function bottomEdgeHasPixels(canvas) {
-    try {
-        const ctx = canvas.getContext("2d");
+        const w = canvas.width || 1;
         const h = canvas.height || 1;
-        const data = ctx.getImageData(0, h - 1, canvas.width || 1, 1).data;
-        for (let i = 3; i < data.length; i += 4) {
-            if (data[i] !== 0) return true;
+        const data = ctx.getImageData(0, 0, w, h).data;
+        for (let y = 0; y < h; y++) {
+            const row = y * w * 4;
+            for (let x = row + 3; x < row + w * 4; x += 4) {
+                if (data[x] !== 0) { res.blank = false; res.pb = y; break; }
+            }
         }
-        return false;
+        res.bottom = res.pb === h - 1;
+        return res;
     } catch (_) {
-        return false; // tainted canvas etc. - never trigger the growth path
+        // tainted canvas etc. - assume it painted something, never grow
+        return { blank: false, bottom: false, pb: -1 };
     }
 }
 
@@ -192,6 +182,10 @@ function mountCanvasPortal(node, item, tn, members, host) {
         // drawable (hint shown). See tick().
         mode: undefined,
         probes: 0,
+        // Pixel-settle auto height: signed extra over the formula height.
+        // autoH == null means "grace not started yet".
+        hAdj: 0,
+        autoH: null,
     };
 
     // --- geometry model ----------------------------------------------------
@@ -214,20 +208,22 @@ function mountCanvasPortal(node, item, tn, members, host) {
     //            widgets - stacking by those collapsed the embed to a
     //            single row (rgthree report), so they are guarded and the
     //            layout falls back to declared native heights + row gap.
-    //   height = the row stack, NEVER smaller than the simple native stack
-    //            sum, and grown to the full node body when the panel really
-    //            paints the whole body (foreground fallback, or a "legacy"
-    //            widget whose draw overflows its declared slot - TrixNodes
-    //            draws its entire panel from a one-slot widget, which used
-    //            to clip everything past the first row).
+    //   height = the row stack as the FLOOR, then a pixel settle loop hugs
+    //            the embed to its real content: content touching the last
+    //            bitmap row -> grow (+30, capped); clear bottom -> trim to
+    //            the painted bottom (+2px). This is what fixes panels that
+    //            paint the whole node body from one slot AND nodes that size
+    //            themselves WITHOUT the title allowance (TrixNodes sets
+    //            size[1] == panel height, so subtracting NODE_TITLE_HEIGHT
+    //            - the old bodyH() - cut exactly one row per embed; the
+    //            "last target never fits" report). The foreground baseline
+    //            is therefore the FULL size[1]; any overshoot is trimmed
+    //            back by the same pixel loop within a few ticks.
     const titleTop = () => {
         const th = Number(globalThis.window?.LiteGraph?.NODE_TITLE_HEIGHT);
         return Number.isFinite(th) && th >= 0 ? th : 30;
     };
-    const bodyH = () => {
-        const bh = Math.round((Number(tn.size?.[1]) || 0) - titleTop());
-        return bh > 0 ? Math.min(1600, bh) : 0;
-    };
+    const sizeH = () => Math.round(Number(tn.size?.[1]) || 0);
     const nativeHeights = () =>
         members.map((m) => Math.min(widgetNativeHeight(m.widget, m.srcH), 400));
     const cumulativeTops = (hs) => {
@@ -268,12 +264,16 @@ function mountCanvasPortal(node, item, tn, members, host) {
         const topsArr = tops ?? cumulativeTops(nat);
         const stackH = nat.reduce((a, b) => a + b, 0)
             + PORTAL_ROW_GAP * Math.max(0, nat.length - 1);
-        let H = topsArr[members.length - 1] + nat[nat.length - 1];
-        H = Math.max(H, stackH);
-        H = Math.max(30, Math.min(1600, Math.round(H)));
-        // Panels that paint the whole node body get the full body height.
-        if (rec.mode === "foreground" || rec.expanded) H = Math.max(H, bodyH());
-        return { W, H, hs: nat, tops: topsArr };
+        let H0 = topsArr[members.length - 1] + nat[nat.length - 1];
+        H0 = Math.max(H0, stackH);
+        // Foreground panels ARE the node body; some nodes size themselves
+        // to the panel only (size[1] == panel height, no title allowance -
+        // TrixNodes). The FULL size[1] is the honest baseline; overshoot
+        // (title-sized nodes) is trimmed by the pixel settle loop.
+        if (rec.mode === "foreground") H0 = Math.max(H0, sizeH());
+        H0 = Math.max(30, Math.min(1600, Math.round(H0)));
+        const H = Math.max(30, Math.min(1600, H0 + (rec.hAdj | 0)));
+        return { W, H, H0, hs: nat, tops: topsArr };
     };
 
     const applyGeometry = (g) => {
@@ -340,18 +340,43 @@ function mountCanvasPortal(node, item, tn, members, host) {
             }
         };
 
+        // Pixel settle loop: the embed must HUG its content. Content
+        // touching the last bitmap row -> clipped -> grow (+30, capped);
+        // clear bottom -> trim to the painted bottom (+2px). Idempotent at
+        // content+2, so it never oscillates; the cap guards against runaway
+        // full-body painters.
+        const settleAutoHeight = (scan, g) => {
+            if (rec.mode === "blank") return;
+            if (!rec.autoH) rec.autoH = { grace: 3 };
+            const st = rec.autoH;
+            if (st.grace > 0) { st.grace--; return; } // let mode probes settle
+            if (scan.bottom) {
+                const cap = Math.max(g.H0, sizeH()) + titleTop() + 8;
+                if (rec.H < cap) rec.hAdj = (rec.hAdj | 0) + 30;
+                return;
+            }
+            if (!(scan.pb >= 0)) return; // tainted canvas - leave as is
+            const target = Math.min(1600, Math.ceil(scan.pb / rec.dpr) + 2);
+            const adj = Math.max(30 - g.H0, Math.min(1600 - g.H0, target - g.H0));
+            if (adj !== (rec.hAdj | 0)) rec.hAdj = adj; // applies next tick
+        };
+
         if (rec.mode === "foreground") {
             // NODE-level render (TrixNodes-style panels). Their hook is in
             // node-local coordinates with the body origin at (0,0) - which
             // is exactly what our portal surface represents.
             paint(() => { tn.onDrawForeground?.call(tn, ctx); });
-            if (!canvasIsBlank(canvas)) return;
+            const scan = scanCanvas(canvas);
+            if (!scan.blank) { settleAutoHeight(scan, g); return; }
             // The hook went dark (frontend mode flipped / node teardown).
             // Re-probe the widget stack instead of leaving a void.
             rec.mode = undefined;
             rec.probes = 0;
+            rec.autoH = null;
+            rec.hAdj = 0;
             paint(paintWidgetStack);
-            if (!canvasIsBlank(canvas)) return; // back on widget rendering
+            const scan2 = scanCanvas(canvas);
+            if (!scan2.blank) { settleAutoHeight(scan2, g); return; }
             rec.mode = "blank";
             paint(() => drawPortalHint(ctx, rec.W, rec.H));
             return;
@@ -360,17 +385,16 @@ function mountCanvasPortal(node, item, tn, members, host) {
         paint(paintWidgetStack);
 
         // Probe whether the widget actually painted. The first ticks decide
-        // the routing; "widget" mode stops probing (normal portals).
-        if (!canvasIsBlank(canvas)) {
-            // Clip detection: content reaching the LAST pixel row means the
-            // panel paints beyond the slots we allotted (mode-gated legacy
-            // widgets) - grow to the full node body within one tick.
-            if (rec.mode !== "foreground" && !rec.expanded) {
-                const bh = bodyH();
-                if (bh > rec.H && bottomEdgeHasPixels(canvas)) rec.expanded = true;
+        // the routing; settled portals run the auto-height loop instead.
+        let scan = scanCanvas(canvas);
+        if (!scan.blank) {
+            if (rec.mode === "blank") { // panel came alive
+                rec.mode = undefined;
+                rec.probes = 0;
+                rec.autoH = null;
+                rec.hAdj = 0;
             }
-            if (rec.mode === "blank") { rec.mode = undefined; rec.probes = 0; } // panel came alive
-            else if (rec.mode === undefined && rec.probes >= 3) rec.mode = "widget";
+            settleAutoHeight(scan, g);
             return;
         }
         if (rec.mode === "blank") {
@@ -383,8 +407,12 @@ function mountCanvasPortal(node, item, tn, members, host) {
             // Mode-gated widget.draw (classic-LiteGraph-only panel):
             // retry through the node's own foreground hook.
             paint(() => { tn.onDrawForeground.call(tn, ctx); });
-            if (!canvasIsBlank(canvas)) {
+            scan = scanCanvas(canvas);
+            if (!scan.blank) {
                 rec.mode = "foreground";
+                rec.autoH = null;
+                rec.hAdj = 0;
+                settleAutoHeight(scan, g);
                 return;
             }
         }
