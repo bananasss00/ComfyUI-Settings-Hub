@@ -66,9 +66,10 @@ web/portal_manager.js  — живые встраивания: DOM-панели �
                          counterpart, мутации оригинала → debounce-rebuild;
                          лок на фокус/недавний ввод), canvas-порталы,
                          групповые whole-panel embeds, геометрия/тикер;
-                         viewer-встраивания (v26): DOM-медиа-виджет — живое
-                         зеркало img/video, фолбэк painter+node.imgs (v26.1);
-                         нормализация медиа в гостах (аспект, без обрезки)
+                         viewer-встраивания (v26.2): СВОЙ медиа-элемент хаба
+                         — нативный <video controls> плеер / <img> / блит
+                         canvas-превью; вотчер смены src; фолбэк painter
+                         +node.imgs; нормализация медиа в панельных гостах
 web/preset_manager.js  — снапшоты ВСЕХ widget_binding хаба (порталы исключены)
 web/global_settings.js — ГЛОБАЛЬНЫЕ настройки хаба (v26): скорость обновления
                          зеркал (localStorage "settingshub.refreshMs"),
@@ -387,6 +388,48 @@ dev_plan.md            — исходный технический спек пр
   живой, если резолвится НОДА (tw не требуется); reportUnresolved для
   viewer печатает «(whole node embed)» вместо внутреннего sentinel.
 
+### v26.2: SELF-RENDERED вьюверы (свой плеер вместо зеркала)
+- ПОЛЕВЫЕ СИМПТОМЫ v26.1 (гост-зеркало «$$canvas-image-preview»): картинки
+  НЕ видны вообще (фронтенд РИСУЕТ превью на canvas — cloneNode копирует
+  элемент, но не битовую карту → пустой холст); видео мерцает каждый кадр
+  и показывает только первые кадры (rebuild-цикл госта пересоздавал <video>,
+  а timeupdate-синк currentTime дрался с его же воспроизведением); строки/
+  нода мелко дёргали размером (тот же churn).
+- Решение (предложено пользователем): НЕ перехватывать виджет — хаб строит
+  СВОЙ медиа-элемент и кормит его от живого превью источника:
+  * video → собственный нативный <video controls loop muted autoplay
+    playsinline> — НАСТОЯЩИЙ плеер: перемотка/пауза/звук; src копируется
+    (blob:-URL валиден в том же документе);
+  * img   → собственный <img> с живым src;
+  * canvas → блит в собственный <canvas> лёгким интервалом 120 мс
+    (document.hidden гвардия, размер = размеру исходной битовой карты);
+  * ничего из перечисленного → прежний painter-портал (onDrawBackground +
+    фолбэк node.imgs из v26.1).
+- portal_manager.js: findSourceMedia (video > img > canvas ≥2px; возвращает
+  widget+container+media+kind), liveMediaSrc (currentSrc/src/attr/<source>),
+  mountMediaViewer (+keepPortalTag; rec.kind="viewer", rec.release).
+  Вотчер: MutationObserver контейнера источника (childList+subtree+
+  attributeFilter:["src"]) + страховочный setInterval 1 с; apply()
+  РЕ-РЕШАЕТ живой media-элемент при каждом проходе (Vue перемонтирует
+  превью между запусками) и переприсваивает src ТОЛЬКО при реальной
+  смене (rec.lastSrc) — новая генерация подхватывается сама.
+- releaseRecord ветвит kind="viewer" → rec.release (стоп таймеров,
+  disconnect, pause, remove). Источник ТОЛЬКО читается — никогда не
+  клонируется и не стилизуется: ни мерцания, ни дёрганья размеров.
+- styles.css: .hub-viewer-media (width:100%, height:auto — аспект из
+  интринсик-размеров; фон .hub-viewer-media #101020).
+- normalizeGhostMedia остаётся для ОБЫЧНЫХ custom-panel гостей (обрезка
+  видео в панелях); для viewer-маунтов гости больше не используются.
+- Smoke Phase ZJ (обновлена, +25): «$$»-фильтр, isViewerNode-матрица,
+  end-to-end video → СВОЙ <video controls> (controls/loop/muted, src
+  скопирован, госта нет), вотчер подхватывает смену src (blob:x→blob:y),
+  img-маршрут, canvas-блит (размер 320 принят), тихий ✕. Грабль: id
+  тестовой ноды 69004 совпал с авто-id хаба фазы → resolve брал хаб
+  ( FakeLGraphNode конструктор рандомит id; createNewHub через graph.add
+  ставит max+1) — ручные id в фазах выбирать вне диапазона auto. Стенд:
+  play/pause заглушены на HTMLMediaElement (jsdom «Not implemented» шум).
+  База >=655.
+
 ### v26.1: боевые правки вьюверов и внутренних виджетов ($$)
 - ПОЛЕВЫЕ СИМПТОМЫ: (1) «Pin viewer» в новом фронтенде вечно рисует «🖼
   waiting for the source preview» — размер подстраивается, контента нет;
@@ -605,12 +648,13 @@ ZI — v26 вьюверы: isViewerNode-матрица (painter+имя / без 
 меню биндит, sentinel, srcH, тег «🖼 live», НЕ orphan, locate активен,
 canvas смонтирован, тик без бросков, value-refresh не флагает orphan,
 тихий ✕, orphan после удаления ноды-источника.
-ZJ — v26.1: фильтр «$$» (isInternalWidget; path-1 и панель-список чисты,
+ZJ — v26.2: фильтр «$$» (isInternalWidget; path-1 и панель-список чисты,
 viewer-пункту остаётся), isViewerNode по DOM-медиа-виджету без пейнтера
 (+негатив: именованная панель с img — не вьювер), findNodeMediaWidget,
-end-to-end: video-вьювер монтирует DOM-гост (НЕ canvas-пейнтер),
-hub-portal-media + width:100% у клона + height:auto у госта, тег «🖼 live»
-выживает, img-нода тем же маршрутом, тихий ✕ у видео-вьювера.
+end-to-end: video-вьювер монтирует СВОЙ <video controls loop muted>
+(госта НЕТ — источник не клонируется), src копируется и вотчер подхватывает
+смену (blob:x→blob:y — новая генерация), img-маршрут, canvas-блит принимает
+размер исходной карты, тихий ✕ у видео-вьювера.
 
 ⚠ грабль ZI: фазы не диспатчат onRemoved (ноды вырезаются splice'ом), поэтому
 в глобальном реестре копятся хабы прошлых фаз — перед меню-ассертами
@@ -618,7 +662,7 @@ hub-portal-media + width:100% у клона + height:auto у госта, тег 
 колбэк пункта меню биндит в ПЕРВЫЙ stale-хаб.
 
 ```bash
-node scripts/smoke_hub.mjs   # базовая линия: >=653 зелёных, 0 упавших
+node scripts/smoke_hub.mjs   # базовая линия: >=655 зелёных, 0 упавших
 ```
 
 Подводные камни харнеса:

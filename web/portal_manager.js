@@ -42,7 +42,6 @@
 import { app } from "../../scripts/app.js";
 import {
     getHubConfig, PORTAL_ROW_GAP, widgetNativeHeight, resolveBindingTarget,
-    findNodeMediaWidget,
 } from "./core.js";
 
 /** node -> Set<record>; records live between structural renders. */
@@ -817,29 +816,36 @@ function releaseCanvas(rec) {
 
 function releaseRecord(rec) {
     if (rec.kind === "dom") releaseDom(rec);
+    else if (rec.kind === "viewer") rec.release?.();
     else releaseCanvas(rec);
     try { rec.set?.delete(rec); } catch (_) {}
 }
 
 // ---------------------------------------------------------------------------
-// v26 viewer portal: bring the source node's PREVIEW into the hub. Real
-// frontends render viewers through one of TWO surfaces, so the mount tries
-// them in order (v26.1):
+// v26 viewer portal: bring the source node's PREVIEW into the hub.
 //
-//   1. DOM media widget - new-frontend PreviewImage / SaveImage /
-//      VideoCombine builds keep the preview inside a hidden DOM container
-//      ("$$canvas-image-preview") whose element wraps the actual
-//      <img>/<video>/<canvas>. There is NO background painter to call (the
-//      old "waiting for the source preview" dead end) - so we ghost-mirror
-//      that element instead: live media, mutation-synced, with the media
-//      aspect-corrected inside the hub row (see normalizeGhostMedia).
-//   2. Canvas painter - classic builds (and many custom nodes) paint media
-//      straight in node.onDrawBackground. The portal re-renders that painter
-//      through a pseudo-member; when it produces nothing, a fallback painter
-//      draws node.imgs (loading /view specs on demand) before the hint.
+// v26.2 - SELF-RENDERED media (field feedback): the hub builds and owns ITS
+// OWN media element, fed from the source's live preview. The source widget
+// is never cloned and never rebuilt - that mirror churn was visible in the
+// field as per-frame flicker (re-cloned <video> + seek fighting) and rows
+// that kept jitter-resizing.
 //
-// Read-only by contract: pointer forwarding is skipped for painter mounts
-// (viewers are not interactive surfaces; the row's 🎯 locates the source).
+//   video  -> our own native <video controls loop muted autoplay>: a REAL
+//             player (seek/pause/volume) as the user asked. We copy the src
+//             (blob: URLs stay valid in the same document) and re-point it
+//             when the source swaps media (new generation).
+//   img    -> our own <img> with the live src.
+//   canvas -> the new frontend's "$$canvas-image-preview" DRAWS the bitmap
+//             onto a canvas (cloning the element copies nothing - that's why
+//             pinned images came out blank). We blit it into our own canvas
+//             on a light interval instead: content copies across, nothing
+//             rebuilds, no flicker.
+//   none   -> classic painter portal (node.onDrawBackground) with the
+//             node.imgs fallback painter from v26.1.
+//
+// A watcher (MutationObserver on the source container + 1s safety poll)
+// re-resolves the CURRENT media element (Vue re-mounts it between runs) and
+// re-points our element only when the src actually changed.
 // ---------------------------------------------------------------------------
 
 const viewerSpecsLoaded = new WeakSet();
@@ -885,6 +891,147 @@ function drawViewerImgs(ctx, tn, W, H) {
     }
     if (!imgs.length) loadViewerSpecs(tn);
     return false;
+}
+
+/** Live media behind a node: video beats img beats canvas (a canvas preview
+ *  container may also wrap the video player of a Video Combine). Returns
+ *  { widget, container, media, kind } or null. */
+function findSourceMedia(tn) {
+    for (const w of tn?.widgets ?? []) {
+        const el = w?.element ?? w?.inputEl ?? w?.contentEl;
+        if (!el || typeof el.querySelector !== "function") continue;
+        try {
+            const v = el.tagName === "VIDEO" ? el : el.querySelector("video");
+            if (v) return { widget: w, container: el, media: v, kind: "video" };
+            const i = el.tagName === "IMG" ? el : el.querySelector("img");
+            if (i) return { widget: w, container: el, media: i, kind: "img" };
+            const c = el.tagName === "CANVAS" ? el : el.querySelector("canvas");
+            if (c && Number(c.width) >= 2 && Number(c.height) >= 2) {
+                return { widget: w, container: el, media: c, kind: "canvas" };
+            }
+        } catch (_) { /* exotic element - keep scanning */ }
+    }
+    return null;
+}
+
+/** The src actually feeding a media element (attr, property or <source>). */
+function liveMediaSrc(m) {
+    try {
+        return m?.currentSrc || m?.src || m?.getAttribute?.("src")
+            || m?.querySelector?.("source")?.getAttribute?.("src") || "";
+    } catch (_) { return ""; }
+}
+
+/**
+ * SELF-RENDERED viewer: our own media element + a lightweight watcher.
+ * Returns a viewer rec, or null when the source owns no DOM media (caller
+ * falls back to the painter portal). The source is only READ - never
+ * cloned, never rebuilt, never styled.
+ */
+function mountMediaViewer(node, item, tn, host) {
+    keepPortalTag(host);
+    const src = findSourceMedia(tn);
+    if (!src) return null;
+
+    if (src.kind === "video" || src.kind === "img") {
+        const el = document.createElement(src.kind);
+        el.className = "hub-viewer-media";
+        el.dataset.role = "viewer-media";
+        if (src.kind === "video") {
+            // A REAL player: seek / pause / volume via native controls.
+            // Muted+autoplay satisfies browser autoplay policies (the user
+            // can unmute from the controls); loop keeps loops looping.
+            el.controls = true;
+            el.loop = true;
+            el.muted = true;
+            el.playsInline = true;
+            el.preload = "auto";
+        }
+        host.appendChild(el);
+
+        const rec = {
+            kind: "viewer", item, tn, host,
+            media: el, srcKind: src.kind,
+            dead: false, timer: null, observer: null, lastSrc: null,
+            release: null, set: null,
+        };
+        const apply = () => {
+            if (rec.dead) return;
+            // Re-resolve the LIVE media element every pass: frontends
+            // re-mount the preview element between runs.
+            const live = findSourceMedia(tn);
+            const s = live ? liveMediaSrc(live.media) : "";
+            if (!s || s === rec.lastSrc) return;
+            rec.lastSrc = s;
+            try {
+                el.src = s;
+                if (rec.srcKind === "video") {
+                    el.muted = true;
+                    const p = el.play?.();
+                    p?.catch?.(() => {}); // autoplay denial is fine
+                }
+            } catch (_) {}
+        };
+        apply();
+        const MO = typeof MutationObserver !== "undefined"
+            ? MutationObserver : globalThis.window?.MutationObserver ?? null;
+        if (MO) {
+            try {
+                rec.observer = new MO(apply);
+                rec.observer.observe(src.container, {
+                    childList: true, subtree: true,
+                    attributes: true, attributeFilter: ["src"],
+                });
+            } catch (_) { rec.observer = null; }
+        }
+        rec.timer = setInterval(apply, 1000); // mutation-silent swaps
+        rec.release = () => {
+            rec.dead = true;
+            if (rec.timer) { clearInterval(rec.timer); rec.timer = null; }
+            try { rec.observer?.disconnect(); } catch (_) {}
+            rec.observer = null;
+            try { el.pause?.(); } catch (_) {}
+            try { el.remove(); } catch (_) {}
+        };
+        return rec;
+    }
+
+    // canvas: the frontend DRAWS the preview onto a canvas - cloneNode
+    // copies the element but not its bitmap (pinned images came out blank).
+    // Blit it into our own canvas on a light interval: nothing rebuilds.
+    const el = document.createElement("canvas");
+    el.className = "hub-viewer-media";
+    el.dataset.role = "viewer-media";
+    host.appendChild(el);
+    const rec = {
+        kind: "viewer", item, tn, host,
+        media: el, srcKind: "canvas",
+        dead: false, timer: null, observer: null,
+        release: null, set: null,
+    };
+    const blit = () => {
+        if (rec.dead) return;
+        if (document.hidden) return;
+        try {
+            const live = findSourceMedia(tn);
+            const c = live?.kind === "canvas" ? live.media : null;
+            if (!c || !(c.width > 0) || !(c.height > 0)) return;
+            if (el.width !== c.width) el.width = c.width;
+            if (el.height !== c.height) el.height = c.height;
+            const ctx = el.getContext("2d");
+            if (!ctx) return;
+            ctx.clearRect(0, 0, el.width, el.height);
+            ctx.drawImage(c, 0, 0);
+        } catch (_) { /* tainted source - retry next tick */ }
+    };
+    blit();
+    rec.timer = setInterval(blit, 120);
+    rec.release = () => {
+        rec.dead = true;
+        if (rec.timer) { clearInterval(rec.timer); rec.timer = null; }
+        try { el.remove(); } catch (_) {}
+    };
+    return rec;
 }
 
 function mountViewerPortal(node, item, tn, host) {
@@ -946,14 +1093,12 @@ export function mountPortals(node, root) {
                 continue;
             }
             host.classList.remove("hub-portal-broken");
-            // v26.1: mirror the DOM media widget when the frontend keeps the
-            // preview in one - a painter re-call would paint nothing there.
+            // v26.2: the hub renders its OWN media element (native video
+            // player / img / canvas blit) fed from the source preview. No
+            // ghost cloning - that churned, flickered and lost canvas bits.
             let vrec = null;
-            const mw = findNodeMediaWidget(tn);
-            if (mw) {
-                try { vrec = mountDomPortal(item, mw, host, { viewer: true }); }
-                catch (_) { vrec = null; }
-            }
+            try { vrec = mountMediaViewer(node, item, tn, host); }
+            catch (_) { vrec = null; }
             if (!vrec) vrec = mountViewerPortal(node, item, tn, host);
             if (vrec) { vrec.set = set; set.add(vrec); }
             continue;

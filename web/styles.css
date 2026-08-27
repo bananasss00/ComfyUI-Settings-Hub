@@ -467,6 +467,18 @@ span.hub-mirror.hub-mirror-text {
     display: block !important;
 }
 
+/* v26.2: self-rendered viewer media - the hub OWNS this element (native
+   <video controls> player / <img> / canvas blit). Intrinsic aspect keeps
+   the row hugging the content; width follows the hub column. */
+.hub-viewer-media {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    border-radius: 3px;
+    background: #101020;
+}
+
 /* Buttons disabled state */
 .hub-btn:disabled {
     opacity: 0.35;
