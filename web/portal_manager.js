@@ -207,15 +207,19 @@ function mountCanvasPortal(node, item, tn, members, host) {
     //            height:auto) and localPos() compensates pointer
     //            coordinates back into logical space.
     //   rows   = the source's own widget offsets (widget.last_y) whenever
-    //            the runtime exposes them, so stacked rows sit EXACTLY
-    //            where they sit on the node - no drift between what is
-    //            painted and what receives the click. Fallback: declared
-    //            native heights + the LiteGraph row gap.
-    //   height = the row stack, grown to the full node body when the panel
-    //            really paints the whole body (foreground fallback, or a
-    //            "legacy" widget whose draw overflows its declared slot -
-    //            TrixNodes draws its entire panel from a one-slot widget,
-    //            which used to clip everything past the first row).
+    //            they are SANE (strictly growing, each step at least the
+    //            row's own native height - rows cannot overlap on the real
+    //            node), so stacked rows sit EXACTLY where they sit on the
+    //            node. Some frontends leave stale/zeroed last_y on custom
+    //            widgets - stacking by those collapsed the embed to a
+    //            single row (rgthree report), so they are guarded and the
+    //            layout falls back to declared native heights + row gap.
+    //   height = the row stack, NEVER smaller than the simple native stack
+    //            sum, and grown to the full node body when the panel really
+    //            paints the whole body (foreground fallback, or a "legacy"
+    //            widget whose draw overflows its declared slot - TrixNodes
+    //            draws its entire panel from a one-slot widget, which used
+    //            to clip everything past the first row).
     const titleTop = () => {
         const th = Number(globalThis.window?.LiteGraph?.NODE_TITLE_HEIGHT);
         return Number.isFinite(th) && th >= 0 ? th : 30;
@@ -233,14 +237,19 @@ function mountCanvasPortal(node, item, tn, members, host) {
         return t;
     };
     // Row tops relative to the FIRST member (title-height agnostic).
+    // Sanity-guarded: widgets cannot overlap on the real node, so every step
+    // must be >= the row's own native height (small tolerance). Stale or
+    // zeroed offsets (all equal - seen on rgthree panels in some frontends)
+    // return null -> the safe cumulative fallback is used instead.
     const sourceTops = () => {
-        let ok = members.length > 0;
-        const ly = members.map((m) => {
-            const v = Number(m.widget?.last_y);
-            if (!Number.isFinite(v)) ok = false;
-            return v;
-        });
-        return ok ? ly.map((v) => Math.max(0, v - ly[0])) : null;
+        if (!members.length) return null;
+        const ly = members.map((m) => Number(m.widget?.last_y));
+        if (ly.some((v) => !Number.isFinite(v))) return null;
+        const nat = nativeHeights();
+        for (let i = 0; i < ly.length - 1; i++) {
+            if (ly[i + 1] - ly[i] < nat[i] * 0.9 - 0.5) return null;
+        }
+        return ly.map((v) => Math.max(0, v - ly[0]));
     };
 
     const computeLayout = () => {
@@ -252,25 +261,19 @@ function mountCanvasPortal(node, item, tn, members, host) {
 
         const tops = sourceTops();
         const nat = nativeHeights();
-        let hs, H;
-        if (tops) {
-            hs = nat.map((h, i) => {
-                if (i < members.length - 1) {
-                    const step = tops[i + 1] - tops[i] - PORTAL_ROW_GAP;
-                    if (step > 0) return Math.min(400, step);
-                }
-                return h;
-            });
-            H = tops[members.length - 1] + hs[members.length - 1];
-        } else {
-            hs = nat;
-            H = hs.reduce((a, b) => a + b, 0)
-                + PORTAL_ROW_GAP * Math.max(0, hs.length - 1);
-        }
+        // Draw rows with their NATIVE heights at the source's own offsets -
+        // exactly what the node itself does (draw receives widget.height).
+        // The simple stack sum is a hard floor for the total height: the
+        // embed must never end up shorter than the panel it reproduces.
+        const topsArr = tops ?? cumulativeTops(nat);
+        const stackH = nat.reduce((a, b) => a + b, 0)
+            + PORTAL_ROW_GAP * Math.max(0, nat.length - 1);
+        let H = topsArr[members.length - 1] + nat[nat.length - 1];
+        H = Math.max(H, stackH);
         H = Math.max(30, Math.min(1600, Math.round(H)));
         // Panels that paint the whole node body get the full body height.
         if (rec.mode === "foreground" || rec.expanded) H = Math.max(H, bodyH());
-        return { W, H, hs, tops };
+        return { W, H, hs: nat, tops: topsArr };
     };
 
     const applyGeometry = (g) => {
@@ -402,12 +405,17 @@ function mountCanvasPortal(node, item, tn, members, host) {
         try {
             const [px, py] = localPos(canvas, e, rec.dpr);
             const g = computeLayout();
-            const tops = g.tops ?? cumulativeTops(g.hs);
+            const tops = g.tops;
             let top = tops[0] ?? 0;
             let hit = -1;
             for (let i = 0; i < members.length; i++) {
                 top = tops[i];
-                if (py >= top && py < top + g.hs[i]) { hit = i; break; }
+                // A row owns everything up to the NEXT row's top - source
+                // gaps between rows route to the row above, no dead zones.
+                const nextTop = i < members.length - 1
+                    ? Math.max(tops[i + 1], top + g.hs[i])
+                    : top + g.hs[i];
+                if (py >= top && py < nextTop) { hit = i; break; }
             }
             if (hit < 0) {
                 hit = members.length - 1;                 // past the last row
