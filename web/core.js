@@ -566,9 +566,16 @@ export function getSliderOverride(item) {
 export function setSliderOverride(item, patch = {}, { autoApply } = {}) {
     if (!item || typeof item !== "object") return {};
     const prevFlag = item.sliderOverride?.applySliderOverride;
+    // The native-options snapshot (taken at the FIRST push) must survive
+    // rebuilds of this object: every Apply replaces item.sliderOverride, and
+    // losing "native" there would make the next push re-capture the ALREADY
+    // overwritten values as if they were node originals.
+    const prevNative = item.sliderOverride?.native;
     // Contract: a BARE patch (no min/max/step keys at all) means "wipe the
-    // override" (the renderer's Clear button); any explicit key turns the
-    // call into a MERGE where null/"" clears that side and omissions keep it.
+    // override" (API-level wipe; the renderer's Clear button routes through
+    // clearSliderOverride, which also RESTORES natives). Any explicit key
+    // turns the call into a MERGE where null/"" clears that side and omitted
+    // keys keep the previous value.
     const hasExplicitKeys =
         !!patch && OV_KEYS.some((k) => k in patch);
     let want = {};
@@ -587,10 +594,17 @@ export function setSliderOverride(item, patch = {}, { autoApply } = {}) {
     const flag =
         autoApply === undefined ? prevFlag : (autoApply === true);
     const keys = Object.keys(want);
+    const carryNative = () => {
+        if (prevNative !== undefined && prevNative !== null) {
+            item.sliderOverride.native = prevNative;
+        }
+    };
     if (keys.length) {
         item.sliderOverride = { ...want };
+        carryNative();
     } else if (flag === false) {
         item.sliderOverride = {}; // remember "never touch real widgets"
+        carryNative();
     } else {
         delete item.sliderOverride;
         return {};
@@ -599,6 +613,35 @@ export function setSliderOverride(item, patch = {}, { autoApply } = {}) {
         item.sliderOverride.applySliderOverride = flag;
     }
     return getSliderOverride(item);
+}
+
+/**
+ * Remove the override AND give back whatever the real widget carried before
+ * the first push (native snapshot). Returns what happened:
+ *   wiped=true   - config no longer carries sliderOverride;
+ *   restored=true - native min/max/step(/precision/round) written back to a
+ *                   resolved live widget. Restoring is best-effort: when the
+ *                   target cannot be resolved right now the config is still
+ *                   wiped (user asked), only nothing can be reverted on-node.
+ */
+export function clearSliderOverride(item) {
+    if (!item || typeof item !== "object") return { wiped: false, restored: false };
+    const raw = item.sliderOverride;
+    let restored = false;
+    const nat = raw?.native && typeof raw.native === "object" ? raw.native : null;
+    if (nat) {
+        try {
+            const tn = resolveBindingTarget(item);
+            const tw = tn?.widgets?.find((w) => w && w.name === item.widgetToBind);
+            if (tn && tw && tw.options && typeof tw.options === "object") {
+                for (const k of Object.keys(nat)) tw.options[k] = nat[k];
+                try { (tn.graph ?? app.graph)?.setDirtyCanvas?.(true, true); } catch (_) {}
+                restored = true;
+            }
+        } catch (_) { /* keep wiping even if resolution exploded */ }
+    }
+    delete item.sliderOverride; // native snapshot dies with the override
+    return { wiped: true, restored };
 }
 
 /** True when at least one overridden field exists on this binding. */
@@ -652,9 +695,46 @@ export function applyOverrideToTargetWidgets(item) {
     if (!tn || !tw) return 0;
     try {
         if (!tw.options || typeof tw.options !== "object") tw.options = {};
+
+        // NATIVE SNAPSHOT - taken exactly once, BEFORE the first write, so
+        // Clear can give the node back what IT carried (field report v22:
+        // "reset сбрасывает не к настоящим значениям виджета"). Besides the
+        // three overridden keys we also snapshot precision/round whenever
+        // they exist, because the step-coherence block below may refine them.
+        try {
+            const rawOv = item.sliderOverride;
+            if (rawOv && typeof rawOv === "object" && !rawOv.native) {
+                const nat = {};
+                for (const k of [...OV_KEYS, "precision", "round"]) {
+                    if (k in tw.options) nat[k] = tw.options[k];
+                }
+                rawOv.native = nat;
+            }
+        } catch (_) { /* frozen configs must not break pushing */ }
+
         for (const k of OV_KEYS) {
             if (k in ov) tw.options[k] = ov[k];
         }
+
+        // STEP COHERENCE (field report v22: "min/max применяется, а step -
+        // нет"). Several frontends drive number-widget drag granularity from
+        // options.precision / options.round and only use raw step for the
+        // arrow zones. Writing step alone therefore looks like a no-op on
+        // those widgets. If the widget ITSELF declares these fields, bring
+        // them in line with the pushed step; never invent missing fields.
+        if ("step" in ov) {
+            const dec = stepDecimals(ov.step);
+            if (tw.options.round != null) tw.options.round = ov.step;
+            if (tw.options.precision != null &&
+                Number.isFinite(Number(tw.options.precision))) {
+                // Only ever RAISE display precision to be able to EXPRESS the
+                // step ("1" -> precision 0 with step .25 would fight); never
+                // shrink an existing finer one.
+                tw.options.precision =
+                    Math.max(Number(tw.options.precision), dec);
+            }
+        }
+
         try { (tn.graph ?? app.graph)?.setDirtyCanvas?.(true, true); } catch (_) {}
         return 1;
     } catch (_) {

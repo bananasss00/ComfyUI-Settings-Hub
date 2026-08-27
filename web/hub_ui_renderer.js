@@ -22,7 +22,8 @@ import {
     isMultilineWidget, portalKindOf, resolveBindingTarget, findHolderChainOf,
     synthSliderWindow, growSynthWindow,
     effectiveSliderParams, getSliderOverride, hasSliderOverride,
-    setSliderOverride, applyOverrideToTargetWidgets, maybeReapplySliderOverride,
+    setSliderOverride, clearSliderOverride, applyOverrideToTargetWidgets,
+    maybeReapplySliderOverride,
 } from "./core.js";
 import { presetSave, presetNew, presetDelete, presetApply } from "./preset_manager.js";
 import { writeTargetValue, ensureHooksForItem } from "./sync_manager.js";
@@ -633,7 +634,17 @@ function openNumPopup(node, trigger) {
 
     const ov = getSliderOverride(item);
     const eff = effectiveSliderParams(item, findTarget(item).tw);
-    const fmt = (x) => Number.isFinite(x) ? String(x) : "";
+    // Placeholder shows the NODE'S ORIGINAL value (captured before the first
+    // push), not the currently-pushed numbers - field report v22: after a
+    // push the custom values looked like node defaults in the empty-state
+    // hints. Suffix "·node" is only truthful when a snapshot exists.
+    const nat = (item.sliderOverride?.native && typeof item.sliderOverride.native === "object")
+        ? item.sliderOverride.native : null;
+    const phOf = (natV, effV) => {
+        if (nat && Number.isFinite(Number(natV))) return `${String(natV)}·node`;
+        const f = Number.isFinite(Number(effV)) ? String(Number(effV)) : "";
+        return f ? `${f}·src` : "";
+    };
     const autoChecked = item.sliderOverride?.applySliderOverride !== false;
 
     const pop = document.createElement("div");
@@ -641,12 +652,12 @@ function openNumPopup(node, trigger) {
     pop.innerHTML =
         `<div class="hub-menu-title">⚙ ${esc(item.customLabel || item.widgetToBind || "slider")}</div>` +
         `<div class="hub-pop-grid">` +
-        `<label>min</label><input data-pop-field="min" inputmode="decimal" spellcheck="false" placeholder="${fmt(eff.min)}·src" value="${ov.min !== undefined ? esc(String(ov.min)) : ""}">` +
-        `<label>max</label><input data-pop-field="max" inputmode="decimal" spellcheck="false" placeholder="${fmt(eff.max)}·src" value="${ov.max !== undefined ? esc(String(ov.max)) : ""}">` +
-        `<label>step</label><input data-pop-field="step" inputmode="decimal" spellcheck="false" placeholder="${fmt(eff.sliderStep)}·auto" value="${ov.step !== undefined ? esc(String(ov.step)) : ""}">` +
+        `<label>min</label><input data-pop-field="min" inputmode="decimal" spellcheck="false" placeholder="${esc(phOf(nat?.min, eff.min))}" value="${ov.min !== undefined ? esc(String(ov.min)) : ""}">` +
+        `<label>max</label><input data-pop-field="max" inputmode="decimal" spellcheck="false" placeholder="${esc(phOf(nat?.max, eff.max))}" value="${ov.max !== undefined ? esc(String(ov.max)) : ""}">` +
+        `<label>step</label><input data-pop-field="step" inputmode="decimal" spellcheck="false" placeholder="${esc(phOf(nat?.step, eff.sliderStep))}" value="${ov.step !== undefined ? esc(String(ov.step)) : ""}">` +
         `</div>` +
         `<label class="hub-pop-auto"><input type="checkbox" data-pop-role="auto"${autoChecked ? " checked" : ""}> auto-apply to real nodes (incl. reload)</label>` +
-        `<div class="hub-pop-hint">empty field = keep source side · step &gt; 0</div>` +
+        `<div class="hub-pop-hint">empty field = keep source side · grey hint = node original · step &gt; 0</div>` +
         `<div class="hub-pop-btns">` +
         `<button type="button" data-pop-btn="apply" title="Save for this binding">✓</button>` +
         `<button type="button" data-pop-btn="push" title="Write min/max/step onto the REAL node widgets right now">⤴ push</button>` +
@@ -666,7 +677,9 @@ function openNumPopup(node, trigger) {
         if (act === "close") { closeNumPopup(); return; }
         if (act === "apply") { applyNumPopover(node, numPopState); return; }
         if (act === "clear") {
-            setSliderOverride(numPopState.item, {});
+            // Restore the REAL widget's original min/max/step(/precision/round)
+            // when they were captured at the first push, then drop the config.
+            clearSliderOverride(numPopState.item);
             node.setDirtyCanvas?.(true, true);
             closeNumPopup();
             renderHub(node);

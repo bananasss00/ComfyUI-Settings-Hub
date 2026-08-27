@@ -39,6 +39,7 @@ web/core.js            — конфиг хаба, detectWidgetType (самоле
                          шагов не-int источников), effectiveSliderParams;
                          override-модель слайдеров: get/setSliderOverride /
                          hasSliderOverride / applyOverrideToTargetWidgets /
+                         clearSliderOverride (рестор native-опций) /
                          maybeReapplySliderOverride (одноразовый session-latch);
                          createNewHub — канонический LiteGraph.createNode -> graph.add
 web/sync.js            — шина структурных/values-обновлений + shared edit-lock
@@ -158,21 +159,35 @@ dev_plan.md            — исходный технический спек пр
 - merged min/max/step лечатся обратно в item.options (выживание орфанов).
 
 ### Slider overrides (⚙ на числовой строке)
-- Модель: `item.sliderOverride = { min?, max?, step?, applySliderOverride? }`
+- Модель: `item.sliderOverride = { min?, max?, step?, applySliderOverride?, native? }`
   живёт в конфиге хаба (переживает reload/presets). Присутствие поля = стена;
   отсутствие = семантика источника той стороны.
 - Контракт setSliderOverride(item, patch): BARE patch {} — ПОЛНАЯ зачистка
-  (кнопка clear); любой явный ключ — MERGE: значение ставит стену, null/""
-  снимает сторону, опущенный ключ сохраняет прежнее. step строго >0.
+  (API-wipe БЕЗ рестора; для восстановления используйте clearSliderOverride);
+  любой явный ключ — MERGE: значение ставит стену, null/"" снимает сторону,
+  опущенный ключ сохраняет прежнее. step строго >0. native-снапшот переносится
+  через все rebuild'ы объекта (иначе повторный пуш записал бы кастомные числа
+  как «натив»).
+- НАТИВНЫЙ СНАПШОТ (v22): первый пуш (applyOverrideToTargetWidgets) ДО записи
+  копирует текущие tw.options {min,max,step}+объявленные precision/round в
+  sliderOverride.native. clearSliderOverride(item) = рестор нативов на живой
+  виджет + удаление override-ключа; best-effort: цель не резолвится → config
+  чистится, restored=false (честный отчёт). API-bare {} restore НЕ делает.
+- STEP-КОГЕРЕНТНОСТЬ пуша (v22): многие фронты ведут драг по precision/round,
+  а не по сырому step — потому при наличии ОБЪЯВЛЕННЫх полей:
+  round := step (квант равен шагу), precision := max(orig, decimals(step)) —
+  только повышаем, никогда не сужаем; отсутствующие поля НЕ изобретаем.
 - Рендер — ТОЛЬКО через effectiveSliderParams(item,tw)= numericMerge ⊕ override;
   override-границы действуют как стены и для ручных коммитов (coerceNumeric
   клэмпит по объединению source∪override). Парность «статичный ↔ синтетический»
   выбирается по эффективным границам; overridden-слайдер носит класс
   .hub-range-ovr, гайка строки подсвечена (.hub-gear-on).
 - Поповер — body-level fixed (.hub-num-pop); валидация полей inline
-  (.hub-pop-bad), пустое поле = снять сторону; кнопки ✓apply / ⤴push / clear / ✕.
-  Push пишет числа в ЖИВОЙ виджет ноды немедленно (после apply без переоткрытия);
-  флэш-фидбек идёт на СВЕЖУЮ кнопку после innerHTML-свопа.
+  (.hub-pop-bad), пустое поле = снять сторону; кнопки ✓apply / ⤴push / clear / ✕
+  (clear идёт через clearSliderOverride — С РЕСТОРОМ). Плейсхолдеры показывают
+  native со суффиксом «·node»; без снапшота — эффективные с «·src». Push пишет
+  числа в ЖИВОЙ виджет немедленно; флэш-фидбек идёт на СВЕЖУЮ кнопку после
+  innerHTML-свопа.
 
 ### Авто-применение override к реальным нодам
 - Флаг applySliderOverride (чекбокс поповера, дефолт ON) разрешает пушь на
@@ -182,6 +197,8 @@ dev_plan.md            — исходный технический спек пр
   чтобы структурные рендеры не спамили патчи. OFF блокирует даже пост-reload путь.
 - resolveBindingTarget возвращает ГОЛУЮ НОДУ (не пару {tn,tw}) — деструктурировать
   оборонительно (инцидент ZC-написания: TypeError при orphan-resolve).
+- ОГРАНИЧЕНИЕ: нативы, затёртые пушами ДО введения снапшота (≤v21), невосстановимы —
+  у тех биндингов Clear лишь снимет кастом (уже добавьте оригиналы руками один раз).
 
 ### Вкладки — переименование поверх перерендера
 - Нативный dblclick по кнопке вкладки НЕВОЗМОЖЕН: первый клик пересобирает
@@ -315,9 +332,15 @@ int-семейство нетронуто), API override'ов (bare-clear / merg
 коммитов, пушь на реальный виджет, авто-реапплай после симулированного reload
 с latch-семантикой и отказным чекбоксом, поповер (open/invalid-keep/clear-side
 /close-on-apply), JSON-persistence флага.
+ZD — круговорот пушей (v22): native-снапшот до первой записи (min/max/step+
+объявленные precision/round) и его НЕПЕРЕЗАПИСЫВАЕМОСТЬ при повторных пушах и
+rebuild'ах конфига; step-когерентность (precision 0->2 при step=.25, round:=step
+только когда поле объявлено); clearSliderOverride вертает ТОЧНО допушные значения
+включая coerced-round; orphan-clear честно reports wiped/restored=false;
+плейсхолдеры «·node» из нативов против value=override; фолбэк «·src» без снапшота.
 
 ```bash
-node scripts/smoke_hub.mjs   # базовая линия: >=433 зелёных, 0 упавших
+node scripts/smoke_hub.mjs   # базовая линия: >=454 зелёных, 0 упавших
 ```
 
 Подводные камни харнеса:
