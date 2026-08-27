@@ -108,10 +108,19 @@ function releaseDom(rec) {
 // Canvas re-render flavor
 // ---------------------------------------------------------------------------
 
-function localPos(canvas, e) {
+function localPos(canvas, e, dpr) {
     try {
         const r = canvas.getBoundingClientRect();
-        return [e.clientX - r.left, e.clientY - r.top];
+        // CSS may scale the canvas down to fit a narrow hub row
+        // (max-width:100% + height:auto). Compensate so the forwarded
+        // position is ALWAYS in logical draw coordinates - clicks stay
+        // pixel-true at any display scale (and any hub width).
+        let sx = 1, sy = 1;
+        const lw = canvas.width / (dpr || 1);
+        const lh = canvas.height / (dpr || 1);
+        if (r.width > 0 && lw > 0) sx = lw / r.width;
+        if (r.height > 0 && lh > 0) sy = lh / r.height;
+        return [(e.clientX - r.left) * sx, (e.clientY - r.top) * sy];
     } catch (_) {
         return [e.clientX || 0, e.clientY || 0];
     }
@@ -133,6 +142,26 @@ function canvasIsBlank(canvas) {
         return true;
     } catch (_) {
         return false; // tainted canvas etc. - assume it painted something
+    }
+}
+
+/**
+ * True when content reached the LAST pixel row. Custom panels often draw far
+ * beyond their declared widget height (TrixNodes paints its whole panel from
+ * a one-slot "legacy" widget) - the bottom-edge clip is the only signal we
+ * can read back, and it reliably means "the embed is cut short".
+ */
+function bottomEdgeHasPixels(canvas) {
+    try {
+        const ctx = canvas.getContext("2d");
+        const h = canvas.height || 1;
+        const data = ctx.getImageData(0, h - 1, canvas.width || 1, 1).data;
+        for (let i = 3; i < data.length; i += 4) {
+            if (data[i] !== 0) return true;
+        }
+        return false;
+    } catch (_) {
+        return false; // tainted canvas etc. - never trigger the growth path
     }
 }
 
@@ -165,30 +194,83 @@ function mountCanvasPortal(node, item, tn, members, host) {
         probes: 0,
     };
 
-    // Live row tracking: native growth (a lora added on the source node),
-    // hub resizing or viewport changes are all picked up WITHIN ONE TICK -
-    // no tab switch / page reload needed anymore.
-    const rowHeights = () =>
+    // --- geometry model ----------------------------------------------------
+    // The portal reproduces the SOURCE node's own widget area so that the
+    // panel's internal hit-testing (which custom panels derive from the node
+    // width / their real row offsets) matches what the user sees:
+    //
+    //   width  = the source node's widget width. NEVER squeezed into the
+    //            hub row - squeezing shifted right-anchored controls
+    //            (rgthree arrows, trix toggles) and made clicks activate
+    //            the WRONG element, depending on the hub's width. A narrow
+    //            row scales the canvas down via CSS (max-width:100% +
+    //            height:auto) and localPos() compensates pointer
+    //            coordinates back into logical space.
+    //   rows   = the source's own widget offsets (widget.last_y) whenever
+    //            the runtime exposes them, so stacked rows sit EXACTLY
+    //            where they sit on the node - no drift between what is
+    //            painted and what receives the click. Fallback: declared
+    //            native heights + the LiteGraph row gap.
+    //   height = the row stack, grown to the full node body when the panel
+    //            really paints the whole body (foreground fallback, or a
+    //            "legacy" widget whose draw overflows its declared slot -
+    //            TrixNodes draws its entire panel from a one-slot widget,
+    //            which used to clip everything past the first row).
+    const titleTop = () => {
+        const th = Number(globalThis.window?.LiteGraph?.NODE_TITLE_HEIGHT);
+        return Number.isFinite(th) && th >= 0 ? th : 30;
+    };
+    const bodyH = () => {
+        const bh = Math.round((Number(tn.size?.[1]) || 0) - titleTop());
+        return bh > 0 ? Math.min(1600, bh) : 0;
+    };
+    const nativeHeights = () =>
         members.map((m) => Math.min(widgetNativeHeight(m.widget, m.srcH), 400));
+    const cumulativeTops = (hs) => {
+        const t = [];
+        let y = 0;
+        for (const h of hs) { t.push(y); y += h + PORTAL_ROW_GAP; }
+        return t;
+    };
+    // Row tops relative to the FIRST member (title-height agnostic).
+    const sourceTops = () => {
+        let ok = members.length > 0;
+        const ly = members.map((m) => {
+            const v = Number(m.widget?.last_y);
+            if (!Number.isFinite(v)) ok = false;
+            return v;
+        });
+        return ok ? ly.map((v) => Math.max(0, v - ly[0])) : null;
+    };
 
-    // Authentic-size geometry: the draw width mirrors the SOURCE node's
-    // widget area (capped by what the hub row offers), and the CSS display
-    // size stays 1:1 with the backing buffer - so the embed reproduces the
-    // original styling/sizes instead of being stretched into the row.
-    // The cap keeps a small margin (draw code often insets by ~10px, so a
-    // -4px cap never clips content painted at the node's own width).
-    const desired = () => {
+    const computeLayout = () => {
         let avail = Math.round(host.clientWidth || 0);
-        if (!(avail > 0)) avail = Math.max(160, (node.size?.[0] ?? 340) - 24);
-        let cap = Math.round(Number(tn.size?.[0]) || 340) - 4;
-        if (!(cap > 80)) cap = avail;
-        const hs = rowHeights();
-        const H = Math.min(
-            1600,
-            hs.reduce((a, b) => a + b, 0)
-                + PORTAL_ROW_GAP * Math.max(0, hs.length - 1),
-        );
-        return { W: Math.max(80, Math.min(avail, cap)), H, hs };
+        if (!(avail > 0)) avail = Math.max(160, (tn.size?.[0] ?? 340) - 24);
+        let W = Math.round(Number(tn.size?.[0]) || 0) - 4;
+        if (!(W > 80)) W = Math.max(160, avail);
+        W = Math.max(80, Math.min(1600, W));
+
+        const tops = sourceTops();
+        const nat = nativeHeights();
+        let hs, H;
+        if (tops) {
+            hs = nat.map((h, i) => {
+                if (i < members.length - 1) {
+                    const step = tops[i + 1] - tops[i] - PORTAL_ROW_GAP;
+                    if (step > 0) return Math.min(400, step);
+                }
+                return h;
+            });
+            H = tops[members.length - 1] + hs[members.length - 1];
+        } else {
+            hs = nat;
+            H = hs.reduce((a, b) => a + b, 0)
+                + PORTAL_ROW_GAP * Math.max(0, hs.length - 1);
+        }
+        H = Math.max(30, Math.min(1600, Math.round(H)));
+        // Panels that paint the whole node body get the full body height.
+        if (rec.mode === "foreground" || rec.expanded) H = Math.max(H, bodyH());
+        return { W, H, hs, tops };
     };
 
     const applyGeometry = (g) => {
@@ -197,8 +279,10 @@ function mountCanvasPortal(node, item, tn, members, host) {
         rec.H = g.H;
         canvas.width = Math.max(1, Math.round(g.W * dpr));
         canvas.height = Math.max(1, Math.round(g.H * dpr));
+        // style.width pins the intrinsic logical size; the stylesheet may
+        // scale it down (max-width:100%). style.height is NEVER pinned -
+        // the aspect ratio must follow the rendered width or clicks drift.
         canvas.style.width = `${g.W}px`;
-        canvas.style.height = `${g.H}px`;
     };
 
     const tick = () => {
@@ -214,14 +298,14 @@ function mountCanvasPortal(node, item, tn, members, host) {
         try { ctx = canvas.getContext("2d"); } catch (_) { ctx = null; }
         if (!ctx) return;
 
-        const g = desired();
+        const g = computeLayout();
         applyGeometry(g); // buffer resize clears the surface automatically
 
         // Persist live row heights so saved configs restart accurately.
         let dirty = false;
         let total = 0;
         for (let i = 0; i < members.length; i++) {
-            const h = Math.round(Math.min(widgetNativeHeight(members[i].widget, members[i].srcH), 400));
+            const h = Math.round(g.hs[i]);
             total += h + (i < members.length - 1 ? PORTAL_ROW_GAP : 0);
             if (Array.isArray(item.members) && members[i].srcH !== h) {
                 members[i].srcH = h;
@@ -247,11 +331,9 @@ function mountCanvasPortal(node, item, tn, members, host) {
         // Every member paints itself exactly like on its source node,
         // stacked vertically - the same order/layout LiteGraph uses.
         const paintWidgetStack = () => {
-            let y = 0;
+            const tops = g.tops ?? cumulativeTops(g.hs);
             for (let i = 0; i < members.length; i++) {
-                const h = g.hs[i];
-                members[i].widget.draw?.(ctx, tn, rec.W, y, h);
-                y += h + PORTAL_ROW_GAP;
+                members[i].widget.draw?.(ctx, tn, rec.W, tops[i], g.hs[i]);
             }
         };
 
@@ -277,6 +359,13 @@ function mountCanvasPortal(node, item, tn, members, host) {
         // Probe whether the widget actually painted. The first ticks decide
         // the routing; "widget" mode stops probing (normal portals).
         if (!canvasIsBlank(canvas)) {
+            // Clip detection: content reaching the LAST pixel row means the
+            // panel paints beyond the slots we allotted (mode-gated legacy
+            // widgets) - grow to the full node body within one tick.
+            if (rec.mode !== "foreground" && !rec.expanded) {
+                const bh = bodyH();
+                if (bh > rec.H && bottomEdgeHasPixels(canvas)) rec.expanded = true;
+            }
             if (rec.mode === "blank") { rec.mode = undefined; rec.probes = 0; } // panel came alive
             else if (rec.mode === undefined && rec.probes >= 3) rec.mode = "widget";
             return;
@@ -306,19 +395,23 @@ function mountCanvasPortal(node, item, tn, members, host) {
     // (mode-gated widgets return false outside Vue mode), the NODE-level
     // handlers get it with node-local coordinates - our portal surface
     // maps 1:1 onto the node body origin (same contract as onDrawForeground).
+    // Row routing uses the SAME layout math as the painter (source last_y
+    // offsets when available), and localPos() compensates any CSS scaling -
+    // so the row you click is always the row that receives the event.
     const forward = (e) => {
         try {
-            const [px, py] = localPos(canvas, e);
-            const hs = rowHeights();
-            let top = 0;
+            const [px, py] = localPos(canvas, e, rec.dpr);
+            const g = computeLayout();
+            const tops = g.tops ?? cumulativeTops(g.hs);
+            let top = tops[0] ?? 0;
             let hit = -1;
             for (let i = 0; i < members.length; i++) {
-                if (py >= top && py < top + hs[i]) { hit = i; break; }
-                top += hs[i] + PORTAL_ROW_GAP;
+                top = tops[i];
+                if (py >= top && py < top + g.hs[i]) { hit = i; break; }
             }
             if (hit < 0) {
                 hit = members.length - 1;                 // past the last row
-                top = Math.max(0, top - PORTAL_ROW_GAP - hs[hit]);
+                top = tops[hit] ?? 0;
             }
             const pos = [px, py - top];
             let handled = false;
@@ -341,7 +434,7 @@ function mountCanvasPortal(node, item, tn, members, host) {
             // Legacy drag cancellation lives on the node (widget level has
             // no leave concept) - best effort, never swallows anything.
             try {
-                const [px, py] = localPos(canvas, e);
+                const [px, py] = localPos(canvas, e, rec.dpr);
                 tn.onMouseLeave?.call(tn, e, [px, py], app.canvas);
             } catch (_) {}
         },

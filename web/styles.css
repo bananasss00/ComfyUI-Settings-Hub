@@ -416,11 +416,16 @@ span.hub-mirror.hub-mirror-text {
 
 /* Canvas flavor: the portal paints the source widget's own draw() */
 .hub-portal-canvas {
-    /* Inline style.width/height stay in 1:1 lockstep with the backing
-       buffer (see portal_manager) - CSS must NOT stretch the canvas or the
-       embed distorts. Centered when narrower than the row. */
+    /* style.width pins the AUTHENTIC source width (1:1 with the backing
+       buffer). When the hub row is narrower, the canvas scales DOWN
+       proportionally (max-width + auto height) instead of being squeezed -
+       the panel's internal hit geometry stays pixel-true, and
+       portal_manager's localPos() compensates pointer coordinates for the
+       displayed scale. */
     display: block;
     margin: 0 auto;
+    max-width: 100%;
+    height: auto;
     border-radius: 3px;
     background: #101020;
     pointer-events: auto;
