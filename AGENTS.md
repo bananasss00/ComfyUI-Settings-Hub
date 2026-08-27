@@ -15,13 +15,18 @@ DnD-сортировку, «живые порталы» кастомных DOM/c
 (rgthree и т.п.) и комбо с живым поиском.
 
 Python-часть — заглушка (`py/settings_hub.py`), вся логика живёт в `web/`
-(ES-модули, грузятся через `WEB_DIRECTORY = "./web"`).
+(ES-модули, грузятся через `WEB_DIRECTORY = "./web"`). Инвариант стаба:
+БЕЗ `OUTPUT_NODE` и `noop()` возвращает `()` — иначе executor запускает
+узел при каждом queue, а `merge_result_data` падает
+`TypeError: 'NoneType' has no len()` (реальный инцидент v1).
 
 ## 2. Карта файлов
 
 ```text
 __init__.py            — регистрация ноды "SettingsHub" + WEB_DIRECTORY
-py/settings_hub.py     — Python-заглушка (FUNCTION = "noop"), логики НЕТ
+py/settings_hub.py     — Python-заглушка (FUNCTION = "noop", возвращает
+                         (); БЕЗ OUTPUT_NODE — узел не исполняется на queue),
+                         логики НЕТ
 web/settings_hub.js    — точка входа: app.registerExtension, загрузка CSS
 web/core.js            — конфиг хаба, detectWidgetType (самолечение типов),
                          createBinding, liveComboValues, comboTokensMatch-контракт
