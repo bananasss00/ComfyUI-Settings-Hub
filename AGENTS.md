@@ -58,13 +58,17 @@ web/hub_ui_renderer.js — весь UI хаба: табы, строки зерк
 web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode
 web/context_menu.js    — пиннинг: ПКМ по hover-виджету; пункт меню ноды
-                         "Pin custom panel"; перехват Ctrl/Cmd+ПКМ (capture)
+                         "Pin custom panel"; "🖼 Pin viewer" (v26); фильтр
+                         служебных "$$"-виджетов фронтенда (v26.1); перехват Ctrl/Cmd+ПКМ (capture)
 web/portal_manager.js  — живые встраивания: DOM-панели — GHOST-ЗЕРКАЛА
                          (неcтруктивный клон в хабе, оригинал НИКОГДА не
                          покидает ноду; события клона → реэвент на
                          counterpart, мутации оригинала → debounce-rebuild;
                          лок на фокус/недавний ввод), canvas-порталы,
-                         групповые whole-panel embeds, геометрия/тикер
+                         групповые whole-panel embeds, геометрия/тикер;
+                         viewer-встраивания (v26): DOM-медиа-виджет — живое
+                         зеркало img/video, фолбэк painter+node.imgs (v26.1);
+                         нормализация медиа в гостах (аспект, без обрезки)
 web/preset_manager.js  — снапшоты ВСЕХ widget_binding хаба (порталы исключены)
 web/global_settings.js — ГЛОБАЛЬНЫЕ настройки хаба (v26): скорость обновления
                          зеркал (localStorage "settingshub.refreshMs"),
@@ -383,6 +387,52 @@ dev_plan.md            — исходный технический спек пр
   живой, если резолвится НОДА (tw не требуется); reportUnresolved для
   viewer печатает «(whole node embed)» вместо внутреннего sentinel.
 
+### v26.1: боевые правки вьюверов и внутренних виджетов ($$)
+- ПОЛЕВЫЕ СИМПТОМЫ: (1) «Pin viewer» в новом фронтенде вечно рисует «🖼
+  waiting for the source preview» — размер подстраивается, контента нет;
+  (2) обычный пин из SaveImage биндит ТЕКСТОВОЕ поле «$$canvas-image-
+  preview»; (3) Video Combine в «Pin custom panel» показывает видео,
+  ОБРЕЗАННОЕ по высоте.
+- Причина: новый фронтенд рендерит превью НЕ в onDrawBackground, а в
+  СКРЫТОМ DOM-виджете «$$canvas-image-preview» (контейнер с img/video/
+  canvas внутри). Пейинтера нет → blank-режим → вечный hint. А сам этот
+  виджет классифицировался как portal/text и попадал в меню пина.
+- core.js: isInternalWidget(w) — имя начинается с «$$» = служебный виджет
+  фронтенда, НЕ пиннится никогда; findNodeMediaWidget(node) — первый
+  виджет, чей element (или сам element) есть IMG/VIDEO/CANVAS.
+  isViewerNode ослаблен: достаточно painter ИЛИ DOM-медиа-виджета (квалификация
+  прежняя: media-поля ИЛИ имя ИЛИ медиа-виджет).
+- context_menu.js: «$$» вырезан из path-1 (виджет под курсором) и из
+  listPanelWidgets; на DOM-поверхностях, принадлежащих «$$»-виджету,
+  предлагается ТОЛЬКО viewer-пин (entriesForInternalOwner) — ПКМ прямо по
+  превью = «🖼 Pin viewer», а не текстовое зеркало.
+- portal_manager.js, mountPortals (viewer-ветка): ПРИОРИТЕТ — DOM-медиа
+  виджет: mountDomPortal(item, mw, host, {viewer:true}) — ЖИВОЕ зеркало
+  img/video (клоны держат src, MutationObserver ловит смену превью).
+  Фолбэк — прежний painter-портал.
+- Новое в mountDomPortal: normalizeGhostMedia — медиа в госте
+  аспект-корректится (width:100%, height:auto, object-fit:contain),
+  node-baked инлайн-высоты госта/обёрток сбрасываются в auto; класс
+  hub-portal-media (+CSS-дубли в styles.css с !important — на случай
+  восстановления инлайнов при ребилде). Для viewer-маунтов нормализуются
+  и canvas (в панелях canvas = функциональный UI, не трогаем). Это же
+  чинит обрезку видео в «Pin custom panel» (там viewer=false, но media
+  img/video нормализуются так же). syncViewerVideos: timeupdate источника
+  → currentTime клона (зеркало не застывает на первом кадре);
+  syncViewerVideoTime при каждом ребилде; unsync в releaseDom.
+- Painter-портал (классика): rec.altPainters — фолбэк-пейинтеры,
+  опрашиваемые когда стэк рисует пустоту: drawViewerImgs рисует последний
+  node.imgs letterbox'ом, при пустом imgs loadViewerSpecs лениво грузит
+  specs (filename/subfolder/type → /view?...) в tn.imgs. Режимы:
+  mode="alt" + altWinner (стабильная фаза), altSig/altIdx — ретраи при
+  смене media-состояния (превью появилась ПОСЛЕ пина → подхватится).
+  Hint «waiting» теперь честно только когда нет НИ стека, НИ imgs.
+- Smoke: Phase ZJ (+23) — фильтр «$$» (path-1/панель-список),
+  isInternalWidget/findNodeMediaWidget, isViewerNode-матрица (media-виджет
+  без пейнтера=true; именованная панель с img=false), end-to-end:
+  video-вьювер монтирует DOM-гост (не canvas), классы/стили нормализации,
+  тег «🖼 live» выживает, img-нода тем же маршрутом, тихий ✕. База >=653.
+
 ### Резолвер целей v24 (крест-граф, вложенные сабграфы)
 - allGraphs: BFS по УРОВНЯМ (глубина — уровни иерархии, дефолт 12), списки
   нод = union `_nodes` + публичный `nodes`; реестры `_subgraphs`/`subgraphs`/
@@ -555,6 +605,12 @@ ZI — v26 вьюверы: isViewerNode-матрица (painter+имя / без 
 меню биндит, sentinel, srcH, тег «🖼 live», НЕ orphan, locate активен,
 canvas смонтирован, тик без бросков, value-refresh не флагает orphan,
 тихий ✕, orphan после удаления ноды-источника.
+ZJ — v26.1: фильтр «$$» (isInternalWidget; path-1 и панель-список чисты,
+viewer-пункту остаётся), isViewerNode по DOM-медиа-виджету без пейнтера
+(+негатив: именованная панель с img — не вьювер), findNodeMediaWidget,
+end-to-end: video-вьювер монтирует DOM-гост (НЕ canvas-пейнтер),
+hub-portal-media + width:100% у клона + height:auto у госта, тег «🖼 live»
+выживает, img-нода тем же маршрутом, тихий ✕ у видео-вьювера.
 
 ⚠ грабль ZI: фазы не диспатчат onRemoved (ноды вырезаются splice'ом), поэтому
 в глобальном реестре копятся хабы прошлых фаз — перед меню-ассертами
@@ -562,7 +618,7 @@ canvas смонтирован, тик без бросков, value-refresh не 
 колбэк пункта меню биндит в ПЕРВЫЙ stale-хаб.
 
 ```bash
-node scripts/smoke_hub.mjs   # базовая линия: >=630 зелёных, 0 упавших
+node scripts/smoke_hub.mjs   # базовая линия: >=653 зелёных, 0 упавших
 ```
 
 Подводные камни харнеса:

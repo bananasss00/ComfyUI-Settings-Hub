@@ -999,6 +999,44 @@ export function portalKindOf(widget) {
 }
 
 // ---------------------------------------------------------------------------
+// Internal widgets (v26.1): the ComfyUI frontend parks hidden helper widgets
+// on nodes with names like "$$canvas-image-preview" (the DOM container that
+// actually SHOWS PreviewImage/SaveImage/VideoCombine previews). They are
+// implementation details: binding one mirrors an opaque value into a useless
+// text field, and they must never surface in pin menus. The same DOM
+// container is exactly what a viewer embed wants - see findNodeMediaWidget.
+// ---------------------------------------------------------------------------
+
+/** True for frontend-internal helper widgets ("$$...") - never pinnable. */
+export function isInternalWidget(widget) {
+    try {
+        const n = widget?.name;
+        return typeof n === "string" && n.startsWith("$$");
+    } catch (_) { return false; }
+}
+
+/**
+ * The node's DOM widget that carries live MEDIA (img / video / canvas).
+ * New-frontend PreviewImage / SaveImage / VideoCombine builds render their
+ * preview through such a hidden widget - no canvas painter involved. Returns
+ * the WIDGET so the portal can ghost-mirror its element (the media comes
+ * along); null when the node owns no media widget.
+ */
+export function findNodeMediaWidget(node) {
+    for (const w of node?.widgets ?? []) {
+        const el = w?.element ?? w?.inputEl ?? w?.contentEl;
+        if (!el) continue;
+        try {
+            if (el.tagName === "IMG" || el.tagName === "VIDEO"
+                || el.tagName === "CANVAS") return w;
+            if (typeof el.querySelector === "function"
+                && el.querySelector("img,video,canvas")) return w;
+        } catch (_) { /* exotic element - keep scanning */ }
+    }
+    return null;
+}
+
+// ---------------------------------------------------------------------------
 // Viewer nodes (v26): "вынести вьювер с картинкой/видео в хаб"
 // ---------------------------------------------------------------------------
 // Many viewers do NOT own a widget at all: classic PreviewImage / LoadImage /
@@ -1018,15 +1056,22 @@ const VIEWER_MEDIA_KEYS = [
 ];
 
 /**
- * A node whose onDrawBackground paints meaningful content (a viewer).
- * Gate: the painter hook must exist; qualification: either the node already
- * carries media state (post-execution) OR its type name looks like a viewer.
- * The name check alone keeps the menu entry discoverable BEFORE the first
- * generation (PreviewImage / LoadImage / SaveImage / VHS_VideoCombine / ...).
+ * A node that RENDERS media (a viewer). Two universal surfaces qualify:
+ *   - classic builds paint media in node.onDrawBackground (canvas painter);
+ *   - new-frontend builds show it through a hidden DOM media widget
+ *     ("$$canvas-image-preview" container with img/video/canvas inside).
+ * Qualification (either): the node already carries media state (post-exec),
+ * its type name looks like a viewer, or it owns a DOM media widget. The name
+ * check alone keeps the menu entry discoverable BEFORE the first generation
+ * (PreviewImage / LoadImage / SaveImage / VHS_VideoCombine / ...).
  */
 export function isViewerNode(node) {
     if (!node || node.type === HUB_NODE_NAME) return false;
-    if (typeof node.onDrawBackground !== "function") return false;
+    let painter = false;
+    try { painter = typeof node.onDrawBackground === "function"; } catch (_) { painter = false; }
+    let mediaWidget = false;
+    try { mediaWidget = !!findNodeMediaWidget(node); } catch (_) { mediaWidget = false; }
+    if (!painter && !mediaWidget) return false;
     for (const k of VIEWER_MEDIA_KEYS) {
         let v;
         try { v = node[k]; } catch (_) { continue; }

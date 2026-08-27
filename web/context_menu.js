@@ -2,7 +2,7 @@ import { app } from "../../scripts/app.js";
 import {
     getHubConfig, getActiveTabId, createBinding, createPortalBinding,
     createNewHub, HUB_NODE_NAME, detectWidgetType, portalKindOf, allHubs,
-    isViewerNode, createViewerBinding,
+    isViewerNode, createViewerBinding, isInternalWidget,
 } from "./core.js";
 
 // ============================================================================
@@ -38,7 +38,8 @@ export function attachContextMenu() {
             }
 
             const items = [];
-            if (widget && node.widgets?.length && !isHelperWidget(widget)) {
+            if (widget && node.widgets?.length && !isHelperWidget(widget)
+                && !isInternalWidget(widget)) {
                 items.push({
                     content: "📌 Pin to Settings Hub",
                     has_submenu: true,
@@ -144,7 +145,7 @@ function listPanelWidgets(node) {
     const out = [];
     for (const w of node.widgets ?? []) {
         try {
-            if (isHelperWidget(w)) continue;
+            if (isHelperWidget(w) || isInternalWidget(w)) continue;
             if (detectWidgetType(w) === "portal") out.push(w);
         } catch (_) { /* defensive: exotic getters must not kill the menu */ }
     }
@@ -415,6 +416,17 @@ function showHubMenu(x, y, entries) {
 // our capture-phase handler answers BEFORE the panel's own contextmenu
 // logic and offers the standard pin menu instead.
 
+/**
+ * Menu entries for a right-click whose owner widget is frontend-INTERNAL
+ * ("$$canvas-image-preview" - the hidden DOM container that SHOWS a
+ * PreviewImage/SaveImage/VideoCombine preview). Binding it is meaningless
+ * (opaque value -> useless text mirror), but the SURFACE under the cursor is
+ * exactly the media the user wants in the hub - offer the viewer pin.
+ */
+function entriesForInternalOwner(node) {
+    return isViewerNode(node) ? buildViewerSubmenu(node) : [];
+}
+
 function attachCtrlRmbOverride() {
     document.addEventListener("contextmenu", (e) => {
         if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.defaultPrevented) return;
@@ -451,14 +463,17 @@ function attachCtrlRmbOverride() {
 
         if (!owner || owner.node.type === HUB_NODE_NAME) return;
 
-        // Offer the WHOLE-PANEL group embed first (the widget under the
-        // cursor is usually just one row of a multi-widget custom panel),
-        // then node-level viewer embeds, then the under-cursor widget pin.
-        const entries = [
-            ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node), allHubs()),
-            ...(isViewerNode(owner.node) ? buildViewerSubmenu(owner.node) : []),
-            ...buildPinSubmenu(owner.node, owner.widget),
-        ];
+        // Internal media containers ($$...) offer the viewer pin only.
+        const entries = isInternalWidget(owner.widget)
+            ? entriesForInternalOwner(owner.node)
+            : [
+                // Offer the WHOLE-PANEL group embed first (the widget under the
+                // cursor is usually just one row of a multi-widget custom panel),
+                // then node-level viewer embeds, then the under-cursor widget pin.
+                ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node), allHubs()),
+                ...(isViewerNode(owner.node) ? buildViewerSubmenu(owner.node) : []),
+                ...buildPinSubmenu(owner.node, owner.widget),
+            ];
         if (!entries.length) return;
 
         e.preventDefault();
@@ -487,6 +502,15 @@ function attachPanelSurfacePinMenu() {
 
         const owner = findDomWidgetOwner(t);
         if (!owner || owner.node.type === HUB_NODE_NAME) return;
+        if (isInternalWidget(owner.widget)) {
+            // Hidden preview container: viewer pin or nothing.
+            const entries = entriesForInternalOwner(owner.node);
+            if (!entries.length) return;
+            e.preventDefault();
+            e.stopPropagation();
+            showHubMenu(e.clientX, e.clientY, entries);
+            return;
+        }
         // Panel-classified widgets only - everything else has its own handler.
         if (detectWidgetType(owner.widget) !== "portal") return;
 
@@ -540,6 +564,14 @@ function attachDomWidgetPinMenu() {
 
         const owner = findDomWidgetOwner(e.target);
         if (!owner || owner.node.type === HUB_NODE_NAME) return;
+        if (isInternalWidget(owner.widget)) {
+            const entries = entriesForInternalOwner(owner.node);
+            if (!entries.length) return;
+            e.preventDefault();
+            e.stopPropagation();
+            showHubMenu(e.clientX, e.clientY, entries);
+            return;
+        }
 
         const entries = buildPinSubmenu(owner.node, owner.widget);
         if (!entries.length) return;

@@ -444,6 +444,29 @@ span.hub-mirror.hub-mirror-text {
     z-index: auto !important;
 }
 
+/* v26.1: ghost mirrors carrying live media (viewer embeds, video preview
+   panels). portal_manager aspect-corrects the media inline per clone; these
+   rules keep the row hugging the content even when a rebuild restores
+   node-baked inline heights before the next normalization pass. */
+.hub-portal-ghost.hub-portal-media {
+    height: auto !important;
+    max-height: none !important;
+}
+.hub-portal-ghost.hub-portal-media img,
+.hub-portal-ghost.hub-portal-media video {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    display: block !important;
+    object-fit: contain !important;
+}
+.hub-portal-ghost.hub-portal-media canvas {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    display: block !important;
+}
+
 /* Buttons disabled state */
 .hub-btn:disabled {
     opacity: 0.35;

@@ -42,6 +42,7 @@
 import { app } from "../../scripts/app.js";
 import {
     getHubConfig, PORTAL_ROW_GAP, widgetNativeHeight, resolveBindingTarget,
+    findNodeMediaWidget,
 } from "./core.js";
 
 /** node -> Set<record>; records live between structural renders. */
@@ -93,7 +94,7 @@ function indexPath(root, node) {
     return cur === root ? path.reverse() : null;
 }
 
-function mountDomPortal(item, tw, host) {
+function mountDomPortal(item, tw, host, opts = {}) {
     const el = tw.element ?? tw.inputEl ?? tw.contentEl;
     if (!el || typeof el.appendChild !== "function") return null;
     // Constructor access via window: some extension realms lack bare globals.
@@ -119,6 +120,10 @@ function mountDomPortal(item, tw, host) {
         observer: null,
         handlers: [],   // [type, fn] pairs bound on the current clone
         touchHandler: null,
+        // v26.1 viewer mounts: media-aware ghost (aspect fixes + playhead
+        // sync for <video> mirrors).
+        viewer: !!opts.viewer,
+        videoSync: [],  // [sourceVideo, timeupdateFn] pairs
     };
 
     // --- clone -> original: re-dispatch real events on the counterpart ---
@@ -203,6 +208,8 @@ function mountDomPortal(item, tw, host) {
         bindClone(fresh);
         try { host.appendChild(fresh); } catch (_) { return; }
         rec.clone = fresh;
+        normalizeGhostMedia(rec, fresh);
+        if (rec.viewer) syncViewerVideoTime(rec);
     };
     const scheduleSync = (delay = SYNC_DEBOUNCE) => {
         if (rec.syncQueued || rec.releasing || rec.dead) return;
@@ -236,7 +243,90 @@ function mountDomPortal(item, tw, host) {
         return null;
     }
     bindClone(rec.clone);
+    // v26.1: media inside the ghost must survive the hub row (viewer embeds
+    // and video-preview panels used to come out cropped).
+    normalizeGhostMedia(rec, rec.clone);
+    if (rec.viewer) syncViewerVideos(rec);
     return rec;
+}
+
+/**
+ * Media inside a ghost keeps its node-baked inline geometry, which crops it
+ * inside the (usually narrower) hub row. Aspect-correct the media and let
+ * the row hug it. Canvas elements are normalized for VIEWER mounts only -
+ * in interactive panels a canvas is usually functional UI, not media.
+ */
+function normalizeGhostMedia(rec, clone) {
+    try {
+        if (!clone?.querySelector) return false;
+        const sel = rec.viewer ? "img,video,canvas" : "img,video";
+        const media = clone.querySelectorAll(sel);
+        if (!media?.length) return false;
+        clone.classList.add("hub-portal-media");
+        const freeBox = (el) => {
+            if (!el?.style) return;
+            el.style.height = "auto";
+            el.style.maxHeight = "none";
+        };
+        freeBox(clone);
+        for (const el of media) {
+            if (!el.style) continue;
+            el.style.width = "100%";
+            el.style.maxWidth = "100%";
+            el.style.height = "auto";
+            el.style.display = "block";
+            el.style.objectFit = "contain";
+        }
+        // Intermediate wrappers with node-baked pixel heights would still
+        // crop the aspect-corrected media - release them too.
+        for (const el of clone.querySelectorAll("*")) {
+            const h = el?.style?.height;
+            if (h && h !== "auto" && el.querySelector?.(sel)) freeBox(el);
+        }
+        return true;
+    } catch (_) { return false; }
+}
+
+/** Point every mirrored <video> at the source's current playhead (a fresh
+ *  clone would otherwise freeze on its first frame). */
+function syncViewerVideoTime(rec) {
+    try {
+        const srcs = rec.el?.querySelectorAll?.("video") ?? [];
+        const dsts = rec.clone?.querySelectorAll?.("video") ?? [];
+        for (let i = 0; i < Math.min(srcs.length, dsts.length); i++) {
+            const a = srcs[i].currentTime || 0;
+            const b = dsts[i].currentTime || 0;
+            if (Math.abs(a - b) > 0.3) dsts[i].currentTime = a;
+        }
+    } catch (_) {}
+}
+
+/** Track the source's video playback so the mirror stays roughly in sync
+ *  (timeupdate fires a few times per second while playing - cheap). */
+function syncViewerVideos(rec) {
+    try {
+        const srcs = rec.el?.querySelectorAll?.("video") ?? [];
+        srcs.forEach((sv, i) => {
+            const copy = () => {
+                try {
+                    const dv = rec.clone?.querySelectorAll("video")?.[i];
+                    if (!dv) return;
+                    if (Math.abs((dv.currentTime || 0) - (sv.currentTime || 0)) > 0.3) {
+                        dv.currentTime = sv.currentTime || 0;
+                    }
+                } catch (_) {}
+            };
+            sv.addEventListener("timeupdate", copy);
+            rec.videoSync.push([sv, copy]);
+            copy();
+        });
+    } catch (_) {}
+}
+
+function unsyncViewerVideos(rec) {
+    for (const [sv, fn] of rec.videoSync.splice(0)) {
+        try { sv.removeEventListener("timeupdate", fn); } catch (_) {}
+    }
 }
 
 function releaseDom(rec) {
@@ -247,6 +337,7 @@ function releaseDom(rec) {
     rec.observer = null;
     try { rec.unbind?.(); } catch (_) {}
     rec.unbind = null;
+    try { unsyncViewerVideos(rec); } catch (_) {}
     try { rec.clone?.remove(); } catch (_) {}
     rec.clone = null;
 }
@@ -341,6 +432,15 @@ function mountCanvasPortal(node, item, tn, members, host) {
         // drawable (hint shown). See tick().
         mode: undefined,
         probes: 0,
+        // v26.1: fallback painters probed IN ORDER when the primary stack
+        // paints nothing (viewer: draw node.imgs when the node has no
+        // background-painter content). altWinner = the painter that produced
+        // pixels; altIdx/altSig gate retries so late-arriving media (first
+        // generation after the pin) still gets picked up.
+        altPainters: null,
+        altIdx: 0,
+        altSig: "",
+        altWinner: null,
         // Pixel-settle auto height: signed extra over the formula height.
         // autoH == null means "grace not started yet".
         hAdj: 0,
@@ -545,6 +645,19 @@ function mountCanvasPortal(node, item, tn, members, host) {
             return;
         }
 
+        if (rec.mode === "alt") {
+            // A fallback painter won the probe war - keep using it.
+            paint(rec.altWinner);
+            const scanA = scanCanvas(canvas);
+            if (!scanA.blank) { settleAutoHeight(scanA, g); return; }
+            // The fallback went dark too - restart the full probe cycle.
+            rec.mode = undefined;
+            rec.probes = 0;
+            rec.autoH = null;
+            rec.hAdj = 0;
+            rec.altIdx = 0;
+        }
+
         paint(paintWidgetStack);
 
         // Probe whether the widget actually painted. The first ticks decide
@@ -561,7 +674,29 @@ function mountCanvasPortal(node, item, tn, members, host) {
             return;
         }
         if (rec.mode === "blank") {
-            // Keep the hint painted (each pass clears the surface).
+            // Keep the hint painted (each pass clears the surface) - but keep
+            // retrying fallback painters when the media state changes, so a
+            // preview that appears AFTER the pin still lands.
+            if (Array.isArray(rec.altPainters)) {
+                const sig = `${tn.imgs?.length ?? 0}/${tn.images?.length ?? 0}`;
+                if (sig !== rec.altSig) {
+                    rec.altSig = sig;
+                    rec.altIdx = 0;
+                }
+                if (rec.altIdx < rec.altPainters.length) {
+                    const fn = rec.altPainters[rec.altIdx++];
+                    paint(fn);
+                    const scanB = scanCanvas(canvas);
+                    if (!scanB.blank) {
+                        rec.mode = "alt";
+                        rec.altWinner = fn;
+                        rec.autoH = null;
+                        rec.hAdj = 0;
+                        settleAutoHeight(scanB, g);
+                        return;
+                    }
+                }
+            }
             paint(() => drawPortalHint(ctx, rec.W, rec.H, rec.hintText));
             return;
         }
@@ -573,6 +708,21 @@ function mountCanvasPortal(node, item, tn, members, host) {
             scan = scanCanvas(canvas);
             if (!scan.blank) {
                 rec.mode = "foreground";
+                rec.autoH = null;
+                rec.hAdj = 0;
+                settleAutoHeight(scan, g);
+                return;
+            }
+        }
+        // v26.1: fallback painters (viewer imgs) get their probe round after
+        // the foreground hook declined.
+        if (Array.isArray(rec.altPainters) && rec.altIdx < rec.altPainters.length) {
+            const fn = rec.altPainters[rec.altIdx++];
+            paint(fn);
+            scan = scanCanvas(canvas);
+            if (!scan.blank) {
+                rec.mode = "alt";
+                rec.altWinner = fn;
                 rec.autoH = null;
                 rec.hAdj = 0;
                 settleAutoHeight(scan, g);
@@ -672,15 +822,70 @@ function releaseRecord(rec) {
 }
 
 // ---------------------------------------------------------------------------
-// v26 viewer portal: the source node's own onDrawBackground IS the viewer.
-// Classic PreviewImage / LoadImage / SaveImage builds and many custom nodes
-// (video combiners, galleries) paint their media straight onto the node - no
-// widget exists to embed. We re-render that painter onto the portal canvas
-// through a pseudo-member (the node surface maps 1:1 onto our origin), so
-// the hub shows exactly the pixels the source node shows. Read-only: the
-// usual pointer forwarding is deliberately skipped (viewers are not
-// interactive surfaces; the row's 🎯 locates the source instead).
+// v26 viewer portal: bring the source node's PREVIEW into the hub. Real
+// frontends render viewers through one of TWO surfaces, so the mount tries
+// them in order (v26.1):
+//
+//   1. DOM media widget - new-frontend PreviewImage / SaveImage /
+//      VideoCombine builds keep the preview inside a hidden DOM container
+//      ("$$canvas-image-preview") whose element wraps the actual
+//      <img>/<video>/<canvas>. There is NO background painter to call (the
+//      old "waiting for the source preview" dead end) - so we ghost-mirror
+//      that element instead: live media, mutation-synced, with the media
+//      aspect-corrected inside the hub row (see normalizeGhostMedia).
+//   2. Canvas painter - classic builds (and many custom nodes) paint media
+//      straight in node.onDrawBackground. The portal re-renders that painter
+//      through a pseudo-member; when it produces nothing, a fallback painter
+//      draws node.imgs (loading /view specs on demand) before the hint.
+//
+// Read-only by contract: pointer forwarding is skipped for painter mounts
+// (viewers are not interactive surfaces; the row's 🎯 locates the source).
 // ---------------------------------------------------------------------------
+
+const viewerSpecsLoaded = new WeakSet();
+
+/** Best-effort load of image specs ({filename,subfolder,type}) into node.imgs
+ *  so they become drawable - mirrors what classic frontends do after exec. */
+function loadViewerSpecs(tn) {
+    if (viewerSpecsLoaded.has(tn)) return;
+    viewerSpecsLoaded.add(tn);
+    try {
+        const Ctor = globalThis.Image ?? globalThis.window?.Image;
+        if (typeof Ctor !== "function") return;
+        const specs = Array.isArray(tn.images) ? tn.images : [];
+        const imgs = specs.map((s) => {
+            if (!s || typeof s !== "object" || !s.filename) return null;
+            const q = new URLSearchParams();
+            q.set("filename", String(s.filename));
+            q.set("subfolder", String(s.subfolder ?? ""));
+            q.set("type", String(s.type ?? "output"));
+            const im = new Ctor();
+            im.src = `/view?${q.toString()}`;
+            return im;
+        }).filter(Boolean);
+        if (imgs.length) tn.imgs = [...(Array.isArray(tn.imgs) ? tn.imgs : []), ...imgs];
+    } catch (_) { /* no Image realm - the painter path stays decorative */ }
+}
+
+/** Draw the node's latest loaded image fitted (letterboxed) into W x H. */
+function drawViewerImgs(ctx, tn, W, H) {
+    const imgs = Array.isArray(tn?.imgs) ? tn.imgs : [];
+    for (let i = imgs.length - 1; i >= 0; i--) {
+        const im = imgs[i];
+        const iw = im?.naturalWidth || im?.width || 0;
+        const ih = im?.naturalHeight || im?.height || 0;
+        if (!im || !iw || !ih) continue;
+        const ar = iw / ih;
+        const dh = Math.min(H, W / ar);
+        const dw = dh * ar;
+        try {
+            ctx.drawImage(im, (W - dw) / 2, (H - dh) / 2, dw, dh);
+            return true;
+        } catch (_) { /* not decodable yet - try the next one */ }
+    }
+    if (!imgs.length) loadViewerSpecs(tn);
+    return false;
+}
 
 function mountViewerPortal(node, item, tn, host) {
     const persistedH = Number(item.options?.srcH);
@@ -697,7 +902,13 @@ function mountViewerPortal(node, item, tn, host) {
             try { tn.onDrawBackground?.call(tn, ctx, app.canvas ?? undefined, app.canvas ?? undefined); } catch (_) {}
         },
     };
-    return mountCanvasPortal(node, item, tn, [{ widget: painterWidget, srcH }], host);
+    const rec = mountCanvasPortal(node, item, tn, [{ widget: painterWidget, srcH }], host);
+    if (rec) {
+        // Fallback when the painter produces nothing (no hook, or a hook
+        // that only paints under the real graph canvas): show node.imgs.
+        rec.altPainters = [(ctx) => drawViewerImgs(ctx, tn, rec.W, rec.H)];
+    }
+    return rec;
 }
 
 // ---------------------------------------------------------------------------
@@ -735,7 +946,15 @@ export function mountPortals(node, root) {
                 continue;
             }
             host.classList.remove("hub-portal-broken");
-            const vrec = mountViewerPortal(node, item, tn, host);
+            // v26.1: mirror the DOM media widget when the frontend keeps the
+            // preview in one - a painter re-call would paint nothing there.
+            let vrec = null;
+            const mw = findNodeMediaWidget(tn);
+            if (mw) {
+                try { vrec = mountDomPortal(item, mw, host, { viewer: true }); }
+                catch (_) { vrec = null; }
+            }
+            if (!vrec) vrec = mountViewerPortal(node, item, tn, host);
             if (vrec) { vrec.set = set; set.add(vrec); }
             continue;
         }
