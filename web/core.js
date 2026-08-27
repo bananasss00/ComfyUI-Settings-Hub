@@ -297,7 +297,23 @@ export function detectWidgetType(widget) {
     // 2) Booleans / toggles.
     if (BOOL_TYPES.has(type) || typeof widget?.value === "boolean") return "checkbox";
 
-    // 2.5) Real DOM panel containers (addDOMWidget-based custom UIs).
+    // 2.6) Plain canvas ACTION BUTTONS (rgthree Seed "Randomize Each Time",
+    //      "Use Last seed", etc.): litegraph widgets of type exactly "button"
+    //      drawn on the canvas - no state to mirror, but their callback is
+    //      worth invoking from the hub. Declared earlier as un-pinnable
+    //      helpers; since v23 buttons WITH a handler are first-class pins.
+    //      A type:"button" carrying a REAL DOM container stays out of this
+    //      branch: it falls through to the portal classification below (the
+    //      DOM-panel guarantee outranks the declared type string).
+    if (type === "button") {
+        const domEl = widget?.element ?? widget?.contentEl ?? null;
+        const looksLikePanel =
+            !!(domEl && typeof domEl.querySelector === "function" &&
+                !isMultilineWidget(widget));
+        if (!looksLikePanel) return "button";
+    }
+
+    // 2.7) Real DOM panel containers (addDOMWidget-based custom UIs).
     //      Their serialized value is OPAQUE application state ("[]" stacks,
     //      objects...) - never mirror it into a primitive editor just
     //      because the value happens to be a string. The LTX / MiniMax H3

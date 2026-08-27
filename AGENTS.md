@@ -11,8 +11,10 @@ Frontend-ориентированное расширение ComfyUI: узел *
 принимает на себя виджеты других нод через пиннинг (ПКМ → 📌 Pin) и
 зеркалит их значения с двусторонней синхронизацией в реальном времени —
 без проводов и вспомогательных нод. Поддерживает вкладки, пресеты,
-DnD-сортировку, «живые порталы» кастомных DOM/canvas-панелей сторонних нод
-(rgthree и т.п.) и комбо с живым поиском.
+DnD-сортировку, пиннинг КНОПОК нод (rgthree Seed «Randomize Each Time» и
+т.п.), встроенный ▶ Queue ×N (очередь ComfyUI прямо из хаба), «живые
+порталы» кастомных DOM/canvas-панелей сторонних нод (rgthree и т.п.) и
+комбо с живым поиском.
 
 Python-часть — заглушка (`py/settings_hub.py`), вся логика живёт в `web/`
 (ES-модули, грузятся через `WEB_DIRECTORY = "./web"`). Инвариант стаба:
@@ -28,7 +30,8 @@ py/settings_hub.py     — Python-заглушка (FUNCTION = "noop", возв�
                          (); БЕЗ OUTPUT_NODE — узел не исполняется на queue),
                          логики НЕТ
 web/settings_hub.js    — точка входа: app.registerExtension, загрузка CSS
-web/core.js            — конфиг хаба, detectWidgetType (самолечение типов),
+web/core.js            — конфиг хаба, detectWidgetType (самолечение типов;
+                         type:"button" без DOM-контейнера => "button"),
                          createBinding, liveComboValues, comboTokensMatch-контракт;
                          кросс-графовый поиск: allGraphs / findNodeByIdEverywhere /
                          resolveBindingTarget (id + title-drift repair) /
@@ -45,7 +48,9 @@ web/core.js            — конфиг хаба, detectWidgetType (самоле
 web/sync.js            — шина структурных/values-обновлений + shared edit-lock
                          (beginEdit/endEdit), rAF-очередь queueHubRefresh
 web/sync_manager.js    — хуки реактивности на целевых виджетах (обёртка callback),
-                         writeTargetValue под lock'ом, self-healing вызовы
+                         writeTargetValue под lock'ом, invokeTargetButton
+                         (запуск запиненной кнопки на ЖИВОЙ ноде,
+                         никогда не трогает .value), self-healing вызовы
 web/hub_ui_renderer.js — весь UI хаба: табы, строки зеркал, searchable combo
                          popup, gear-поповер кастомных min/max/step (.hub-num-pop,
                          Apply/Push/Clear + checkbox auto-apply), layout-движок
@@ -80,7 +85,12 @@ dev_plan.md            — исходный технический спек пр
   int / slider / text / portal. Конфиг может быть старым — `renderHub`
   самолечит типы по живому виджету (`widget_binding ↔ widget_portal`).
 - НЕ примитивный value или null с кастомным DOM ⇒ `"portal"` (без хардкода
-  под конкретные ноды; type:"button" исключён как helper).
+  под конкретные ноды).
+- Пиннинг кнопок v23: type:"button" без реального DOM-контейнера =>
+  класс "button" (зеркало ▶ run); С DOM-контейнером проваливается в
+  "portal" (гарантия DOM-панелей сильнее строки типа). Мертвые кнопки
+  (нет callable callback) = helpers: меню их НЕ пинит (`isHelperWidget`),
+  детект при этом всё равно "button".
 - Правило DOM-панелей: виджет с РЕАЛЬНЫМ контейнером (`element`/`contentEl`,
   не textarea) — это `"portal"`, ДАЖЕ если value — строка (LTX/PlagueKind
   «LoRA Loader Stack»: один addDOMWidget + непрозрачный JSON). Гвардии:
@@ -218,6 +228,30 @@ dev_plan.md            — исходный технический спек пр
 - Поверхности хаба (`.hub-menu`, `.settings-hub-wrap`, `.hub-portal-host`)
   никогда не перехватываются.
 
+### Пиннинг кнопок и Queue (v23)
+- Запиненная кнопка — widget_binding с widgetType:"button", options={}.
+  Зеркало — `button.hub-btn-action[data-role="btn-run"]`; у него НАМЕРЕННО
+  нет data-hub-control: values-шина, пресеты и echo-refresh его не касаются.
+  snapshotAll/presetApply пропускают widgetType==="button" на ОБЕИХ сторонах
+  (иначе DOM-фолбэк снапшота записал бы подпись кнопки как «value»).
+- Клик зеркала → sync_manager.`invokeTargetButton(tn,tw)`:
+  `callback.call(tw, tw.value ?? null, app.canvas, tn)` — реплика диспетча
+  litegraph — ПОД begin/endEdit (обёртка хука молчит), .value НИКОГДА не
+  пишется; бросок хендлера изолируется ({ok:false} + console.warn),
+  UI не ломается.
+- Меню: живые кнопки (callable callback) пинятся через Path 1 c меткой 🔘
+  и суффиксом «· button»; мертвые (спейсеры) по-прежнему helpers.
+- Самолечение: конфиги ≤v22 могли классифицировать кнопку как "portal"
+  (fallback старого детектора) — существующая ветка миграции
+  portal↔binding превращает её в обычный биндинг ▶ run без ghost-embed.
+- Queue-бар под табами (`.hub-queue-row`): [▶ Queue ×N]. runQueueFlow зовет
+  `app.queuePrompt(undefined, N)` — ВАНИЛЬНАЯ семантика главной Queue:
+  number опущен (append-at-back, сервер нумерует сам), batchCount=N.
+  Отсутствие app.queuePrompt — мягкая деградация (console.warn + флэш ⚠).
+  parseQueueCount: int ≥1, кап MAX_QUEUE_BATCH=1000; cfg.queueCount
+  персистится (change и каждый клик коммитят значение поля); Enter в поле =
+  запуск очереди. Высота бара включена в measureContent (по частям).
+
 ### Locate (🎯) — прыжок внутрь сабграфа
 - Порядок: `resolveBindingTarget` → владельческий граф из `tn.graph`, а если
   оно не задано (не все фронтенды его пишут) — из хвоста `findHolderChainOf`
@@ -338,9 +372,19 @@ rebuild'ах конфига; step-когерентность (precision 0->2 п�
 только когда поле объявлено); clearSliderOverride вертает ТОЧНО допушные значения
 включая coerced-round; orphan-clear честно reports wiped/restored=false;
 плейсхолдеры «·node» из нативов против value=override; фолбэк «·src» без снапшота.
+ZE — пиннинг кнопок + очередь (v23): классификация type:"button" (canvas →
+"button", DOM-контейнер → portal, мертвые детектятся тоже), биндинг без
+options, RUN-зеркало (клик вызывает колбэк источника с this=widget и
+value??null, .value не трогается), гиря на строке отсутствует, отсутствие
+data-hub-control, изоляция броска хендлера, ok:false на orphan; пресеты
+исключают кнопки в снапшоте И в apply (мусорная запись инертна);
+самолечение legacy portal-конфига кнопки; queue-бар: дефолт N=1, persist
+change'ом, queuePrompt(undefined,N) на клик, спам-клики appending, Enter,
+нормализация мусора в 1, клэмп капа 1000, мягкая деградация без
+app.queuePrompt, JSON round-trip queueCount.
 
 ```bash
-node scripts/smoke_hub.mjs   # базовая линия: >=454 зелёных, 0 упавших
+node scripts/smoke_hub.mjs   # базовая линия: >=486 зелёных, 0 упавших
 ```
 
 Подводные камни харнеса:

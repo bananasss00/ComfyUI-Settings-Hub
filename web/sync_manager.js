@@ -65,6 +65,38 @@ export function writeTargetValue(targetNode, targetWidget, value) {
     }
 }
 
+/**
+ * Invoke a PINNED BUTTON's callback on its live target node.
+ * Buttons carry no mirrored state, so unlike writeTargetValue this never
+ * touches `.value` - it reproduces the litegraph click dispatch:
+ * callback.call(widget, value ?? null, canvas, node). The shared edit lock
+ * is held so the hook wrapper around the same callback stays silent (buttons
+ * have no mirrors to refresh), and the invocation result/error report is
+ * contained: a throwing handler must not break the hub UI.
+ */
+export function invokeTargetButton(targetNode, targetWidget) {
+    if (!targetNode || !targetWidget) return { ok: false };
+    if (typeof targetWidget.callback !== "function") return { ok: false };
+    beginEdit();
+    try {
+        let ok = true;
+        try {
+            targetWidget.callback.call(
+                targetWidget,
+                targetWidget.value ?? null,
+                app.canvas ?? undefined,
+                targetNode,
+            );
+        } catch (err) {
+            ok = false;
+            console.warn("[SettingsHub] pinned button failed:", err);
+        }
+        return { ok };
+    } finally {
+        endEdit();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Global helpers
 // ---------------------------------------------------------------------------

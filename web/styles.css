@@ -450,6 +450,71 @@ span.hub-mirror.hub-mirror-text {
     cursor: default;
 }
 
+/* ---------------------------------------------------------------------------
+   Pinned action buttons (rgthree Seed etc.) - a RUN mirror
+   --------------------------------------------------------------------------- */
+
+button.hub-btn.hub-btn-action {
+    background: #24402c;
+    border-color: #3e6b48;
+    color: #b8e6bf;
+    padding: 2px 9px;
+}
+
+button.hub-btn.hub-btn-action:hover {
+    background: #2f533a;
+    color: #eaffee;
+}
+
+/* ---------------------------------------------------------------------------
+   Queue controls: ▶ Queue ×N (ComfyUI enqueue, N times)
+   --------------------------------------------------------------------------- */
+
+.hub-queue-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 6px;
+    background: #131320;
+    border-bottom: 1px solid #2a2a3e;
+    flex: 0 0 auto;
+}
+
+.hub-btn.hub-queue-run {
+    background: #2b3550;
+    border-color: #45538a;
+    color: #cfe0ff;
+    font-size: 11px;
+    padding: 2px 10px;
+}
+
+.hub-btn.hub-queue-run:hover {
+    background: #35426a;
+    color: #fff;
+}
+
+.hub-queue-times {
+    color: #77789e;
+    font-size: 10px;
+    flex-shrink: 0;
+}
+
+input.hub-queue-count {
+    width: 44px;
+    background: #10101e;
+    color: #e8e8ff;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font-size: 11px;
+    padding: 2px 5px;
+    outline: none;
+    appearance: textfield;
+}
+
+input.hub-queue-count:focus {
+    border-color: #6677aa;
+}
+
 /* Drag visual states */
 .hub-dragging {
     opacity: 0.35;

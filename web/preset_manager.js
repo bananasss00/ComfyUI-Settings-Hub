@@ -15,7 +15,10 @@ function snapshotAll(node) {
         // widget_portal items are deliberately NOT preset-able: there is no
         // universal way to serialize/restore complex custom-widget states
         // (lora lists, panels) across custom nodes.
-        if (item.type !== "widget_binding") continue;
+        // Pinned BUTTONS are skipped too: they carry no value state - only
+        // their callback runs; snapshotting the mirror DOM would store the
+        // button's own caption as a "value" and corrupt the node on apply.
+        if (item.type !== "widget_binding" || item.widgetType === "button") continue;
         // Prefer live value mirrored on the target node; fall back to DOM mirror.
         const targetNode = resolveBindingTarget(item);
         const widget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
@@ -74,6 +77,8 @@ export function presetApply(node, presetName) {
     for (const [itemId, value] of Object.entries(preset)) {
         const item = cfg.items.find((i) => i.id === itemId);
         if (!item || item.type !== "widget_binding") continue;
+        // Buttons have nothing to write back - their snapshots were never taken.
+        if (item.widgetType === "button") continue;
         const targetNode = resolveBindingTarget(item);
         const widget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
         if (!widget) continue;

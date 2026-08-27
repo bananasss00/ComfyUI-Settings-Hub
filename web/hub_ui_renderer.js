@@ -6,8 +6,10 @@
 //
 //   .hub-tab-bar    -> visual tabs: click switch / dblclick rename / [+]
 //                      / hover [x] delete / drop-item-to-move-tab
+//   .hub-queue-row  -> ▶ Queue + "run N times" count (ComfyUI queue)
 //   .hub-container  -> one .hub-item-row per pinned widget:
 //                      [handle] [label] [mirror] [locate] [remove]
+//                      type:"button" pins render a RUN mirror instead
 //   .hub-preset-row -> preset select + Save / New / Delete / Add Divider
 //
 // Mirror widgets are real <select>/<input type=...>/controls bound to the
@@ -26,7 +28,7 @@ import {
     maybeReapplySliderOverride,
 } from "./core.js";
 import { presetSave, presetNew, presetDelete, presetApply } from "./preset_manager.js";
-import { writeTargetValue, ensureHooksForItem } from "./sync_manager.js";
+import { writeTargetValue, ensureHooksForItem, invokeTargetButton } from "./sync_manager.js";
 import { beginEdit, endEdit, registerStructural, registerValues } from "./sync.js";
 import { initDrag } from "./dnd_manager.js";
 import * as Portals from "./portal_manager.js";
@@ -204,6 +206,14 @@ function mirrorHtml(item, tw) {
                 `<input type="text" inputmode="decimal" class="hub-num-input" data-role="number" data-hub-control ` +
                 `value="${esc(String(v))}"${numAttrs}>` + slider + `</span>`;
         }
+        case "button": {
+            // Pinned ACTION BUTTON (rgthree Seed etc.): no value state - the
+            // mirror is just a runner that invokes the source callback on its
+            // LIVE node. NOT marked data-hub-control on purpose: presets and
+            // refreshValuesDom deal with VALUES only; a button has none.
+            return `<span class="hub-mirror"><button type="button" class="hub-btn hub-btn-action" ` +
+                `data-role="btn-run" title="Run this button on the source node">▶ run</button></span>`;
+        }
         default: {
             const val = tw?.value ?? "";
             // Multiline mirrors: persisted flag OR live widget carrying a
@@ -284,6 +294,54 @@ function presetRowHtml(cfg) {
         `<button type="button" class="hub-btn" data-action="preset-del" title="Delete selected preset">🗑️</button>` +
         `<button type="button" class="hub-btn" data-action="add-divider" title="Add section divider">＋Div</button>` +
         `</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Queue controls: enqueue the CURRENT ComfyUI graph N times.
+// Mirrors the vanilla Queue button: app.queuePrompt(undefined, N) queues the
+// live graph exactly like clicking "Queue Prompt" N times - no number
+// argument means plain append-at-back, server assigns execution numbers.
+// ---------------------------------------------------------------------------
+
+const MAX_QUEUE_BATCH = 1000;
+
+function parseQueueCount(v) {
+    const n = Math.floor(Number(String(v ?? "").trim().replace(",", ".")));
+    if (!Number.isFinite(n) || n < 1) return 1;
+    return Math.min(n, MAX_QUEUE_BATCH);
+}
+
+function queueRowHtml(cfg) {
+    const n = parseQueueCount(cfg.queueCount);
+    return `<div class="hub-queue-row">` +
+        `<button type="button" class="hub-btn hub-queue-run" data-action="queue-run" title="Queue prompt (same as ComfyUI Queue button)">▶ Queue</button>` +
+        `<span class="hub-queue-times">×</span>` +
+        `<input type="text" inputmode="numeric" class="hub-queue-count" data-role="queue-count" ` +
+        `value="${esc(String(n))}" title="Run the workflow this many times (1–${MAX_QUEUE_BATCH})">` +
+        `</div>`;
+}
+
+async function runQueueFlow(node) {
+    const st = stateMap.get(node);
+    if (!st?.root) return;
+    const cfg = getHubConfig(node);
+    const input = st.root.querySelector('[data-role="queue-count"]');
+    const n = parseQueueCount(input?.value);
+    cfg.queueCount = n; // persist the user preference across reloads
+    if (input && input.value !== String(n)) input.value = String(n);
+
+    const btn = st.root.querySelector('[data-action="queue-run"]');
+    try {
+        if (typeof app.queuePrompt !== "function") {
+            throw new Error("app.queuePrompt is not available in this frontend");
+        }
+        // Vanilla semantics: number omitted -> plain append, batchCount -> N copies.
+        await app.queuePrompt(undefined, n);
+        flashBtn(btn, "✓");
+    } catch (err) {
+        console.warn("[SettingsHub] queue failed:", err);
+        flashBtn(btn, "⚠");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,6 +1099,7 @@ function renderHub(node) {
 
     st.root.innerHTML =
         buildTabBarHtml(cfg) +
+        queueRowHtml(cfg) +
         containerHtml(node, cfg) +
         presetRowHtml(cfg);
 
@@ -1091,7 +1150,7 @@ function measureContent(node, st) {
     const inner = root.querySelector(".hub-container-inner");
     const presetRow = root.querySelector(".hub-preset-row");
 
-    let measured = hOf(tabBar) + hOf(presetRow);
+    let measured = hOf(tabBar) + hOf(root.querySelector(".hub-queue-row")) + hOf(presetRow);
 
     if (inner) {
         // Count the scroll viewport's own padding/border around the content.
@@ -1249,6 +1308,7 @@ function wireEvents(node, st) {
         switch (action) {
             case "add-tab": addTabFlow(node, cfg); break;
             case "del-tab": deleteTabFlow(node, cfg, btn.closest(".hub-tab-btn")?.dataset.tab); break;
+            case "queue-run": runQueueFlow(node); break;
             case "locate": {
                 const row = btn.closest("[data-hub-item]");
                 const item = cfg.items.find((i) => i.id === row?.dataset.hubItem);
@@ -1331,6 +1391,13 @@ function wireEvents(node, st) {
 
     // Mirror widget edits -> target nodes.
     root.addEventListener("change", (e) => {
+        // Queue count normalizes itself: int, >=1, capped at MAX_QUEUE_BATCH.
+        if (e.target.closest?.('[data-role="queue-count"]')) {
+            const n = parseQueueCount(e.target.value);
+            e.target.value = String(n);
+            getHubConfig(node).queueCount = n; // persist immediately
+            return;
+        }
         const c = e.target.closest("[data-hub-control]");
         if (!c) return;
         if (c.dataset.role === "check") pushControlToTarget(node, c, c.checked);
@@ -1358,6 +1425,29 @@ function wireEvents(node, st) {
     root.addEventListener("click", (e) => {
         const btn = e.target.closest('button[data-role="combo"]');
         if (btn && !btn.disabled) openComboPopup(node, btn);
+    });
+
+    // Pinned button rows RUN their source callback on the live node.
+    root.addEventListener("click", async (e) => {
+        const runBtn = e.target.closest('button[data-role="btn-run"]');
+        if (!runBtn || runBtn.disabled) return;
+        const row = runBtn.closest("[data-hub-item]");
+        const item = getHubConfig(node).items.find(
+            (i) => i.id === row?.dataset.hubItem);
+        if (!item || item.type !== "widget_binding" || item.widgetType !== "button") return;
+        const { tn, tw } = findTarget(item);
+        if (!tn || !tw) return; // orphan row - nothing to run
+        const res = invokeTargetButton(tn, tw);
+        flashBtn(runBtn, res.ok ? "✓" : "⚠");
+    });
+
+    // Enter inside the queue count fires the queue right away.
+    root.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        if (!e.target.closest?.('[data-role="queue-count"]')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        runQueueFlow(node);
     });
 }
 

@@ -67,12 +67,15 @@ export function attachContextMenu() {
     });
 }
 
-/** Declared helper widgets (bare buttons etc.) carry no state worth mirroring
- *  and no panel worth embedding - they were the source of mis-pins like
- *  "empty space" / stray toggles. */
+/** Helper widgets = buttons WITHOUT any handler (spacers / dead labels).
+ *  They carry no state to mirror, no callback worth invoking and no panel
+ *  worth embedding - historically the source of mis-pins like "empty space".
+ *  Buttons WITH a callable handler are first-class pins since v23 (rgthree
+ *  Seed "Randomize Each Time" etc.). */
 function isHelperWidget(w) {
     const t = (typeof w?.type === "string" ? w.type : "").trim().toLowerCase();
-    return t === "button";
+    if (t !== "button") return false;
+    return typeof w?.callback !== "function";
 }
 
 /** All widgets of the node classified as portals (custom panels).
@@ -220,14 +223,18 @@ function buildPinSubmenu(node, widget) {
     // any subgraph.
     const hubs = allHubs();
     // Custom widgets (non-primitive values / unknown types) become live
-    // portals - mark those entries so users know what to expect.
-    const portal = detectWidgetType(widget) === "portal";
-    const mark = portal ? "🪟 " : "📌 ";
+    // portals - mark those entries so users know what to expect. Plain
+    // action buttons get their own mark: the hub row will RUN them.
+    const kind = detectWidgetType(widget);
+    const portal = kind === "portal";
+    const mark = portal ? "🪟 " : (kind === "button" ? "🔘 " : "📌 ");
+    const btnNote = kind === "button" ? " · button" : "";
 
     if (hubs.length === 0) {
         return [
             {
-                content: `${mark}Create New Settings Hub${portal ? " (live embed)" : ""}`,
+                content: `${mark}Create New Settings Hub${
+                    portal ? " (live embed)" : btnNote}`,
                 callback: () => {
                     const newHub = createNewHub();
                     if (!newHub) return; // never leave a bare empty hub behind
@@ -247,7 +254,7 @@ function buildPinSubmenu(node, widget) {
             entries.push({
                 content: prefix
                     ? `${mark}${prefix}: ${tab.name}${portal ? " · live" : ""}`
-                    : `${mark}${tab.name}${portal ? " · live" : ""}`,
+                    : `${mark}${tab.name}${portal ? " · live" : ""}${btnNote}`,
                 callback: () => {
                     createBinding(hub, node, widget, tab.id);
                 },
