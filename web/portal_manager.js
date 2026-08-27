@@ -82,6 +82,24 @@ const SYNC_DEBOUNCE = 180;   // batch bursts of original-side mutations
 const RETRY_DELAY = 400;     // re-check the interaction lock later
 const TOUCH_LOCK = 900;      // ms after clone interaction before rebuilds
 
+/**
+ * True for elements whose focus means "the user is mid-typing or a native
+ * popup is open": swapping the ghost under them would eat keystrokes or
+ * close the popup. Plain focusable elements (buttons, toggles, labels) do
+ * NOT count - Chromium focuses a clicked <button> and that focus STAYS on
+ * it until something else is clicked; treating it as "busy" held the
+ * original->clone rebuild forever (the "hub updates only when I pan the
+ * graph" class of bugs, reported on token toggles and other custom nodes).
+ */
+function isTextEntry(n) {
+    try {
+        const tag = n?.tagName;
+        if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return true;
+        if (n?.isContentEditable) return true;
+    } catch (_) {}
+    return false;
+}
+
 /** Element-only child index path from `root` down to `node` (or null). */
 function indexPath(root, node) {
     const path = [];
@@ -171,8 +189,20 @@ function mountDomPortal(item, tw, host, opts = {}) {
             target.addEventListener(t, fn);
             rec.handlers.push([t, fn, target]);
         }
-        rec.touchHandler = () => { rec.lastTouch = Date.now(); };
-        for (const t of ["pointerdown", "wheel", "keydown", "input", "focusin"]) {
+        // Capture-phase interaction tracker. Any touch arms TOUCH_LOCK so a
+        // rebuild cannot land mid-gesture (a swapped clone would eat a
+        // pending click: its target would belong to the detached subtree and
+        // the router would drop it). A completed "click" RELEASES the lock
+        // synchronously - click always fires after the gesture finished and
+        // its forward+dispatch is one synchronous task, so the mutation it
+        // causes may rebuild on the very next debounce tick (~180ms) instead
+        // of idling out the full TOUCH_LOCK. Drag events keep the lock armed
+        // (the browser fires them continuously and suppresses click).
+        rec.touchHandler = (e) => {
+            rec.lastTouch = e?.type === "click" ? 0 : Date.now();
+        };
+        for (const t of ["pointerdown", "wheel", "keydown", "input", "focusin",
+            "dragstart", "drag", "dragend", "drop", "pointercancel", "click"]) {
             target.addEventListener(t, rec.touchHandler, { capture: true, passive: true });
         }
     };
@@ -180,19 +210,23 @@ function mountDomPortal(item, tw, host, opts = {}) {
         for (const [t, fn, elem] of rec.handlers.splice(0)) {
             try { elem.removeEventListener(t, fn); } catch (_) {}
         }
-        try { target?.removeEventListener("pointerdown", rec.touchHandler, { capture: true }); } catch (_) {}
-        try { target?.removeEventListener("wheel", rec.touchHandler, { capture: true }); } catch (_) {}
-        try { target?.removeEventListener("keydown", rec.touchHandler, { capture: true }); } catch (_) {}
-        try { target?.removeEventListener("input", rec.touchHandler, { capture: true }); } catch (_) {}
-        try { target?.removeEventListener("focusin", rec.touchHandler, { capture: true }); } catch (_) {}
+        for (const t of ["pointerdown", "wheel", "keydown", "input", "focusin",
+            "dragstart", "drag", "dragend", "drop", "pointercancel", "click"]) {
+            try { target?.removeEventListener(t, rec.touchHandler, { capture: true }); } catch (_) {}
+        }
     };
     rec.unbind = () => unbindClone(rec.clone);
 
     // --- original -> clone: debounced full re-clone swap ----------------
+    // Defer ONLY while the user is mid-typing / a native popup is open.
+    // Button/toggle focus (which Chromium keeps on the clicked element until
+    // something else is clicked) must never hold the mirror stale - see
+    // isTextEntry(): that made click-driven source changes visible only
+    // after the graph moved (panning blurs the button).
     const busyLocked = () => {
         try {
             const ae = document.activeElement;
-            if (ae && rec.clone.contains(ae)) return true;      // typing/focus
+            if (ae && rec.clone.contains(ae) && isTextEntry(ae)) return true;
         } catch (_) {}
         return Date.now() - rec.lastTouch < TOUCH_LOCK;         // drag/menu open
     };
@@ -201,6 +235,14 @@ function mountDomPortal(item, tw, host, opts = {}) {
         let fresh;
         try { fresh = el.cloneNode(true); } catch (_) { return; }
         try { fresh.classList.add(GHOST_CLASS); } catch (_) {}
+        // Carry non-text focus across the swap (keyboard-operated toggles
+        // keep working); text-entry focus is held by busyLocked() and can
+        // never reach this point.
+        let refocusPath = null;
+        try {
+            const ae = document.activeElement;
+            if (ae && rec.clone.contains(ae)) refocusPath = indexPath(rec.clone, ae);
+        } catch (_) {}
         unbindClone(rec.clone);
         rec.clone.remove();
         // Keep the closure's `clone` reference on the LIVE mirror - the
@@ -209,6 +251,16 @@ function mountDomPortal(item, tw, host, opts = {}) {
         bindClone(fresh);
         try { host.appendChild(fresh); } catch (_) { return; }
         rec.clone = fresh;
+        if (refocusPath) {
+            try {
+                let n = fresh;
+                for (const idx of refocusPath) {
+                    n = n?.children?.[idx] ?? null;
+                    if (!n) break;
+                }
+                if (n && typeof n.focus === "function") n.focus({ preventScroll: true });
+            } catch (_) {}
+        }
         normalizeGhostMedia(rec, fresh);
         if (rec.viewer) syncViewerVideoTime(rec);
     };
