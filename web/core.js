@@ -458,14 +458,41 @@ function optsHas(a, b, key) {
  * Display window for the nudge-slider when the source widget declares NO
  * finite bounds (PrimitiveFloat et al: min/max are effectively ±infinity).
  * Mirrors never invent REAL walls - typed input stays unrestricted and
- * coercion ignores these numbers (only DECLARED bounds clamp). The slider is
- * an adaptive helper: it centers on the current value and re-centers after
- * every commit, so dragging is always possible no matter the magnitude.
+ * coercion ignores these numbers (only DECLARED bounds clamp). Initial
+ * render centers the window on the current value; afterwards the window is
+ * managed by growSynthWindow (sticky one-sided growth, no re-centering).
  */
 export function synthSliderWindow(value) {
     const v = Number.isFinite(Number(value)) ? Number(value) : 0;
     const span = Math.max(Math.abs(v), 1);
     return { min: v - span, max: v + span };
+}
+
+/**
+ * STICKY growth for an EXISTING adaptive window. v1.19 re-centered the
+ * window on every commit, which kept snapping the thumb back to the visual
+ * midpoint ("слайдер всегда по центру" field report) and shifted the scale
+ * mid-gesture. New contract: initial render centers ONCE; afterwards the
+ * window only EXPANDS on the side the value escapes to - the rest of the
+ * scale (and the thumb's meaning) stays put, exactly like a declared
+ * static slider behaves.
+ */
+export function growSynthWindow(min, max, value) {
+    let lo = Number.isFinite(Number(min)) ? Number(min) : NaN;
+    let hi = Number.isFinite(Number(max)) ? Number(max) : NaN;
+    const n = Number(value);
+    const v = Number.isFinite(n) ? n : null;
+
+    // Degenerate seed -> synthesize a sane bracket around the value.
+    if (!(Number.isFinite(lo) && Number.isFinite(hi) && hi > lo)) {
+        const s = Math.max(Math.abs(v ?? 0), 1);
+        return { min: (v ?? 0) - s, max: (v ?? 0) + s };
+    }
+
+    const eps = (hi - lo) * 0.02; // tiny inset so the thumb never hugs dead stop
+    if (v !== null && v < lo) lo = v - eps;
+    else if (v !== null && v > hi) hi = v + eps;
+    return { min: lo, max: hi };
 }
 
 /**

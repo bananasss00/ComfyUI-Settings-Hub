@@ -20,7 +20,7 @@ import {
     getHubConfig, getActiveTabId, sortedTabs, itemsOfTab, genId,
     liveComboValues, numericMerge, coerceNumeric, removeItem, detectWidgetType,
     isMultilineWidget, portalKindOf, resolveBindingTarget, findHolderChainOf,
-    synthSliderWindow,
+    synthSliderWindow, growSynthWindow,
 } from "./core.js";
 import { presetSave, presetNew, presetDelete, presetApply } from "./preset_manager.js";
 import { writeTargetValue, ensureHooksForItem } from "./sync_manager.js";
@@ -308,10 +308,11 @@ function pushControlToTarget(node, control, rawValue, manualText = false) {
         // and its sibling so the DOM never shows out-of-range junk.
         if (String(control.value) !== String(v)) control.value = String(v);
         updateSiblingControl(control, v);
-        // Adaptive slider re-centers itself on its OWN commit too - otherwise
-        // releasing the thumb exactly on a window edge leaves zero headroom.
+        // Adaptive slider window GROWS one-sidedly when the committed value
+        // escapes it - NEVER re-centers, so the thumb stays meaningful
+        // relative to a stable scale (field report v20: "всегда по центру").
         if (control.dataset.synthRange === "1") {
-            const w = synthSliderWindow(v);
+            const w = growSynthWindow(control.min, control.max, v);
             control.setAttribute("min", String(w.min));
             control.setAttribute("max", String(w.max));
         }
@@ -323,15 +324,15 @@ function pushControlToTarget(node, control, rawValue, manualText = false) {
 }
 
 /** Keep range <-> number pair consistent without re-entering target writes.
- *  Adaptive (synth-range) sliders get their display window refreshed around
- *  the committed value so the NEXT drag has headroom both ways. */
+ *  Adaptive (synth-range) sliders only GROW their window when the value
+ *  escapes it (sticky scale - never re-centered: the thumb keeps meaning). */
 function updateSiblingControl(control, value) {
     const mirror = control.closest(".hub-mirror-num");
     if (!mirror) return;
     for (const el of mirror.querySelectorAll("input[data-hub-control]")) {
         if (el === control) continue;
         if (el.dataset.synthRange === "1") {
-            const w = synthSliderWindow(value);
+            const w = growSynthWindow(el.min, el.max, value);
             el.setAttribute("min", String(w.min));
             el.setAttribute("max", String(w.max));
         }
@@ -553,14 +554,14 @@ function refreshValuesDom(node) {
                     if (control.value !== String(tw.value)) control.value = String(tw.value ?? "");
                     break;
                 default: { // number / range
-                    // While the user is editing this control, echoes from the
-                    // target must NOT stomp the value mid-typing (caret jumps,
-                    // partial strings like "0." overwritten). It resyncs right
-                    // after commit/blur via the normal flow.
-                    if (document.activeElement === control && control.dataset.role === "number") break;
+                    // While the user is editing this control (typing OR mid-
+                    // drag), echoes from the target must NOT stomp it: values
+                    // would jump AND synth windows would shift under the
+                    // pointer. Resync happens right after commit/blur.
+                    if (document.activeElement === control) break;
                     const v = coerceNumeric(tw.value, item, tw, tw.value);
                     if (control.dataset.synthRange === "1") {
-                        const w = synthSliderWindow(Number.isFinite(v) ? v : Number(control.value));
+                        const w = growSynthWindow(control.min, control.max, v);
                         control.setAttribute("min", String(w.min));
                         control.setAttribute("max", String(w.max));
                     }
