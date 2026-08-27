@@ -138,6 +138,58 @@ export function resolveBindingTarget(item) {
     return null;
 }
 
+/**
+ * Chain of SubgraphNode holders leading from the root graph DOWN TO the graph
+ * that directly contains `targetNode` (outermost holder FIRST, immediate
+ * parent LAST). Empty array = node lives on a root canvas - nothing to enter.
+ * null = owner graph unreachable through known holder fields.
+ *
+ * Locate navigation uses this to hop INTO nested subgraphs instead of just
+ * panning the wrong canvas.
+ */
+export function findHolderChainOf(targetNode) {
+    if (!targetNode || typeof targetNode !== "object") return null;
+    const chains = new Map();   // graph -> holders[] to reach it
+    const seen = new Set();
+    const queue = [];
+
+    const seed = (g) => {
+        if (g && typeof g === "object" && !seen.has(g)) {
+            seen.add(g);
+            chains.set(g, []);
+            queue.push(g);
+        }
+    };
+    try { seed(app.graph); } catch (_) {}
+    try { seed(app.canvas?.graph); } catch (_) {}
+    try { seed(window.comfyAPI?.app?.graph); } catch (_) {}
+
+    for (let qi = 0; qi < queue.length; qi++) {
+        const g = queue[qi];
+        const path = chains.get(g) ?? [];
+        for (const n of g?._nodes ?? []) {
+            if (n === targetNode) return [...path];
+            try {
+                if (n.subgraph && !seen.has(n.subgraph)) {
+                    seen.add(n.subgraph);
+                    chains.set(n.subgraph, [...path, n]);
+                    queue.push(n.subgraph);
+                }
+            } catch (_) {}
+            if (Array.isArray(n.subgraphs)) {
+                for (const s of n.subgraphs) {
+                    if (s && typeof s === "object" && !seen.has(s)) {
+                        seen.add(s);
+                        chains.set(s, [...path, n]);
+                        queue.push(s);
+                    }
+                }
+            }
+        }
+    }
+    return null;
+}
+
 // ---------------------------------------------------------------------------
 // Config access / migration
 // ---------------------------------------------------------------------------
@@ -400,6 +452,20 @@ export function numericMerge(item, targetWidget) {
 
 function optsHas(a, b, key) {
     return a?.[key] != null || b?.[key] != null;
+}
+
+/**
+ * Display window for the nudge-slider when the source widget declares NO
+ * finite bounds (PrimitiveFloat et al: min/max are effectively ±infinity).
+ * Mirrors never invent REAL walls - typed input stays unrestricted and
+ * coercion ignores these numbers (only DECLARED bounds clamp). The slider is
+ * an adaptive helper: it centers on the current value and re-centers after
+ * every commit, so dragging is always possible no matter the magnitude.
+ */
+export function synthSliderWindow(value) {
+    const v = Number.isFinite(Number(value)) ? Number(value) : 0;
+    const span = Math.max(Math.abs(v), 1);
+    return { min: v - span, max: v + span };
 }
 
 /**

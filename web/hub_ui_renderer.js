@@ -19,7 +19,8 @@ import { app } from "../../scripts/app.js";
 import {
     getHubConfig, getActiveTabId, sortedTabs, itemsOfTab, genId,
     liveComboValues, numericMerge, coerceNumeric, removeItem, detectWidgetType,
-    isMultilineWidget, portalKindOf, resolveBindingTarget,
+    isMultilineWidget, portalKindOf, resolveBindingTarget, findHolderChainOf,
+    synthSliderWindow,
 } from "./core.js";
 import { presetSave, presetNew, presetDelete, presetApply } from "./preset_manager.js";
 import { writeTargetValue, ensureHooksForItem } from "./sync_manager.js";
@@ -166,13 +167,27 @@ function mirrorHtml(item, tw) {
             const v = coerceNumeric(tw?.value, item, tw, o.min);
             const finMin = Number.isFinite(o.min);
             const finMax = Number.isFinite(o.max);
-            // Faithful attributes: undeclared bounds stay ABSENT (open-ended),
-            // never replaced by invented 0..1 walls. The range slider needs a
-            // finite box - omit it when either side is open-ended.
+            // Faithful attributes on the TEXT editor: undeclared bounds stay
+            // ABSENT (open-ended), never replaced by invented 0..1 walls.
             const numAttrs =
                 (finMin ? ` min="${o.min}"` : "") +
                 (finMax ? ` max="${o.max}"` : "") +
                 ` step="${o.step}"`;
+            // Slider box: declared bounds win; open sides get an ADAPTIVE
+            // nudge window around the current value (data-synth-range).
+            // Display-only helper for PrimitiveFloat-style widgets whose
+            // bounds are effectively ±infinity: typed commits stay free,
+            // coercion still clamps ONLY by declared bounds.
+            let slider;
+            if (finMin && finMax) {
+                slider = `<input type="range" class="hub-range" data-role="range" data-hub-control ` +
+                    `value="${esc(String(v))}" min="${o.min}" max="${o.max}" step="${o.step}">`;
+            } else {
+                const w = synthSliderWindow(v);
+                slider = `<input type="range" class="hub-range hub-range-synth" data-role="range" data-hub-control ` +
+                    `data-synth-range="1" value="${esc(String(v))}" min="${w.min}" max="${w.max}" step="${o.step}" ` +
+                    `title="No declared source bounds - adaptive nudge around the current value; exact values via the text field">`;
+            }
             // The editor is a TEXT input with inputmode=decimal, NOT
             // type=number: native number fields SANITIZE the value ("0,9"
             // becomes "", comma locales and exotic decimals die before our
@@ -180,12 +195,7 @@ function mirrorHtml(item, tw) {
             // coerceNumeric, so the raw user text always reaches it intact.
             return `<span class="hub-mirror hub-mirror-num">` +
                 `<input type="text" inputmode="decimal" class="hub-num-input" data-role="number" data-hub-control ` +
-                `value="${esc(String(v))}"${numAttrs}>` +
-                (finMin && finMax
-                    ? `<input type="range" class="hub-range" data-role="range" data-hub-control ` +
-                      `value="${esc(String(v))}" min="${o.min}" max="${o.max}" step="${o.step}">`
-                    : "") +
-                `</span>`;
+                `value="${esc(String(v))}"${numAttrs}>` + slider + `</span>`;
         }
         default: {
             const val = tw?.value ?? "";
@@ -298,6 +308,13 @@ function pushControlToTarget(node, control, rawValue, manualText = false) {
         // and its sibling so the DOM never shows out-of-range junk.
         if (String(control.value) !== String(v)) control.value = String(v);
         updateSiblingControl(control, v);
+        // Adaptive slider re-centers itself on its OWN commit too - otherwise
+        // releasing the thumb exactly on a window edge leaves zero headroom.
+        if (control.dataset.synthRange === "1") {
+            const w = synthSliderWindow(v);
+            control.setAttribute("min", String(w.min));
+            control.setAttribute("max", String(w.max));
+        }
     } finally {
         // writeTargetValue manages its own nesting; this outer pair keeps
         // any callback-triggered rAF refresh suppressed until fully done.
@@ -305,12 +322,20 @@ function pushControlToTarget(node, control, rawValue, manualText = false) {
     }
 }
 
-/** Keep range <-> number pair consistent without re-entering target writes. */
+/** Keep range <-> number pair consistent without re-entering target writes.
+ *  Adaptive (synth-range) sliders get their display window refreshed around
+ *  the committed value so the NEXT drag has headroom both ways. */
 function updateSiblingControl(control, value) {
     const mirror = control.closest(".hub-mirror-num");
     if (!mirror) return;
     for (const el of mirror.querySelectorAll("input[data-hub-control]")) {
-        if (el !== control && el.value !== String(value)) el.value = String(value);
+        if (el === control) continue;
+        if (el.dataset.synthRange === "1") {
+            const w = synthSliderWindow(value);
+            el.setAttribute("min", String(w.min));
+            el.setAttribute("max", String(w.max));
+        }
+        if (el.value !== String(value)) el.value = String(value);
     }
 }
 
@@ -534,6 +559,11 @@ function refreshValuesDom(node) {
                     // after commit/blur via the normal flow.
                     if (document.activeElement === control && control.dataset.role === "number") break;
                     const v = coerceNumeric(tw.value, item, tw, tw.value);
+                    if (control.dataset.synthRange === "1") {
+                        const w = synthSliderWindow(Number.isFinite(v) ? v : Number(control.value));
+                        control.setAttribute("min", String(w.min));
+                        control.setAttribute("max", String(w.max));
+                    }
                     if (Number(control.value) !== v) control.value = String(v);
                     break;
                 }
@@ -543,12 +573,123 @@ function refreshValuesDom(node) {
 }
 
 // ---------------------------------------------------------------------------
-// Locate (🎯): center camera on source node + temporary highlight
+// Locate (🎯): ENTER the owner graph (subgraph!), center camera, highlight
 // ---------------------------------------------------------------------------
 
-function locateItem(item) {
+const nextFrame = () => new Promise((r) => {
+    try { requestAnimationFrame(() => r()); }
+    catch (_) { setTimeout(r, 16); }
+});
+const napFrames = async (n) => { for (let i = 0; i < n; i++) await nextFrame(); };
+
+/** Last-resort opener for frontends exposing no programmatic navigation:
+ *  synthesize the SAME gesture the user would make - a double click on the
+ *  holder node, mapped world->screen through the canvas transform. */
+function emulateDblClickAt(holder) {
+    const c = app.canvas ?? {};
+    const el = c.canvas ?? c.canvas_element ??
+        (typeof document !== "undefined" ? document.querySelector("canvas") : null);
+    if (!el || typeof el.dispatchEvent !== "function" ||
+        !Array.isArray(holder?.pos)) return false;
+    const rect = el.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+    const ds = c.ds ?? {};
+    const scale = Number(ds.scale) > 0 ? Number(ds.scale) : 1;
+    const ox = Array.isArray(ds.offset) ? Number(ds.offset[0]) || 0 : 0;
+    const oy = Array.isArray(ds.offset) ? Number(ds.offset[1]) || 0 : 0;
+    const wx = holder.pos[0] + (holder.size?.[0] ?? 140) / 2;
+    const wy = holder.pos[1] + (holder.size?.[1] ?? 60) / 2;
+    const base = {
+        clientX: rect.left + (wx - ox) * scale,
+        clientY: rect.top + (wy - oy) * scale,
+        bubbles: true, cancelable: true, view: window,
+    };
+    const fire = (Ctor, type) => {
+        if (typeof Ctor !== "function") return;
+        try { el.dispatchEvent(new Ctor(type, base)); } catch (_) {}
+    };
+    const tap = () => {
+        fire(window.PointerEvent, "pointerdown");
+        fire(window.MouseEvent, "mousedown");
+        fire(window.PointerEvent, "pointerup");
+        fire(window.MouseEvent, "mouseup");
+        fire(window.MouseEvent, "click");
+    };
+    tap();
+    setTimeout(tap, 110);
+    setTimeout(() => fire(window.MouseEvent, "dblclick"), 160);
+    return true;
+}
+
+/**
+ * Make the ACTIVE canvas graph become `ownerGraph`.
+ * Strategy ladder (availability differs between litegraph generations):
+ *   1. direct setters: setGraph / openGraph / openSubgraph / showSubgraph;
+ *   2. replaying the canonical gesture along the holder chain -
+ *      processNodeDoubleClicked when exposed, synthetic dblclick otherwise.
+ */
+async function enterOwnerGraph(ownerGraph, holders) {
+    const c = app.canvas;
+    if (!c || !ownerGraph) return false;
+
+    for (const name of ["setGraph", "openGraph", "openSubgraph", "showSubgraph"]) {
+        try {
+            if (typeof c[name] !== "function") continue;
+            c[name].call(c, ownerGraph);
+            await napFrames(2);
+            if ((c.graph ?? null) === ownerGraph) return true;
+        } catch (_) { /* fall through to the next strategy */ }
+    }
+
+    for (const holder of holders ?? []) {
+        if (!holder || typeof holder !== "object") continue;
+        try {
+            if (typeof c.processNodeDoubleClicked === "function") {
+                c.processNodeDoubleClicked.call(c, holder);
+                for (let i = 0; i < 4; i++) {
+                    await napFrames(1);
+                    if ((c.graph ?? null) === ownerGraph) return true;
+                }
+            }
+        } catch (_) { /* ignore broken overrides, keep trying */ }
+        try {
+            if (emulateDblClickAt(holder)) {
+                for (let i = 0; i < 8; i++) {
+                    await sleep(40);
+                    if ((c.graph ?? null) === ownerGraph) return true;
+                }
+            }
+        } catch (_) {}
+    }
+    return (c.graph ?? null) === ownerGraph;
+}
+
+let locateSeq = 0;
+
+async function locateItem(item) {
     const tn = resolveBindingTarget(item);
     if (!tn || !app.canvas?.centerOnNode) return;
+    const seq = ++locateSeq;
+
+    // The target usually lives on ANOTHER graph than the visible canvas.
+    // Jump INTO its owner graph first - otherwise centering pans the wrong
+    // canvas and the user sees nothing move where it matters (field report:
+    // pin from inside a subgraph always panned the root view).
+    const holders = findHolderChainOf(tn); // [] on root, null when unreachable
+    let ownerGraph = tn.graph ?? null;
+    if (!ownerGraph || typeof ownerGraph !== "object") {
+        // node.graph is NOT guaranteed by every frontend generation - derive
+        // the owner from the freshly computed holder chain instead.
+        if (holders == null) ownerGraph = null;
+        else if (holders.length === 0) ownerGraph = app.graph;
+        else ownerGraph = holders[holders.length - 1]?.subgraph ?? null;
+    }
+    if (ownerGraph && (app.canvas.graph ?? null) !== ownerGraph) {
+        try {
+            await enterOwnerGraph(ownerGraph, holders ?? []);
+        } catch (_) { /* highlight below is still worth showing */ }
+    }
+    if (seq !== locateSeq) return; // a fresher locate click took over
+
     app.canvas.centerOnNode(tn);
     // The target may belong to a DIFFERENT graph than the active one - dirty
     // its OWNER so the highlight repaints even when reached cross-graph.

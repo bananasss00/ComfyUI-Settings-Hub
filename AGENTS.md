@@ -31,7 +31,9 @@ web/settings_hub.js    — точка входа: app.registerExtension, заг�
 web/core.js            — конфиг хаба, detectWidgetType (самолечение типов),
                          createBinding, liveComboValues, comboTokensMatch-контракт;
                          кросс-графовый поиск: allGraphs / findNodeByIdEverywhere /
-                         resolveBindingTarget (id + title-drift repair);
+                         resolveBindingTarget (id + title-drift repair) /
+                         findHolderChainOf (цепочка SubgraphNode-владельцев);
+                         synthSliderWindow — адаптивное окно nudge-слайдера;
                          createNewHub — канонический LiteGraph.createNode -> graph.add
 web/sync.js            — шина структурных/values-обновлений + shared edit-lock
                          (beginEdit/endEdit), rAF-очередь queueHubRefresh
@@ -159,6 +161,18 @@ dev_plan.md            — исходный технический спек пр
 - Поверхности хаба (`.hub-menu`, `.settings-hub-wrap`, `.hub-portal-host`)
   никогда не перехватываются.
 
+### Locate (🎯) — прыжок внутрь сабграфа
+- Порядок: `resolveBindingTarget` → владельческий граф из `tn.graph`, а если
+  оно не задано (не все фронтенды его пишут) — из хвоста `findHolderChainOf`
+  (поле НАДЕЖНОСТИ, не источника истины). Если владелец ≠ активный граф —
+  сначала ВХОД, потом centerOnNode; иначе камера крутит НЕ ТОТ холст.
+- Лестница входа `enterOwnerGraph`: прямые сеттеры setGraph/openGraph/
+  openSubgraph/showSubgraph → реплей жеста по цепочке холдеров:
+  processNodeDoubleClicked → синтетический dblclick через мир->экран.
+  Каждая стратегия проверяется фактом смены canvas.graph. Гонки гасятся
+  locateSeq: свежий клик перебивает старый (superseded).
+- Провал входа — НЕ краш: остаётся highlight/центр как раньше (ZB4).
+
 ## 4. Инварианты — НЕ ЛОМАТЬ
 
 1. Никакого поллинга значений (setInterval на чтение виджетов запрещён).
@@ -201,6 +215,11 @@ dev_plan.md            — исходный технический спек пр
 12. Числовые зеркала верны источнику: границы/шаг только реальные или
    precision-производные (см. "Числовые зеркала"); свободный набор с точным
    десятичным коммитом — контракт пользователя, не ломать quantize=false.
+   ИСКЛЮЧЕНИЕ-дополнение v19: при ОТСУТСТВИИ объявленных границ слайдер НЕ
+   опускается, а получает АДАПТИВНОЕ окно `synthSliderWindow` вокруг текущего
+   значения (data-synth-range="1"): ре-спан на каждом коммите/эхо. Окно
+   ЧИСТО ДИСПЛЕЙНОЕ — текстовый ввод без клэмпов, coercion клэмпит ТОЛЬКО по
+   объявленным границам; min/max в editor НЕ пишутся.
 13. Создание хаба — ТОЛЬКО каноническое: `LiteGraph.createNode(HUB_NODE_NAME)`
    -> реальный ИНСТАННС -> `graph.add(node)`. Конфиг-объект `{type}` в
    add()/addNode() ЗАПРЕЩЁН: современный LGraph.add дёргает методы ноды
@@ -229,10 +248,14 @@ Z1 — канонический путь создания хаба (createNode->
 Z2 — статический линт импортов core.js для всех web/*.js;
 Z3 — холодный реестр allHubs: live-scan находит все хабы + дедупликация;
 Z4 — кросс-графовые цели: subgraph-пины живые, title-drift repair,
-реверб значения из сабграфа в зеркало.
+реверб значения из сабграфа в зеркало;
+ZB1–ZB4 — locate входит ВЛАДЕЛЬЧЕСКИЙ граф (цепочки холдеров, прямые
+сеттеры, реплей двойного клика, отказной деградейшн);
+ZB5 — адаптивный nudge-слайдер безграничных float'ов vs статичный у
+объявленных границ.
 
 ```bash
-node scripts/smoke_hub.mjs   # базовая линия: >=365 зелёных, 0 упавших
+node scripts/smoke_hub.mjs   # базовая линия: >=389 зелёных, 0 упавших
 ```
 
 Подводные камни харнеса:
