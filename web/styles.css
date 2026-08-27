@@ -479,6 +479,177 @@ span.hub-mirror.hub-mirror-text {
     background: #101020;
 }
 
+/* v27: batch image gallery (viewer_gallery.js) - the hub's OWN viewer fed
+   from the frontend output store. Row layout: stage (main image + overlay
+   controls) over a thumbnail strip; the row hugs the content. */
+.hub-gallery {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.hub-gallery-stage {
+    position: relative;
+    width: 100%;
+    line-height: 0;
+    border-radius: 4px;
+    background: #101020;
+    overflow: hidden;
+    outline: none;
+}
+.hub-gallery-stage:focus-visible {
+    box-shadow: 0 0 0 1px #4a6da8 inset;
+}
+
+.hub-gallery-img {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    max-height: 460px;
+    object-fit: contain;
+    background: #101020;
+    cursor: zoom-in;
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+/* Overlay controls: visible on hover / focus over the stage corners */
+.hub-gal-btn {
+    position: absolute;
+    border: 1px solid #3a3a5e;
+    background: rgba(16, 16, 32, 0.72);
+    color: #c6cbde;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1;
+    padding: 4px 7px;
+    opacity: 0;
+    transition: opacity 0.12s ease, background 0.12s ease;
+    pointer-events: auto;
+    z-index: 2;
+}
+.hub-gallery-stage:hover .hub-gal-btn,
+.hub-gallery-stage:focus-within .hub-gal-btn {
+    opacity: 1;
+}
+.hub-gal-btn:hover {
+    background: #2a2a46;
+    color: #ffffff;
+}
+.hub-gal-prev { left: 4px; top: 50%; transform: translateY(-50%); }
+.hub-gal-next { right: 4px; top: 50%; transform: translateY(-50%); }
+.hub-gal-fs { right: 4px; top: 4px; font-size: 12px; padding: 3px 6px; }
+
+.hub-gal-counter {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    background: rgba(16, 16, 32, 0.72);
+    border: 1px solid #3a3a5e;
+    border-radius: 4px;
+    color: #aeb4c9;
+    font-size: 9px;
+    line-height: 1.4;
+    padding: 1px 5px;
+    pointer-events: none;
+    z-index: 2;
+}
+
+.hub-gallery-thumbs {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 3px;
+    overflow-x: auto;
+    padding: 1px;
+    scrollbar-width: thin;
+    scrollbar-color: #33335a transparent;
+}
+.hub-gallery-thumbs::-webkit-scrollbar { height: 6px; }
+.hub-gallery-thumbs::-webkit-scrollbar-thumb { background: #33335a; border-radius: 3px; }
+
+.hub-gal-thumb {
+    flex: 0 0 auto;
+    width: 44px;
+    height: 34px;
+    padding: 0;
+    border: 2px solid transparent;
+    border-radius: 4px;
+    background: #101020;
+    cursor: pointer;
+    overflow: hidden;
+    line-height: 0;
+}
+.hub-gal-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    pointer-events: none;
+}
+.hub-gal-thumb:hover { border-color: #4a5a8a; }
+.hub-gal-thumb.hub-gal-thumb-on { border-color: #7a9dd6; }
+
+/* v27: fullscreen viewer - a SINGLETON body-level sheet (invariant #7:
+   fixed, never clipped by hub scroll). Promoted to true fullscreen via
+   the Fullscreen API when granted; works as a plain sheet otherwise. */
+.hub-fs-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(6, 6, 14, 0.94);
+    z-index: 2147483000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.hub-fs-overlay:fullscreen { background: #06060e; }
+
+.hub-fs-img {
+    max-width: 94vw;
+    max-height: 94vh;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: 4px;
+    background: #101020;
+    box-shadow: 0 6px 40px rgba(0, 0, 0, 0.55);
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+.hub-fs-btn {
+    position: absolute;
+    border: 1px solid #3a3a5e;
+    background: rgba(16, 16, 32, 0.8);
+    color: #c6cbde;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 10px 14px;
+    transition: background 0.12s ease;
+}
+.hub-fs-btn:hover { background: #2a2a46; color: #fff; }
+.hub-fs-prev { left: 14px; top: 50%; transform: translateY(-50%); font-size: 18px; }
+.hub-fs-next { right: 14px; top: 50%; transform: translateY(-50%); font-size: 18px; }
+.hub-fs-close { right: 14px; top: 14px; }
+
+.hub-fs-counter {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    background: rgba(16, 16, 32, 0.8);
+    border: 1px solid #3a3a5e;
+    border-radius: 6px;
+    color: #aeb4c9;
+    font-size: 12px;
+    padding: 3px 10px;
+    pointer-events: none;
+}
+
 /* Buttons disabled state */
 .hub-btn:disabled {
     opacity: 0.35;

@@ -43,6 +43,8 @@ import { app } from "../../scripts/app.js";
 import {
     getHubConfig, PORTAL_ROW_GAP, widgetNativeHeight, resolveBindingTarget,
 } from "./core.js";
+import { getVideoAudio, setVideoAudio, applyVideoAudio } from "./global_settings.js";
+import { mountImageGallery, closeGalleryFullscreen } from "./viewer_gallery.js";
 
 /** node -> Set<record>; records live between structural renders. */
 const nodeRegistry = new WeakMap();
@@ -439,6 +441,7 @@ function mountCanvasPortal(node, item, tn, members, host) {
         altPainters: null,
         altIdx: 0,
         altSig: "",
+        altLastRetry: 0,
         altWinner: null,
         // Pixel-settle auto height: signed extra over the formula height.
         // autoH == null means "grace not started yet".
@@ -682,6 +685,16 @@ function mountCanvasPortal(node, item, tn, members, host) {
                     rec.altSig = sig;
                     rec.altIdx = 0;
                 }
+                // v27: the sig only tracks array LENGTHS - it changes BEFORE
+                // the first Image() finishes decoding, so one exhausted probe
+                // war used to freeze the hint forever. Re-arm the probes
+                // periodically (cheap: one paint + one scan per 3s) so late
+                // decode still lands.
+                if (rec.altIdx >= rec.altPainters.length
+                    && Date.now() - (rec.altLastRetry || 0) > 3000) {
+                    rec.altLastRetry = Date.now();
+                    rec.altIdx = 0;
+                }
                 if (rec.altIdx < rec.altPainters.length) {
                     const fn = rec.altPainters[rec.altIdx++];
                     paint(fn);
@@ -816,7 +829,13 @@ function releaseCanvas(rec) {
 
 function releaseRecord(rec) {
     if (rec.kind === "dom") releaseDom(rec);
-    else if (rec.kind === "viewer") rec.release?.();
+    else if (rec.kind === "viewer") {
+        // v27: a gallery viewer owns the fullscreen overlay while open -
+        // unpin/remount must never leave an orphaned overlay (its release
+        // closes it too; this covers recs without release).
+        try { closeGalleryFullscreen(); } catch (_) {}
+        rec.release?.();
+    }
     else releaseCanvas(rec);
     try { rec.set?.delete(rec); } catch (_) {}
 }
@@ -830,16 +849,28 @@ function releaseRecord(rec) {
 // field as per-frame flicker (re-cloned <video> + seek fighting) and rows
 // that kept jitter-resizing.
 //
-//   video  -> our own native <video controls loop muted autoplay>: a REAL
-//             player (seek/pause/volume) as the user asked. We copy the src
-//             (blob: URLs stay valid in the same document) and re-point it
-//             when the source swaps media (new generation).
+//   video  -> our own native <video controls loop autoplay playsinline>: a
+//             REAL player (seek/pause/volume) as the user asked. We copy the
+//             src (blob: URLs stay valid in the same document) and re-point
+//             it when the source swaps media (new generation).
+//             v27: muted/volume start from the GLOBAL preference
+//             (global_settings.getVideoAudio) and every volumechange made
+//             through the native controls writes back - tune audio ONCE,
+//             every future player follows (no per-clip re-muting).
 //   img    -> our own <img> with the live src.
-//   canvas -> the new frontend's "$$canvas-image-preview" DRAWS the bitmap
-//             onto a canvas (cloning the element copies nothing - that's why
-//             pinned images came out blank). We blit it into our own canvas
-//             on a light interval instead: content copies across, nothing
-//             rebuilds, no flicker.
+//   gallery-> v27: the node owns NO DOM media at all (new-frontend
+//             PreviewImage/SaveImage render through the CANVAS-ONLY
+//             "$$canvas-image-preview" widget - BaseWidget canvasOnly, no
+//             element), but the frontend OUTPUT STORE has the full batch:
+//             viewer_gallery.js feeds the hub's OWN gallery from
+//             app.nodeOutputs / app.nodePreviewImages (+ legacy node
+//             fields) - nav arrows, counter, thumbnails, fullscreen. The
+//             route that finally kills the eternal "waiting for the
+//             source preview".
+//   canvas -> nodes that DO carry a real DOM <canvas> widget (custom
+//             builds; the $$ canvas widget itself owns no element). We
+//             blit it into our own canvas on a light interval: content
+//             copies across, nothing rebuilds, no flicker.
 //   none   -> classic painter portal (node.onDrawBackground) with the
 //             node.imgs fallback painter from v26.1.
 //
@@ -939,13 +970,15 @@ function mountMediaViewer(node, item, tn, host) {
         el.dataset.role = "viewer-media";
         if (src.kind === "video") {
             // A REAL player: seek / pause / volume via native controls.
-            // Muted+autoplay satisfies browser autoplay policies (the user
-            // can unmute from the controls); loop keeps loops looping.
+            // Audio starts from the GLOBAL preference, not a hardcoded
+            // mute (v27): the user's mute/volume choice made on ANY hub
+            // player persists (localStorage) and applies to every new
+            // video - no more silencing each clip over and over.
             el.controls = true;
             el.loop = true;
-            el.muted = true;
             el.playsInline = true;
             el.preload = "auto";
+            applyVideoAudio(el);
         }
         host.appendChild(el);
 
@@ -955,6 +988,17 @@ function mountMediaViewer(node, item, tn, host) {
             dead: false, timer: null, observer: null, lastSrc: null,
             release: null, set: null,
         };
+        // v27: persist audio changes made through the player's native
+        // controls into the GLOBAL preference (fires for the mute toggle
+        // and the volume slider alike). The same values we write via
+        // applyVideoAudio also fire volumechange - writing them back is a
+        // harmless same-value round-trip, no echo guard needed.
+        const persistAudio = () => {
+            try { setVideoAudio({ muted: !!el.muted, volume: Number(el.volume) }); } catch (_) {}
+        };
+        if (src.kind === "video") {
+            try { el.addEventListener("volumechange", persistAudio); } catch (_) {}
+        }
         const apply = () => {
             if (rec.dead) return;
             // Re-resolve the LIVE media element every pass: frontends
@@ -966,7 +1010,12 @@ function mountMediaViewer(node, item, tn, host) {
             try {
                 el.src = s;
                 if (rec.srcKind === "video") {
-                    el.muted = true;
+                    // New generation of the same node: re-apply the
+                    // global audio preference (it may have changed since
+                    // this element was mounted), then autoplay. If the
+                    // browser denies unmuted autoplay the video simply
+                    // waits for the user - its controls stay honest.
+                    applyVideoAudio(el);
                     const p = el.play?.();
                     p?.catch?.(() => {}); // autoplay denial is fine
                 }
@@ -990,6 +1039,9 @@ function mountMediaViewer(node, item, tn, host) {
             if (rec.timer) { clearInterval(rec.timer); rec.timer = null; }
             try { rec.observer?.disconnect(); } catch (_) {}
             rec.observer = null;
+            if (src.kind === "video") {
+                try { el.removeEventListener("volumechange", persistAudio); } catch (_) {}
+            }
             try { el.pause?.(); } catch (_) {}
             try { el.remove(); } catch (_) {}
         };
@@ -1093,12 +1145,24 @@ export function mountPortals(node, root) {
                 continue;
             }
             host.classList.remove("hub-portal-broken");
-            // v26.2: the hub renders its OWN media element (native video
-            // player / img / canvas blit) fed from the source preview. No
-            // ghost cloning - that churned, flickered and lost canvas bits.
+            // v26.2/v27: the hub renders its OWN media element fed from the
+            // live source - no ghost cloning (that churned, flickered and
+            // lost canvas bits). Route order:
+            //   1. DOM <video>/<img> widget -> real player / img mirror;
+            //   2. NO DOM media (new frontend $$canvas-image-preview!) but
+            //      output-store images -> OUR batch gallery + fullscreen;
+            //   3. DOM <canvas> widget      -> blit;
+            //   4. nothing                  -> painter portal (hint).
             let vrec = null;
             try { vrec = mountMediaViewer(node, item, tn, host); }
             catch (_) { vrec = null; }
+            if (!vrec) {
+                try { vrec = mountImageGallery(node, item, tn, host); }
+                catch (err) {
+                    console.warn("[SettingsHub] gallery mount failed:", err);
+                    vrec = null;
+                }
+            }
             if (!vrec) vrec = mountViewerPortal(node, item, tn, host);
             if (vrec) { vrec.set = set; set.add(vrec); }
             continue;

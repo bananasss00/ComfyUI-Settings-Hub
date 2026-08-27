@@ -70,9 +70,20 @@ web/portal_manager.js  — живые встраивания: DOM-панели �
                          — нативный <video controls> плеер / <img> / блит
                          canvas-превью; вотчер смены src; фолбэк painter
                          +node.imgs; нормализация медиа в панельных гостах
+web/viewer_gallery.js  — v27 БАТЧ-ГАЛЕРЕЯ вьюверов: свой <img>-вьювер хаба,
+                         кормится от выходного стора фронтенда
+                         (app.nodeOutputs / app.nodePreviewImages + легаси
+                         node.images / node.imgs); навигация, счётчик,
+                         миниатюры, фуллскрин-оверлей (body-level,
+                         Fullscreen API + ←/→/Esc/колесо); вотчер 1с;
+                         findOutputImages / mountImageGallery /
+                         openGalleryFullscreen / closeGalleryFullscreen
 web/preset_manager.js  — снапшоты ВСЕХ widget_binding хаба (порталы исключены)
-web/global_settings.js — ГЛОБАЛЬНЫЕ настройки хаба (v26): скорость обновления
-                         зеркал (localStorage "settingshub.refreshMs"),
+web/global_settings.js — ГЛОБАЛЬНЫЕ настройки хаба (v26/v27): скорость обновления
+                         зеркал (localStorage "settingshub.refreshMs"), + v27: глобальные
+                         видеопредпочтения settingshub.videoMuted /
+                         settingshub.videoVolume (getVideoAudio /
+                         setVideoAudio / applyVideoAudio)
                          опциональный catch-up поллер refreshNodeValues по
                          всем хабам; 0 = только события (дефолт)
 web/dnd_manager.js     — HTML5 DnD: reorder строк, drop на вкладку = перенос
@@ -476,6 +487,56 @@ dev_plan.md            — исходный технический спек пр
   video-вьювер монтирует DOM-гост (не canvas), классы/стили нормализации,
   тег «🖼 live» выживает, img-нода тем же маршрутом, тихий ✕. База >=653.
 
+### v27: галерея-вьювер из выходного стора + глобальный звук видео
+- ПОЛЕВОЙ СИМПТОМ: «🖼 waiting for the source preview» навсегда для
+  PreviewImage/SaveImage. Причина (по исходникам фронта): они рендерят
+  превью СЛУЖЕБНЫМ CANVAS-ВИДЖЕТОМ «$$canvas-image-preview»
+  (canvasImagePreviewTypes.CANVAS_IMAGE_PREVIEW_WIDGET; BaseWidget
+  canvasOnly:true) — у виджета НЕТ element/inputEl/contentEl, DOM-медиа
+  нет ВООБЩЕ. findSourceMedia молчит; painter-маршрут не рисует (в новом
+  фронте onDrawBackground — это только шим updatePreviews, ставится
+  litegraphService.addDrawBackgroundHandler на КАЖДЫЙ класс нод и НЕ
+  красит); alt-painter по node.imgs — гонка декодирования (сигнатура
+  altSig меняется ДО загрузки картинок, исчерпанная война пробов
+  замораживала hint навсегда).
+- РЕШЕНИЕ — живой источник №1, хранилище выходов фронтенда:
+  viewer_gallery.findOutputImages(tn) строит ПОЛНЫЙ батч URL:
+  app.nodeOutputs[locator].images (spec→/view?filename&subfolder&type,
+  зеркалит buildImageUrls; api.apiURL учитывает desktop-origin) →
+  app.nodePreviewImages[locator] (живые preview-кадры) → легаси
+  node.images → src из node.imgs. locatorId: String(node.id) плюс
+  суффикс-скан «:id» для сабграфов. Видео/аудио-расширения фильтруются
+  (и в путях, и в filename /view) — их путь это <video>-маршрут.
+- Маршруты mountPortals (viewer-ветка): DOM video → DOM img →
+  ГАЛЕРЕЯ (store) → DOM canvas blit → painter (hint).
+- Галерея строки: stage с <img> + ховер-кнопки ◀/▶, счётчик «i / N»,
+  ⛶; лента миниатюр (только для батчей, активная подсвечена,
+  scrollIntoView); клик по картинке = фуллскрин; колесо = навигация.
+  Состояние индекса — сессионный Map по item.id (переживает
+  структурные ре-рендеры; НЕ в сериализуемом конфиге). Смена батча
+  (сигнатура length|first|mid|last) → idx=0, перезапуск миниатюр,
+  синхронизация открытого фуллскрина. Прелоад соседей.
+- Фуллскрин — СИНГЛТОН на document.body (.hub-fs-overlay, fixed,
+  z-index 2147483000 — инвариант №7): requestFullscreen на оверлей
+  (отказ → обычный fixed-щит), fullscreenchange-выход закрывает,
+  ←/→/Home/End/Esc (capture), колесо, клик по фону = закрыть.
+  closeGalleryFullscreen идемпотентен; releaseRecord/viewer-release
+  закрывают оверлей (не осиротевший UI при анпине).
+- ИСПРАВЛЕНИЕ alt-painter (painter-маршрут): при исчерпанных пробах
+  реарм altIdx каждые 3с (altLastRetry) — поздняя загрузка картинок
+  больше не вечный «waiting».
+- v27 ЗВУК ВИДЕО — глобально: global_settings.getVideoAudio /
+  setVideoAudio / applyVideoAudio (localStorage settingshub.videoMuted
+  «1»/«0», settingshub.videoVolume 0..1; дефолт muted+vol=1 —
+  autoplay-политика). mountMediaViewer(video): на монтировании и при
+  смене src — applyVideoAudio(el) (жёсткое el.muted=true УДАЛЕН);
+  volumechange от нативных контролов пишется обратно в глобал
+  (persistAudio; same-value эхо от applyVideoAudio безвредно).
+  Грабль: Number(null)===0 — отсутствие ключа в localStorage НЕ должно
+  зажимать дефолт громкости (гвард raw===null||"").
+- Грабль харнеса: jsdom document.hidden===true (prerender) — вотчер
+  галереи НЕ гардуется по document.hidden (контракт видео-вотчера
+  v26.2); гард остаётся только у canvas-blit.
 ### Резолвер целей v24 (крест-граф, вложенные сабграфы)
 - allGraphs: BFS по УРОВНЯМ (глубина — уровни иерархии, дефолт 12), списки
   нод = union `_nodes` + публичный `nodes`; реестры `_subgraphs`/`subgraphs`/
@@ -653,7 +714,17 @@ viewer-пункту остаётся), isViewerNode по DOM-медиа-видж
 (+негатив: именованная панель с img — не вьювер), findNodeMediaWidget,
 end-to-end: video-вьювер монтирует СВОЙ <video controls loop muted>
 (госта НЕТ — источник не клонируется), src копируется и вотчер подхватывает
-смену (blob:x→blob:y — новая генерация), img-маршрут, canvas-блит принимает
+смену (blob:x→blob:y — новая генерация), ZK — v27 галерея: findOutputImages (батч из nodeOutputs, uuid-суффикс
+сабграфов, preview-кадры, легаси images/imgs, фильтр видео-расширений),
+монтирование галереи (тег живёт, счётчик, миниатюры, active),
+setIndex, ремоунт восстанавливает индекс, фуллскрин open/close,
+вотчер подхватывает новый батч (idx=0), пропажа стора держит
+последний батч, тихий ✕. ZL — v27 звук видео: дефолты, patch,
+localStorage round-trip, out-of-range игнор, applyVideoAudio,
+boot-рестор нового инстанса модуля. ВНЕ репо — мини-харнесы:
+smoke_gallery.mjs / smoke_prefs_lint.mjs (jsdom; app-стаб на
+/extensions/<ext>/-layout, requestFullscreen-стаб).
+img-маршрут, canvas-блит принимает
 размер исходной карты, тихий ✕ у видео-вьювера.
 
 ⚠ грабль ZI: фазы не диспатчат onRemoved (ноды вырезаются splice'ом), поэтому

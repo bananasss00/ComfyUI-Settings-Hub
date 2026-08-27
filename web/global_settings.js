@@ -23,6 +23,14 @@
 //   The tick performs a VALUE-ONLY refresh (refreshNodeValues): no innerHTML
 //   rebuilds, popups/inline editors survive, controls being actively edited
 //   are skipped by the renderer itself.
+//
+//   v27 also hosts the GLOBAL video-audio preference for hub viewer players:
+//   muted on/off + volume, persisted across sessions. Every NEW <video> the
+//   hub mounts starts from this preference, and any change made through a
+//   player's native controls (volumechange event) is written back here -
+//   so the user mutes/unmutes/adjusts volume ONCE and every future video
+//   follows. Same philosophy as refreshMs: a user preference, NOT workflow
+//   state (localStorage, never node.properties).
 // ============================================================================
 
 import { allHubs } from "./core.js";
@@ -79,6 +87,66 @@ try {
     if (Number.isFinite(saved) && REFRESH_CHOICES.includes(saved)) currentMs = saved;
 } catch (_) { /* no storage - events-only default stands */ }
 restartTimer();
+
+// ---------------------------------------------------------------------------
+// v27: GLOBAL video audio preference (muted + volume) for hub viewer players
+// ---------------------------------------------------------------------------
+
+const LS_VIDEO_MUTED = "settingshub.videoMuted";
+const LS_VIDEO_VOLUME = "settingshub.videoVolume";
+
+// Defaults: muted ON (browser autoplay policy blocks unmuted autoplay - the
+// user can unmute from the native controls; that choice then sticks).
+let videoMuted = true;
+let videoVolume = 1;
+
+// Boot: restore the persisted preference (if any) once per page load.
+try {
+    const m = localStorage.getItem(LS_VIDEO_MUTED);
+    if (m === "0") videoMuted = false;
+    else if (m === "1") videoMuted = true;
+} catch (_) { /* no storage - muted default stands */ }
+try {
+    const raw = localStorage.getItem(LS_VIDEO_VOLUME);
+    // Number(null) === 0 - an absent key must NOT clamp the default to 0.
+    const v = (raw === null || raw === "") ? NaN : Number(raw);
+    if (Number.isFinite(v) && v >= 0 && v <= 1) videoVolume = v;
+} catch (_) { /* no storage - full volume stands */ }
+
+/** Current global video audio preference ({ muted: boolean, volume: 0..1 }). */
+export function getVideoAudio() {
+    return { muted: videoMuted, volume: videoVolume };
+}
+
+/**
+ * Update the global video audio preference. Unknown/out-of-range fields are
+ * ignored (a patch may carry only one of the two). Persists to localStorage
+ * and returns the applied preference.
+ */
+export function setVideoAudio(patch = {}) {
+    if (typeof patch.muted === "boolean") {
+        videoMuted = patch.muted;
+        try { localStorage.setItem(LS_VIDEO_MUTED, videoMuted ? "1" : "0"); }
+        catch (_) { /* private mode etc. - session-only preference */ }
+    }
+    const vol = Number(patch.volume);
+    if (Number.isFinite(vol) && vol >= 0 && vol <= 1) {
+        videoVolume = Math.min(1, Math.max(0, vol));
+        try { localStorage.setItem(LS_VIDEO_VOLUME, String(videoVolume)); }
+        catch (_) { /* private mode etc. - session-only preference */ }
+    }
+    return getVideoAudio();
+}
+
+/** Push the global preference onto a player element (muted + volume). */
+export function applyVideoAudio(el) {
+    try {
+        if (!el) return null;
+        el.muted = videoMuted;
+        el.volume = videoVolume;
+    } catch (_) { /* exotic element - keep mounting */ }
+    return el;
+}
 
 /** Test hook: run one poller pass immediately (bypasses the hidden guard). */
 export function __refreshTickForTest() {
