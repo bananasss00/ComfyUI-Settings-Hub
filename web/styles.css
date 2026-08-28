@@ -197,14 +197,44 @@
     flex: 0 0 auto;
 }
 
-.hub-preset-select {
+.hub-preset-trigger {
     background: #1a1a2e;
     color: #e0e0e0;
     border: 1px solid #444;
     border-radius: 3px;
     font-size: 10px;
-    padding: 1px 4px;
+    padding: 2px 5px;
     flex: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    text-align: left;
+    cursor: pointer;
+}
+
+.hub-preset-trigger:hover {
+    border-color: #5a5a9e;
+}
+
+.hub-preset-trig-label {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hub-preset-trig-last {
+    color: #9a9abe;
+}
+
+.hub-preset-trig-count {
+    flex: 0 0 auto;
+    background: #2a2a4e;
+    border-radius: 8px;
+    padding: 0 5px;
+    color: #b0b0e0;
+    font-size: 9px;
 }
 
 /* Context menu (custom menu for DOM-widget text fields) */
@@ -1447,17 +1477,33 @@ button.hub-pin-back {
    ========================================================================== */
 
 .hub-inpreset {
-    display: inline-flex;
-    align-items: center;
+    position: relative;
     flex: 0 0 auto;
     margin: 0 1px;
+    font-size: 9px;
+    line-height: 1;
+    padding: 2px 3px;
     cursor: pointer;
 }
 
-.hub-inpreset input[type="checkbox"] {
-    margin: 0;
-    cursor: pointer;
-    accent-color: #7a7ae0;
+/* v29: OFF state = excluded from captures. Amber tone + a diagonal strike
+   so it can never be mistaken for a value checkbox. */
+.hub-inpreset.hub-inpreset-off {
+    opacity: 0.6;
+    color: #e0b050;
+    border-color: #8a7a45;
+}
+
+.hub-inpreset.hub-inpreset-off::after {
+    content: "";
+    position: absolute;
+    left: 1px;
+    right: 1px;
+    top: 50%;
+    height: 1px;
+    background: #e0b050;
+    transform: rotate(-25deg);
+    pointer-events: none;
 }
 
 /* Apply-inspection popover (body-level, same family as .hub-set-pop) */
@@ -1564,4 +1610,352 @@ button.hub-pin-back {
 
 .hub-ppr-report {
     padding: 6px 4px;
+}
+
+/* ==========================================================================
+   v29 Presets UX: searchable picker, quick-save popover, session toast,
+   diff view in the apply popover
+   ========================================================================== */
+
+/* Preset picker (replaces the native select dropdown) */
+.hub-preset-picker {
+    min-width: 250px;
+    max-width: 330px;
+}
+
+.hub-pp-list {
+    max-height: 260px;
+    overflow-y: auto;
+    margin-top: 3px;
+}
+
+.hub-pp-sec {
+    color: #8a8aae;
+    font-size: 9px;
+    letter-spacing: 0.04em;
+    padding: 4px 4px 2px;
+    white-space: nowrap;
+}
+
+.hub-pp-sec-other {
+    cursor: pointer;
+}
+
+.hub-pp-sec-other:hover {
+    color: #b0b0d8;
+}
+
+.hub-pp-other.hub-pp-collapsed {
+    display: none;
+}
+
+.hub-pp-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 4px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.hub-pp-row:hover,
+.hub-pp-row.hub-pp-active {
+    background: #26263e;
+}
+
+.hub-pp-star {
+    flex: 0 0 auto;
+    width: 9px;
+    color: #e8c352;
+    font-size: 9px;
+}
+
+.hub-pp-name {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hub-pp-tab {
+    flex: 0 0 auto;
+    color: #9a8aae;
+    background: #241f30;
+    border-radius: 7px;
+    padding: 0 5px;
+    font-size: 8.5px;
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hub-pp-meta {
+    flex: 0 0 auto;
+    color: #8a8aae;
+    background: #22223a;
+    border-radius: 7px;
+    padding: 0 5px;
+    font-size: 8.5px;
+}
+
+.hub-pp-dead {
+    color: #e0b050;
+    background: #2a2418;
+    border: 1px solid #6a5a30;
+    border-radius: 7px;
+    padding: 0 4px;
+    font-size: 8.5px;
+    cursor: pointer;
+}
+
+.hub-pp-foreign .hub-pp-name {
+    color: #9a9abe;
+}
+
+.hub-pp-foreign:not(:hover) .hub-pp-acts {
+    opacity: 0.45;
+}
+
+/* Per-preset actions: visible on hover / keyboard-active rows only */
+.hub-pp-acts {
+    flex: 0 0 auto;
+    display: inline-flex;
+    gap: 1px;
+    opacity: 0;
+    transition: opacity 0.08s;
+}
+
+.hub-pp-row:hover .hub-pp-acts,
+.hub-pp-row.hub-pp-active .hub-pp-acts {
+    opacity: 1;
+}
+
+.hub-pp-act {
+    background: none;
+    border: none;
+    color: #c0c0e0;
+    font-size: 9.5px;
+    padding: 1px 2px;
+    cursor: pointer;
+    border-radius: 2px;
+}
+
+.hub-pp-act:hover {
+    background: #3a3a5e;
+}
+
+.hub-pp-empty {
+    color: #77789e;
+    font-size: 10px;
+    padding: 8px 6px;
+    text-align: center;
+}
+
+/* Quick-save popover (name / overwrite / merge) */
+.hub-qs-pop {
+    min-width: 240px;
+    max-width: 320px;
+}
+
+.hub-qs-name {
+    width: 100%;
+    box-sizing: border-box;
+    background: #10101e;
+    color: #e8e8ff;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font-size: 11px;
+    padding: 3px 5px;
+    outline: none;
+}
+
+.hub-qs-name:focus {
+    border-color: #5a5a9e;
+}
+
+.hub-qs-info {
+    color: #9a9abe;
+    font-size: 10px;
+    padding: 4px 2px;
+}
+
+.hub-qs-info b {
+    color: #d0d0f0;
+}
+
+.hub-qs-excl {
+    color: #e0b050;
+}
+
+.hub-qs-list {
+    max-height: 160px;
+    overflow-y: auto;
+    margin: 2px 0 4px;
+}
+
+.hub-qs-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 4px;
+    border-radius: 3px;
+}
+
+.hub-qs-row:hover {
+    background: #26263e;
+}
+
+.hub-qs-row .hub-qs-merge,
+.hub-qs-row .hub-qs-over {
+    flex: 0 0 auto;
+    background: #22223a;
+    border: 1px solid #3a3a55;
+    color: #c0c0e0;
+    border-radius: 3px;
+    font-size: 9px;
+    padding: 1px 5px;
+    cursor: pointer;
+}
+
+.hub-qs-row .hub-qs-merge:hover,
+.hub-qs-row .hub-qs-over:hover {
+    background: #3a3a5e;
+}
+
+.hub-qs-none {
+    color: #77789e;
+    font-size: 10px;
+    padding: 4px;
+}
+
+.hub-qs-foot {
+    display: flex;
+    gap: 6px;
+    padding-top: 4px;
+    border-top: 1px solid #2a2a3e;
+}
+
+.hub-qs-foot button {
+    background: #22223a;
+    border: 1px solid #3a3a55;
+    color: #e0e0e0;
+    border-radius: 3px;
+    font-size: 10px;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+
+.hub-qs-foot button:hover {
+    background: #3a3a5e;
+}
+
+.hub-qs-foot .hub-qs-save {
+    border-color: #4a5a8e;
+}
+
+/* Apply popover: diff view + only-changed view filter */
+.hub-ppr-cur {
+    flex: 0 1 auto;
+    color: #8a8aae;
+    text-decoration: line-through;
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10px;
+}
+
+.hub-ppr-arrow {
+    flex: 0 0 auto;
+    color: #7a7ae0;
+    padding: 0 1px;
+    font-size: 10px;
+}
+
+.hub-ppr-onlychg {
+    flex: 1 1 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: #9a9abe;
+    font-size: 9.5px;
+    cursor: pointer;
+    white-space: nowrap;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.hub-ppr-onlychg input {
+    margin: 0;
+    accent-color: #7a7ae0;
+}
+
+.hub-ppr-foot-btns {
+    flex: 0 0 auto;
+    display: inline-flex;
+    gap: 6px;
+}
+
+.hub-ppr-foot .hub-ppr-foot-btns button {
+    flex: 0 0 auto;
+}
+
+.hub-ppr-list.hub-ppr-onlychg .hub-ppr-row:not(.hub-ppr-drift) {
+    display: none;
+}
+
+/* Session toast (bottom-center snackbar) */
+.hub-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 26px;
+    transform: translateX(-50%);
+    z-index: 100002;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #16162a;
+    border: 1px solid #44445e;
+    border-radius: 5px;
+    padding: 6px 10px;
+    color: #e0e0e0;
+    font-family: "Inter", -apple-system, sans-serif;
+    font-size: 11px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
+    max-width: 70vw;
+}
+
+.hub-toast-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hub-toast-undo {
+    background: #2a2a4e;
+    border: 1px solid #5a5a9e;
+    color: #d0d0ff;
+    border-radius: 3px;
+    font-size: 10px;
+    padding: 1px 7px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.hub-toast-undo:hover {
+    background: #3a3a6e;
+}
+
+.hub-toast-x {
+    background: none;
+    border: none;
+    color: #77789e;
+    cursor: pointer;
+    font-size: 10px;
+    padding: 0 1px;
+}
+
+.hub-toast-x:hover {
+    color: #c0c0e0;
 }

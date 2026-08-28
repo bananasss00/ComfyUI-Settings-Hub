@@ -10,8 +10,8 @@
 //   .hub-container  -> one .hub-item-row per pinned widget:
 //                      [handle] [label] [mirror] [locate] [remove]
 //                      type:"button" pins render a RUN mirror instead
-//   .hub-preset-row -> preset select + Save / New / Undo / Delete /
-//                      Tools / Add Divider (v28 Presets 2.0)
+//   .hub-preset-row -> preset picker trigger + Save / Undo / Tools /
+//                      Add Divider (v29; picker = search / favs / actions)
 //
 // Mirror widgets are real <select>/<input type=...>/controls bound to the
 // source widgets through SyncManager.writeTargetValue(), which holds the
@@ -29,14 +29,15 @@ import {
     maybeReapplySliderOverride,
 } from "./core.js";
 import {
-    presetSave, presetNew, presetDelete,
+    presetSave, presetDelete, presetMergeInto, presetFavToggle,
+    presetExportOne, presetBulkOpt, presetPickerModel, captureActiveTab,
     buildApplyPlan, applyPlan,
     presetUndo, presetUndoAvailable, presetUndoLabel,
     presetRename, presetDuplicate, presetCountDead, presetCleanDead,
     presetExportAll, presetImportFromText,
 } from "./preset_manager.js";
 import { writeTargetValue, ensureHooksForItem, invokeTargetButton } from "./sync_manager.js";
-import { beginEdit, endEdit, registerStructural, registerValues } from "./sync.js";
+import { beginEdit, endEdit, registerStructural, registerValues, syncNode } from "./sync.js";
 import { initDrag } from "./dnd_manager.js";
 import * as Portals from "./portal_manager.js";
 import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel } from "./global_settings.js";
@@ -278,13 +279,17 @@ function itemRowHtml(item) {
         : `<span class="hub-item-label hub-orphan" title="⚠️ Target node missing">⚠️ ${esc(label)}</span>`;
     const isNumericMirror = ok &&
         (item.widgetType === "int" || item.widgetType === "slider");
-    // v28 Presets 2.0: per-row opt-out. Unchecked rows are never captured
-    // into presets (item.inPreset === false); absent flag = participates.
-    // Only value bindings get the checkbox - buttons / portals / dividers
-    // have no value state to capture anyway.
+    // v29 Presets: per-row opt-out as a BUTTON-CHIP (not a checkbox - on
+    // checkbox rows it used to read as a second value box). Included rows
+    // show a quiet 💾 chip; excluded rows turn amber with a strike and are
+    // never captured (item.inPreset === false). Absent flag = participates.
+    // Only value bindings get the chip - buttons / portals / dividers have
+    // no value state to capture anyway.
+    const ipOff = item.inPreset === false;
     const inPresetCb = item.type === "widget_binding" && item.widgetType !== "button"
-        ? `<label class="hub-inpreset" title="Include in presets - uncheck to never capture this row">` +
-          `<input type="checkbox" class="hub-inpreset-cb"${item.inPreset === false ? "" : " checked"}></label>`
+        ? `<button type="button" class="hub-btn hub-inpreset${ipOff ? " hub-inpreset-off" : ""}" ` +
+          `data-action="inpreset-toggle" ` +
+          `title="${ipOff ? "Excluded from presets - click to include this row" : "Included in preset captures - click to exclude this row"}">💾</button>`
         : "";
     const tools = [
         inPresetCb,
@@ -334,22 +339,37 @@ function containerHtml(node, cfg) {
 }
 
 function presetRowHtml(cfg, node) {
-    const names = Object.keys(cfg.presets || {});
-    const opts = [`<option value="" disabled selected>Preset…</option>`]
-        .concat(names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`)).join("");
-    // v28: ↩ appears only while a pending undo exists for THIS hub;
-    // ⋯ opens the tools menu (rename / duplicate / clean / export / import).
+    // v29: the native <select> became a SEARCHABLE PICKER trigger. The
+    // trigger shows the last applied preset of this session (dimmed,
+    // stateMap.lastPresetName - deliberately NOT in cfg) plus a count badge
+    // of the ACTIVE tab's presets. ➕ and 🗑️ are gone: ➕ == 💾 (quick-save
+    // popover handles new names / overwrite / merge), delete moved into the
+    // picker rows.
+    const st = stateMap.get(node);
+    const last = st?.lastPresetName && cfg.presets?.[st.lastPresetName]
+        ? st.lastPresetName : null;
+    const tabId = getActiveTabId(cfg);
+    let tabCount = 0;
+    for (const p of Object.values(cfg.presets || {})) {
+        if (p && p.scope === tabId) tabCount++;
+    }
+    // ↩ appears only while a pending undo exists for THIS hub;
+    // ⋯ opens the global tools menu (export / import / bulk opt in-out).
     const undoLabel = presetUndoLabel();
     const undoBtn = presetUndoAvailable(node)
         ? `<button type="button" class="hub-btn" data-action="preset-undo" title="Undo last preset apply${undoLabel ? ` ("${esc(undoLabel)}")` : ""}">↩</button>`
         : "";
     return `<div class="hub-preset-row">` +
-        `<select class="hub-preset-select" data-role="preset-select">${opts}</select>` +
-        `<button type="button" class="hub-btn" data-action="preset-save" title="Save ACTIVE tab rows into selected preset (rows unchecked via 'include in presets' are skipped)">💾</button>` +
-        `<button type="button" class="hub-btn" data-action="preset-new" title="New preset">➕</button>` +
+        `<button type="button" class="hub-preset-trigger" data-action="preset-trigger" ` +
+        `title="Presets of this tab - search by name or values (presets of other tabs under 'Other tabs')">` +
+        (last
+            ? `<span class="hub-preset-trig-label"><span class="hub-preset-trig-last">⏱ ${esc(last)}</span></span>`
+            : `<span class="hub-preset-trig-label">Preset…</span>`) +
+        (tabCount ? `<span class="hub-preset-trig-count">${tabCount}</span>` : "") +
+        `</button>` +
+        `<button type="button" class="hub-btn" data-action="preset-save" title="Capture ACTIVE tab rows into a preset - choose name, overwrite or merge (chip-excluded rows are skipped)">💾</button>` +
         undoBtn +
-        `<button type="button" class="hub-btn" data-action="preset-del" title="Delete selected preset">🗑️</button>` +
-        `<button type="button" class="hub-btn" data-action="preset-more" title="Preset tools: rename, duplicate, clean dead entries, export, import">⋯</button>` +
+        `<button type="button" class="hub-btn" data-action="preset-more" title="Preset tools: export, import, include/exclude all rows">⋯</button>` +
         `<button type="button" class="hub-btn hub-add-divider" data-action="add-divider" title="Add section divider">＋Div</button>` +
         `<button type="button" class="hub-btn hub-settings" data-action="hub-settings" title="Hub settings (mirror update rate)">⚙</button>` +
         `</div>`;
@@ -1159,6 +1179,8 @@ function openComboPopup(node, trigger) {
     const { tn, tw } = findTarget(item);
     if (!tn || !tw) return; // orphan rows have nothing to offer
     closeComboPopup();
+    closePresetPicker();
+    closePresetQuickSave();
 
     const vals = liveComboValues(item, tw).map(String); // always read LIVE options
     if (!vals.length) return;
@@ -1338,6 +1360,8 @@ function openNumPopup(node, trigger) {
     if (numPopState?.trigger === trigger) { closeNumPopup(); return; }
     closeComboPopup();
     closeNumPopup();
+    closePresetPicker();
+    closePresetQuickSave();
 
     const ov = getSliderOverride(item);
     const eff = effectiveSliderParams(item, findTarget(item).tw);
@@ -1450,6 +1474,8 @@ function openSettingsPopup(node, trigger) {
     closeComboPopup();
     closeNumPopup();
     closeSettingsPopup();
+    closePresetPicker();
+    closePresetQuickSave();
 
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-set-pop";
@@ -1486,17 +1512,21 @@ function openSettingsPopup(node, trigger) {
 // Presets 2.0 (v28): inspect-before-apply popover + tools menu
 // ---------------------------------------------------------------------------
 // Same body-level fixed-popup pattern as the combo / gear / settings popups
-// (immune to hub scroll clipping, one global closer pair). The apply popover
-// lists every entry of the selected preset with a status (✓ applies / ⚠
-// missing or invalid), a drift mark when the value changed since capture and
-// checkboxes for PARTIAL apply. Applying writes via applyPlan (edit-lock)
-// and turns the popover into a report. The tools menu (⋯) hosts rename /
-// duplicate / clean dead entries / export / import.
+// (immune to hub scroll clipping, one global closer pair). v29 hosts here:
+// the SEARCHABLE PICKER (tab-scoped list, favorites, per-preset actions),
+// the APPLY popover (statuses, drift, "current -> preset" pairs, partial
+// apply via checkboxes, toast report with Undo), the QUICK-SAVE popover
+// (name / merge / overwrite) and the global tools menu (export / import /
+// bulk include-exclude). A session toast carries the apply report + Undo.
 
 let presetPopState = null; // { node, trigger, pop, plan }
 let presetPopGlobalWired = false;
 let presetMenuState = null; // { node, trigger, pop }
 let presetMenuGlobalWired = false;
+let presetPickerState = null; // { node, trigger, pop, search, list, model, query, showOther, active }
+let presetPickerWired = false;
+let presetQuickSaveState = null; // { node, trigger, pop }
+let presetQuickSaveWired = false;
 
 function closePresetPopover() {
     if (!presetPopState) return;
@@ -1549,10 +1579,479 @@ const PPR_STATUS_TITLES = {
 };
 
 function presetValuePreview(row) {
-    let v = row.value;
+    const v = row.value;
     if (typeof v === "boolean") return v ? "on" : "off";
-    v = String(v ?? "");
-    return v.length > 40 ? v.slice(0, 39) + "…" : v;
+    return shortVal(v);
+}
+
+function shortVal(v) {
+    let s = String(v ?? "");
+    return s.length > 40 ? s.slice(0, 39) + "…" : s;
+}
+
+// ---------------------------------------------------------------------------
+// v29: session toast (bottom-center snackbar). Carries the apply report
+// with a direct Undo button, plus lightweight save / merge / bulk feedback.
+// Body-level fixed (invariant 7), single instance, auto-hides after 6s.
+// ---------------------------------------------------------------------------
+
+let hubToastState = null; // { el, timer }
+
+function hideHubToast() {
+    if (!hubToastState) return;
+    try { clearTimeout(hubToastState.timer); } catch (_) {}
+    try { hubToastState.el.remove(); } catch (_) {}
+    hubToastState = null;
+}
+
+function showHubToast(text, opts = {}) {
+    hideHubToast();
+    const el = document.createElement("div");
+    el.className = "hub-toast";
+    el.innerHTML =
+        `<span class="hub-toast-text">${esc(text)}</span>` +
+        (opts.undoLabel
+            ? `<button type="button" class="hub-toast-undo" title="Undo this apply">↩ Undo</button>`
+            : "") +
+        `<button type="button" class="hub-toast-x" title="Dismiss">✕</button>`;
+    document.body.appendChild(el);
+    hubToastState = { el, timer: null };
+    hubToastState.timer = setTimeout(hideHubToast, 6000);
+    el.querySelector(".hub-toast-x")?.addEventListener("click", hideHubToast);
+    el.querySelector(".hub-toast-undo")?.addEventListener("click", () => {
+        hideHubToast();
+        if (typeof opts.onUndo === "function") opts.onUndo();
+    });
+}
+
+/** Swap the preset row in place (no full renderHub): the undo button
+ * appears, the trigger count / last-applied label refresh. */
+function refreshPresetRowInPlace(node) {
+    try {
+        const st2 = stateMap.get(node);
+        const prow = st2?.root?.querySelector(".hub-preset-row");
+        if (prow) prow.outerHTML = presetRowHtml(getHubConfig(node), node);
+    } catch (_) {}
+}
+
+// ---------------------------------------------------------------------------
+// v29: searchable preset picker (replaces the native <select>). Presets of
+// the ACTIVE tab are listed first (favorites float up); other tabs live in
+// a collapsed dimmed group. Search is multi-token AND, case-insensitive,
+// over preset names AND entry labels/values (comboTokensMatch); a non-empty
+// query searches across ALL tabs and auto-expands the foreign group. Rows
+// carry per-preset actions: favorite / rename / duplicate / copy JSON /
+// export one / delete / clean dead entries. Clicking a row opens the
+// inspect-before-apply popover (statuses, drift, partial apply).
+// ---------------------------------------------------------------------------
+
+function closePresetPicker() {
+    if (!presetPickerState) return;
+    try { presetPickerState.pop.remove(); } catch (_) {}
+    presetPickerState = null;
+}
+
+function ensurePresetPickerGlobalListeners() {
+    if (presetPickerWired) return;
+    presetPickerWired = true;
+    document.addEventListener("mousedown", (e) => {
+        const st = presetPickerState;
+        if (!st) return;
+        try {
+            if (st.pop.contains(e.target) || st.trigger.contains(e.target)) return;
+        } catch (_) {}
+        closePresetPicker();
+    }, true);
+    document.addEventListener("keydown", (e) => {
+        if (presetPickerState && e.key === "Escape") closePresetPicker();
+    }, true);
+}
+
+/** v29: match a preset against the search query - tokens AND,
+ * case-insensitive, over the name AND entry labels/values. */
+function presetMatchesQuery(preset, name, query) {
+    if (!query) return true;
+    const parts = [name];
+    for (const en of preset?.entries || []) parts.push(en.label, en.value);
+    return comboTokensMatch(parts.join(" \n "), query);
+}
+
+function presetRowActionsHtml(fav) {
+    return `<span class="hub-pp-acts">` +
+        `<button type="button" class="hub-pp-act" data-pp-act="fav" ` +
+        `title="${fav ? "Unfavorite" : "Favorite - floats to the top"}">${fav ? "★" : "☆"}</button>` +
+        `<button type="button" class="hub-pp-act" data-pp-act="rename" title="Rename">✏</button>` +
+        `<button type="button" class="hub-pp-act" data-pp-act="duplicate" title="Duplicate">⧉</button>` +
+        `<button type="button" class="hub-pp-act" data-pp-act="copy" title="Copy preset JSON to clipboard">📋</button>` +
+        `<button type="button" class="hub-pp-act" data-pp-act="export" title="Download this preset as JSON">⤓</button>` +
+        `<button type="button" class="hub-pp-act" data-pp-act="delete" title="Delete preset">🗑</button>` +
+        `</span>`;
+}
+
+function renderPresetPickerList() {
+    const st = presetPickerState;
+    if (!st) return;
+    const cfg = getHubConfig(st.node);
+    const q = String(st.query ?? "").trim();
+    const searching = !!q;
+    const match = (r) => presetMatchesQuery(cfg.presets?.[r.name], r.name, q);
+
+    const rowHtml = (r, foreign) => {
+        const p = cfg.presets?.[r.name];
+        if (!p) return ""; // deleted under the open popover - skip
+        const deadBtn = r.dead
+            ? `<button type="button" class="hub-pp-act hub-pp-dead" data-pp-act="clean" ` +
+              `title="Clean ${r.dead} dead entr${r.dead === 1 ? "y" : "ies"} (rows that no longer resolve)">⚠${r.dead}</button>`
+            : "";
+        return `<div class="hub-pp-row${r.fav ? " hub-pp-fav" : ""}${foreign ? " hub-pp-foreign" : ""}" ` +
+            `data-pp-name="${esc(r.name)}" title="Click to inspect before apply">` +
+            `<span class="hub-pp-star">${r.fav ? "★" : ""}</span>` +
+            `<span class="hub-pp-name">${esc(r.name)}</span>` +
+            (foreign
+                ? `<span class="hub-pp-tab" title="${esc(`Captured on tab "${r.scopeName}"`)}">${esc(r.scopeName)}</span>`
+                : "") +
+            `<span class="hub-pp-meta" title="Values in the preset">${r.count}</span>` +
+            deadBtn +
+            presetRowActionsHtml(r.fav) +
+            `</div>`;
+    };
+
+    const tabRows = st.model.tab.filter(match);
+    const otherRows = st.model.other.filter(match);
+    let html = "";
+    if (!st.model.tab.length && !st.model.other.length) {
+        html = `<div class="hub-pp-empty">No presets yet - 💾 captures the rows of ` +
+            `the ACTIVE tab (chip-excluded rows are skipped).</div>`;
+    } else if (searching && !tabRows.length && !otherRows.length) {
+        html = `<div class="hub-pp-empty">No presets match "${esc(q)}".</div>`;
+    } else {
+        if (tabRows.length) {
+            html += `<div class="hub-pp-sec">This tab · ${esc(st.model.tabName)} (${tabRows.length})</div>` +
+                tabRows.map((r) => rowHtml(r, false)).join("");
+        } else if (!searching) {
+            html += `<div class="hub-pp-empty">No presets for this tab - 💾 captures the ACTIVE tab rows.</div>`;
+        }
+        if (otherRows.length) {
+            const open = searching || st.showOther;
+            html += `<div class="hub-pp-sec hub-pp-sec-other" data-pp-toggle-other ` +
+                `title="Presets captured on other tabs - click to expand/collapse">` +
+                `Other tabs (${otherRows.length}) ${open ? "▾" : "▸"}</div>` +
+                `<div class="hub-pp-other${open ? "" : " hub-pp-collapsed"}">` +
+                otherRows.map((r) => rowHtml(r, true)).join("") + `</div>`;
+        }
+    }
+    st.list.innerHTML = html;
+    st.active = -1;
+}
+
+function openPresetPickerPopover(node, trigger) {
+    // Toggle on the same trigger; every other popup kind closes first.
+    if (presetPickerState?.trigger === trigger) { closePresetPicker(); return; }
+    closeComboPopup();
+    closeNumPopup();
+    closeSettingsPopup();
+    closePresetPopover();
+    closePresetToolsMenu();
+    closePresetQuickSave();
+    closePresetPicker();
+
+    const model = presetPickerModel(node);
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-preset-picker";
+    pop.innerHTML =
+        `<div class="hub-menu-title">Presets · tab "${esc(model.tabName)}"</div>` +
+        `<input type="text" class="hub-combo-search" spellcheck="false" ` +
+        `placeholder="Search presets - name / values…">` +
+        `<div class="hub-pp-list"></div>` +
+        `<div class="hub-pop-hint">Click a preset to inspect before apply. Hover a ` +
+        `row for actions: ★ fav, ✏ rename, ⧉ duplicate, 📋 copy, ⤓ export, 🗑 delete.</div>`;
+    document.body.appendChild(pop);
+    presetPickerState = {
+        node, trigger, pop, model,
+        search: pop.querySelector(".hub-combo-search"),
+        list: pop.querySelector(".hub-pp-list"),
+        query: "", showOther: false, active: -1,
+    };
+    ensurePresetPickerGlobalListeners();
+    positionNumPopup(pop, trigger);
+    renderPresetPickerList();
+    try { presetPickerState.search.focus(); } catch (_) {}
+
+    presetPickerState.search.addEventListener("input", () => {
+        const st = presetPickerState;
+        if (!st) return;
+        st.query = st.search.value;
+        renderPresetPickerList();
+    });
+    presetPickerState.search.addEventListener("keydown", (e) => {
+        const st = presetPickerState;
+        if (!st) return;
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            const rows = [...st.list.querySelectorAll(".hub-pp-row")];
+            if (!rows.length) return;
+            st.active = e.key === "ArrowDown"
+                ? Math.min(rows.length - 1, st.active + 1)
+                : Math.max(0, st.active - 1);
+            rows.forEach((r, i) => r.classList.toggle("hub-pp-active", i === st.active));
+            try { rows[st.active].scrollIntoView({ block: "nearest" }); } catch (_) {}
+            return;
+        }
+        if (e.key === "Enter") {
+            e.preventDefault();
+            const rows = [...st.list.querySelectorAll(".hub-pp-row")];
+            const row = rows[st.active] || rows[0];
+            if (row) row.click();
+        }
+    });
+
+    presetPickerState.list.addEventListener("click", (e) => {
+        const st = presetPickerState;
+        if (!st) return;
+        if (e.target.closest("[data-pp-toggle-other]")) {
+            st.showOther = !st.showOther;
+            renderPresetPickerList();
+            return;
+        }
+        const row = e.target.closest(".hub-pp-row");
+        const actBtn = e.target.closest("[data-pp-act]");
+        if (row && actBtn) {
+            const name = row.dataset.ppName;
+            const act = actBtn.dataset.ppAct;
+            if (act === "fav") {
+                presetFavToggle(node, name);
+                st.model = presetPickerModel(node);
+                renderPresetPickerList();
+                return;
+            }
+            if (act === "rename") {
+                const nn = prompt(`Rename preset "${name}" to:`, name);
+                if (nn !== null && presetRename(node, name, nn)) {
+                    st.model = presetPickerModel(node);
+                    refreshPresetRowInPlace(node);
+                    renderPresetPickerList();
+                }
+                return;
+            }
+            if (act === "duplicate") {
+                const nn = prompt(`Duplicate "${name}" as:`, `${name} copy`);
+                if (nn !== null && presetDuplicate(node, name, nn)) {
+                    st.model = presetPickerModel(node);
+                    refreshPresetRowInPlace(node);
+                    renderPresetPickerList();
+                }
+                return;
+            }
+            if (act === "delete") {
+                if (confirm(`Delete preset "${name}"?`)) {
+                    presetDelete(node, name);
+                    st.model = presetPickerModel(node);
+                    refreshPresetRowInPlace(node);
+                    renderPresetPickerList();
+                }
+                return;
+            }
+            if (act === "clean") {
+                const dead = presetCountDead(node, name);
+                if (!dead) return;
+                if (confirm(`Remove ${dead} dead entr${dead === 1 ? "y" : "ies"} from "${name}"?`)) {
+                    presetCleanDead(node, name);
+                    st.model = presetPickerModel(node);
+                    renderPresetPickerList();
+                }
+                return;
+            }
+            if (act === "export") {
+                try {
+                    const json = presetExportOne(node, name);
+                    if (!json) return;
+                    const blob = new Blob([json], { type: "application/json" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    const safe = String(name).replace(/[^\w.-]+/g, "_").slice(0, 48) || "preset";
+                    a.download = `settings-hub-preset-${safe}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 4000);
+                    flashBtn(actBtn, "✓");
+                } catch (err) {
+                    console.warn("[SettingsHub] preset export failed:", err);
+                    flashBtn(actBtn, "⚠");
+                }
+                return;
+            }
+            if (act === "copy") {
+                const json = presetExportOne(node, name);
+                if (!json) return;
+                const done = () => flashBtn(actBtn, "✓");
+                try {
+                    if (navigator.clipboard?.writeText) {
+                        navigator.clipboard.writeText(json).then(done, () => {
+                            console.warn("[SettingsHub] clipboard write failed");
+                        });
+                    } else {
+                        const ta = document.createElement("textarea");
+                        ta.value = json;
+                        ta.style.position = "fixed";
+                        ta.style.opacity = "0";
+                        document.body.appendChild(ta);
+                        ta.select();
+                        try { document.execCommand("copy"); done(); } catch (_) {}
+                        try { ta.remove(); } catch (_) {}
+                    }
+                } catch (err) {
+                    console.warn("[SettingsHub] clipboard copy failed:", err);
+                }
+                return;
+            }
+        }
+        if (row && !actBtn) {
+            const name = row.dataset.ppName;
+            if (!name) return;
+            const trig = st.trigger; // stays mounted after the picker closes
+            closePresetPicker();
+            openPresetApplyPopover(node, name, trig);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// v29: quick-save popover (replaces the native prompt()). Name field + a
+// live capture-info line (dry-run of captureActiveTab) + the list of
+// existing presets with direct Merge / Overwrite actions. 💾 is the single
+// entry point (the former ➕ is its alias and is gone from the row).
+// ---------------------------------------------------------------------------
+
+function closePresetQuickSave() {
+    if (!presetQuickSaveState) return;
+    try { presetQuickSaveState.pop.remove(); } catch (_) {}
+    presetQuickSaveState = null;
+}
+
+function ensurePresetQuickSaveGlobalListeners() {
+    if (presetQuickSaveWired) return;
+    presetQuickSaveWired = true;
+    document.addEventListener("mousedown", (e) => {
+        const st = presetQuickSaveState;
+        if (!st) return;
+        try {
+            if (st.pop.contains(e.target) || st.trigger.contains(e.target)) return;
+        } catch (_) {}
+        closePresetQuickSave();
+    }, true);
+    document.addEventListener("keydown", (e) => {
+        if (presetQuickSaveState && e.key === "Escape") closePresetQuickSave();
+    }, true);
+}
+
+function openPresetQuickSave(node, trigger) {
+    if (presetQuickSaveState?.trigger === trigger) { closePresetQuickSave(); return; }
+    closeComboPopup();
+    closeNumPopup();
+    closeSettingsPopup();
+    closePresetPopover();
+    closePresetToolsMenu();
+    closePresetPicker();
+    closePresetQuickSave();
+
+    const cfg = getHubConfig(node);
+    const tabId = getActiveTabId(cfg);
+    const tabName = cfg.tabs?.find((t) => t.id === tabId)?.name || tabId || "?";
+    const snap = captureActiveTab(node); // pure read - a dry run for the info line
+    const names = Object.keys(cfg.presets || {});
+
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-qs-pop";
+    pop.innerHTML =
+        `<div class="hub-menu-title">Save preset · tab "${esc(tabName)}"</div>` +
+        `<input type="text" class="hub-qs-name" spellcheck="false" placeholder="Preset name…" ` +
+        `value="${esc(`Preset ${names.length + 1}`)}">` +
+        `<div class="hub-qs-info">Will capture <b>${snap.entries.length}</b> value(s)` +
+        (snap.excluded ? ` · <span class="hub-qs-excl">${snap.excluded} row(s) excluded</span>` : "") +
+        ` from tab "${esc(tabName)}"</div>` +
+        (names.length
+            ? `<input type="text" class="hub-combo-search hub-qs-filter" spellcheck="false" placeholder="Filter existing presets…">` +
+              `<div class="hub-qs-list"></div>`
+            : `<div class="hub-qs-info hub-qs-none">No presets yet - name it above and Save.</div>`) +
+        `<div class="hub-qs-foot">` +
+        `<button type="button" data-qs-save class="hub-qs-save">💾 Save</button>` +
+        `<button type="button" data-qs-cancel>Cancel</button>` +
+        `</div>` +
+        `<div class="hub-pop-hint">Overwrite replaces the preset content; Merge updates matching ` +
+        `rows and appends new ones (nothing is dropped).</div>`;
+    document.body.appendChild(pop);
+    presetQuickSaveState = { node, trigger, pop };
+    ensurePresetQuickSaveGlobalListeners();
+    positionNumPopup(pop, trigger);
+
+    const nameInp = pop.querySelector(".hub-qs-name");
+    try { nameInp.focus(); nameInp.select(); } catch (_) {}
+
+    const listEl = pop.querySelector(".hub-qs-list");
+    const renderQsList = () => {
+        if (!listEl) return;
+        const q = String(pop.querySelector(".hub-qs-filter")?.value ?? "");
+        const cfg2 = getHubConfig(node);
+        const rows = Object.keys(cfg2.presets || {}).filter((n) => comboTokensMatch(n, q))
+            .map((n) => {
+                const p = cfg2.presets[n];
+                const foreign = p && p.scope !== tabId;
+                const scopeName = p?.scope
+                    ? (cfg2.tabs?.find((t) => t.id === p.scope)?.name || p.scope)
+                    : "?";
+                return `<div class="hub-qs-row" data-qs-name="${esc(n)}">` +
+                    `<span class="hub-pp-name">${esc(n)}</span>` +
+                    (foreign ? `<span class="hub-pp-tab" title="Captured on another tab">${esc(scopeName)}</span>` : "") +
+                    `<span class="hub-pp-meta">${p?.entries?.length ?? 0}</span>` +
+                    `<button type="button" class="hub-qs-merge" data-qs-merge title="Merge the current tab values in: update matching rows, append new ones">Merge</button>` +
+                    `<button type="button" class="hub-qs-over" data-qs-over title="Replace the preset content with the current tab values (confirm)">Overwrite</button>` +
+                    `</div>`;
+            }).join("");
+        listEl.innerHTML = rows || `<div class="hub-qs-none">No presets match.</div>`;
+    };
+    renderQsList();
+    pop.querySelector(".hub-qs-filter")?.addEventListener("input", renderQsList);
+
+    const doSave = () => {
+        const name = String(nameInp.value ?? "").trim();
+        if (!name) { try { nameInp.focus(); } catch (_) {} return; }
+        const saved = presetSave(node, name); // confirm inside on overwrite
+        if (saved) {
+            closePresetQuickSave();
+            refreshPresetRowInPlace(node);
+            showHubToast(`Saved "${saved}" - ${snap.entries.length} value(s)`, {});
+        }
+    };
+    pop.querySelector("[data-qs-save]").addEventListener("click", doSave);
+    pop.querySelector("[data-qs-cancel]").addEventListener("click", closePresetQuickSave);
+    nameInp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); doSave(); }
+    });
+
+    listEl?.addEventListener("click", (e) => {
+        const row = e.target.closest(".hub-qs-row");
+        if (!row) return;
+        const name = row.dataset.qsName;
+        if (e.target.closest("[data-qs-merge]")) {
+            const res = presetMergeInto(node, name);
+            if (res) {
+                closePresetQuickSave();
+                refreshPresetRowInPlace(node);
+                showHubToast(`Merged into "${name}" - +${res.added} added, ${res.updated} updated`, {});
+            }
+            return;
+        }
+        if (e.target.closest("[data-qs-over]")) {
+            const saved = presetSave(node, name); // confirm inside
+            if (saved) {
+                closePresetQuickSave();
+                refreshPresetRowInPlace(node);
+                showHubToast(`Overwrote "${saved}" - ${snap.entries.length} value(s)`, {});
+            }
+        }
+    });
 }
 
 function openPresetApplyPopover(node, presetName, trigger) {
@@ -1562,6 +2061,8 @@ function openPresetApplyPopover(node, presetName, trigger) {
     closeNumPopup();
     closeSettingsPopup();
     closePresetToolsMenu();
+    closePresetPicker();
+    closePresetQuickSave();
     closePresetPopover();
 
     const plan = buildApplyPlan(node, presetName);
@@ -1585,11 +2086,17 @@ function openPresetApplyPopover(node, presetName, trigger) {
                 : `<input type="checkbox" data-ppr-idx="${idx}" checked>`;
             const title = bad ? PPR_STATUS_TITLES[row.status] || row.status
                 : (row.drift ? "Will apply - value changed since capture" : "Will apply");
-            return `<label class="hub-ppr-row${bad ? " hub-ppr-bad" : ""}" title="${esc(title)}">` +
+            // v29: drifted rows show the pair "current -> preset".
+            const pair = row.drift && !bad
+                ? `<span class="hub-ppr-cur" title="Current value">${esc(shortVal(row.widget?.value))}</span>` +
+                  `<span class="hub-ppr-arrow">→</span>`
+                : "";
+            return `<label class="hub-ppr-row${bad ? " hub-ppr-bad" : " hub-ppr-ok"}${row.drift ? " hub-ppr-drift" : ""}" title="${esc(title)}">` +
                 cb +
                 `<span class="hub-ppr-icon">${bad ? "⚠" : "✓"}</span>` +
                 `<span class="hub-ppr-label">${esc(row.entry.label)}</span>` +
                 `<span class="hub-ppr-type">${esc(row.entry.widgetType || "")}</span>` +
+                pair +
                 `<span class="hub-ppr-val">${esc(presetValuePreview(row))}</span>` +
                 (row.drift ? `<span class="hub-ppr-drift-mark" title="Value changed since capture">≈</span>` : "") +
                 `</label>`;
@@ -1598,11 +2105,15 @@ function openPresetApplyPopover(node, presetName, trigger) {
     html += `</div>`;
     if (plan.rows.length) {
         html += `<div class="hub-ppr-foot">` +
+            `<label class="hub-ppr-onlychg" title="View filter: show only rows whose value changed since capture. Apply still writes every checked row - unchanged writes are no-ops.">` +
+            `<input type="checkbox" data-ppr-onlychg> Only changed</label>` +
+            `<span class="hub-ppr-foot-btns">` +
             `<button type="button" data-ppr-apply>Apply <span data-ppr-count>0</span></button>` +
             `<button type="button" data-ppr-cancel>Cancel</button>` +
+            `</span>` +
             `</div>` +
-            `<div class="hub-pop-hint">Uncheck rows to apply only part of the preset. ` +
-            `↩ in the preset row undoes the last apply.</div>`;
+            `<div class="hub-pop-hint">Uncheck rows to apply only part of the preset; ` +
+            `"Only changed" hides unchanged rows. The toast Undo reverses the last apply.</div>`;
     }
     pop.innerHTML = html;
     document.body.appendChild(pop);
@@ -1622,6 +2133,10 @@ function openPresetApplyPopover(node, presetName, trigger) {
         if (e.target.matches?.("input[data-ppr-idx]")) recount();
     });
     recount();
+    pop.querySelector("[data-ppr-onlychg]")?.addEventListener("change", (e) => {
+        pop.querySelector(".hub-ppr-list")?.classList.toggle(
+            "hub-ppr-onlychg", !!e.target.checked);
+    });
 
     pop.querySelector("[data-ppr-cancel]")?.addEventListener("click", closePresetPopover);
     applyBtn?.addEventListener("click", () => {
@@ -1631,21 +2146,26 @@ function openPresetApplyPopover(node, presetName, trigger) {
         const total = idxs.length;
         const res = applyPlan(node, presetPopState?.plan, idxs);
         const skipped = Math.max(0, total - res.applied);
-        // Refresh the preset row IN PLACE so the undo button appears right
-        // away - a full renderHub is not warranted for a values-only change.
+        // v29: remember the last applied preset for the picker trigger
+        // label, refresh the preset row IN PLACE (undo button appears) and
+        // surface the report as a toast with a direct Undo - the popover
+        // closes instead of turning into a second report surface.
         try {
             const st2 = stateMap.get(node);
-            const prow = st2?.root?.querySelector(".hub-preset-row");
-            if (prow) prow.outerHTML = presetRowHtml(getHubConfig(node), node);
+            if (st2) st2.lastPresetName = presetName;
         } catch (_) {}
-        pop.innerHTML =
-            `<div class="hub-menu-title">Preset "${esc(presetName)}"</div>` +
-            `<div class="hub-ppr-report">Applied ${res.applied} of ${total}` +
-            (skipped ? ` - ${skipped} skipped` : "") +
-            `.</div>` +
-            `<div class="hub-pop-hint">Undo: press ↩ in the preset row.</div>` +
-            `<div class="hub-ppr-foot"><button type="button" data-ppr-close>Close</button></div>`;
-        pop.querySelector("[data-ppr-close]")?.addEventListener("click", closePresetPopover);
+        refreshPresetRowInPlace(node);
+        closePresetPopover();
+        showHubToast(
+            `Applied ${res.applied} of ${total}` +
+            (skipped ? ` - ${skipped} skipped` : "") + ` · "${presetName}"`,
+            {
+                undoLabel: presetName,
+                onUndo: () => {
+                    if (presetUndo(node)) refreshPresetRowInPlace(node);
+                },
+            },
+        );
     });
 }
 
@@ -1655,35 +2175,32 @@ function openPresetToolsMenu(node, trigger) {
     closeNumPopup();
     closeSettingsPopup();
     closePresetPopover();
+    closePresetPicker();
+    closePresetQuickSave();
     closePresetToolsMenu();
 
+    // v29: per-preset actions (rename / duplicate / clean dead) moved INTO
+    // the picker rows; the tools menu keeps only global operations. Bulk
+    // counts cover the value bindings of the ACTIVE tab.
     const cfg = getHubConfig(node);
-    const sel = trigger.closest(".hub-preset-row")?.querySelector('[data-role="preset-select"]');
-    const name = sel?.value || null;
-    const has = !!(name && cfg.presets[name]);
+    const tabId = getActiveTabId(cfg);
+    const tabName = cfg.tabs?.find((t) => t.id === tabId)?.name || tabId || "?";
+    const valRows = itemsOfTab(cfg, tabId)
+        .filter((i) => i.type === "widget_binding" && i.widgetType !== "button").length;
 
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-preset-tools";
     pop.innerHTML =
-        `<div class="hub-menu-title">Preset tools${name ? `: ${esc(name)}` : ""}</div>` +
-        `<div class="hub-menu-item" data-pt="rename">✏ Rename…</div>` +
-        `<div class="hub-menu-item" data-pt="duplicate">⧉ Duplicate…</div>` +
-        `<div class="hub-menu-item" data-pt="clean">🧹 Clean dead entries</div>` +
+        `<div class="hub-menu-title">Preset tools · tab "${esc(tabName)}"</div>` +
         `<div class="hub-menu-item" data-pt="export">⬇ Export all presets</div>` +
         `<div class="hub-menu-item" data-pt="import">⬆ Import presets…</div>` +
-        `<div class="hub-menu-item hub-menu-cancel" data-pt="cancel">Cancel</div>`;
+        `<div class="hub-menu-item" data-pt="optin" title="Every value row of this tab participates in preset captures again">💾 Include all rows in presets (${valRows})</div>` +
+        `<div class="hub-menu-item" data-pt="optout" title="Never capture any value row of this tab">💾 Exclude all rows from presets (${valRows})</div>` +
+        `<div class="hub-menu-cancel" data-pt="cancel">Cancel</div>`;
     document.body.appendChild(pop);
     presetMenuState = { node, trigger, pop };
     ensurePresetMenuGlobalListeners();
     positionNumPopup(pop, trigger);
-
-    if (!has) {
-        for (const el of pop.querySelectorAll(
-            '[data-pt="rename"],[data-pt="duplicate"],[data-pt="clean"]')) {
-            el.style.opacity = "0.45";
-            el.title = "Select a preset in the dropdown first";
-        }
-    }
 
     pop.addEventListener("click", (e) => {
         const item = e.target.closest("[data-pt]");
@@ -1691,26 +2208,12 @@ function openPresetToolsMenu(node, trigger) {
         const act = item.dataset.pt;
         closePresetToolsMenu();
         if (act === "cancel") return;
-        if (act === "rename") {
-            if (!has) return;
-            const nn = prompt(`Rename preset "${name}" to:`, name);
-            if (nn !== null && presetRename(node, name, nn)) renderHub(node);
-            return;
-        }
-        if (act === "duplicate") {
-            if (!has) return;
-            const nn = prompt(`Duplicate "${name}" as:`, `${name} copy`);
-            if (nn !== null && presetDuplicate(node, name, nn)) renderHub(node);
-            return;
-        }
-        if (act === "clean") {
-            if (!has) return;
-            const dead = presetCountDead(node, name);
-            if (!dead) { flashBtn(trigger, "0"); return; }
-            if (confirm(`Remove ${dead} dead entr${dead === 1 ? "y" : "ies"} from "${name}"?`)) {
-                presetCleanDead(node, name);
-                renderHub(node);
-            }
+        if (act === "optin" || act === "optout") {
+            const n = presetBulkOpt(node, act === "optin");
+            renderHub(node); // chips re-render
+            showHubToast(n
+                ? `${n} row(s) ${act === "optin" ? "included in" : "excluded from"} preset captures`
+                : "No value rows on this tab", {});
             return;
         }
         if (act === "export") {
@@ -2488,17 +2991,22 @@ function wireEvents(node, st) {
                 renderHub(node);
                 break;
             }
-            case "preset-save": {
-                const sel = root.querySelector('[data-role="preset-select"]');
-                const chosen = sel?.value || null;
-                presetSave(node, chosen); // no selection => single prompt for a name
-                break;
-            }
-            case "preset-new": presetNew(node); break;
-            case "preset-del": {
-                const sel = root.querySelector('[data-role="preset-select"]');
-                if (sel?.value && confirm(`Delete preset "${sel.value}"?`)) {
-                    presetDelete(node, sel.value);
+            case "preset-save": openPresetQuickSave(node, btn); break;
+            case "preset-trigger": openPresetPickerPopover(node, btn); break;
+            case "inpreset-toggle": {
+                // v29 chip: flip the row's capture participation in place -
+                // only the chip look and the flag change, no re-render.
+                const irow = btn.closest("[data-hub-item]");
+                const iitem = getHubConfig(node).items.find((i) => i.id === irow?.dataset.hubItem);
+                if (iitem) {
+                    const nowOff = iitem.inPreset !== false;
+                    if (nowOff) iitem.inPreset = false; else delete iitem.inPreset;
+                    btn.classList.toggle("hub-inpreset-off", nowOff);
+                    btn.title = nowOff
+                        ? "Excluded from presets - click to include this row"
+                        : "Included in preset captures - click to exclude this row";
+                    syncNode(node);
+                    node.setDirtyCanvas(true, true);
                 }
                 break;
             }
@@ -2557,19 +3065,9 @@ function wireEvents(node, st) {
             getHubConfig(node).queueCount = n; // persist immediately
             return;
         }
-        // v28 Presets 2.0: per-row opt-out checkbox. NOT a data-hub-control
-        // (it carries no widget value) - it only flips item.inPreset.
-        const ipcb = e.target.closest?.(".hub-inpreset-cb");
-        if (ipcb) {
-            const row = ipcb.closest("[data-hub-item]");
-            const item = getHubConfig(node).items.find((i) => i.id === row?.dataset.hubItem);
-            if (item) {
-                if (ipcb.checked) delete item.inPreset;
-                else item.inPreset = false;
-                node.setDirtyCanvas(true, true);
-            }
-            return;
-        }
+        // v29: the per-row opt-out is the 💾 CHIP (a button) - handled by
+        // the "inpreset-toggle" case in the click delegation below, NOT
+        // here. Checkbox and number mirrors still commit on change.
         const c = e.target.closest("[data-hub-control]");
         if (!c) return;
         if (c.dataset.role === "check") pushControlToTarget(node, c, c.checked);
@@ -2593,13 +3091,6 @@ function wireEvents(node, st) {
         // number deliberately NOT here: typing "0." / "1e" must not punch
         // garbage through to the target on every keystroke - number inputs
         // commit on the change event above.
-    });
-
-    // v28: preset select NO LONGER applies instantly - it opens the
-    // inspect-before-apply popover (statuses, drift, partial apply).
-    root.addEventListener("change", (e) => {
-        const sel = e.target.closest('[data-role="preset-select"]');
-        if (sel && sel.value) openPresetApplyPopover(node, sel.value, sel);
     });
 
     // Combo triggers open the searchable list (toggle on repeat click).

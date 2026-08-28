@@ -26,8 +26,12 @@ import * as Pins from "./pins.js";
  *       }],
  *   };
  *
- * Rows are excluded from capture by unchecking the per-row "include in
- * presets" checkbox (item.inPreset === false; absent flag = participates).
+ * Rows are excluded from capture via the per-row 💾 chip (v29: a BUTTON,
+ * not a checkbox - on checkbox rows it used to read as a second value
+ * box): chip off -> item.inPreset === false (never captured); absent flag
+ * = participates. Records also carry optional capture-time metadata:
+ * excluded (how many value rows were opted out at capture) and fav
+ * (picker favorite).
  * The old flat {itemId: value} format is NOT migrated on purpose - no v1
  * presets exist in the wild (user decision, plan v28).
  */
@@ -41,13 +45,14 @@ import * as Pins from "./pins.js";
  * Buttons carry no value state, portals are not widget bindings, and rows
  * opted out via the per-row checkbox are skipped.
  */
-function captureActiveTab(node) {
+export function captureActiveTab(node) {
     const cfg = getHubConfig(node);
     const tabId = getActiveTabId(cfg);
     const entries = [];
+    let excluded = 0; // v29: value rows opted out via the chip (meta only)
     for (const item of itemsOfTab(cfg, tabId)) {
         if (item.type !== "widget_binding" || item.widgetType === "button") continue;
-        if (item.inPreset === false) continue;
+        if (item.inPreset === false) { excluded++; continue; }
         // Prefer live value mirrored on the target node; fall back to the
         // hub's own DOM mirror (same fallback chain as v1 snapshots).
         const targetNode = resolveBindingTarget(item);
@@ -71,25 +76,24 @@ function captureActiveTab(node) {
             widget: item.widgetToBind || null,
         });
     }
-    return { v: 2, ts: Date.now(), scope: tabId, entries };
+    return { v: 2, ts: Date.now(), scope: tabId, excluded, entries };
 }
 
 function tabNameOf(cfg, tabId) {
     return cfg.tabs?.find((t) => t.id === tabId)?.name || tabId || "?";
 }
 
-/** Save into an existing preset name (overwrite, confirmed) or prompt for a new one. */
-export function presetSave(node, existingName) {
+/**
+ * Save the ACTIVE tab snapshot under `name` (overwrite of an existing name
+ * is confirmed). v29: the NAME always comes from the quick-save popover -
+ * the native prompt() is gone; a null/empty name is a no-op. Returns the
+ * name or null (declined / nothing to save under).
+ */
+export function presetSave(node, name) {
     const cfg = getHubConfig(node);
+    name = String(name ?? "").trim();
+    if (!name) return null;
     const exists = (n) => Object.prototype.hasOwnProperty.call(cfg.presets, n);
-    let name = existingName;
-
-    if (!name || !exists(name)) {
-        name = prompt("Preset name:", name || `Preset ${Object.keys(cfg.presets).length + 1}`);
-        if (name === null) return null;
-        name = String(name).trim();
-        if (!name) return null;
-    }
 
     const snap = captureActiveTab(node);
     // v28: overwriting an existing preset is CONFIRMED (was silent before).
@@ -109,8 +113,32 @@ export function presetSave(node, existingName) {
     return name;
 }
 
-export function presetNew(node) {
-    return presetSave(node, null);
+/**
+ * v29 merge capture: snapshot the ACTIVE tab and merge it into an EXISTING
+ * preset. An incoming entry updates an existing one matched by itemId,
+ * falling back to the stable key (nodeId + widget); unmatched entries are
+ * appended. scope/ts/excluded refresh from the snapshot (last capture
+ * wins). Returns {added, updated} or null when the target is missing.
+ */
+export function presetMergeInto(node, name) {
+    const cfg = getHubConfig(node);
+    const dst = cfg.presets[name];
+    if (!dst || typeof dst !== "object" || !Array.isArray(dst.entries)) return null;
+    const snap = captureActiveTab(node);
+    let updated = 0;
+    for (const inc of snap.entries) {
+        const at = dst.entries.findIndex((e) =>
+            e.itemId === inc.itemId ||
+            (inc.nodeId != null && inc.widget &&
+                e.nodeId === inc.nodeId && e.widget === inc.widget));
+        if (at >= 0) { dst.entries[at] = { ...inc }; updated++; }
+        else dst.entries.push({ ...inc });
+    }
+    dst.ts = snap.ts;
+    dst.scope = snap.scope;
+    if (snap.excluded) dst.excluded = snap.excluded; else delete dst.excluded;
+    persistAndRepaint(node);
+    return { added: snap.entries.length - updated, updated };
 }
 
 export function presetDelete(node, name) {
@@ -355,6 +383,80 @@ export function presetCleanDead(node, name) {
         persistAndRepaint(node);
     }
     return removed;
+}
+
+/** v29: toggle the picker favorite flag (favorites float to the top). */
+export function presetFavToggle(node, name) {
+    const cfg = getHubConfig(node);
+    const p = cfg.presets?.[name];
+    if (!p || typeof p !== "object") return false;
+    if (p.fav) delete p.fav; else p.fav = true;
+    persistAndRepaint(node);
+    return !!p.fav;
+}
+
+/** v29: single-preset export (same wrapped envelope, one entry). Import
+ * reads it back unchanged (presetImportFromText accepts wrapped maps). */
+export function presetExportOne(node, name) {
+    const cfg = getHubConfig(node);
+    const p = cfg.presets?.[name];
+    if (!p || typeof p !== "object") return null;
+    return JSON.stringify(
+        { kind: "settings-hub-presets", version: 2, presets: { [name]: p } },
+        null,
+        2,
+    );
+}
+
+/**
+ * v29 bulk opt: include/exclude EVERY value binding of the ACTIVE tab in
+ * preset captures (the ⋯ tools menu). Returns how many rows changed.
+ */
+export function presetBulkOpt(node, include) {
+    const cfg = getHubConfig(node);
+    const tabId = getActiveTabId(cfg);
+    let changed = 0;
+    for (const item of itemsOfTab(cfg, tabId)) {
+        if (item.type !== "widget_binding" || item.widgetType === "button") continue;
+        if (include) {
+            if (item.inPreset === false) { delete item.inPreset; changed++; }
+        } else if (item.inPreset !== false) { item.inPreset = false; changed++; }
+    }
+    if (changed) persistAndRepaint(node);
+    return changed;
+}
+
+/**
+ * v29 picker model: presets split by tab scope. Each record carries the
+ * entry count, the dead-entry count (id AND stable key both failed) and
+ * the favorite flag. Favorites float to the top; the insertion order is
+ * preserved otherwise (Array#sort is stable in modern engines).
+ */
+export function presetPickerModel(node) {
+    const cfg = getHubConfig(node);
+    const tabId = getActiveTabId(cfg);
+    const tab = [];
+    const other = [];
+    for (const [name, p] of Object.entries(cfg.presets || {})) {
+        if (!p || typeof p !== "object" || !Array.isArray(p.entries)) continue;
+        const rec = {
+            name,
+            count: p.entries.length,
+            dead: presetCountDead(node, name),
+            fav: !!p.fav,
+            scopeName: tabNameOf(cfg, p.scope),
+        };
+        (p.scope === tabId ? tab : other).push(rec);
+    }
+    const favFirst = (a, b) => (b.fav ? 1 : 0) - (a.fav ? 1 : 0);
+    tab.sort(favFirst);
+    other.sort(favFirst);
+    return {
+        tabId,
+        tabName: tabNameOf(cfg, tabId),
+        tab, other,
+        total: tab.length + other.length,
+    };
 }
 
 /** Whole-hub export: one JSON string with every preset (wrapped format). */

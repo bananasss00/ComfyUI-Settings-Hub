@@ -78,11 +78,15 @@ web/viewer_gallery.js  — v27 БАТЧ-ГАЛЕРЕЯ вьюверов: сво�
                          Fullscreen API + ←/→/Esc/колесо); вотчер 1с;
                          findOutputImages / mountImageGallery /
                          openGalleryFullscreen / closeGalleryFullscreen
-web/preset_manager.js  — Presets 2.0 (v28): v2-снапшоты АКТИВНОЙ вкладки
-                         (opt-out item.inPreset, кнопки/порталы мимо),
-                         buildApplyPlan/applyPlan (инспекция-поповер,
-                         валидация combo, клэмп coerceNumeric, частичное
-                         применение, отчёт), undo (память модуля),
+web/preset_manager.js  — Presets 2.0 (v28) + UX (v29): v2-снапшоты АКТИВНОЙ
+                         вкладки (чип item.inPreset, excluded-мета, кнопки/
+                         порталы мимо), presetSave (имя из quick-save,
+                         confirm на перезапись), presetMergeInto (матч
+                         itemId -> stable-key -> добавление, scope/ts/excluded
+                         от снапшота), buildApplyPlan/applyPlan (инспекция,
+                         валидация combo, клэмп, частичное применение), undo
+                         (память модуля), presetFavToggle / presetExportOne /
+                         presetBulkOpt / presetPickerModel,
                          rename/duplicate/countDead/cleanDead,
                          exportAll/importFromText; stable-key fallback
                          nodeId+widget для перепинов
@@ -485,6 +489,65 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v29: Presets UX — чип opt-out, пикер с поиском, quick-save + merge, diff-поповер, тосты
+- ОПТ-АУТ = ЧИП: на строках value-байндингов кнопка .hub-inpreset (глиф 💾,
+  класс hub-btn) вместо чекбокса — на bool-строках чекбокс читался как
+  второе значение. Участвует = тихий чип; исключено (.hub-inpreset-off) =
+  приглушено + диагональный штрих (::after), tooltip меняется. Клик — case
+  "inpreset-toggle" в click-делегировании: флаг item.inPreset ставится/
+  удаляется ТОЧЕЧНО (без renderHub), syncNode + setDirtyCanvas. Чип —
+  авторский чром (правило .hub-chrome-hidden прежнее).
+- ПИКЕР (замена <select>): триггер .hub-preset-trigger (метка «Preset…»
+  либо ⏱ последний применённый пресет СЕССИИ из stateMap.lastPresetName —
+  НЕ в cfg; бейдж = число пресетов АКТИВНОЙ вкладки) открывает body-level
+  .hub-preset-picker (паттерн combo-поиска, свои global-листенеры
+  mousedown/Escape, positionNumPopup). Список: секция «This tab · <имя>»
+  (scope === активная вкладка; избранные первыми — СТАБИЛЬНАЯ сортировка
+  favFirst, порядок вставки сохраняется) + свёрнутая приглушённая секция
+  «Other tabs (N)» (клик по заголовку раскрывает; чужой пресет применить
+  можно — строки те же). Поиск (инпут .hub-combo-search, автфокус):
+  мульти-токены AND, case-insensitive, comboTokensMatch по имени И
+  label/value записей (presetMatchesQuery); НЕпустой запрос ищет по ВСЕМ
+  вкладкам и раскрывает чужую секцию; ↑/↓ двигают активную строку
+  (.hub-pp-active), Enter открывает применение, Esc закрывает. Строки:
+  ★/☆ fav (preset.fav), ✏ rename, ⧉ duplicate, 📋 copy JSON в клипборд
+  (clipboard API, фолбэк textarea+execCommand), ⤓ export одного пресета
+  (wrapped-формат с одним пресетом; Import его читает), 🗑 delete (confirm),
+  бейдж «⚠K» = clean dead entries (confirm; модель пикера перестраивается).
+  Клик по строке = openPresetApplyPopover (триггер — КНОПКА триггера пикера,
+  не строка: строка удаляется вместе с пикером, rect нулевой). ⋯ в ряду
+  пресетов = только глобальное: Export all / Import / 💾 Include all rows
+  (N) / 💾 Exclude all rows (N) / Cancel (presetBulkOpt: value-байндинги
+  активной вкладки, счётчик ИЗМЕНЁННЫХ строк, после — renderHub + тост).
+  Кнопки ➕ и 🗑️ из ряда удалены (➕ == 💾; удаление — в строках пикера).
+- QUICK-SAVE (замена prompt()): 💾 открывает .hub-qs-pop: имя (авто- «Preset
+  N», Enter=Save), живая строка «Will capture N value(s) from tab "X" (K
+  row(s) excluded)» — СУХОЙ прогон captureActiveTab (теперь exported:
+  запись несёт excluded — сколько чип-исключённых строк было при захвате),
+  список существующих пресетов (фильтр comboTokensMatch; бейдж чужой
+  вкладки) c кнопками [Merge]/[Overwrite] (overwrite = presetSave с его
+  confirm), футер [Save]/[Cancel]. presetSave(node, name) больше НЕ зовёт
+  prompt() (пустое имя = no-op); presetNew удалён.
+- MERGE-ЗАХВАТ: presetMergeInto(node, name) — снапшот активной вкладки
+  вливается в существующий пресет: матч по itemId, иначе по stable-key
+  (nodeId+widget) — обновление, иначе добавление; scope/ts/excluded — от
+  снапшота (last capture wins). Тост «Merged into "X" - +A added, U updated».
+- DIFF-ПОПОВЕР: у ok-строк с дрейфом значение показывается парой «current →
+  preset» (.hub-ppr-cur перечёркнут — flex-СИБЛИНГ .hub-ppr-val, не внутри:
+  у val max-width 110px; класс строки .hub-ppr-drift); «Only changed» в
+  футере — фильтр ВИДА (прячет строки без дрейфа через
+  .hub-ppr-list.hub-ppr-onlychg; Apply по-прежнему пишет все отмеченные —
+  неизменившиеся записи безвредны, подсказка в поповере оговаривает).
+- ТОСТ: после Apply поповер ЗАКРЫВАЕТСЯ, внизу по центру body-level
+  .hub-toast «Applied N of M (K skipped) · "Name"» c [↩ Undo] (6с,
+  авто-скрытие, единственный инстанс showHubToast/hideHubToast; esc()).
+  Undo = presetUndo + refreshPresetRowInPlace (ряд пресетов
+  перерисовывается точечно — ↩ исчезает, метка триггера обновляется).
+  Тосты также для save/merge/bulk. ↩ в ряду пресетов остаётся.
+- ФОРМАТ: cfg.presets[name] = { v:2, ts, scope, excluded?, fav?, entries[] }
+  — оба новых поля опциональны, обратно совместимы.
+- Пресет-ряд: [picker-триггер] [💾] [↩?] [⋯] [＋Div] [⚙].
 
 ### v25: фильтр виджетов, скрытие хрома, тихое удаление, очистка очереди
 - 🔍 фильтр (вход в таб-баре, свёрнут до линзы, :focus/.hub-search-active
@@ -903,21 +966,24 @@ node scripts/smoke_hub.mjs   # базовая линия: >=655 зелёных, 
 Правило: любое изменение зеркальных фич сопровождается регресс-проверкой в
 подходящей фазе (или новой фазой по букве).
 
-ZP (v28) — smoke_presets_v2.mjs, 51 чек: захват v2 (scope=активная
-вкладка, opt-out item.inPreset, исключение кнопок; метаданные
-label/widgetType/nodeId/widget), confirm на перезапись (decline сохраняет
-старый снапшот), поповер применения (статусы ok/missing-item/missing-widget/
-combo-invalid, drift-маркер «≈» только на изменившихся строках, частичное
-применение с пересчётом счётчика, отчёт «Applied M of N»), undo (восстанав-
-ливает пре-апплай состояние, расходуется, не переживает re-render), чекбокс
-строки (inPreset сериализуется с графом), tools-меню (rename с сохранением
-порядка ключей, duplicate deep-copy, clean dead entries с confirm-ветками,
-export JSON-блобом, import с overwrite-confirm и отказной веткой JSON),
-stable-key fallback (перепиненная строка резолвится по nodeId+widget),
-клэмп вне границ через coerceNumeric. Известное ограничение песочницы:
-jsdom не диспетчит change по клику checkbox ВНЕ документа (докнутый хаб
-живёт в element виджета) — смоук выставляет checked и диспетчит change
-вручную; в реальном браузере событие натуральное.
+ZP (v28/v29) — smoke_presets_v29.mjs, 78 чек: захват v2 через quick-save
+(префикс имени, живая инфа «Will capture … (K row(s) excluded)», excluded
+в записи), confirm на перезапись (decline сохраняет снапшот И поповер),
+поповер применения (статусы ok/missing-item/missing-widget/combo-invalid,
+drift-пара «current → preset», only-changed как view-фильтр, частичное
+применение, тост-отчёт вместо in-popover репорта), undo (тост-Undo и ↩
+ряда, расходуется, не переживает re-render), чип opt-out (off-состояние,
+round-trip, захват мимо исключённых, inPreset сериализуется с графом),
+тулзы (bulk include/exclude со счётчиком ИЗМЕНЁННЫХ строк + тост, export
+all, import с overwrite-confirm и отказной веткой JSON), пикер (секции
+tab/other, свёрнутая чужая группа с бейджем вкладки, поиск по имени и
+ЗНАЧЕНИЯМ записей, мульти-токены AND, клавиатура ↑↓/Enter/Esc, fav всплы-
+вает стабильно, rename/duplicate/delete/export one/copy, dead-бейдж «⚠K»
+с confirm-ветками), merge (обновление по itemId/stable-key, добавление,
+чужая вкладка тянет свои строки и переносит scope), stable-key fallback,
+клэмп вне границ через coerceNumeric, undo не в cfg. Песочница: клики по
+элементам докнутого (detached) хаба работают через el.click(); VirtualConsole
+форвардит jsdomError — исключения в слушателях не глотаются.
 
 ## 6. Упаковка и коммиты
 
