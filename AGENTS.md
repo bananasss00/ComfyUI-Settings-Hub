@@ -490,6 +490,34 @@ dev_plan.md            — исходный технический спек пр
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
 
+### v30.2: управляемые высоты multiline-зеркал (грип + скроллбар)
+- ПОЛЕВОЙ РЕПОРТ: конвертация ⤢ в single-line работает, но маркер ресайза
+  по-прежнему уезжает с числом строк, а скроллбар не появляется, когда
+  строки не влезают. Причина: v30.1 держал высоту чисто в CSS
+  (field-sizing:fixed + max-height + overflow-y) — в реальном фронтенде это
+  не устояло (его глобальные textarea-стили эпохи field-sizing:content
+  снова вытянули бокс по контенту; нельзя исключать и кэш styles.css —
+  опираться на CSS-констрейнты больше нельзя в принципе).
+- РЕШЕНИЕ: высота зеркала УПРАВЛЯЕТСЯ ИЗ JS — applyManagedTextHeights
+  (бывшая applySavedTextHeights) при КАЖДОМ renderHub выставляет явный
+  inline px на каждую textarea.hub-text-area: сохранённая пользователем
+  item.textH (позиция грипа, переживает re-render и сериализацию) либо
+  TEXT_MIRROR_H=64 («3 строки» по умолчанию). Явный inline height старше
+  field-sizing:content в любом браузере — рамка фиксирована
+  детерминированно: скроллбар появляется ровно когда строки не влезают,
+  грип всегда в том же достижимом углу. CSS-кэп v30.1 (max-height 180 +
+  правило [style*=height]) удалён как мёртвый; overflow-y:auto !important
+  оставлен страховкой.
+- ГРИП: pointerup/mouseup сохраняет натянутую высоту в item.textH (механика
+  v27.4, не изменилась); дефолт 64 тоже inline — случайный клик по полю не
+  меняет ничего (значение равно дефолту).
+- Призраки (порталы) не тронуты: их высоты живут в item.ghostTextHs и
+  следуют за родным виджетом фронтенда.
+- Карта: hub_ui_renderer.js +TEXT_MIRROR_H/applyManagedTextHeights;
+  styles.css .hub-text-area — комментарий-контракт, max-height снят.
+- Коммит: «fix(hub): JS-managed mirror heights - fixed textarea frame with
+  scrollbar and always-reachable grip».
+
 ### v30.1: полевые фиксы media/multiline/чипов
 - МЕДИА-ДЕТЕКТ усилен (репорт: у Load Image не было 🎬-пункта, только
   viewer): сигналы лоадера = флаги на combo (как раньше) ИЛИ ЛЮБОЙ из
@@ -1065,7 +1093,7 @@ tab/other, свёрнутая чужая группа с бейджем вкла
 элементам докнутого (detached) хаба работают через el.click(); VirtualConsole
 форвардит jsdomError — исключения в слушателях не глотаются.
 
-ZQ (v30) — smoke_v30.mjs, 25 чек: ординалы (members[].ord у трёх
+ZQ (v30/v30.2) — smoke_v30.mjs, 33 чек: ординалы (members[].ord у трёх
 одноимённых виджетов, findWidgetOnNode резолвит РАЗНЫЕ объекты по ord,
 выход за диапазон → первый, createBinding хранит widgetOrd), multiline
 (значение с \n автодетектится, plain-строка остаётся input'ом c чипом ⤢,
@@ -1077,7 +1105,10 @@ createMediaBinding хранит media-мету и переживает syncNode-
 кнопку ноды, дроп идёт в onDrop ноды с целыми File (стабы DataTransfer/
 DragEvent для jsdom), маршрут B — фетч /upload/image + запись combo +
 push в values + тост), меню: 🎬-пункт у лоадера и его отсутствие у обычной
-ноды (attachContextMenu зван явно).
+ноды (attachContextMenu зван явно); управляемые высоты v30.2 — свежая
+textarea.hub-text-area несёт inline 64px, симуляция перетаскивания грипа
+(inline height + pointerup) пишет item.textH, сохранённая высота
+восстанавливается после re-render (B5b/B5c/B5d).
 
 ## 6. Упаковка и коммиты
 

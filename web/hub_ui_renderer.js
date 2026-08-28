@@ -2806,24 +2806,33 @@ function applySearchFilter(node, st) {
 }
 
 // ---------------------------------------------------------------------------
-// v27.4: user-resizable multiline mirrors
+// v27.4 + v30.2: managed-height multiline mirrors
 // ---------------------------------------------------------------------------
 // The browser writes inline height while the user drags a textarea's native
-// resize grip ("resize: vertical" in styles.css); an empty inline height
-// means "never resized". That px height is persisted on the hub item
-// (item.textH - a plain item field, serialized with the graph) and
-// re-applied after every innerHTML rebuild, which would otherwise reset the
-// mirror to its rows="3" default. The content ResizeObserver re-fits the
-// node height on its own, so no extra layout work happens here.
+// resize grip ("resize: vertical" in styles.css); that px height is persisted
+// on the hub item (item.textH - a plain item field, serialized with the
+// graph) and re-applied after every innerHTML rebuild.
+//
+// v30.2: EVERY hub textarea gets an explicit inline px height at render time
+// (the saved grip position, TEXT_MIRROR_H otherwise). Field report: CSS-only
+// sizing did not hold in the real frontend - its own global textarea styling
+// (the field-sizing:content era) grew the box with the line count, the grip
+// rode the growing bottom edge and overflow never happened (no scrollbar).
+// An explicit inline height outranks field-sizing in every browser, so the
+// frame is deterministic: fixed box, internal scrollbar exactly when the
+// lines exceed it, grip always at the same reachable corner.
 
-function applySavedTextHeights(node, cfg) {
+const TEXT_MIRROR_H = 64; // px - the "3 rows" default of a fresh mirror
+
+function applyManagedTextHeights(node, cfg) {
     const root = stateMap.get(node)?.root;
     if (!root) return;
     for (const ta of root.querySelectorAll("textarea.hub-text-area")) {
         const row = ta.closest("[data-hub-item]");
         const item = cfg.items.find((i) => i.id === row?.dataset?.hubItem);
         const h = Number(item?.textH);
-        if (Number.isFinite(h) && h > 0) ta.style.height = `${h}px`;
+        ta.style.height =
+            `${Number.isFinite(h) && h > 0 ? Math.round(h) : TEXT_MIRROR_H}px`;
     }
 }
 
@@ -2976,9 +2985,10 @@ function renderHub(node) {
         } catch (_) {}
     }
 
-    // v27.4: the innerHTML swap reset every textarea to rows="3" - restore
-    // user-resized heights BEFORE the layout pass measures the content.
-    try { applySavedTextHeights(node, cfg); } catch (_) {}
+    // v27.4/v30.2: the innerHTML swap rebuilt every mirror - re-apply the
+    // managed heights (saved grip position or the default) BEFORE the layout
+    // pass measures the content.
+    try { applyManagedTextHeights(node, cfg); } catch (_) {}
 
     layoutNode(node);
 }
