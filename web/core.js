@@ -1249,10 +1249,22 @@ export function mediaLoaderInfo(targetNode) {
         } catch (_) { /* exotic getters must not kill detection */ }
     }
     let hit = flagged;
-    if (!hit && mediaish &&
-        Object.prototype.hasOwnProperty.call(targetNode, "onDragOver") &&
-        Object.prototype.hasOwnProperty.call(targetNode, "onDrop")) {
-        hit = mediaish; // upload composables attach these as instance props
+    if (!hit && mediaish) {
+        // Any real upload wiring qualifies the node: upload composables
+        // install onDragOver/onDrop as INSTANCE props; the upload button
+        // widget is named "upload" (modern) / carries "upload" (legacy);
+        // classic LoadImage builds expose node.pasteFiles. Field report
+        // v30.1: a plain Load Image showed no media entry - rely on more
+        // than one signal.
+        const ownDrop =
+            Object.prototype.hasOwnProperty.call(targetNode, "onDragOver") &&
+            Object.prototype.hasOwnProperty.call(targetNode, "onDrop");
+        const hasUploadBtn = (targetNode.widgets || []).some((w) =>
+            (typeof w?.type === "string" && w.type.toLowerCase() === "button") &&
+            /upload/i.test(String(w.name ?? "")) &&
+            typeof w.callback === "function");
+        const hasPaste = typeof targetNode.pasteFiles === "function";
+        if (ownDrop || hasUploadBtn || hasPaste) hit = mediaish;
     }
     if (!hit) return null;
     return {

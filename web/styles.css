@@ -381,6 +381,18 @@
     min-height: 46px;
     line-height: 1.35;
     font-family: inherit;
+    /* v30.1: the box must NOT grow with the line count (frontends style
+       textareas with field-sizing:content - the grip ran away below the
+       viewport). Fixed sizing + a cap keep the grip reachable; overflow
+       scrolls INSIDE the field. A saved/dragged inline height (the user's
+       own resize) lifts the cap - see the [style*=height] rule below. */
+    field-sizing: fixed !important;
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.hub-text-area[style*="height"] {
+    max-height: none;
 }
 
 /* Multiline mirror takes the remaining row width; stretching it vertically

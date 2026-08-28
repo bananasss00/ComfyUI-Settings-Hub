@@ -275,7 +275,14 @@ function mirrorHtml(item, tw) {
             const val = tw?.value ?? "";
             // Multiline mirrors: persisted flag OR live widget carrying a
             // real <textarea> element (DOM prompt widgets have no flag).
-            if (item.options?.multiline || isMultilineWidget(tw)) {
+            // v30.1: a manual ⤢ choice (options.mlManual) PINS the shape -
+            // the live re-detection (a value containing newlines, a mounted
+            // textarea...) must not override it, otherwise the chip could
+            // never switch such a field back to a single-line input.
+            const ml = item.options?.mlManual === true
+                ? !!item.options?.multiline
+                : (item.options?.multiline || isMultilineWidget(tw));
+            if (ml) {
                 // hub-mirror-text: the textarea takes the remaining row width
                 // (see styles.css); vertical resize is followed by the
                 // content observer so the node re-fits.
@@ -323,12 +330,15 @@ function itemRowHtml(item) {
           `data-action="ml-toggle" ` +
           `title="${mlOn ? "Switch to single-line input" : "Switch to multiline editor (resize grip)"}">⤢</button>`
         : "";
+    // v30.1 order: the slider gear comes FIRST, the 💾 include-in-presets
+    // chip sits next to 🎯 - on slider rows the previous order read as a
+    // visual staircase.
     const tools = [
-        inPresetCb,
-        mlChip,
         isNumericMirror
             ? `<button type="button" class="hub-btn hub-gear${hasSliderOverride(item) ? " hub-gear-on" : ""}" data-action="num-settings" title="Custom min / max / step for this slider (+ push to the real node)">⚙</button>`
             : "",
+        inPresetCb,
+        mlChip,
         `<button type="button" class="hub-btn hub-locate" data-action="locate" ${ok ? "" : "disabled"} title="Locate source node">🎯</button>`,
         `<button type="button" class="hub-btn hub-remove" data-action="unpin" title="Unpin from Hub">✕</button>`,
     ].join("");

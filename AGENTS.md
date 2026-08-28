@@ -490,6 +490,28 @@ dev_plan.md            — исходный технический спек пр
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
 
+### v30.1: полевые фиксы media/multiline/чипов
+- МЕДИА-ДЕТЕКТ усилен (репорт: у Load Image не было 🎬-пункта, только
+  viewer): сигналы лоадера = флаги на combo (как раньше) ИЛИ ЛЮБОЙ из
+  {собственные onDragOver+onDrop instance-пропсы, upload-кнопка (имя
+  /upload/i, с callback), node.pasteFiles (классические сборки)} при
+  media-имени combo; 🎬-пункт в меню теперь ПЕРЕД «🖼 Pin viewer» (на
+  Load Image viewer-подменю прятал медиа-пункт внизу).
+- MULTILINE: ручной выбор ⤢ (options.mlManual) ФИКСИРУЕТ форму зеркала —
+  live-пере-детект (значение с \n, смонтированная textarea) больше не
+  побеждает чип (раньше поле с многострочным значением нельзя было
+  вернуть в однострочный input — «кнопка никак не отражается»).
+  .hub-text-area: field-sizing:fixed !important (фронтендовые глобальные
+  стили с field-sizing:content заставляли бокс расти с числом строк и
+  уводили грип за пределы видимости) + max-height 180px + внутренний
+  overflow-y:auto (скроллбар по запросу); сохранённая/натянутая
+  пользователем высота (inline style) снимает кэп правилом
+  [style*="height"] { max-height: none }.
+- ПОРЯДОК ТУЛЗОВ В СТРОКЕ: ⚙ слайдера ПЕРВЫМ, затем 💾 include-in-presets
+  (рядом с 🎯), затем ⤢ — убрана «лесенка» на слайдерных строках.
+- Коммит: «fix(hub): field polish - media detect signals, multiline manual
+  shape pin with capped scrolling textarea, row tool order».
+
 ### v30: media-source row, same-name widget ordinals, multiline chip
 - ORDINALS (фикс Fast Groups Bypasser/Muter от rgthree): пак регистрирует
   КАЖДУЮ строку-тоггл отдельным виджетом с ОДНИМ именем

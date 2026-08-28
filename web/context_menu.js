@@ -66,6 +66,24 @@ export function attachContextMenu() {
                 });
             }
 
+            // v30: media-source loaders - ONE row with the input-file
+            // preview, the searchable file combo and upload (native picker
+            // via the node's own upload button, drag&drop routed through
+            // the node's onDrop pipeline, /upload/image fallback). v30.1:
+            // offered BEFORE the viewer entry (on Load Image the viewer
+            // submenu hid the media action at the bottom).
+            try {
+                const mi = mediaLoaderInfo(node);
+                if (mi) {
+                    items.push({
+                        content: "🎬 Pin media source (preview + upload)",
+                        has_submenu: true,
+                        submenu: {
+                            options: buildMediaSubmenu(node, mi),
+                        },
+                    });
+                }
+            } catch (_) { /* detection must never kill the menu */ }
             // v26: viewers that paint straight in onDrawBackground (classic
             // PreviewImage / LoadImage / SaveImage builds, video combiners,
             // custom gallery nodes) own NO widget to pin - offer the whole
@@ -79,22 +97,6 @@ export function attachContextMenu() {
                     },
                 });
             }
-            // v30: media-source loaders - ONE row with the input-file
-            // preview, the searchable file combo and upload (native picker
-            // via the node's own upload button, drag&drop routed through
-            // the node's onDrop pipeline, /upload/image fallback).
-            try {
-                const mi = mediaLoaderInfo(node);
-                if (mi) {
-                    items.push({
-                        content: "🎬 Pin media source (preview + upload)",
-                        has_submenu: true,
-                        submenu: {
-                            options: buildMediaSubmenu(node, mi),
-                        },
-                    });
-                }
-            } catch (_) { /* detection must never kill the menu */ }
             return items;
         },
     });
