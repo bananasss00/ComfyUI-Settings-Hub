@@ -258,6 +258,22 @@ function scanAllNodesFor(pred) {
  * far better than orphaning a perfectly good pin. "targetTitle" is written
  * by createBinding/createPortalBinding; older configs simply skip this.
  */
+/**
+ * v30: widget lookup by name with a same-name ORDINAL disambiguator.
+ * Custom packs register SEVERAL widgets under ONE name (rgthree Fast
+ * Groups Muter/Bypasser rows are all "RGTHREE_TOGGLE_AND_NAV") - a plain
+ * find-by-name always returned the FIRST row, so pinning such a node
+ * duplicated its first toggle N times (every member resolved to the same
+ * widget). Pin time stores an ordinal (index among the same-name widgets);
+ * out-of-range ordinals (row removed / re-sorted) degrade to the first hit.
+ */
+export function findWidgetOnNode(tn, name, ord) {
+    const list = (tn?.widgets || []).filter((w) => w && w.name === name);
+    if (!list.length) return null;
+    const i = Number.isInteger(ord) && ord >= 0 && ord < list.length ? ord : 0;
+    return list[i] ?? list[0];
+}
+
 export function resolveBindingTarget(item) {
     const tn = findNodeByIdEverywhere(item?.targetNodeId);
     if (tn != null) return tn;
@@ -438,7 +454,11 @@ const TEXT_TYPES = new Set([
  */
 export function isMultilineWidget(widget) {
     if (!widget) return false;
-    if (widget.options?.multiline === true) return true;
+    // v30: truthy flags of any kind count ("true"/1 travel through some
+    // widget builders); an explicit false never vetoes a live textarea.
+    if (widget.options?.multiline === true || widget.options?.multiline === "true") {
+        return true;
+    }
     // Any direct element reference that IS a textarea. Frontend versions
     // disagree on which reference carries the editor (element since
     // PR #8594, inputEl on older builds) - checking only the FIRST
@@ -451,6 +471,19 @@ export function isMultilineWidget(widget) {
     // mounted element - still render it as a growing editor, not an input.
     const type = typeof widget.type === "string" ? widget.type.toLowerCase() : "";
     if (type === "customtext") return true;
+    // v30: TEXT widgets whose CURRENT value already contains newlines are
+    // de-facto multiline - catches packs that expose neither a flag nor a
+    // mounted element (the multiline flag often stays in the node DEF only
+    // and never reaches the widget object).
+    if (TEXT_TYPES.has(type) && typeof widget.value === "string" &&
+        widget.value.includes("\n")) {
+        return true;
+    }
+    // v30: explicit name/label hint on a TEXT-family widget.
+    if (TEXT_TYPES.has(type) &&
+        /multiline/i.test(`${widget.name ?? ""} ${widget.label ?? ""}`)) {
+        return true;
+    }
     // A declared-TEXT widget may wrap the real editor in a container div:
     // a contained <textarea> counts too. Restricted to TEXT_TYPES so custom
     // PANELS that merely include a textarea never flip to text mirrors.
@@ -828,7 +861,7 @@ export function clearSliderOverride(item) {
     if (nat) {
         try {
             const tn = resolveBindingTarget(item);
-            const tw = tn?.widgets?.find((w) => w && w.name === item.widgetToBind);
+            const tw = findWidgetOnNode(tn, item.widgetToBind, item.widgetOrd);
             if (tn && tw && tw.options && typeof tw.options === "object") {
                 for (const k of Object.keys(nat)) tw.options[k] = nat[k];
                 try { (tn.graph ?? app.graph)?.setDirtyCanvas?.(true, true); } catch (_) {}
@@ -887,7 +920,7 @@ export function applyOverrideToTargetWidgets(item) {
     // resolveBindingTarget returns the TARGET NODE itself (or null):
     // destructure defensively, never assume a {tn,tw} pair shape.
     const tn = resolveBindingTarget(item ?? {});
-    const tw = tn?.widgets?.find((w) => w && w.name === item.widgetToBind);
+    const tw = findWidgetOnNode(tn, item.widgetToBind, item.widgetOrd);
     if (!tn || !tw) return 0;
     try {
         if (!tw.options || typeof tw.options !== "object") tw.options = {};
@@ -1165,6 +1198,108 @@ export function widgetNativeHeight(widget, fallback = 30) {
  * members[] persists name+height so reloads survive; live geometry is still
  * re-read every frame by the portal renderer (rows grow/shrink dynamically).
  */
+// ---------------------------------------------------------------------------
+// v30: media-source loaders (LoadImage / LoadVideo / LoadAudio + customs).
+// Detection mirrors the frontend's own upload extension: media combos carry
+// flags in their options (image_upload / video_upload / audio_upload /
+// animated_image_upload). Fallback: the node carries its OWN onDragOver and
+// onDrop instance props (installed by the upload composables) next to a
+// media-ish combo. Returns {combo, kind, folder} or null.
+// ---------------------------------------------------------------------------
+
+const MEDIA_FLAG_KINDS = [
+    ["video_upload", "video"],
+    ["audio_upload", "audio"],
+    ["animated_image_upload", "image"],
+    ["image_upload", "image"],
+];
+
+function mediaKindOfWidget(widget) {
+    const o = widget?.options || {};
+    for (const [flag, kind] of MEDIA_FLAG_KINDS) {
+        if (o[flag]) return kind;
+    }
+    return null;
+}
+
+function isDeadButtonWidget(w) {
+    const t = (typeof w?.type === "string" ? w.type : "").trim().toLowerCase();
+    return t === "button" && typeof w?.callback !== "function";
+}
+
+export function mediaLoaderInfo(targetNode) {
+    if (!targetNode || targetNode.type === HUB_NODE_NAME) return null;
+    let flagged = null;
+    let mediaish = null;
+    for (const w of targetNode.widgets ?? []) {
+        try {
+            if (isDeadButtonWidget(w) || isInternalWidget(w)) continue;
+            const kind = mediaKindOfWidget(w);
+            if (kind) { flagged = { combo: w, kind }; break; }
+            if (!mediaish && detectWidgetType(w) === "combo") {
+                const nm = String(w.name ?? "");
+                if (/image|video|audio|file/i.test(nm)) {
+                    mediaish = {
+                        combo: w,
+                        kind: /video/i.test(nm) ? "video"
+                            : /audio/i.test(nm) ? "audio" : "image",
+                    };
+                }
+            }
+        } catch (_) { /* exotic getters must not kill detection */ }
+    }
+    let hit = flagged;
+    if (!hit && mediaish &&
+        Object.prototype.hasOwnProperty.call(targetNode, "onDragOver") &&
+        Object.prototype.hasOwnProperty.call(targetNode, "onDrop")) {
+        hit = mediaish; // upload composables attach these as instance props
+    }
+    if (!hit) return null;
+    return {
+        combo: hit.combo,
+        kind: hit.kind,
+        folder: String(hit.combo?.options?.image_folder ?? "input"),
+    };
+}
+
+/**
+ * v30: pin a MEDIA-SOURCE loader as ONE enriched row - the searchable file
+ * combo, an input-file preview (from the output store, type=input) and an
+ * upload affordance (native picker + drag&drop routed through the node's
+ * own onDrop pipeline, falling back to /upload/image).
+ */
+export function createMediaBinding(node, targetNode, info, tabId, label) {
+    const cfg = getHubConfig(node);
+    if (!info?.combo) return null;
+    const item = {
+        id: genId("item"),
+        type: "widget_binding",
+        widgetType: "media",
+        tabId,
+        order: nextOrder(cfg, tabId),
+        customLabel: label || targetNode?.title || info.combo.name || "media",
+        targetNodeId: targetNode.id,
+        targetTitle: targetNode?.title ?? "",
+        widgetToBind: info.combo.name,
+        widgetOrd: sameNameOrdinal(targetNode, info.combo),
+        options: { media: { kind: info.kind || "image", folder: info.folder || "input" } },
+    };
+    cfg.items.push(item);
+    Pins.invalidatePins();
+    node.setDirtyCanvas(true, true);
+    syncNode(node);
+    return item;
+}
+
+/** Index of `widget` among the target node's widgets sharing its name
+ * (0 for unique names). Stored on bindings so same-name widget families
+ * resolve to the exact row they were pinned from (v30). */
+function sameNameOrdinal(targetNode, widget) {
+    const list = (targetNode?.widgets || []).filter((w) => w && w.name === widget?.name);
+    const i = list.indexOf(widget);
+    return i > 0 ? i : 0;
+}
+
 export function createPortalBinding(node, targetNode, widgets, tabId, label) {
     const cfg = getHubConfig(node);
     const list = (Array.isArray(widgets) ? widgets : [widgets]).filter(Boolean);
@@ -1183,6 +1318,7 @@ export function createPortalBinding(node, targetNode, widgets, tabId, label) {
         widgetType: "portal",
         members: list.map((w) => ({
             name: w.name ?? "",
+            ord: sameNameOrdinal(targetNode, w),
             srcH: Math.round(widgetNativeHeight(w)),
         })),
     };
@@ -1217,6 +1353,7 @@ export function createBinding(node, targetNode, widget, tabId, type, extra) {
         item.type = "widget_portal";
         item.targetNodeId = targetNode.id;
         item.widgetToBind = widget.name;
+        item.widgetOrd = sameNameOrdinal(targetNode, widget);
         item.widgetType = "portal";
         item.customLabel = extra?.label || widget.label || widget.name || "panel";
         let srcH = Number(widget.height ?? widget.options?.height);
@@ -1226,6 +1363,7 @@ export function createBinding(node, targetNode, widget, tabId, type, extra) {
         item.targetNodeId = targetNode.id;
         item.targetTitle = targetNode?.title ?? ""; // drift repair anchor
         item.widgetToBind = widget.name;
+        item.widgetOrd = sameNameOrdinal(targetNode, widget);
         item.widgetType = detectWidgetType(widget);           // fixed detection
         item.customLabel = extra?.label || widget.label || widget.name || "";
         const values = extractComboValues(widget);

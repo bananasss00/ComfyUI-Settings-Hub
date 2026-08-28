@@ -490,6 +490,64 @@ dev_plan.md            — исходный технический спек пр
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
 
+### v30: media-source row, same-name widget ordinals, multiline chip
+- ORDINALS (фикс Fast Groups Bypasser/Muter от rgthree): пак регистрирует
+  КАЖДУЮ строку-тоггл отдельным виджетом с ОДНИМ именем
+  «RGTHREE_TOGGLE_AND_NAV» — поиск по имени всегда возвращал ПЕРВУЮ строку,
+  поэтому панельный пин рисовал первый тоггл N раз (репорт: «первый элемент
+  дублируется столько, сколько элементов»). core.findWidgetOnNode(tn, name,
+  ord) — резолв по имени + порядковому номеру среди одноимённых; пин хранит
+  item.widgetOrd / members[].ord (0 у уникальных имён); ВСЕ резолвы
+  (sync_manager-хуки, порталы single+members, findTarget рендерера,
+  slider-overrides core, пресеты) идут через него; выход за диапазон
+  деградирует к первой строке (строки удаляются/пересортируются пакетом).
+- MULTILINE (фикс «Text (Multiline) — нет грипа»): isMultilineWidget
+  усилен — truthy-флаги («true»/1), TEXT-значение с переводом строки,
+  подсказка «multiline» в name/label (флаг часто живёт только в DEF ноды и
+  не доходит до объекта виджета). Гарантированный путь: чип ⤢ на каждой
+  TEXT-строке (авторский чром, прячется 👁) переключает input ↔ растущую
+  textarea с грипом (item.options.multiline) и помечает выбор mlManual=true
+  — ручной выбор ВЫИГРЫВАЕТ у авто-хила renderHub (раньше тот затирал флаг
+  на каждом рендере).
+- CRLF-АУДИТ: viewer_gallery / global_settings / dnd_manager / sync /
+  settings_hub .js оказались LF (созданы генерацией) — нормализованы к CRLF.
+- MEDIA-SOURCE ROW: ПКМ по ноде-лоадеру (LoadImage/LoadVideo/LoadAudio +
+  кастомы) → «🎬 Pin media source (preview + upload)» — ОДНА строка:
+  [превью input-файла 40px] [поисковый file-combo] [📁].
+  ДЕТЕКТ core.mediaLoaderInfo: combo с media-флагами (image_upload /
+  video_upload / audio_upload / animated_image_upload — те же, на которых
+  стоит upload-расширение фронтенда); фолбэк — у ноды СВОИ instance-пропсы
+  onDragOver+onDrop (ставят upload-композаблы) + media-имя у combo.
+  createMediaBinding: widgetType «media», options.media {kind, folder};
+  само-хил renderHeader ИСКЛЮЧАЕТ media-строки (иначе вылечил бы строку в
+  обычный combo и снёс превью/загрузку).
+  ПРЕВЬЮ: viewer_gallery.firstMediaSpec читает output store — фронтенд
+  держит там input-файлы лоадеров (type:"input"); пустой стор → фолбэк
+  /view?filename=<combo>&type=<folder>; img / video (muted, preload=
+  metadata) / иконка+имя для audio; guard srcSig (URL не изменился — DOM
+  не трогаем); отрисовка на renderHub и в refreshValuesDom (реактивно,
+  без поллинга).
+  ЗАГРУЗКА: 📁 → СНАЧАЛА родная upload-кнопка ноды (имя /upload/i) — её
+  пикер/accept/batch остаются авторитетными; иначе скрытый file input.
+  Файлы идут через uploadMediaFiles: маршрут A — синтезированный
+  DragEvent+DataTransfer в onDrop НОДЫ (весь её пайплайн: фильтр,
+  /upload/image, обновление combo, batch — кастомные паки ведут себя
+  1:1); маршрут B (нет onDrop/DragEvent) — прямой POST /upload/image
+  (type=folder) → путь → pushComboValue (tw.options.values + item) →
+  writeTargetValue; отчёт тостом. Дроп-зона = весь media-миррор
+  (stopPropagation против канвасного дропа). Пресеты: media-строки
+  захватываются как combo-значения (применение восстанавливает выбранный
+  файл). Триггер combo в строке — стандартный data-role="combo": поиск,
+  тултипы, рефреш достаются бесплатно.
+- Карта (дополнения): core.js +mediaLoaderInfo/createMediaBinding/
+  findWidgetOnNode; viewer_gallery.js +firstMediaSpec; context_menu.js
+  +🎬-пункт и buildMediaSubmenu; hub_ui_renderer.js +media-миррор,
+  paintMediaPreview/uploadMediaFiles, ⤢-чип; styles.css +.hub-media-*.
+- Коммиты: «fix(hub): same-name widget ordinals - rgthree Fast Groups rows
+  no longer duplicate the first toggle»; «feat(hub): media-source rows -
+  input preview, searchable combo, upload via the node's own pipeline»;
+  «fix(hub): multiline detection hardening + per-row multiline toggle chip».
+
 ### v29: Presets UX — чип opt-out, пикер с поиском, quick-save + merge, diff-поповер, тосты
 - ОПТ-АУТ = ЧИП: на строках value-байндингов кнопка .hub-inpreset (глиф 💾,
   класс hub-btn) вместо чекбокса — на bool-строках чекбокс читался как
@@ -984,6 +1042,20 @@ tab/other, свёрнутая чужая группа с бейджем вкла
 клэмп вне границ через coerceNumeric, undo не в cfg. Песочница: клики по
 элементам докнутого (detached) хаба работают через el.click(); VirtualConsole
 форвардит jsdomError — исключения в слушателях не глотаются.
+
+ZQ (v30) — smoke_v30.mjs, 25 чек: ординалы (members[].ord у трёх
+одноимённых виджетов, findWidgetOnNode резолвит РАЗНЫЕ объекты по ord,
+выход за диапазон → первый, createBinding хранит widgetOrd), multiline
+(значение с \n автодетектится, plain-строка остаётся input'ом c чипом ⤢,
+чип конвертирует input ↔ textarea.hub-text-area в обе стороны), media-строка
+(детект по флагам + фолбэк по onDragOver/onDrop, анти-детект обычной ноды,
+createMediaBinding хранит media-мету и переживает syncNode-миграцию, ряд
+= превью+combo+📁, превью: фолбэк /view значения combo при пустом сторе,
+следует за сменой значения/стора через srcSig, 📁 зовёт РОДНУЮ upload-
+кнопку ноды, дроп идёт в onDrop ноды с целыми File (стабы DataTransfer/
+DragEvent для jsdom), маршрут B — фетч /upload/image + запись combo +
+push в values + тост), меню: 🎬-пункт у лоадера и его отсутствие у обычной
+ноды (attachContextMenu зван явно).
 
 ## 6. Упаковка и коммиты
 

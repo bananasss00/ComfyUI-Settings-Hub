@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import {
     getHubConfig, getActiveTabId, itemsOfTab, resolveBindingTarget,
-    liveComboValues, coerceNumeric,
+    liveComboValues, coerceNumeric, findWidgetOnNode,
 } from "./core.js";
 import { writeTargetValue } from "./sync_manager.js";
 import { syncNode, refreshNodeValues } from "./sync.js";
@@ -56,7 +56,7 @@ export function captureActiveTab(node) {
         // Prefer live value mirrored on the target node; fall back to the
         // hub's own DOM mirror (same fallback chain as v1 snapshots).
         const targetNode = resolveBindingTarget(item);
-        const widget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
+        const widget = findWidgetOnNode(targetNode, item.widgetToBind, item.widgetOrd);
         let value;
         if (widget && widget.value !== undefined) {
             value = widget.value;
@@ -191,7 +191,7 @@ export function buildApplyPlan(node, presetName) {
         }
         row.item = item;
         const targetNode = resolveBindingTarget(item);
-        const widget = targetNode?.widgets?.find((w) => w.name === item.widgetToBind);
+        const widget = findWidgetOnNode(targetNode, item.widgetToBind, item.widgetOrd);
         if (!targetNode || !widget) {
             row.status = "missing-widget";
             return row;
@@ -305,7 +305,7 @@ export function presetUndo(node) {
         const item = cfg.items.find((i) => i.id === e.itemId);
         if (!item) continue;
         const tn = resolveBindingTarget(item);
-        const w = tn?.widgets?.find((x) => x.name === item.widgetToBind);
+        const w = findWidgetOnNode(tn, item.widgetToBind, item.widgetOrd);
         if (!w) continue;
         writeTargetValue(tn, w, e.value);
         restored++;

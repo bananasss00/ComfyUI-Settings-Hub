@@ -42,6 +42,7 @@
 import { app } from "../../scripts/app.js";
 import {
     getHubConfig, PORTAL_ROW_GAP, widgetNativeHeight, resolveBindingTarget,
+    findWidgetOnNode,
 } from "./core.js";
 import { getVideoAudio, setVideoAudio, applyVideoAudio } from "./global_settings.js";
 import { mountImageGallery, closeGalleryFullscreen, downloadMediaUrl } from "./viewer_gallery.js";
@@ -52,7 +53,7 @@ const nodeRegistry = new WeakMap();
 /** Cross-graph lookup: portal sources may live inside any subgraph. */
 function findWidget(item) {
     const tn = resolveBindingTarget(item);
-    const tw = tn?.widgets?.find((w) => w.name === item.widgetToBind);
+    const tw = findWidgetOnNode(tn, item.widgetToBind, item.widgetOrd);
     return { tn, tw };
 }
 
@@ -67,7 +68,8 @@ function resolveMembers(item, tn) {
         : [{ name: item.widgetToBind, srcH: Number(item.options?.srcH) || 30 }];
     const out = [];
     for (const m of list) {
-        const tw = tn.widgets?.find((w) => w.name === m.name);
+        // v30: m.ord disambiguates same-name widget families (rgthree rows).
+        const tw = findWidgetOnNode(tn, m.name, m.ord);
         if (tw) out.push({ widget: tw, srcH: Number(m.srcH) > 0 ? Number(m.srcH) : 30 });
     }
     return out;

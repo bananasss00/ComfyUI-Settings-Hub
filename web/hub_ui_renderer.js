@@ -23,6 +23,7 @@ import {
     getHubConfig, getActiveTabId, sortedTabs, itemsOfTab, genId,
     liveComboValues, coerceNumeric, removeItem, detectWidgetType,
     isMultilineWidget, portalKindOf, resolveBindingTarget, findHolderChainOf,
+    findWidgetOnNode,
     synthSliderWindow, growSynthWindow, allHubs,
     effectiveSliderParams, getSliderOverride, hasSliderOverride,
     setSliderOverride, clearSliderOverride, applyOverrideToTargetWidgets,
@@ -37,10 +38,11 @@ import {
     presetExportAll, presetImportFromText,
 } from "./preset_manager.js";
 import { writeTargetValue, ensureHooksForItem, invokeTargetButton } from "./sync_manager.js";
-import { beginEdit, endEdit, registerStructural, registerValues, syncNode } from "./sync.js";
+import { beginEdit, endEdit, registerStructural, registerValues, syncNode, refreshNodeValues } from "./sync.js";
 import { initDrag } from "./dnd_manager.js";
 import * as Portals from "./portal_manager.js";
 import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel } from "./global_settings.js";
+import { firstMediaSpec } from "./viewer_gallery.js";
 
 // Layout allowances. The title bar height is taken from LiteGraph when
 // available (themes vary); SLOT_TOP_GAP is the canvas-side offset above the
@@ -69,7 +71,7 @@ function esc(s) {
  *  while the hub sits on the root canvas (see core.resolveBindingTarget). */
 function findTarget(item) {
     const tn = resolveBindingTarget(item);
-    const tw = tn?.widgets?.find((w) => w.name === item.widgetToBind);
+    const tw = findWidgetOnNode(tn, item.widgetToBind, item.widgetOrd);
     return { tn, tw };
 }
 
@@ -197,6 +199,26 @@ function mirrorHtml(item, tw) {
                 `title="${esc(cur)}${cur ? "\n" : ""}Searchable list - filter parts separated by space, all must match, case-insensitive">` +
                 `<span class="hub-combo-label">${esc(cur)}</span><span class="hub-combo-caret">▾</span></button></span>`;
         }
+        case "media": {
+            // v30 media-source row: input-file preview + searchable file
+            // combo + upload (native picker / drop). The preview paints from
+            // the output store (type=input) via paintMediaPreview; until it
+            // runs the placeholder shows the kind icon.
+            const m = item.options?.media || {};
+            const cur = String(tw?.value ?? "");
+            const vals = liveComboValues(item, tw);
+            const sig = vals.join("¦");
+            const ph = m.kind === "audio" ? "🎵" : m.kind === "video" ? "🎞" : "🖼";
+            return `<span class="hub-mirror hub-mirror-media" data-media-kind="${esc(m.kind || "image")}">` +
+                `<span class="hub-media-prev" data-role="media-prev" title="${esc(cur)}">` +
+                `<span class="hub-media-ph">${ph}</span></span>` +
+                `<button type="button" class="hub-combo" data-role="combo" data-hub-control data-sig="${esc(sig)}" ` +
+                `title="${esc(cur)}${cur ? "\n" : ""}Searchable list - filter parts separated by space, all must match, case-insensitive">` +
+                `<span class="hub-combo-label">${esc(cur)}</span><span class="hub-combo-caret">▾</span></button>` +
+                `<button type="button" class="hub-btn hub-media-up" data-role="media-upload" ` +
+                `title="Upload a file into this node (click, or drop a file on the row)">📁</button>` +
+                `</span>`;
+        }
         case "checkbox": {
             const checked = tw?.value === true || tw?.value === "true";
             return `<span class="hub-mirror"><input type="checkbox" class="hub-check" data-role="check" data-hub-control${checked ? " checked" : ""}></span>`;
@@ -291,8 +313,19 @@ function itemRowHtml(item) {
           `data-action="inpreset-toggle" ` +
           `title="${ipOff ? "Excluded from presets - click to include this row" : "Included in preset captures - click to exclude this row"}">💾</button>`
         : "";
+    // v30: guaranteed multiline switch. Auto-detection covers every shape
+    // we know; exotic packs that expose neither flag nor textarea get a ONE
+    // CLICK fix - the row flips between single-line input and the growing
+    // resizable textarea. Authoring chrome (hidden by 👁).
+    const mlOn = item.options?.multiline === true;
+    const mlChip = item.type === "widget_binding" && item.widgetType === "text"
+        ? `<button type="button" class="hub-btn hub-mlt${mlOn ? " hub-mlt-on" : ""}" ` +
+          `data-action="ml-toggle" ` +
+          `title="${mlOn ? "Switch to single-line input" : "Switch to multiline editor (resize grip)"}">⤢</button>`
+        : "";
     const tools = [
         inPresetCb,
+        mlChip,
         isNumericMirror
             ? `<button type="button" class="hub-btn hub-gear${hasSliderOverride(item) ? " hub-gear-on" : ""}" data-action="num-settings" title="Custom min / max / step for this slider (+ push to the real node)">⚙</button>`
             : "",
@@ -2270,6 +2303,169 @@ function openPresetToolsMenu(node, trigger) {
 // Value plumbing: target node -> controls  (registered as the values bus fn)
 // ---------------------------------------------------------------------------
 
+/** v30: paint the input-file preview of a media-source row. Reads the
+ * output store via firstMediaSpec (the frontend keeps loader inputs there,
+ * type:"input"); falls back to /view of the combo value itself for fresh
+ * workflows whose store entry was not built yet. srcSig guard: unchanged
+ * URLs never touch the DOM. */
+function paintMediaPreview(node, item) {
+    try {
+        const st = stateMap.get(node);
+        const host = st?.root?.querySelector(
+            `[data-hub-item="${item.id}"] [data-role="media-prev"]`);
+        if (!host) return;
+        const { tn } = findTarget(item);
+        const spec = firstMediaSpec(tn);
+        let url = spec?.url || "";
+        if (!url) {
+            const cur = String(findTarget(item).tw?.value ?? "");
+            if (cur) {
+                try {
+                    const q = new URLSearchParams();
+                    q.set("filename", cur);
+                    q.set("type", item.options?.media?.folder || "input");
+                    url = app.api.apiURL(`/view?${q.toString()}`);
+                } catch (_) {}
+            }
+        }
+        if (host.dataset.srcSig === url) return;
+        host.dataset.srcSig = url;
+        const kind = item.options?.media?.kind || "image";
+        if (!url) {
+            const ph = kind === "audio" ? "🎵" : kind === "video" ? "🎞" : "🖼";
+            host.innerHTML = `<span class="hub-media-ph">${ph}</span>`;
+            return;
+        }
+        if (kind === "video") {
+            host.innerHTML = "";
+            const v = document.createElement("video");
+            v.src = url; v.muted = true; v.preload = "metadata";
+            try { v.playsInline = true; } catch (_) { v.setAttribute("playsinline", ""); }
+            v.className = "hub-media-el";
+            v.title = spec?.filename || "";
+            host.appendChild(v);
+        } else if (kind === "audio") {
+            host.innerHTML = `<span class="hub-media-ph">🎵</span>` +
+                `<span class="hub-media-name">${esc(spec?.filename ?? "")}</span>`;
+            host.title = spec?.filename || "";
+        } else {
+            host.innerHTML = "";
+            const img = document.createElement("img");
+            img.src = url; img.className = "hub-media-el"; img.alt = "";
+            img.title = spec?.filename || "";
+            host.appendChild(img);
+        }
+    } catch (_) { /* a broken preview must never kill the row */ }
+}
+
+/** v30: upload entry point - PREFER the node's own upload button ("upload"
+ * on modern builds): its picker, accept list and batch logic stay
+ * authoritative. Fallback: our own hidden file input. */
+function openMediaPicker(node, item) {
+    const { tn } = findTarget(item);
+    if (!tn) return;
+    const upBtn = tn.widgets?.find((w) =>
+        (typeof w?.type === "string" && w.type.toLowerCase() === "button") &&
+        /upload/i.test(String(w.name ?? "")) &&
+        typeof w.callback === "function");
+    if (upBtn) {
+        try { upBtn.callback?.(); } catch (err) {
+            console.warn("[SettingsHub] node upload button failed:", err);
+        }
+        return;
+    }
+    const kind = item.options?.media?.kind || "image";
+    const accept = kind === "video" ? "video/*"
+        : kind === "audio" ? "audio/*" : "image/*";
+    const inp = document.createElement("input");
+    inp.type = "file";
+    inp.accept = accept;
+    inp.style.display = "none";
+    inp.addEventListener("change", () => {
+        const files = Array.from(inp.files ?? []);
+        try { inp.remove(); } catch (_) {}
+        if (files.length) uploadMediaFiles(node, item, files);
+    });
+    document.body.appendChild(inp);
+    try { inp.click(); } catch (_) { try { inp.remove(); } catch (_) {} }
+}
+
+/** v30: make sure an uploaded path is selectable in the file combo. */
+function pushComboValue(item, tw, path) {
+    try {
+        if (Array.isArray(tw?.options?.values) && !tw.options.values.includes(path)) {
+            tw.options.values = [...tw.options.values, path];
+        }
+        const vals = item.options?.values;
+        if (Array.isArray(vals) && !vals.includes(path)) {
+            item.options.values = [...vals, path];
+        }
+    } catch (_) {}
+}
+
+/** v30: push files into the loader node. Route A - the node's OWN drop
+ * pipeline (useNodeDragAndDrop -> /upload/image -> combo update), reused
+ * via a synthesized DragEvent so custom packs keep their exact behavior.
+ * Route B (no onDrop / no DragEvent) - direct /upload/image + combo write.
+ */
+async function uploadMediaFiles(node, item, files) {
+    const { tn, tw } = findTarget(item);
+    if (!tn || !tw) return;
+    if (typeof tn.onDrop === "function" &&
+        typeof window.DragEvent === "function" &&
+        typeof window.DataTransfer === "function") {
+        try {
+            const dt = new window.DataTransfer();
+            for (const f of files) { try { dt.items.add(f); } catch (_) {} }
+            if (dt.files.length) {
+                const ev = new window.DragEvent("drop", {
+                    dataTransfer: dt, bubbles: true, cancelable: true,
+                });
+                await tn.onDrop(ev);
+                // The node pipeline updates its combo asynchronously - the
+                // reactive hook repaints the row on the value change; one
+                // delayed repaint covers builds that swap the store entry
+                // without touching the widget value (upload feedback, not
+                // value polling).
+                setTimeout(() => paintMediaPreview(node, item), 800);
+                return;
+            }
+        } catch (err) {
+            console.warn("[SettingsHub] media drop route failed:", err);
+        }
+    }
+    const folder = item.options?.media?.folder || "input";
+    let lastPath = null;
+    let failed = 0;
+    for (const file of files) {
+        try {
+            const body = new FormData();
+            body.append("image", file);
+            body.append("type", folder);
+            const resp = await fetch(app.api.apiURL("/upload/image"), {
+                method: "POST", body,
+            });
+            if (!resp.ok) { failed++; continue; }
+            const data = await resp.json();
+            const path = data?.subfolder ? `${data.subfolder}/${data.name}` : data?.name;
+            if (path) {
+                lastPath = path;
+                pushComboValue(item, tw, path);
+                writeTargetValue(tn, tw, path);
+            } else failed++;
+        } catch (err) {
+            failed++;
+            console.warn("[SettingsHub] media upload failed:", err);
+        }
+    }
+    if (lastPath) {
+        refreshNodeValues(node);
+        showHubToast(`Uploaded ${files.length - failed} file(s) -> ${lastPath}`, {});
+    } else if (failed) {
+        showHubToast(`Upload failed (${failed} file(s))`, {});
+    }
+}
+
 function refreshValuesDom(node) {
     const st = stateMap.get(node);
     if (!st || !st.root) return;
@@ -2292,6 +2488,13 @@ function refreshValuesDom(node) {
                 if (lbl) { lbl.classList.add("hub-orphan"); lbl.textContent = `⚠️ ${lbl.textContent}`; }
             }
             continue;
+        }
+
+        // v30: media rows repaint their input-file preview here - the
+        // store entry follows the combo value; paintMediaPreview's srcSig
+        // guard skips the DOM write when the URL did not change.
+        if (item.type === "widget_binding" && item.widgetType === "media") {
+            paintMediaPreview(node, item);
         }
 
         for (const control of row.querySelectorAll("[data-hub-control]")) {
@@ -2650,6 +2853,11 @@ function renderHub(node) {
     // The live target widget is always authoritative.
     for (const item of cfg.items) {
         if (item.type !== "widget_binding" && item.type !== "widget_portal") continue;
+        // v30: media-source rows own their type - the bound widget IS a
+        // combo live, but the row renders as a media mirror (preview +
+        // combo + upload); healing it back to a plain combo would strip
+        // the preview and the upload affordance.
+        if (item.widgetType === "media") continue;
         const { tw } = findTarget(item);
         if (!tw) continue;
         // Slider overrides requested to stick on real nodes: re-push them
@@ -2683,7 +2891,9 @@ function renderHub(node) {
         if (itemIsPortal) continue; // portals carry no primitive values
 
         if (live !== item.widgetType) item.widgetType = live;
-        if (live === "text") {
+        if (live === "text" && item.options?.mlManual !== true) {
+            // v30: auto-heal only while the user has not pinned a manual
+            // choice with the ⤢ chip (item.options.mlManual).
             const ml = isMultilineWidget(tw);
             if (ml !== !!item.options?.multiline) {
                 item.options = { ...(item.options || {}), multiline: ml };
@@ -2706,6 +2916,13 @@ function renderHub(node) {
 
     // Mount portal embeds (DOM relocation / canvas draw loops).
     Portals.mountPortals(node, st.root);
+
+    // v30: paint input-file previews of media-source rows (output store).
+    for (const mIt of cfg.items) {
+        if (mIt.type === "widget_binding" && mIt.widgetType === "media") {
+            paintMediaPreview(node, mIt);
+        }
+    }
 
     // v24 queue bar: paint current server truth immediately after rebuild.
     try { paintQueueBarDom(st.root); } catch (_) {}
@@ -2991,6 +3208,23 @@ function wireEvents(node, st) {
                 renderHub(node);
                 break;
             }
+            case "ml-toggle": {
+                // v30: flip the row between single-line input and the
+                // multiline (resizable) textarea mirror.
+                const mrow = btn.closest("[data-hub-item]");
+                const mitem = getHubConfig(node).items.find((i) => i.id === mrow?.dataset.hubItem);
+                if (mitem) {
+                    if (mitem.options?.multiline === true) {
+                        if (mitem.options) delete mitem.options.multiline;
+                    } else {
+                        mitem.options = { ...(mitem.options || {}), multiline: true };
+                    }
+                    mitem.options.mlManual = true; // manual choice beats the auto-heal
+                    syncNode(node);
+                    renderHub(node);
+                }
+                break;
+            }
             case "preset-save": openPresetQuickSave(node, btn); break;
             case "preset-trigger": openPresetPickerPopover(node, btn); break;
             case "inpreset-toggle": {
@@ -3097,6 +3331,42 @@ function wireEvents(node, st) {
     root.addEventListener("click", (e) => {
         const btn = e.target.closest('button[data-role="combo"]');
         if (btn && !btn.disabled) openComboPopup(node, btn);
+    });
+
+    // v30 media rows: upload picker + drag&drop routing. The drop zone is
+    // the whole media mirror; files go through the node's own onDrop
+    // pipeline when present (custom packs keep their behavior), else
+    // through our /upload/image fallback.
+    root.addEventListener("click", (e) => {
+        const up = e.target.closest?.('[data-role="media-upload"]');
+        if (!up) return;
+        const row = up.closest("[data-hub-item]");
+        const item = getHubConfig(node).items.find((i) => i.id === row?.dataset.hubItem);
+        if (item) openMediaPicker(node, item);
+    });
+    root.addEventListener("dragover", (e) => {
+        const zone = e.target.closest?.(".hub-mirror-media");
+        if (!zone) return;
+        if (Array.from(e.dataTransfer?.types ?? []).includes("Files")) {
+            e.preventDefault();
+            zone.classList.add("hub-media-drag");
+        }
+    });
+    root.addEventListener("dragleave", (e) => {
+        const zone = e.target.closest?.(".hub-mirror-media");
+        if (zone) zone.classList.remove("hub-media-drag");
+    });
+    root.addEventListener("drop", (e) => {
+        const zone = e.target.closest?.(".hub-mirror-media");
+        if (!zone) return;
+        e.preventDefault();
+        e.stopPropagation();
+        zone.classList.remove("hub-media-drag");
+        const files = Array.from(e.dataTransfer?.files ?? []);
+        if (!files.length) return;
+        const irow = zone.closest("[data-hub-item]");
+        const item = getHubConfig(node).items.find((i) => i.id === irow?.dataset.hubItem);
+        if (item) uploadMediaFiles(node, item, files);
     });
 
     // Pinned button rows RUN their source callback on the live node.

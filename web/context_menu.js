@@ -3,6 +3,7 @@ import {
     getHubConfig, getActiveTabId, createBinding, createPortalBinding,
     createNewHub, HUB_NODE_NAME, detectWidgetType, portalKindOf, allHubs,
     isViewerNode, createViewerBinding, isInternalWidget,
+    mediaLoaderInfo, createMediaBinding,
 } from "./core.js";
 
 // ============================================================================
@@ -78,6 +79,22 @@ export function attachContextMenu() {
                     },
                 });
             }
+            // v30: media-source loaders - ONE row with the input-file
+            // preview, the searchable file combo and upload (native picker
+            // via the node's own upload button, drag&drop routed through
+            // the node's onDrop pipeline, /upload/image fallback).
+            try {
+                const mi = mediaLoaderInfo(node);
+                if (mi) {
+                    items.push({
+                        content: "🎬 Pin media source (preview + upload)",
+                        has_submenu: true,
+                        submenu: {
+                            options: buildMediaSubmenu(node, mi),
+                        },
+                    });
+                }
+            } catch (_) { /* detection must never kill the menu */ }
             return items;
         },
     });
@@ -102,6 +119,50 @@ function buildViewerSubmenu(node) {
     const title = String(node?.title || "").trim().slice(0, 26) || "node";
     const what = `🖼 viewer «${title}»`;
     const bind = (hub, tabId) => createViewerBinding(hub, node, tabId);
+
+    if (!hubs.length) {
+        return [{
+            content: `${what} → Create New Settings Hub`,
+            callback: () => {
+                const newHub = createNewHub();
+                if (!newHub) return;
+                bind(newHub, getActiveTabId(getHubConfig(newHub)));
+            },
+        }];
+    }
+
+    const entries = [];
+    for (const hub of hubs) {
+        const cfg = getHubConfig(hub);
+        const prefix = hubs.length > 1 ? `${hub.title || "Settings Hub"}: ` : "";
+        for (const tab of cfg.tabs) {
+            entries.push({
+                content: `${what} → ${prefix}${tab.name}`,
+                callback: () => bind(hub, tab.id),
+            });
+        }
+        entries.push({
+            content: `➕ ${what} → ${prefix}New Tab`,
+            callback: () => {
+                const name = prompt("New tab name:", "New Tab");
+                if (name !== null) {
+                    const tabId = `tab_${Date.now().toString(36)}`;
+                    cfg.tabs.push({ id: tabId, name, order: cfg.tabs.length });
+                    bind(hub, tabId);
+                }
+            },
+        });
+    }
+    return entries;
+}
+
+/** v30 media-source entries: hub x tab flat list + Create New / New Tab.
+ *  Same shape as the viewer submenu (ONE submenu level in the Vue menu). */
+function buildMediaSubmenu(node, mi) {
+    const hubs = allHubs();
+    const title = String(node?.title || "").trim().slice(0, 26) || "node";
+    const what = `🎬 media source «${title}»`;
+    const bind = (hub, tabId) => createMediaBinding(hub, node, mi, tabId);
 
     if (!hubs.length) {
         return [{

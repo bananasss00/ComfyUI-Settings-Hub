@@ -1408,8 +1408,76 @@ button.hub-pin-back {
 .settings-hub.hub-chrome-hidden .hub-add-divider,
 .settings-hub.hub-chrome-hidden .hub-add-tab,
 .settings-hub.hub-chrome-hidden .hub-inpreset,
+.settings-hub.hub-chrome-hidden .hub-mlt,
 .settings-hub.hub-searching .hub-drag-handle {
     display: none !important;
+}
+
+/* v30: media-source row - preview thumb + file combo + upload */
+.hub-mirror-media {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.hub-mirror-media .hub-combo {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.hub-media-prev {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 30px;
+    border-radius: 3px;
+    background: #10101e;
+    border: 1px solid #33334e;
+    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    position: relative;
+}
+
+.hub-media-el {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.hub-media-ph {
+    color: #77789e;
+    font-size: 13px;
+    line-height: 1;
+}
+
+.hub-media-name {
+    color: #9a9abe;
+    font-size: 8px;
+    max-width: 48px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hub-media-up {
+    flex: 0 0 auto;
+}
+
+.hub-mirror-media.hub-media-drag .hub-media-prev {
+    border-color: #7a7ae0;
+    box-shadow: 0 0 0 1px #7a7ae0 inset;
+    background: #1c1c34;
+}
+
+/* v30: multiline toggle chip - accent while the row IS a textarea */
+.hub-btn.hub-mlt.hub-mlt-on {
+    border-color: #4a7a8e;
+    color: #79d0ff;
 }
 
 /* Search-filtered rows (class toggle - no innerHTML rebuild while typing). */

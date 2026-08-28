@@ -95,6 +95,29 @@ function viewUrlFromSpec(spec) {
     } catch (_) { return ""; }
 }
 
+/** v30: current media spec of a node WITHOUT the image-only filter - the
+ * media-source rows need video/audio input files too. Reads the same
+ * output store as findOutputImages (the frontend keeps LoadImage/LoadVideo/
+ * LoadAudio inputs there with type:"input"). Returns {url,type,filename}
+ * or null. */
+export function firstMediaSpec(tn) {
+    const outputs = firstStoreEntry(tn, app?.nodeOutputs)
+        ?? (typeof tn?.images !== "undefined" ? { images: tn.images } : undefined);
+    const specs = Array.isArray(outputs?.images) ? outputs.images : [];
+    for (const s of specs) {
+        try {
+            if (s && typeof s === "object" && s.filename) {
+                return {
+                    url: viewUrlFromSpec(s),
+                    type: String(s.type ?? "output"),
+                    filename: String(s.filename),
+                };
+            }
+        } catch (_) {}
+    }
+    return null;
+}
+
 // ---------------------------------------------------------------------------
 // v27.3: media download - shared by the gallery, the fullscreen overlay and
 // the self-rendered video/img viewer (portal_manager.js imports this).
