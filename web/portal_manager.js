@@ -80,6 +80,10 @@ function resolveMembers(item, tn) {
 // ---------------------------------------------------------------------------
 
 const GHOST_CLASS = "hub-portal-ghost";
+// v32: opt-in layout surrender for roots that POSITION THEMSELVES
+// (computed absolute/fixed). Everything else keeps its own layout system -
+// see mountDomPortal / styles.css for the full story.
+const FLOAT_CLASS = "hub-portal-ghost-float";
 const SYNC_DEBOUNCE = 180;   // batch bursts of original-side mutations
 const RETRY_DELAY = 400;     // re-check the interaction lock later
 const TOUCH_LOCK = 900;      // ms after clone interaction before rebuilds
@@ -126,7 +130,22 @@ function mountDomPortal(item, tw, host, opts = {}) {
 
     let clone;
     try { clone = el.cloneNode(true); } catch (_) { return null; }
-    try { clone.classList.add(GHOST_CLASS); } catch (_) {}
+    try {
+        clone.classList.add(GHOST_CLASS);
+        // v32: the hard display/position flattening used to break
+        // self-laid-out panels - the KJNodes Model Preview Override mirror
+        // lost its flex column, its absolute-fill preview image escaped the
+        // image area (the hub host is position:relative) and the opaque
+        // info panel painted over the picture. Only roots that position
+        // THEMSELVES (the panels the hard rules were written for) get the
+        // legacy detach treatment now.
+        let cs = null;
+        try { cs = win.getComputedStyle ? win.getComputedStyle(el) : null; } catch (_) {}
+        const pos = String(cs?.position || "").toLowerCase();
+        if (pos === "absolute" || pos === "fixed") {
+            clone.classList.add(FLOAT_CLASS);
+        }
+    } catch (_) {}
 
     const rec = {
         kind: "dom",
@@ -207,7 +226,11 @@ function mountDomPortal(item, tw, host, opts = {}) {
         rec.touchHandler = (e) => {
             rec.lastTouch = e?.type === "click" ? 0 : Date.now();
         };
-        for (const t of ["pointerdown", "wheel", "keydown", "input", "focusin",
+        // v32: pointermove/mousemove extend the lock too - a drag gesture
+        // longer than TOUCH_LOCK (split grips, native sliders) used to lose
+        // its protection and a rebuild could land mid-drag.
+        for (const t of ["pointerdown", "pointermove", "mousemove", "wheel",
+            "keydown", "input", "focusin",
             "dragstart", "drag", "dragend", "drop", "pointercancel", "click"]) {
             target.addEventListener(t, rec.touchHandler, { capture: true, passive: true });
         }
@@ -218,12 +241,68 @@ function mountDomPortal(item, tw, host, opts = {}) {
         target.addEventListener("mouseup", captureGhostTextHs);
         rec.handlers.push(["pointerup", captureGhostTextHs, target]);
         rec.handlers.push(["mouseup", captureGhostTextHs, target]);
+        // v32: local split-grip drag (see splitDrag above).
+        target.addEventListener("mousedown", splitDrag);
+        rec.handlers.push(["mousedown", splitDrag, target]);
     };
+    // --- v32: local split-grip drag inside the ghost ----------------------
+    // Panels like KJNodes' Model Preview Override put an ns-resize grip
+    // between a flex-grow media area and a fixed-height info panel. The
+    // pack's own grip handler resizes the ORIGINAL panel only, so the ghost
+    // used to follow through delayed rebuilds (which could even land
+    // mid-drag - pointermove did not extend the touch lock). A grip gesture
+    // now ALSO drives a local drag on the clone: instant feedback with the
+    // same clamp contract as the source (panel >= 60px, media keeps
+    // >= 80px), while the forwarded events keep updating the original node
+    // in sync - on release the rebuild lands with both sides equal.
+    const splitDrag = (ev) => {
+        try {
+            if (ev.button !== 0) return;
+            let grip = null;
+            let t = ev.target;
+            for (let i = 0; t && t !== clone && i < 6; i++) {
+                let cur = "";
+                try {
+                    cur = String(win.getComputedStyle(t)?.cursor || "").toLowerCase();
+                } catch (_) {}
+                if (cur === "ns-resize" || cur === "row-resize") { grip = t; break; }
+                t = t.parentElement;
+            }
+            if (!grip) return;
+            const panel = grip.nextElementSibling;
+            if (!panel) return;
+            const startY = Number(ev.clientY) || 0;
+            const startH = (panel.getBoundingClientRect?.().height
+                || panel.offsetHeight
+                || parseFloat(panel.style?.height) || 0);
+            if (!(startH > 0)) return;
+            // Live root height; falls back to the persisted mirror height
+            // for layout-less environments (smoke harness).
+            const rootH = (clone.getBoundingClientRect?.().height
+                || Number(rec.item?.ghostSplitH) || 0);
+            const maxH = rootH > 0
+                ? Math.max(60, rootH - 80)
+                : Math.max(60, startH + 200);
+            const move = (e2) => {
+                const y = Number(e2.clientY) || 0;
+                const nh = Math.max(60, Math.min(maxH, startH + (startY - y)));
+                try { panel.style.height = `${Math.round(nh)}px`; } catch (_) {}
+            };
+            const up = () => {
+                try { win.removeEventListener("mousemove", move); } catch (_) {}
+                try { win.removeEventListener("mouseup", up); } catch (_) {}
+            };
+            win.addEventListener("mousemove", move);
+            win.addEventListener("mouseup", up);
+        } catch (_) { /* interaction plumbing must never throw */ }
+    };
+
     const unbindClone = (target) => {
         for (const [t, fn, elem] of rec.handlers.splice(0)) {
             try { elem.removeEventListener(t, fn); } catch (_) {}
         }
-        for (const t of ["pointerdown", "wheel", "keydown", "input", "focusin",
+        for (const t of ["pointerdown", "pointermove", "mousemove", "wheel",
+            "keydown", "input", "focusin",
             "dragstart", "drag", "dragend", "drop", "pointercancel", "click"]) {
             try { target?.removeEventListener(t, rec.touchHandler, { capture: true }); } catch (_) {}
         }
@@ -284,6 +363,35 @@ function mountDomPortal(item, tw, host, opts = {}) {
         } catch (_) {}
     };
 
+    // --- v32: mirror the source panel's own height ------------------------
+    // A flex-column panel root (KJNodes Model Preview Override: flex:1
+    // image area over a fixed-height info panel) lays out against its own
+    // height. In the node that height comes from the widget box; in the hub
+    // a content-sized clone collapses the image area to its min-height and
+    // the grip drag has nothing to redistribute. Capture the source's
+    // offsetHeight once (transform-independent, works for off-viewport
+    // nodes), persist it per item and re-apply after every re-clone swap -
+    // the hub mirror keeps the node's image/info split and the grip behaves
+    // 1:1 with the node. Non-flex roots are untouched (legacy behavior).
+    const applyGhostPanelSize = (rootEl) => {
+        try {
+            if (!rootEl?.style) return;
+            const cs = win.getComputedStyle ? win.getComputedStyle(rootEl) : null;
+            if (String(cs?.display || "").toLowerCase().indexOf("flex") < 0) return;
+            if (String(cs?.flexDirection || "").toLowerCase() !== "column") return;
+            const saved = Number(rec.item?.ghostSplitH);
+            if (Number.isFinite(saved) && saved >= 60) {
+                rootEl.style.height = `${Math.round(saved)}px`;
+                return;
+            }
+            const oh = Math.round(el.offsetHeight || 0);
+            if (oh >= 60) {
+                rec.item.ghostSplitH = oh;
+                rootEl.style.height = `${oh}px`;
+            }
+        } catch (_) { /* cosmetics must never break the mount */ }
+    };
+
     // --- original -> clone: debounced full re-clone swap ----------------
     // Defer ONLY while the user is mid-typing / a native popup is open.
     // Button/toggle focus (which Chromium keeps on the clicked element until
@@ -330,6 +438,7 @@ function mountDomPortal(item, tw, host, opts = {}) {
         }
         normalizeGhostMedia(rec, fresh);
         applyGhostTextHs(fresh); // v27.4: restore user-resized textareas
+        applyGhostPanelSize(fresh); // v32: keep the node's image/info split
         if (rec.viewer) syncViewerVideoTime(rec);
     };
     const scheduleSync = (delay = SYNC_DEBOUNCE) => {
@@ -368,6 +477,7 @@ function mountDomPortal(item, tw, host, opts = {}) {
     // and video-preview panels used to come out cropped).
     normalizeGhostMedia(rec, rec.clone);
     applyGhostTextHs(rec.clone); // v27.4: restore user-resized textareas
+    applyGhostPanelSize(rec.clone); // v32: keep the node's image/info split
     if (rec.viewer) syncViewerVideos(rec);
     return rec;
 }

@@ -73,7 +73,12 @@ web/portal_manager.js  — живые встраивания: DOM-панели �
                          viewer-встраивания (v26.2): СВОЙ медиа-элемент хаба
                          — нативный <video controls> плеер / <img> / блит
                          canvas-превью; вотчер смены src; фолбэк painter
-                         +node.imgs; нормализация медиа в панельных гостах
+                         +node.imgs; нормализация медиа в панельных гостах;
+                         v32: ghost-база МЯГКАЯ (сохраняет flex-геометрию
+                         самодостаточных панелей), жёсткий detach — opt-in
+                         .hub-portal-ghost-float (computed absolute/fixed);
+                         ghostSplitH (высота сплит-корня) + локальный
+                         ns-resize сплит-драг клона
 web/viewer_gallery.js  — v27 БАТЧ-ГАЛЕРЕЯ вьюверов: свой <img>-вьювер хаба,
                          кормится от выходного стора фронтенда
                          (app.nodeOutputs / app.nodePreviewImages + легаси
@@ -493,6 +498,105 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v32: самодостаточные ghost-зеркала — Model Preview Override (KJNodes): инфо-панель НЕ лежит на картинке, живой разделитель в хабе
+- РЕПОРТ: превью из Model Preview Override (kj_preview DOM-виджет) в хабе
+  рисовалось с инфо-панелью ПОВЕРХ картинки (в ноде картинка и инфо
+  разделены перетаскиваемым грипом), и драг разделителя в хабе работал
+  неправильно.
+- КОРЕНЬ 1 (наложение): универсальная нормализация .hub-portal-ghost
+  плющила КАЖДЫЙ корень (position:static + display:block !important).
+  kj-pov-root — колонно-flex панель с position:relative зоной картинки и
+  absolute-fill <img> внутри: плющение убивало flex-колонку, а картинки
+  выпадали из зоны (их containing block становился .hub-portal-host —
+  position:relative!) и растягивались на весь host; непрозрачная инфо-
+  панель ложилась поверх. РЕШЕНИЕ: жёсткий detach стал OPT-IN — mountDom-
+  Portal добавляет .hub-portal-ghost-float ТОЛЬКО корням, которые
+  ПОЗИЦИОНИРУЮТ СЕБЯ САМИ (computed absolute/fixed — панели, под которые
+  правила писались); мягкая база (width/margin/visibility/pointer-events/
+  z-index/top-left-right-bottom auto) сохраняет собственную layout-систему
+  источника. Статичные/block-корни не меняются вовсе — риск регрессии
+  существующих ghost-панелей нулевой (для них computed = static/block).
+- КОРЕНЬ 2 (схлопывание картинки): контентный клон давал image-area
+  (flex:1, контент абсолютный) только min-height 80px. РЕШЕНИЕ:
+  applyGhostPanelSize — flex-column корням клон получает inline height =
+  сплит-высота: при первом монте offsetHeight ОРИГИНАЛА (трансформ-независ.
+  — работает и для нод вне вьюпорта; jsdom/layoutless — graceful no-op),
+  персистится в item.ghostSplitH (сериализуется с графом как ghostTextHs),
+  переприменяется после каждого re-clone swap. Сплит картинка/инфо в хабе
+  = 1:1 с нодой; не-flex корни не трогаются (легаси-поведение).
+- КОРЕНЬ 3 (разделитель): грип клонa форвардил события в оригинал —
+  оригинальный хендлер ресайзил ТОЛЬКО панель ноды, клон догонял через
+  отложенные rebuild'ы, а те могли приземлиться середрагом (pointermove НЕ
+  продлевал touch-lock — защита умирала через 900мс). РЕШЕНИЕ: (a)
+  локальный сплит-драг на клоне (splitDrag: mousedown на элементе с
+  computed cursor ns/row-resize, панель = nextElementSibling, клэмп как у
+  kj-ноды: панель >= 60px, медиа-зона >= 80px от высоты зеркала) —
+  мгновенный отклик в хабе; форвард продолжает крутить оригинал синхронно
+  (нода сохраняет свой kjPovPanelH на mouseup), на отпускании rebuild
+  выравнивает обе стороны; (b) pointermove/mousemove добавлены в touch-arms
+  — лок продлевается весь жест (чинит и ЛЮБЫЕ долгие драги внутри ghost
+  зеркал, напр. нативные слайдеры).
+- Смоуки: smoke_v32.mjs (17 чек: мягкий базис + ghostSplitH + graceful
+  no-op, float opt-in, локальный драг с клэмпом и живым форвардом,
+  продление лока pointermove — без него rebuild на ~980мс, переживание
+  высоты после rebuild, release). smoke_v31 F1 переведён на баннер v32.
+- Регресс: v31 38, v30 35, text_resize 34, presets_v29 78, ghost_lock 8,
+  ghost_prefix 8, canvas_route 2, resize_pin, media_dl_chrome 29 — ALL
+  PASSED; node --check web/*.js.
+- Коммит: «fix(hub): v32 self-laid-out ghost mirrors - KJNodes Model
+  Preview Override keeps its image/info split, live local grip drag in
+  the hub».
+
+### v32: самодостаточные ghost-зеркала — Model Preview Override (KJNodes): инфо-панель не лежит на картинке, живой разделитель в хабе
+- РЕПОРТ: превью из Model Preview Override (kj_preview DOM-виджет) в хабе
+  рисовалось с инфо-панелью ПОВЕРХ картинки (в ноде картинка и инфо
+  разделены перетаскиваемым грипом), и драг разделителя в хабе работал
+  неправильно.
+- КОРЕНЬ 1 (наложение): универсальная нормализация .hub-portal-ghost
+  плющила КАЖДЫЙ корень (position:static + display:block !important).
+  kj-pov-root — колонно-flex панель с position:relative зоной картинки и
+  absolute-fill <img> внутри: плющение убивало flex-колонку, а картинки
+  выпадали из зоны (их containing block становился .hub-portal-host —
+  position:relative!) и растягивались на весь host; непрозрачная инфо-
+  панель ложилась поверх. РЕШЕНИЕ: жёсткий detach стал OPT-IN — mountDom-
+  Portal добавляет .hub-portal-ghost-float ТОЛЬКО корням, которые
+  ПОЗИЦИОНИРУЮТ СЕБЯ САМИ (computed absolute/fixed — панели, под которые
+  правила писались); мягкая база (width/margin/visibility/pointer-events/
+  z-index/top-left-right-bottom auto) сохраняет собственную layout-систему
+  источника. Статичные/block-корни не меняются вовсе — риск регрессии
+  существующих ghost-панелей нулевой (для них computed = static/block).
+- КОРЕНЬ 2 (схлопывание картинки): контентный клон давал image-area
+  (flex:1, контент абсолютный) только min-height 80px. РЕШЕНИЕ:
+  applyGhostPanelSize — flex-column корням клон получает inline height =
+  сплит-высота: при первом монте offsetHeight ОРИГИНАЛА (трансформ-
+  независим — работает и для нод вне вьюпорта; jsdom/layoutless — graceful
+  no-op), персистится в item.ghostSplitH (сериализуется с графом, как
+  ghostTextHs), переприменяется после каждого re-clone swap. Сплит
+  картинка/инфо в хабе = 1:1 с нодой; не-flex корни не трогаются
+  (легаси-поведение).
+- КОРЕНЬ 3 (разделитель): грип клона форвардил события в оригинал —
+  оригинальный хендлер ресайзил ТОЛЬКО панель ноды, клон догонял через
+  отложенные rebuild'ы, а те могли приземлиться середрагом (pointermove НЕ
+  продлевал touch-lock — защита умирала через 900мс). РЕШЕНИЕ: (a)
+  локальный сплит-драг на клоне (splitDrag: mousedown на элементе с
+  computed cursor ns/row-resize, панель = nextElementSibling, клэмп как у
+  kj-ноды: панель >= 60px, медиа-зона >= 80px от высоты зеркала) —
+  мгновенный отклик в хабе; форвард продолжает крутить оригинал синхронно
+  (нода сохраняет свой kjPovPanelH на mouseup), на отпускании rebuild
+  выравнивает обе стороны; (b) pointermove/mousemove добавлены в
+  touch-arms — лок продлевается весь жест (чинит и ЛЮБЫЕ долгие драги
+  внутри ghost-зеркал, напр. нативные слайдеры).
+- Смоуки: smoke_v32.mjs (17 чек: мягкий базис + ghostSplitH + graceful
+  no-op, float opt-in, локальный драг с клэмпом и живым форвардом,
+  продление лока pointermove — без него rebuild на ~980мс, переживание
+  высоты после rebuild, release). smoke_v31 F1 переведён на баннер v32.
+- Регресс: v31 38, v30 35, text_resize 34, presets_v29 78, ghost_lock 8,
+  ghost_prefix 8, canvas_route 2, resize_pin, media_dl_chrome 29 — ALL
+  PASSED; node --check web/*.js.
+- Коммит: «fix(hub): v32 self-laid-out ghost mirrors - KJNodes Model
+  Preview Override keeps its image/info split, live local grip drag in
+  the hub».
 
 ### v31: шесть полевых фиксов — ширина значений, честный коллапс, одиночный unpin, 👁 против ✕ вкладки, уход закреплённого хаба при смене воркфлоу, колесо-слайдер
 - РЕПОРТ 1 «значения слишком ограничены по ширине»: label был flex:1
@@ -984,8 +1088,14 @@ dev_plan.md            — исходный технический спек пр
    копируются свойствами ДО dispatch (без echo — observer смотрит ТОЛЬКО
    оригинал); (b) оригинал→клон — debounce 180мс полный re-clone swap;
    ребилд ОТКЛАДЫВАЕТСЯ пока фокус внутри зеркала или <900мс с последнего
-   касания (pointerdown/wheel/key/focusin); занятая цепочка
-   перезаказывается по 400мс, не теряется. contextmenu НЕ форвардится.
+   касания (pointerdown/pointermove/mousemove/wheel/key/focusin); занятая
+   цепочка перезаказывается по 400мс, не теряется. contextmenu НЕ
+   форвардится. v32: ghost-база НЕ плющит layout зеркала — position/
+   display/transform снимаются только классом .hub-portal-ghost-float
+   (mountDomPortal вешает его на computed absolute/fixed корни);
+   flex-column корням высоту задаёт ghostSplitH; сплит-драг резолвится
+   УНИВЕРСАЛЬНО (computed cursor ns/row-resize + nextElementSibling),
+   хардкод под конкретные ноды запрещён.
 10. Липкость relocate-порталов устарела вместе с самим relocate: не двигай
    элементы — проблемы remount-циклов зума/offscreen неприменимы к клону.
 11. Поиск хабов — ТОЛЬКО через реестр `allHubs()` (core.js: trackHubNode /
@@ -1207,6 +1317,18 @@ layout-контракт (label 45%/56px, hub-mirror-grow у combo/text/num и е
 хаб и запись реестра, живой остаётся, свежий инстанс рефлоатит по pinPos);
 баннер v31. Песочница sb_v31: узлы-фикстуры в graph._nodes + trackHubNode
 (эмуляция nodeCreated).
+
+ZS (v32) — smoke_v32.mjs, 17 чек: мягкий ghost-базис (flex-column корень
+без float-класса, persisted ghostSplitH = inline height клона,
+absolute-fill img остаётся внутри relative image-area клона); graceful
+no-op без сохранённой высоты в layoutless-среде (height auto, ничего не
+персистится); float opt-in (computed absolute корень получает
+.hub-portal-ghost-float); локальный сплит-драг (mousedown -> мгновенный
+ресайз панели клона 140->170, направление «вверх = выше», клэмп root-80,
+конец по mouseup, форвард в оригинал жив параллельно); продление
+touch-лока pointermove (без него rebuild приземлялся ~980мс середрагом;
+с продлением — после жеста); ghostSplitH переживает rebuild + драг
+перевешивается на свежем клоне; release снимает все зеркала.
 
 ## 6. Упаковка и коммиты
 

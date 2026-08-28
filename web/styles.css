@@ -541,21 +541,35 @@ textarea.hub-portal-ghost {
 /* DOM ghost-mirror flavor: the hub holds a LIVE CLONE of the panel; the
    original stays on its node untouched. The clone must lay out INSIDE the
    hub row like a normal block (ComfyUI wrapper styles do not apply to it,
-   but panel code may have baked inline sizing assumptions). */
+   but panel code may have baked inline sizing assumptions).
+
+   v32: SOFT base. Force-flattening every root (position:static +
+   display:block) broke self-laid-out panels - KJNodes Model Preview
+   Override is a column-flex root with a relative image area holding an
+   absolute-fill preview image: flattening dropped the image out of its
+   area and let the opaque info panel paint over the picture. Geometry
+   surrender is now opt-in via .hub-portal-ghost-float (portal_manager
+   adds it when the source root computes to absolute/fixed). */
 .hub-portal-ghost {
-    position: static !important;
-    display: block !important;
     width: 100% !important;
     max-width: none !important;
     top: auto !important;
     left: auto !important;
     right: auto !important;
     bottom: auto !important;
-    transform: none !important;
     margin: 0 !important;
     visibility: visible !important;
     pointer-events: auto !important;
     z-index: auto !important;
+}
+
+/* v32: roots that position themselves (computed absolute/fixed) keep the
+   legacy detach treatment - without it such panels would hang off their
+   node-baked coordinates inside the hub row. */
+.hub-portal-ghost-float {
+    position: static !important;
+    display: block !important;
+    transform: none !important;
 }
 
 /* v26.1: ghost mirrors carrying live media (viewer embeds, video preview

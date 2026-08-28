@@ -24,7 +24,7 @@ import { syncAll } from "./sync_manager.js";
 // v30.3: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect twice already).
-console.info("[SettingsHub] web build: v31 - stretched value mirrors, real window collapse, single unpin, wheel sliders, workflow-switch prune");
+console.info("[SettingsHub] web build: v32 - self-laid-out ghost mirrors: KJNodes Model Preview Override image/info split, live local grip drag in the hub");
 
 // Load CSS via link tag to avoid module MIME type errors.
 (function loadStyles() {
