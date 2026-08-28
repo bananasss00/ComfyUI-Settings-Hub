@@ -3232,6 +3232,31 @@ function wireEvents(node, st) {
                 // v30: flip the row between single-line input and the
                 // multiline (resizable) textarea mirror.
                 const mrow = btn.closest("[data-hub-item]");
+                // v30.3 field diagnostics: Alt+click dumps the mirror's box
+                // truth (height/overflow/scrollbar mode) instead of
+                // toggling - remote bug reports stop being guesswork.
+                if (e.altKey) {
+                    const mta = mrow?.querySelector(
+                        "textarea.hub-text-area, input[data-role='text']");
+                    if (mta) {
+                        const mcs = getComputedStyle(mta);
+                        console.info("[SettingsHub] mirror box:", {
+                            inlineH: mta.style.height || "(none)",
+                            clientH: mta.clientHeight,
+                            scrollH: mta.scrollHeight,
+                            clientW: mta.clientWidth,
+                            offsetW: mta.offsetWidth,
+                            scrollTop: mta.scrollTop,
+                            overflowY: mcs.overflowY,
+                            resize: mcs.resize,
+                            fieldSizing: mcs.fieldSizing ||
+                                mcs.getPropertyValue("field-sizing"),
+                            scrollbarWidth: mcs.scrollbarWidth ||
+                                mcs.getPropertyValue("scrollbar-width"),
+                        });
+                    }
+                    break;
+                }
                 const mitem = getHubConfig(node).items.find((i) => i.id === mrow?.dataset.hubItem);
                 if (mitem) {
                     if (mitem.options?.multiline === true) {

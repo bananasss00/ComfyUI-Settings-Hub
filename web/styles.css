@@ -390,7 +390,28 @@
        frontend - dropped here as dead weight.) */
     field-sizing: fixed !important;
     overflow-y: auto !important;
+    /* v30.3: the scrollbar must be an ALWAYS-VISIBLE CLASSIC one. Windows 11
+       Chrome (and ComfyUI Desktop's Electron) draw fluent OVERLAY scrollbars:
+       they auto-hide when idle AND own the corner cell - field report: at the
+       first overflowing line the thumb was invisible and the native resize
+       grip vanished with it (same 155px box, grip at 6 lines, gone at 7).
+       Custom webkit scrollbar styles opt the element out of the fluent
+       overlay pipeline (classic bar + live corner grip); scrollbar-width/
+       color is the standard fallback - "thin" never renders as an
+       auto-hiding overlay. */
+    scrollbar-width: thin;
+    scrollbar-color: #3d4358 transparent;
 }
+
+.hub-text-area::-webkit-scrollbar { width: 9px; }
+.hub-text-area::-webkit-scrollbar-track { background: transparent; }
+.hub-text-area::-webkit-scrollbar-thumb {
+    background: #3d4358;
+    background-clip: padding-box;
+    border: 2px solid transparent;
+    border-radius: 5px;
+}
+.hub-text-area::-webkit-scrollbar-thumb:hover { background-color: #565d78; }
 
 /* Multiline mirror takes the remaining row width; stretching it vertically
    grows the node via the content observer (ResizeObserver on
