@@ -119,6 +119,59 @@ function indexPath(root, node) {
     return cur === root ? path.reverse() : null;
 }
 
+/**
+ * v33: signature of a self-laid-out split panel - a flex-COLUMN root that
+ * carries its own ns-resize/row-resize grip (KJNodes Model Preview Override
+ * and friends). For such roots the pack's OWN stylesheet is the layout
+ * authority: absolute-fill media, flex redistribution, grip behavior - all
+ * of it already works through the global classes the clone carries. The hub
+ * must not touch anything except the root height (and even that only as an
+ * inline-IMPORTANT override, see setSplitHeight).
+ */
+function isFlexSplitRoot(rootEl) {
+    try {
+        const win = globalThis.window;
+        if (!win?.getComputedStyle || !rootEl?.children) return false;
+        const cs = win.getComputedStyle(rootEl);
+        const display = String(cs?.display || "").toLowerCase();
+        const dir = String(cs?.flexDirection || "").toLowerCase();
+        if (display.indexOf("flex") < 0 || dir !== "column") return false;
+        // Bounded grip hunt: computed cursor over direct children, then
+        // grandchildren (the grip is a shallow sibling of the media area in
+        // every known build). jsdom resolves inline styles; real browsers
+        // resolve the pack's stylesheet - both land here.
+        const pool = Array.from(rootEl.children);
+        for (let i = 0; i < pool.length && i < 80; i++) {
+            const kid = pool[i];
+            let cursor = "";
+            try {
+                cursor = String(win.getComputedStyle(kid)?.cursor || "").toLowerCase();
+            } catch (_) {}
+            if (cursor === "ns-resize" || cursor === "row-resize") return true;
+            if (kid?.children) for (const g of kid.children) if (pool.length < 80) pool.push(g);
+        }
+        return false;
+    } catch (_) { return false; }
+}
+
+/**
+ * v33: inline-IMPORTANT height. Cascade order puts author-important INLINE
+ * above author-important RULES - the mirror CSS legitimately carries
+ * `.hub-portal-ghost.hub-portal-media { height:auto !important }` for viewer
+ * embeds, and that rule silently cancelled v32's plain inline height (the
+ * "panel over picture, divider frozen" field report). important-inline wins
+ * against any stylesheet rule, so the mirrored split survives whatever the
+ * flavor CSS does.
+ */
+function setSplitHeight(rootEl, h) {
+    const px = `${Math.round(h)}px`;
+    try {
+        rootEl.style.setProperty("height", px, "important");
+    } catch (_) {
+        try { rootEl.style.height = px; } catch (_) {}
+    }
+}
+
 function mountDomPortal(item, tw, host, opts = {}) {
     const el = tw.element ?? tw.inputEl ?? tw.contentEl;
     if (!el || typeof el.appendChild !== "function") return null;
@@ -376,21 +429,58 @@ function mountDomPortal(item, tw, host, opts = {}) {
     const applyGhostPanelSize = (rootEl) => {
         try {
             if (!rootEl?.style) return;
-            const cs = win.getComputedStyle ? win.getComputedStyle(rootEl) : null;
-            if (String(cs?.display || "").toLowerCase().indexOf("flex") < 0) return;
-            if (String(cs?.flexDirection || "").toLowerCase() !== "column") return;
+            // v33: flex/column checks folded into isFlexSplitRoot() - the
+            // grip signature ALSO gates the clone-height fallback below, so
+            // random flex-column widgets without a splitter stay legacy.
+            if (!isFlexSplitRoot(rootEl)) return;
             const saved = Number(rec.item?.ghostSplitH);
             if (Number.isFinite(saved) && saved >= 60) {
-                rootEl.style.height = `${Math.round(saved)}px`;
+                setSplitHeight(rootEl, saved);
                 return;
             }
-            const oh = Math.round(el.offsetHeight || 0);
+            // Ground truth is the ORIGINAL's laid-out height (transform-
+            // independent, works for off-viewport nodes). When the source
+            // cannot report one (hidden/collapsed at mount), the freshly
+            // appended clone still knows its own packed height (image min
+            // 80 + grip 5 + panel >= 60 = 145) - better than leaving the
+            // root height-less forever (the old one-shot capture hole).
+            let oh = Math.round(el.offsetHeight || 0);
+            if (!(oh >= 60)) {
+                const cr = rootEl.getBoundingClientRect?.();
+                const ch = Math.round(cr?.height || 0);
+                if (ch >= 145) oh = ch;
+            }
             if (oh >= 60) {
                 rec.item.ghostSplitH = oh;
-                rootEl.style.height = `${oh}px`;
+                setSplitHeight(rootEl, oh);
             }
         } catch (_) { /* cosmetics must never break the mount */ }
     };
+
+    // v33: live node-resize tracking. The mirror height used to be a
+    // one-shot capture - resizing the source node later left the hub split
+    // stale until the item was re-pinned. The RO watches the ORIGINAL only
+    // (the mirror cannot feed back into it), stays silent mid-interaction
+    // and is torn down with the record.
+    try {
+        const RO = typeof ResizeObserver !== "undefined"
+            ? ResizeObserver : win?.ResizeObserver ?? null;
+        if (RO) {
+            rec.splitRo = new RO((entries) => {
+                try {
+                    if (rec.releasing || rec.dead || !rec.clone) return;
+                    if (Date.now() - rec.lastTouch < TOUCH_LOCK) return;
+                    const h = Math.round(entries?.[0]?.contentRect?.height
+                        || el.offsetHeight || 0);
+                    if (!(h >= 60)) return;
+                    if (Math.abs(h - (Number(rec.item?.ghostSplitH) || 0)) < 2) return;
+                    rec.item.ghostSplitH = h;
+                    if (isFlexSplitRoot(rec.clone)) setSplitHeight(rec.clone, h);
+                } catch (_) {}
+            });
+            rec.splitRo.observe(el);
+        }
+    } catch (_) { rec.splitRo = null; }
 
     // --- original -> clone: debounced full re-clone swap ----------------
     // Defer ONLY while the user is mid-typing / a native popup is open.
@@ -491,6 +581,14 @@ function mountDomPortal(item, tw, host, opts = {}) {
 function normalizeGhostMedia(rec, clone) {
     try {
         if (!clone?.querySelector) return false;
+        // v33: self-laid-out split panels (flex-column + own resize grip)
+        // size their media through the pack's stylesheet. The media-flavor
+        // rewrite below used to tag them .hub-portal-media, whose
+        // `height:auto !important` cancelled the mirrored root height and
+        // collapsed the image strip to its minimum (the v32 field report).
+        // Leave such clones to their own CSS - the hub only owns the root
+        // height (applyGhostPanelSize).
+        if (isFlexSplitRoot(clone)) return false;
         const sel = rec.viewer ? "img,video,canvas" : "img,video";
         const media = clone.querySelectorAll(sel);
         if (!media?.length) return false;
@@ -567,6 +665,8 @@ function releaseDom(rec) {
     rec.releasing = true;
     try { rec.observer?.disconnect(); } catch (_) {}
     rec.observer = null;
+    try { rec.splitRo?.disconnect(); } catch (_) {}
+    rec.splitRo = null;
     try { rec.unbind?.(); } catch (_) {}
     rec.unbind = null;
     try { unsyncViewerVideos(rec); } catch (_) {}
