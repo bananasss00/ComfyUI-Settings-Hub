@@ -113,14 +113,29 @@
     color: #888;
 }
 
-/* Labels */
+/* Labels. v31: the label keeps its CONTENT width (capped at a 45% share,
+   min 56px) instead of flex:1 - stretching the hub now grows the VALUE
+   mirrors, not the captions. Long labels still ellipsize. */
 .hub-item-label {
-    flex: 1;
+    flex: 0 1 auto;
+    min-width: 56px;
+    max-width: 45%;
     color: #ccc;
     font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* v31: right-aligned tool group - margin-left:auto keeps the tools pinned
+   to the row edge on every row shape (rows without a stretching mirror used
+   to leave their buttons dangling mid-row). */
+.hub-row-tools {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    flex-shrink: 0;
 }
 
 .hub-item-label:hover {
@@ -360,9 +375,21 @@
     flex-shrink: 0;
 }
 
+/* v31: stretching mirrors - the VALUE uses the free row width (the mirrors
+   were hard-capped, so a wide hub grew dead space after the label). The
+   basis keeps a sane minimum; shrink lets long values compress gracefully
+   on narrow hubs instead of overflowing. */
+span.hub-mirror.hub-mirror-grow {
+    flex: 1 1 120px;
+    min-width: 0;
+    display: inline-flex;
+}
+
 .hub-mirror input[type="range"].hub-range {
     accent-color: #6b8ecb;
-    width: 78px;
+    width: auto;
+    flex: 1 1 78px;
+    min-width: 64px;
     max-width: unset;
     height: 12px;
     background: transparent;
@@ -373,6 +400,13 @@
 .hub-mirror input.hub-num-input {
     width: 52px;
     appearance: textfield;
+}
+
+/* v31: single-line text mirrors fill their (stretching) wrapper */
+.hub-mirror input.hub-text-input {
+    width: 100%;
+    max-width: none;
+    min-width: 48px;
 }
 
 .hub-text-area {
@@ -883,7 +917,10 @@ button.hub-combo {
     border-radius: 3px;
     font-size: 11px;
     padding: 2px 6px;
-    max-width: 110px;
+    /* v31: fills the stretching mirror (was capped at 110px while the hub
+       could grow much wider). The label span still ellipsizes. */
+    width: 100%;
+    max-width: none;
     min-width: 0;
     cursor: pointer;
     font-family: inherit;
@@ -1283,6 +1320,16 @@ button.hub-pin-back {
     display: none;
 }
 
+/* v31: collapse must COLLAPSE THE WINDOW, not only hide the body. The
+   explicit (user-resized) box is dropped in JS for the collapsed period;
+   these rules shrink the remaining shell to the header strip (auto width
+   beats the 380px default; the JS re-applies the persisted size on expand). */
+.hub-pin-panel.hub-pin-collapsed {
+    width: auto !important;
+    height: auto !important;
+    min-width: 150px;
+}
+
 /* v27.2: user-resized window - the panel gets explicit px width/height and
    the body becomes the flexible scroll area. The unsized path above keeps
    hugging content (max-height still applies). */
@@ -1383,6 +1430,13 @@ button.hub-pin-back {
     box-shadow: 0 0 6px rgba(255, 212, 121, 0.35);
 }
 
+/* v31: while floating, the window header's pin button is THE unpin control -
+   the tab-bar twin inside the hub read as a second unpin. The tab-bar one
+   stays available in the canvas-slot hub (that is how you pin from there). */
+.hub-pin-body .hub-tab-bar .hub-pin-toggle {
+    display: none !important;
+}
+
 /* ---------------------------------------------------------------------------
    v25: widget filter + row-chrome visibility
    --------------------------------------------------------------------------- */
@@ -1439,6 +1493,7 @@ button.hub-pin-back {
 .settings-hub.hub-chrome-hidden .hub-add-tab,
 .settings-hub.hub-chrome-hidden .hub-inpreset,
 .settings-hub.hub-chrome-hidden .hub-mlt,
+.settings-hub.hub-chrome-hidden .hub-tab-del,
 .settings-hub.hub-searching .hub-drag-handle {
     display: none !important;
 }

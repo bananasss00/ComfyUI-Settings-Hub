@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { getHubConfig, trackHubNode, forgetHubNode } from "./core.js";
 import { syncNode } from "./sync.js";
-import { relayoutHub, disposeHubVisuals } from "./hub_ui_renderer.js";
+import { relayoutHub, disposeHubVisuals, pruneForeignHubs } from "./hub_ui_renderer.js";
 import * as Pins from "./pins.js";
 
 export const NODE_NAME = "SettingsHub";
@@ -153,6 +153,10 @@ app.registerExtension({
         installBadgePainter();
     },
     afterConfigureGraph() {
+        // v31: BEFORE the survivors re-render - a graph configure (workflow
+        // switch) rebuilds node instances without firing onRemoved; sweep
+        // dead hubs so their pinned windows do not outlive the workflow.
+        try { pruneForeignHubs(); } catch (_) {}
         registerHubNode();
         installBadgePainter();
         Pins.repaint(app); // badges for freshly loaded graph

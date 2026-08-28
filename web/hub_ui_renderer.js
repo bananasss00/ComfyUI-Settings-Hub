@@ -23,7 +23,7 @@ import {
     getHubConfig, getActiveTabId, sortedTabs, itemsOfTab, genId,
     liveComboValues, coerceNumeric, removeItem, detectWidgetType,
     isMultilineWidget, portalKindOf, resolveBindingTarget, findHolderChainOf,
-    findWidgetOnNode,
+    findWidgetOnNode, allGraphs, forgetHubNode,
     synthSliderWindow, growSynthWindow, allHubs,
     effectiveSliderParams, getSliderOverride, hasSliderOverride,
     setSliderOverride, clearSliderOverride, applyOverrideToTargetWidgets,
@@ -172,7 +172,7 @@ function buildTabBarHtml(cfg) {
         `<input type="text" class="hub-search" data-role="hub-search" spellcheck="false" ` +
         `placeholder="🔍" title="Filter widgets on this tab (substring, case-insensitive; Esc clears)">` +
         `<button type="button" class="hub-chrome-toggle${cfg.hideChrome ? " hub-chrome-off" : ""}" data-action="chrome-toggle" ` +
-        `title="Show / hide row chrome (handles ⠿, ✕, slider ⚙, hub ⚙, ＋Div, + tab)" ` +
+        `title="Show / hide row chrome (handles ⠿, row ✕, tab ✕, slider ⚙, hub ⚙, ＋Div, + tab)" ` +
         `aria-pressed="${cfg.hideChrome ? "true" : "false"}">👁</button>` +
         `<button type="button" class="hub-pin-toggle${cfg.pinned ? " hub-pin-on" : ""}" data-action="pin-toggle" ` +
         `title="Keep this hub on screen - float above the canvas, survives panning/zoom" ` +
@@ -194,7 +194,9 @@ function mirrorHtml(item, tw) {
             const vals = liveComboValues(item, tw);
             const cur = String(tw?.value ?? "");
             const sig = vals.join("¦");
-            return `<span class="hub-mirror hub-mirror-combo">` +
+            // v31: hub-mirror-grow - the mirror stretches into the free row
+            // width (values were capped too narrow; see styles.css).
+            return `<span class="hub-mirror hub-mirror-combo hub-mirror-grow">` +
                 `<button type="button" class="hub-combo" data-role="combo" data-hub-control data-sig="${esc(sig)}" ` +
                 `title="${esc(cur)}${cur ? "\n" : ""}Searchable list - filter parts separated by space, all must match, case-insensitive">` +
                 `<span class="hub-combo-label">${esc(cur)}</span><span class="hub-combo-caret">▾</span></button></span>`;
@@ -209,7 +211,7 @@ function mirrorHtml(item, tw) {
             const vals = liveComboValues(item, tw);
             const sig = vals.join("¦");
             const ph = m.kind === "audio" ? "🎵" : m.kind === "video" ? "🎞" : "🖼";
-            return `<span class="hub-mirror hub-mirror-media" data-media-kind="${esc(m.kind || "image")}">` +
+            return `<span class="hub-mirror hub-mirror-media hub-mirror-grow" data-media-kind="${esc(m.kind || "image")}">` +
                 `<span class="hub-media-prev" data-role="media-prev" title="${esc(cur)}">` +
                 `<span class="hub-media-ph">${ph}</span></span>` +
                 `<button type="button" class="hub-combo" data-role="combo" data-hub-control data-sig="${esc(sig)}" ` +
@@ -244,22 +246,26 @@ function mirrorHtml(item, tw) {
             // Display-only helper for PrimitiveFloat-style widgets whose
             // bounds are effectively ±infinity: typed commits stay free,
             // coercion still clamps ONLY by declared bounds (+ overrides).
+            // v31: the slider is WHEEL-DRIVEN too - plain wheel = +/- step,
+            // Shift+wheel = x10 (handler in wireEvents; the hint travels on
+            // both the declared-range and the synth-range titles).
             let slider;
             if (finMin && finMax) {
                 slider = `<input type="range" class="hub-range${o.overridden ? " hub-range-ovr" : ""}" data-role="range" data-hub-control ` +
+                    `title="Drag, type or wheel - Shift+wheel = x10 step" ` +
                     `value="${esc(String(v))}" min="${o.min}" max="${o.max}" step="${sStep}">`;
             } else {
                 const w = synthSliderWindow(v);
                 slider = `<input type="range" class="hub-range hub-range-synth${o.overridden ? " hub-range-ovr" : ""}" data-role="range" data-hub-control ` +
                     `data-synth-range="1" value="${esc(String(v))}" min="${w.min}" max="${w.max}" step="${sStep}" ` +
-                    `title="No declared source bounds - adaptive nudge around the current value; exact values via the text field">`;
+                    `title="No declared source bounds - adaptive nudge around the current value; exact values via the text field; wheel = +/- step (Shift = x10)">`;
             }
             // The editor is a TEXT input with inputmode=decimal, NOT
             // type=number: native number fields SANITIZE the value ("0,9"
             // becomes "", comma locales and exotic decimals die before our
             // validation ever sees them). We own clamping/quantization in
             // coerceNumeric, so the raw user text always reaches it intact.
-            return `<span class="hub-mirror hub-mirror-num">` +
+            return `<span class="hub-mirror hub-mirror-num hub-mirror-grow">` +
                 `<input type="text" inputmode="decimal" class="hub-num-input" data-role="number" data-hub-control ` +
                 `value="${esc(String(v))}"${numAttrs}>` + slider + `</span>`;
         }
@@ -288,7 +294,8 @@ function mirrorHtml(item, tw) {
                 // content observer so the node re-fits.
                 return `<span class="hub-mirror hub-mirror-text"><textarea class="hub-text-area" rows="3" spellcheck="false" data-role="text" data-hub-control>${esc(val)}</textarea></span>`;
             }
-            return `<span class="hub-mirror"><input type="text" class="hub-text-input" data-role="text" data-hub-control value="${esc(val)}"></span>`;
+            // v31: single-line text mirrors stretch too (hub-mirror-grow).
+            return `<span class="hub-mirror hub-mirror-grow"><input type="text" class="hub-text-input" data-role="text" data-hub-control value="${esc(val)}"></span>`;
         }
     }
 }
@@ -342,6 +349,11 @@ function itemRowHtml(item) {
         `<button type="button" class="hub-btn hub-locate" data-action="locate" ${ok ? "" : "disabled"} title="Locate source node">🎯</button>`,
         `<button type="button" class="hub-btn hub-remove" data-action="unpin" title="Unpin from Hub">✕</button>`,
     ].join("");
+    // v31: tools live in their own right-aligned group - margin-left:auto
+    // pushes them to the row edge even on rows WITHOUT a stretching mirror
+    // (checkbox/button rows used to dangle mid-row once labels stopped
+    // being flex:1).
+    const toolsHtml = `<span class="hub-row-tools">${tools}</span>`;
 
     // Portal items embed the custom widget itself instead of a value mirror.
     // v26 viewer embeds pin the whole SOURCE NODE (its own background painter
@@ -354,7 +366,7 @@ function itemRowHtml(item) {
         : (ok ? mirrorHtml(item, tw) : "");
 
     return `<div class="hub-item-row${ok ? "" : " hub-orphan-row"}" data-hub-item="${esc(item.id)}" data-tab-id="${esc(item.tabId)}">` +
-        handle + labelEl + body + tools + `</div>`;
+        handle + labelEl + body + toolsHtml + `</div>`;
 }
 
 function dividerRowHtml(item) {
@@ -720,7 +732,11 @@ function applyPinSize(node, panel) {
     let size = null;
     try {
         const raw = getHubConfig(node).pinSize;
-        size = raw ? clampPinSize(raw.w, raw.h) : null;
+        // v31: a COLLAPSED window hugs its header - the explicit box is
+        // dropped for the collapsed period and re-applied on expand, so
+        // collapsing actually shrinks the window instead of leaving an
+        // empty shell of the old size.
+        size = (raw && !getHubConfig(node).pinMin) ? clampPinSize(raw.w, raw.h) : null;
     } catch (_) { size = null; }
     if (size) {
         try { getHubConfig(node).pinSize = size; } catch (_) {}
@@ -838,6 +854,13 @@ function ensurePinPanel(node, st) {
         const cfg = getHubConfig(node);
         cfg.pinMin = !cfg.pinMin;
         panel.classList.toggle("hub-pin-collapsed", cfg.pinMin);
+        // v31: collapsing must COLLAPSE THE WINDOW, not just hide the body -
+        // an explicit (user-resized) box used to keep its full height and
+        // leave a big empty shell behind the header. Drop the explicit box
+        // while collapsed; expanding re-applies the persisted size (or the
+        // hug mode when the user never resized).
+        applyPinSize(node, panel);
+        btnMin.textContent = cfg.pinMin ? "+" : "–";
         savePinPosFromRect(node, panel);
     });
     btnBack.addEventListener("click", (e) => {
@@ -1022,6 +1045,46 @@ export function disposeHubVisuals(node) {
     const p = pinPanels.get(node);
     try { p?.panel.remove(); } catch (_) {}
     pinPanels.delete(node);
+}
+
+// ---------------------------------------------------------------------------
+// v31: workflow-switch hygiene (field report: a screen-pinned hub stayed on
+// screen after switching to another workflow). A frontend graph configure
+// (workflow tab switch, file open, undo) rebuilds node instances and is NOT
+// guaranteed to run onRemoved for the dropped ones - the floating panel and
+// the registry entry of such a dead hub must be swept explicitly. Called
+// from the afterConfigureGraph hook BEFORE syncAll re-renders survivors.
+// ---------------------------------------------------------------------------
+
+/** Is this hub still reachable from the LIVE root graph (root canvas or any
+ *  nested subgraph)? A walker failure answers YES - live state is never
+ *  destroyed on a tooling hiccup. */
+function hubIsReachable(hub) {
+    try {
+        for (const g of allGraphs()) {
+            if (Array.isArray(g?._nodes) && g._nodes.includes(hub)) return true;
+            if (Array.isArray(g?.nodes) && g.nodes.includes(hub)) return true;
+        }
+    } catch (_) {
+        return true;
+    }
+    return false;
+}
+
+/** Drop every tracked hub that no longer belongs to the live graph: forget
+ *  the registry entry (menus / poller stop seeing the ghost) and tear down
+ *  its floating visuals (a pinned panel must not outlive its workflow).
+ *  Returns the number of pruned hubs. Survivors re-float through the normal
+ *  onConfigure -> renderHub path when their workflow is opened again. */
+export function pruneForeignHubs() {
+    let removed = 0;
+    for (const hub of allHubs()) {
+        if (hubIsReachable(hub)) continue;
+        try { forgetHubNode(hub); } catch (_) {}
+        try { disposeHubVisuals(hub); } catch (_) {}
+        removed++;
+    }
+    return removed;
 }
 
 // ---------------------------------------------------------------------------
@@ -3458,6 +3521,31 @@ function wireEvents(node, st) {
     };
     root.addEventListener("pointerup", textResizeEnd);
     root.addEventListener("mouseup", textResizeEnd);
+
+    // v31: mouse wheel nudges the slider mirror. Plain wheel = one step,
+    // Shift+wheel = x10. The nudge goes through the SAME push pipeline as a
+    // drag: coerceNumeric clamps DECLARED bounds + overrides and snaps to
+    // the step grid, adaptive synth windows grow one-sidedly inside
+    // pushControlToTarget, the number sibling is synced. Ctrl+wheel stays a
+    // browser zoom gesture; wheel over the number editor stays untouched
+    // (typing has priority over nudging).
+    root.addEventListener("wheel", (e) => {
+        if (e.ctrlKey) return;
+        const mirror = e.target.closest?.(".hub-mirror-num");
+        if (!mirror || e.target.closest?.(".hub-num-input")) return;
+        const range = mirror.querySelector('input[data-role="range"]');
+        if (!range) return;
+        const d = Number(e.deltaY) || Number(e.deltaX) || 0;
+        if (!d) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const dir = d < 0 ? 1 : -1;
+        let step = Number(range.step);
+        if (!Number.isFinite(step) || step <= 0) step = 0.1;
+        const cur = Number(range.value);
+        if (!Number.isFinite(cur)) return;
+        pushControlToTarget(node, range, String(cur + dir * step * (e.shiftKey ? 10 : 1)));
+    }, { passive: false });
 }
 
 // ============================================================================

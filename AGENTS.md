@@ -54,9 +54,13 @@ web/sync_manager.js    — хуки реактивности на целевых
 web/hub_ui_renderer.js — весь UI хаба: табы, строки зеркал, searchable combo
                          popup, gear-поповер кастомных min/max/step (.hub-num-pop,
                          Apply/Push/Clear + checkbox auto-apply), layout-движок
-                         (AUTO/FILL), события (делегирование)
+                         (AUTO/FILL), события (делегирование; wheel-слайдеры);
+                         pruneForeignHubs — санитария реестра и плавающих окон
+                         после graph configure (воркфлоу-переключение)
 web/hub_node.js        — класс узла: onResize (user vs auto sizing),
-                         бейдж 📌 через обёртку LGraphCanvas.drawNode
+                         бейдж 📌 через обёртку LGraphCanvas.drawNode;
+                         afterConfigureGraph первым делом зовёт
+                         pruneForeignHubs (до syncAll выживших)
 web/context_menu.js    — пиннинг: ПКМ по hover-виджету; пункт меню ноды
                          "Pin custom panel"; "🖼 Pin viewer" (v26); фильтр
                          служебных "$$"-виджетов фронтенда (v26.1); перехват Ctrl/Cmd+ПКМ (capture)
@@ -489,6 +493,57 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v31: шесть полевых фиксов — ширина значений, честный коллапс, одиночный unpin, 👁 против ✕ вкладки, уход закреплённого хаба при смене воркфлоу, колесо-слайдер
+- РЕПОРТ 1 «значения слишком ограничены по ширине»: label был flex:1
+  (заголовок съедал всю ширину), зеркала жёстко кэпились (input 100px,
+  combo 110px, range 78px) — при ресайзе хаба (нода или pin-окно) рос только
+  заголовок. СЕТКА: .hub-item-label — контентная ширина (min 56px, максимум
+  45%); зеркала combo/media/num/single-line text получили hub-mirror-grow
+  (flex:1 1 120px, min-width:0) и тянутся в свободную ширину; range —
+  flex:1 1 78px внутри числовой пары; текстовое поле — width:100% в
+  обёртке; combo-триггер — width:100% (кэп снят, label эллипсится). Тулзы
+  обёрнуты в .hub-row-tools (margin-left:auto) — правый край ряда на ЛЮБОЙ
+  его форме (checkbox/button-ряды без растяжения раньше «висели» в
+  середине). Мультилайн и чекбоксы не тронуты.
+- РЕПОРТ 2 «свернуть прячет контент, а не окно»: при hub-pin-sized инлайн
+  ширина/высота оставались — за шапкой оставалась пустая оболочка.
+  Свернуть = СЖАТЬ ОКНО: applyPinSize игнорирует сохранённый размер, пока
+  cfg.pinMin (инлайн-бокс сброшен; CSS .hub-pin-collapsed width/height:
+  auto !important + min-width:150px), при развороте размер возвращается из
+  cfg; глиф «-»/«+»; свёрнутое состояние переживает re-render.
+- РЕПОРТ 3 «2 unpin»: в плавающем окне дублировались pin-кнопка шапки и
+  pin-кнопка таб-бара. Пока хаб плавает, таб-баровский твин скрыт
+  (.hub-pin-body .hub-tab-bar .hub-pin-toggle display:none); на канве
+  таб-баровский pin остаётся способом запинить.
+- РЕПОРТ 4 «eye должен прятать и крестик вкладки»: в список chrome-hidden
+  добавлен .hub-tab-del; тайтл тоггла перечисляет tab x.
+- РЕПОРТ 5 «пин-хаб не исчезает при переключении воркфлоу»: configure()
+  пересобирает инстансы нод и НЕ ОБЯЗАН звать onRemoved — панель и запись
+  реестра переживали смену воркфлоу. hub_ui_renderer.pruneForeignHubs():
+  хаб, недостижимый из живого корневого графа (обход allGraphs; СБОЙ обхода
+  = «живой», состояние не рушим), забывается (forgetHubNode) и теряет
+  визуал (disposeHubVisuals); вызов в hub_node.afterConfigureGraph ДО
+  syncAll-перерисовки выживших. Вернувшийся воркфлоу рефлоатит свежий
+  инстанс по сохранённым pinPos/pinSize.
+- РЕПОРТ 6 «крутить слайдер колесом»: wheel по .hub-mirror-num (кроме поля
+  числа) крутит значение: +/-step, Shift = x10; Ctrl+wheel не перехватывается
+  (зум браузера); preventDefault гасит скролл контейнера. Значение идёт тем
+  же пайплайном, что драг: coerceNumeric (границы + override'ы + сетка
+  шага), синтетическое окно растёт односторонне в pushControlToTarget,
+  number-сиблинг синхронизируется. Подсказка в тайтлах обоих вариантов
+  range.
+- Смоуки: smoke_v31.mjs (38 чек: A коллапс окна, B CSS/DOM-контракты unpin/
+  вкладки, D wheel, E layout-контракт, C prune при смене воркфлоу, F
+  баннер); smoke_ghost_prefix.mjs переведён с оригинальной upload-копии на
+  ТЕКУЩИЙ portal_manager (тестировал файл из upload/, отставший на 30
+  версий, и падал ложно) + стаб findWidgetOnNode — 8/8.
+- Регресс: v30 35, text_resize 34, presets_v29 78, ghost_lock 8,
+  canvas_route 2, resize_pin, media_dl_chrome 29, ghost_prefix 8 —
+  ALL PASSED; node --check web/*.js.
+- Коммит: «fix(hub): v31 field batch - stretched value mirrors, real window
+  collapse, single unpin, tab-x chrome, workflow-switch prune, wheel
+  sliders».
 
 ### v30.3: классические (всегда видимые) скроллбары зеркал + верификация сборки
 - ПОЛЕВОЙ РЕПОРТ (скриншоты 6/7 строк): бокс фиксирован (v30.2 работает —
@@ -1138,6 +1193,20 @@ textarea.hub-text-area несёт inline 64px, симуляция перетас
 .hub-text-area несёт ::-webkit-scrollbar + scrollbar-width: thin (выход из
 fluent overlay, иначе на Win11/Electron исчезают полоса и грип) и баннер
 сборки в settings_hub.js (B7/B8).
+
+ZR (v31) — smoke_v31.mjs, 38 чек: коллапс pin-окна (инлайн-бокс сброшен,
+cfg.pinSize переживает свёрнутый период, разворот восстанавливает размер,
+глиф -/+, re-render держит шапку); CSS/DOM-контракты (collapsed
+width/height auto, скрытый твин .hub-pin-body .hub-tab-bar .hub-pin-toggle
+реально в панели, chrome-hidden .hub-tab-del, grip скрыт у свёрнутого);
+wheel-слайдеры (+/-step, Shift x10, клэмп объявленной стены, не-перехват
+над number-полем и при Ctrl, синтетическое окно растёт односторонне);
+layout-контракт (label 45%/56px, hub-mirror-grow у combo/text/num и его
+отсутствие у checkbox, .hub-row-tools с margin-left:auto — ровно один на
+ряд, с unpin и locate внутри); prune (смена воркфлоу сметает чужой плавающий
+хаб и запись реестра, живой остаётся, свежий инстанс рефлоатит по pinPos);
+баннер v31. Песочница sb_v31: узлы-фикстуры в graph._nodes + trackHubNode
+(эмуляция nodeCreated).
 
 ## 6. Упаковка и коммиты
 
