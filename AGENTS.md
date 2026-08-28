@@ -78,7 +78,14 @@ web/viewer_gallery.js  — v27 БАТЧ-ГАЛЕРЕЯ вьюверов: сво�
                          Fullscreen API + ←/→/Esc/колесо); вотчер 1с;
                          findOutputImages / mountImageGallery /
                          openGalleryFullscreen / closeGalleryFullscreen
-web/preset_manager.js  — снапшоты ВСЕХ widget_binding хаба (порталы исключены)
+web/preset_manager.js  — Presets 2.0 (v28): v2-снапшоты АКТИВНОЙ вкладки
+                         (opt-out item.inPreset, кнопки/порталы мимо),
+                         buildApplyPlan/applyPlan (инспекция-поповер,
+                         валидация combo, клэмп coerceNumeric, частичное
+                         применение, отчёт), undo (память модуля),
+                         rename/duplicate/countDead/cleanDead,
+                         exportAll/importFromText; stable-key fallback
+                         nodeId+widget для перепинов
 web/global_settings.js — ГЛОБАЛЬНЫЕ настройки хаба (v26/v27): скорость обновления
                          зеркал (localStorage "settingshub.refreshMs"), + v27: глобальные
                          видеопредпочтения settingshub.videoMuted /
@@ -430,6 +437,54 @@ dev_plan.md            — исходный технический спек пр
   виджетов (панели с textarea внутри не переворачиваются в текст-зеркала).
   Плюс ghost-КОРЕНЬ может быть самой textarea (element==editor): её включил
   ghostTextareas() и CSS `textarea.hub-portal-ghost`.
+
+### v28: Presets 2.0 — пресеты по вкладкам: opt-out, инспекция, undo, тулзы
+- ФОРМАТ (v2): cfg.presets[name] = { v: 2, ts, scope: <tabId>, entries:
+  [{ itemId, label, widgetType, value, nodeId, widget }] }. ПЛОСКИЙ
+  {itemId: value} НЕ читается намеренно (старых пресетов не существовало —
+  решение пользователя). Хранение по-прежнему в cfg.presets (с графом).
+- SCOPE = АКТИВНАЯ ВКЛАДКА: захват (💾) снимает только value-байндинги
+  itemsOfTab(cfg, cfg.activeTabId); кнопки/порталы/делители не захватываются
+  (как и в v1). Применение пишет только свои entries — чужие вкладки не
+  трогает.
+- OPT-OUT (вариант А): в пресет по умолчанию попадают ВСЕ value-контролы
+  вкладки; у каждой строки value-байндинга чекбокс .hub-inpreset («include
+  in presets»): unchecked → item.inPreset = false (строка никогда не
+  захватывается), checked → флаг удаляется (участвует). Флажок — авторский
+  чром: скрывается 👁 (правило .hub-chrome-hidden). НЕ data-hub-control
+  (значение не носит) — отдельная ветка в change-листенере рендерера.
+- ЗАХВАТ с ПОДТВЕРЖДЕНИЕМ: перезапись существующего имени — только после
+  confirm «Overwrite "X"? (N value(s) from tab "Y")» (в v1 было молчаливо).
+- ПРИМЕНЕНИЕ = ИНСПЕКЦИЯ: выбор в дропдауне больше НЕ применяет мгновенно —
+  открывается поповер .hub-preset-pop (body-level fixed, паттерн combo/
+  gear/set-попапов). Каждая entry — строка с чекбоксом, статусом и превью:
+  ✓ ok / ⚠ missing-item (строки нет) / ⚠ missing-widget (нода/виджет не
+  найдены) / ⚠ combo-invalid (значения нет в liveComboValues — skip).
+  Дрейф-маркер «≈» если значение изменилось с момента захвата. [Apply N]
+  пишет только отмеченные строки (ЧАСТИЧНОЕ ПРИМЕНЕНИЕ), затем отчёт
+  «Applied M of N (−K skipped)». Все записи — writeTargetValue под общим
+  edit-lock + refreshNodeValues после батча (инвариант 2 не нарушается).
+- STABLE-KEY FALLBACK (Ф3): entry резолвится по itemId; если строка умерла
+  (перепин) — по паре nodeId + widget (тот же байндинг той же ноды).
+  presetCountDead / presetCleanDead считают «мёртвым» только entry,
+  неразрешимое ОБЕИМИ путями.
+- UNDO: один уровень, ПАМЯТЬ МОДУЛЯ (не cfg — не раздувает workflow и не
+  переживает reload намеренно). Снапшот берётся ДО первой записи и только
+  затронутых строк; кнопка ↩ в ряду пресетов появляется сразу после
+  применения (ряд перерисовывается точечно outerHTML-заменой, без полного
+  renderHub), клик восстанавливает значения и расходует undo (кнопка
+  удаляется).
+- ВАЛИДАЦИЯ/КЛЭМП: int/float/slider/number — coerceNumeric (границы виджета
+  + пользовательские override'ы, int округляется), checkbox — !!, текст —
+  String; combo — значение обязано быть среди liveComboValues, иначе skip.
+- ТУЛЗЫ (⋯ в ряду пресетов, body-level .hub-preset-tools): Rename (порядок
+  ключей сохраняется перестройкой карты), Duplicate (глубокая копия),
+  Clean dead entries (confirm с количеством), Export all (JSON-блоб
+  settings-hub-presets.json, формат {kind, version: 2, presets}),
+  Import (файл → presetImportFromText: wrapped или голый map, overwrite
+  только после confirm; ошибки — console.warn + flash ⚠).
+- Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
+  Титул 💾 обновлён (ACTIVE tab + opt-out).
 
 ### v25: фильтр виджетов, скрытие хрома, тихое удаление, очистка очереди
 - 🔍 фильтр (вход в таб-баре, свёрнут до линзы, :focus/.hub-search-active
@@ -847,6 +902,22 @@ node scripts/smoke_hub.mjs   # базовая линия: >=655 зелёных, 
 
 Правило: любое изменение зеркальных фич сопровождается регресс-проверкой в
 подходящей фазе (или новой фазой по букве).
+
+ZP (v28) — smoke_presets_v2.mjs, 51 чек: захват v2 (scope=активная
+вкладка, opt-out item.inPreset, исключение кнопок; метаданные
+label/widgetType/nodeId/widget), confirm на перезапись (decline сохраняет
+старый снапшот), поповер применения (статусы ok/missing-item/missing-widget/
+combo-invalid, drift-маркер «≈» только на изменившихся строках, частичное
+применение с пересчётом счётчика, отчёт «Applied M of N»), undo (восстанав-
+ливает пре-апплай состояние, расходуется, не переживает re-render), чекбокс
+строки (inPreset сериализуется с графом), tools-меню (rename с сохранением
+порядка ключей, duplicate deep-copy, clean dead entries с confirm-ветками,
+export JSON-блобом, import с overwrite-confirm и отказной веткой JSON),
+stable-key fallback (перепиненная строка резолвится по nodeId+widget),
+клэмп вне границ через coerceNumeric. Известное ограничение песочницы:
+jsdom не диспетчит change по клику checkbox ВНЕ документа (докнутый хаб
+живёт в element виджета) — смоук выставляет checked и диспетчит change
+вручную; в реальном браузере событие натуральное.
 
 ## 6. Упаковка и коммиты
 
