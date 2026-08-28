@@ -237,8 +237,14 @@ function mountDomPortal(item, tw, host, opts = {}) {
     // snapshot taken right after each apply keeps a plain click from saving
     // the source height (a fresh clone legally carries it).
     const ghostTextareas = (rootEl) => {
-        try { return rootEl?.querySelectorAll?.("textarea") ?? []; }
-        catch (_) { return []; }
+        try {
+            if (!rootEl?.querySelectorAll) return [];
+            // The ghost ROOT itself may be the editor (DOM widgets whose
+            // element IS the textarea, not a wrapper around it).
+            return rootEl.tagName === "TEXTAREA"
+                ? [rootEl]
+                : rootEl.querySelectorAll("textarea");
+        } catch (_) { return []; }
     };
     const applyGhostTextHs = (rootEl) => {
         try {

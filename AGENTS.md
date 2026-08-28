@@ -419,6 +419,17 @@ dev_plan.md            — исходный технический спек пр
   resize для .comfy-multiline-input.
 - Ширина намеренно НЕ ресайзится (vertical only): строка зеркала занимает
   всю ширину хаба, горизонтальный драг ломал бы раскладку строк.
+- Фикс v27.4.1 (PromptChecker без грипа): `isMultilineWidget` смотрела
+  только ПЕРВЫЙ ненулевой element-референс (`element ?? inputEl ??
+  contentEl`) и флаг `options.multiline`. Новые сборки фронтенда флаг не
+  ставят вовсе, а референсы различаются между версиями (element с PR #8594,
+  inputEl раньше; часть слоёв не экспонирует элемент до маунта) → prompt
+  рендерился однострочным `.hub-text-input` без грипа. Теперь multiline =
+  ЛЮБОЙ референс-textarea, `type=="customtext"` по определению multiline,
+  а обёртка-div с textarea внутри засчитывается ТОЛЬКО для TEXT_TYPES
+  виджетов (панели с textarea внутри не переворачиваются в текст-зеркала).
+  Плюс ghost-КОРЕНЬ может быть самой textarea (element==editor): её включил
+  ghostTextareas() и CSS `textarea.hub-portal-ghost`.
 
 ### v25: фильтр виджетов, скрытие хрома, тихое удаление, очистка очереди
 - 🔍 фильтр (вход в таб-баре, свёрнут до линзы, :focus/.hub-search-active

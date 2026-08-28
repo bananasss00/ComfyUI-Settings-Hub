@@ -439,8 +439,26 @@ const TEXT_TYPES = new Set([
 export function isMultilineWidget(widget) {
     if (!widget) return false;
     if (widget.options?.multiline === true) return true;
-    const el = widget.element ?? widget.inputEl ?? widget.contentEl;
-    return !!(el && el.tagName === "TEXTAREA");
+    // Any direct element reference that IS a textarea. Frontend versions
+    // disagree on which reference carries the editor (element since
+    // PR #8594, inputEl on older builds) - checking only the FIRST
+    // non-null one made prompts with a wrapper div render as single-line
+    // inputs (no resize grip in the hub).
+    const refs = [widget.inputEl, widget.element, widget.contentEl];
+    if (refs.some((el) => el && el.tagName === "TEXTAREA")) return true;
+    // "customtext" IS the multiline canvas widget by definition (single-line
+    // STRING is type "text"). Some builds expose neither the flag nor a
+    // mounted element - still render it as a growing editor, not an input.
+    const type = typeof widget.type === "string" ? widget.type.toLowerCase() : "";
+    if (type === "customtext") return true;
+    // A declared-TEXT widget may wrap the real editor in a container div:
+    // a contained <textarea> counts too. Restricted to TEXT_TYPES so custom
+    // PANELS that merely include a textarea never flip to text mirrors.
+    if (!TEXT_TYPES.has(type)) return false;
+    for (const el of refs) {
+        try { if (el?.querySelector?.("textarea")) return true; } catch (_) {}
+    }
+    return false;
 }
 
 export function detectWidgetType(widget) {
