@@ -23,7 +23,7 @@ import {
     getHubConfig, getActiveTabId, sortedTabs, itemsOfTab, genId,
     liveComboValues, coerceNumeric, removeItem, detectWidgetType,
     isMultilineWidget, portalKindOf, resolveBindingTarget, findHolderChainOf,
-    findWidgetOnNode, allGraphs, forgetHubNode,
+    findWidgetOnNode, allGraphs, forgetHubNode, nodeListOf,
     synthSliderWindow, growSynthWindow, allHubs,
     effectiveSliderParams, getSliderOverride, hasSliderOverride,
     setSliderOverride, clearSliderOverride, applyOverrideToTargetWidgets,
@@ -3573,3 +3573,73 @@ export function syncHubNode(node) {
 /** Test hook: internal per-node renderer state (smoke phases ZF4+). */
 export function __hubTestState(node) { return stateMap.get(node) ?? null; }
 
+// ===========================================================================
+// v35: configure-free workflow-tab hygiene, CONSERVATIVE edition.
+// ---------------------------------------------------------------------------
+// Field history: v31 closed pinned windows only through afterConfigureGraph
+// (configure-based switches); modern frontends swap app.canvas.graph WITHOUT
+// any configure, so a pinned window stayed over a foreign workflow. v34
+// "fixed" that with an identity sweep + weak hub registry + livePinPanels
+// side table + activeHubs() menu re-gating - and regressed the field hard
+// (hub UI never restored, orphan mirrors, dead menus). The whole machinery
+// was reverted; what ships instead is the smallest possible pass with the
+// same user-visible goal, assembled from v33 primitives only:
+//
+//   * fires ONLY when an active root graph object identity changes;
+//   * "active" = nodes of allGraphs() - the CURRENT roots and their
+//     subgraphs (that part of v34 was sound; background tabs' graphs are
+//     never seeded, so foreign hubs read as foreign);
+//   * enumeration failure or an EMPTY active set = observe-only tick - a
+//     walker hiccup must never close user windows;
+//   * hub IN the active set: re-float a pinned hub whose wrap is still
+//     connected; a dropped element goes through the syncNode rebuild path
+//     (renderHub re-floats pinned hubs itself);
+//   * FOREIGN hub: take the floating window down via homeHub - cfg.pinned
+//     SURVIVES, switching back re-floats at the same pinPos;
+//   * NO weak registry, NO menu re-gating, NO panel side table - every
+//     other subsystem keeps its exact v33 shape;
+//   * 5 consecutive broken ticks disable the watcher for the session with
+//     one console.warn - a pathological frontend degrades to v33 behavior.
+// ===========================================================================
+let tabWatchInstalled = false;
+export function installHubTabWatch() {
+    if (tabWatchInstalled) return;
+    tabWatchInstalled = true;
+    let lastRoot;
+    let lastCanvas;
+    let seen = false;
+    let fails = 0;
+    const timer = setInterval(() => {
+        try {
+            const root = app?.graph ?? null;
+            const canvas = app?.canvas?.graph ?? null;
+            if (seen && root === lastRoot && canvas === lastCanvas) return;
+            lastRoot = root; lastCanvas = canvas; seen = true;
+            const active = new Set();
+            for (const g of allGraphs()) {
+                for (const n of nodeListOf(g)) active.add(n);
+            }
+            if (!active.size) return; // unreadable/empty: observe only
+            for (const hub of allHubs()) {
+                try {
+                    const st = stateMap.get(hub);
+                    if (active.has(hub)) {
+                        const cfg = getHubConfig(hub);
+                        if (cfg?.pinned && !isWrapInPanel(st)) {
+                            if (st?.wrap?.isConnected) floatHub(hub);
+                            else syncNode(hub); // rebuild, renderHub re-floats
+                        }
+                    } else if (isWrapInPanel(st)) {
+                        homeHub(hub); // window down; the pin survives
+                    }
+                } catch (_) { /* one broken hub must not sink the pass */ }
+            }
+            fails = 0;
+        } catch (err) {
+            if (++fails >= 5) {
+                clearInterval(timer);
+                console.warn("[SettingsHub] tab watcher disabled after repeated failures - staying on the v33 lifecycle:", err);
+            }
+        }
+    }, 1200);
+}

@@ -2126,3 +2126,117 @@ button.hub-pin-back {
 .hub-toast-x:hover {
     color: #c0c0e0;
 }
+/* ============================================================================
+   v35: batch widget-add picker (node context menu -> checkbox list)
+   ============================================================================ */
+.hub-batch {
+    position: fixed;
+    z-index: 100001;
+    background: #16162a;
+    border: 1px solid #44445e;
+    border-radius: 6px;
+    padding: 8px;
+    width: 300px;
+    max-width: 92vw;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+    font-family: "Inter", -apple-system, sans-serif;
+    font-size: 11px;
+    color: #e0e0e0;
+}
+.hub-batch-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 2px 2px 6px;
+    border-bottom: 1px solid #2a2a3e;
+    margin-bottom: 6px;
+}
+.hub-batch-title {
+    color: #c8c8e0;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.hub-batch-close {
+    background: none;
+    border: 0;
+    color: #77778e;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0 2px;
+}
+.hub-batch-close:hover { color: #fff; }
+.hub-batch-list {
+    max-height: 224px;
+    overflow-y: auto;
+    border: 1px solid #2a2a3e;
+    border-radius: 4px;
+    margin-bottom: 6px;
+    background: #111120;
+}
+.hub-batch-row {
+    display: flex;
+    gap: 7px;
+    align-items: center;
+    padding: 4px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.hub-batch-row:hover { background: #262640; }
+.hub-batch-row input[type="checkbox"] { accent-color: #6b6bd8; margin: 0; }
+.hub-batch-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.hub-batch-chip {
+    flex: 0 0 auto;
+    color: #8a8aae;
+    font-size: 9px;
+    border: 1px solid #33334e;
+    border-radius: 3px;
+    padding: 0 4px;
+}
+.hub-batch-chip.hub-chip-portal { color: #c8a0ff; border-color: #5a3a7e; }
+.hub-batch-all {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 2px 2px 6px;
+    color: #8a8aae;
+    font-size: 10px;
+    cursor: pointer;
+    user-select: none;
+}
+.hub-batch-all input[type="checkbox"] { accent-color: #6b6bd8; margin: 0; }
+.hub-batch-all:hover { color: #b0b0d0; }
+.hub-batch-target {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 2px 2px 8px;
+}
+.hub-batch-tolbl { color: #8a8aae; flex: 0 0 auto; }
+.hub-batch-target select {
+    flex: 1 1 auto;
+    background: #111120;
+    color: #e0e0e0;
+    border: 1px solid #33334e;
+    border-radius: 3px;
+    padding: 3px 5px;
+    font-size: 11px;
+    min-width: 0;
+}
+.hub-batch-foot { display: flex; gap: 6px; justify-content: flex-end; }
+.hub-batch-btn {
+    background: #2a2a3e;
+    color: #e0e0e0;
+    border: 1px solid #44445e;
+    border-radius: 3px;
+    padding: 3px 10px;
+    cursor: pointer;
+    font-size: 11px;
+}
+.hub-batch-btn:hover { background: #3a3a5e; }
+.hub-batch-btn.hub-batch-primary { background: #3a2a5e; border-color: #6b5a9e; }
+.hub-batch-btn.hub-batch-primary:hover { background: #4a3a72; }
+.hub-batch-btn:disabled { opacity: 0.45; cursor: default; }

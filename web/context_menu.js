@@ -3,7 +3,7 @@ import {
     getHubConfig, getActiveTabId, createBinding, createPortalBinding,
     createNewHub, HUB_NODE_NAME, detectWidgetType, portalKindOf, allHubs,
     isViewerNode, createViewerBinding, isInternalWidget,
-    mediaLoaderInfo, createMediaBinding,
+    mediaLoaderInfo, createMediaBinding, createBindingsBulk,
 } from "./core.js";
 
 // ============================================================================
@@ -39,6 +39,9 @@ export function attachContextMenu() {
             }
 
             const items = [];
+            // v35: batch add FIRST - one pick, many widgets, one landing.
+            const batch = batchPickerEntry(node);
+            if (batch) items.push(batch);
             if (widget && node.widgets?.length && !isHelperWidget(widget)
                 && !isInternalWidget(widget)) {
                 items.push({
@@ -400,6 +403,251 @@ function buildPinSubmenu(node, widget) {
 }
 
 // ============================================================================
+// v35: batch add - one right-click on a node, tick the widgets, one
+// landing. Conservative re-land of the v34 picker on the v33 baseline:
+// targets come from the global registry (allHubs) like every other menu,
+// nothing here touches the hub lifecycle.
+// ============================================================================
+
+/** Widgets worth offering in the batch picker, in node order: mirrors
+ *  (combo/toggle/number/text), action buttons with a handler, live panels.
+ *  Helper buttons (no handler) and frontend-internal "$$" widgets are out. */
+function listBatchWidgets(node) {
+    const out = [];
+    for (const w of node.widgets ?? []) {
+        try {
+            if (isHelperWidget(w) || isInternalWidget(w)) continue;
+            if (!detectWidgetType(w)) continue;
+            // Touch the label fields the picker will render: a widget whose
+            // name/label getter throws is skipped ENTIRELY here - letting it
+            // reach the dialog would kill the whole batch UI mid-render.
+            void w.name; void w.label;
+            out.push(w);
+        } catch (_) { /* exotic getters must not kill the menu */ }
+    }
+    return out;
+}
+
+const BATCH_TYPE_MARK = {
+    combo: "📌 combo", checkbox: "📌 toggle", text: "📌 text",
+    int: "📌 int", slider: "📌 slider", button: "🔘 button",
+    portal: "🪟 live panel",
+};
+
+/** {content, callback} for the batch picker, or null when there is nothing
+ *  worth batch-adding (empty menu slots must not appear). */
+function batchPickerEntry(node) {
+    if (!node || node.type === HUB_NODE_NAME) return null;
+    if (!listBatchWidgets(node).length) return null;
+    return {
+        content: "📦 Add widgets to hub (batch)…",
+        callback: () => { try { showBatchPicker(node); } catch (err) {
+            console.warn("[SettingsHub] batch picker failed:", err);
+        } },
+    };
+}
+
+let openBatchEl = null;
+let batchDismiss = null;
+
+function closeBatchPicker() {
+    openBatchEl?.remove();
+    openBatchEl = null;
+    if (batchDismiss) {
+        document.removeEventListener("pointerdown", batchDismiss.pointer, true);
+        document.removeEventListener("keydown", batchDismiss.key, true);
+        window.removeEventListener("blur", batchDismiss.blur);
+        batchDismiss = null;
+    }
+}
+
+function batchTabId() { return `tab_${Date.now().toString(36)}`; }
+
+/** The picker dialog: checkbox list + hub/tab target + Add/Cancel. */
+function showBatchPicker(node) {
+    closeBatchPicker();
+    closeHubMenu();
+
+    const widgets = listBatchWidgets(node);
+    if (!widgets.length) return;
+    const hubs = allHubs();
+    const mi = (() => { try { return mediaLoaderInfo(node); } catch (_) { return null; } })();
+    const nodeName = String(node?.title || "").replace(/\s+/g, " ").trim().slice(0, 30) || "node";
+
+    const box = document.createElement("div");
+    box.className = "hub-batch";
+
+    const head = document.createElement("div");
+    head.className = "hub-batch-head";
+    const ttl = document.createElement("span");
+    ttl.className = "hub-batch-title";
+    ttl.textContent = `📦 Add widgets — ${nodeName}`;
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "hub-batch-close";
+    closeBtn.textContent = "✕";
+    closeBtn.title = "Close";
+    closeBtn.addEventListener("click", closeBatchPicker);
+    head.appendChild(ttl);
+    head.appendChild(closeBtn);
+    box.appendChild(head);
+
+    const list = document.createElement("div");
+    list.className = "hub-batch-list";
+    const checkboxes = [];
+    widgets.forEach((w, idx) => {
+        const kind = (() => { try { return detectWidgetType(w); } catch (_) { return ""; } })();
+        const label = (() => { try {
+            return String(w.label || w.name || kind || "widget").replace(/\s+/g, " ").trim().slice(0, 34);
+        } catch (_) { return kind || "widget"; } })();
+        const row = document.createElement("label");
+        row.className = "hub-batch-row";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.dataset.idx = String(idx);
+        const name = document.createElement("span");
+        name.className = "hub-batch-name";
+        name.textContent = label;
+        try { name.title = `${w.name ?? ""} (${kind})`; } catch (_) { name.title = kind; }
+        const chip = document.createElement("span");
+        chip.className = "hub-batch-chip" + (kind === "portal" ? " hub-chip-portal" : "");
+        chip.textContent = BATCH_TYPE_MARK[kind] || kind || "•";
+        row.appendChild(cb); row.appendChild(name); row.appendChild(chip);
+        list.appendChild(row);
+        checkboxes.push({ w, cb, kind });
+    });
+    box.appendChild(list);
+
+    // Select all / none toggle.
+    const allRow = document.createElement("div");
+    allRow.className = "hub-batch-all";
+    const allCb = document.createElement("input");
+    allCb.type = "checkbox";
+    const allLbl = document.createElement("span");
+    const syncAllLbl = () => {
+        const n = checkboxes.filter((x) => x.cb.checked).length;
+        allLbl.textContent = n === checkboxes.length
+            ? "all selected" : `${n} of ${checkboxes.length} selected — click to toggle all`;
+        addBtn.textContent = `➕ Add ${n}`;
+        addBtn.disabled = n === 0;
+    };
+    allRow.appendChild(allCb);
+    allRow.appendChild(allLbl);
+    allRow.addEventListener("click", (e) => {
+        e.preventDefault();
+        const target = checkboxes.some((x) => !x.cb.checked);
+        for (const x of checkboxes) x.cb.checked = target;
+        syncAllLbl();
+    });
+    for (const x of checkboxes) x.cb.addEventListener("change", syncAllLbl);
+    box.appendChild(allRow);
+
+    // Target: hub ▸ tab (active hubs only) / new tab / new hub.
+    const targetRow = document.createElement("div");
+    targetRow.className = "hub-batch-target";
+    const targetLbl = document.createElement("span");
+    targetLbl.textContent = "To:";
+    targetLbl.className = "hub-batch-tolbl";
+    const sel = document.createElement("select");
+    if (!hubs.length) {
+        const o = document.createElement("option");
+        o.value = "__newhub__";
+        o.textContent = "Create New Settings Hub";
+        sel.appendChild(o);
+    } else {
+        hubs.forEach((hub, hi) => {
+            const cfg = getHubConfig(hub);
+            const prefix = hubs.length > 1 ? `${hub.title || "Settings Hub"} ▸ ` : "";
+            for (const tab of cfg.tabs) {
+                const o = document.createElement("option");
+                o.value = `${hi}||${tab.id}`;
+                o.textContent = `${prefix}${tab.name}`;
+                sel.appendChild(o);
+            }
+        });
+        hubs.forEach((hub, hi) => {
+            const prefix = hubs.length > 1 ? `${hub.title || "Settings Hub"} ▸ ` : "";
+            const o = document.createElement("option");
+            o.value = `${hi}||__newtab__`;
+            o.textContent = `➕ ${prefix}New Tab…`;
+            sel.appendChild(o);
+        });
+    }
+    targetRow.appendChild(targetLbl);
+    targetRow.appendChild(sel);
+    box.appendChild(targetRow);
+
+    const foot = document.createElement("div");
+    foot.className = "hub-batch-foot";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "hub-batch-btn";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", closeBatchPicker);
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.className = "hub-batch-btn hub-batch-primary";
+    addBtn.textContent = "➕ Add 0";
+    addBtn.disabled = true;
+    foot.appendChild(cancelBtn);
+    foot.appendChild(addBtn);
+    box.appendChild(foot);
+
+    addBtn.addEventListener("click", () => {
+        const picked = checkboxes.filter((x) => x.cb.checked).map((x) => x.w);
+        if (!picked.length) return;
+        let hub = null;
+        let tabId = null;
+        const v = sel.value || "__newhub__";
+        if (v === "__newhub__") {
+            hub = createNewHub();
+            if (!hub) return; // creation failed - already surfaced
+            tabId = getActiveTabId(getHubConfig(hub));
+        } else {
+            const [hiStr, tabPart] = v.split("||");
+            hub = hubs[Number(hiStr)];
+            if (!hub) return;
+            if (tabPart === "__newtab__") {
+                const name = prompt("New tab name:", "New Tab");
+                if (name === null) return;
+                tabId = batchTabId();
+                const cfg = getHubConfig(hub);
+                cfg.tabs.push({ id: tabId, name, order: cfg.tabs.length });
+            } else {
+                tabId = tabPart;
+            }
+        }
+        try {
+            const plain = mi ? picked.filter((w) => w !== mi.combo) : picked;
+            const media = mi ? picked.filter((w) => w === mi.combo) : [];
+            if (plain.length) createBindingsBulk(hub, node, plain, tabId);
+            for (const _w of media) {
+                try { createMediaBinding(hub, node, mi, tabId); } catch (_) {}
+            }
+        } catch (err) {
+            console.warn("[SettingsHub] batch add failed:", err);
+        }
+        closeBatchPicker();
+    });
+
+    document.body.appendChild(box);
+    const r = box.getBoundingClientRect();
+    box.style.left = `${Math.max(4, Math.min(window.innerWidth - r.width - 8, (window.innerWidth - r.width) / 2))}px`;
+    box.style.top = `${Math.max(4, Math.min(window.innerHeight - r.height - 8, (window.innerHeight - r.height) / 2))}px`;
+
+    openBatchEl = box;
+    batchDismiss = {
+        pointer: (e) => { if (!box.contains(e.target)) closeBatchPicker(); },
+        key: (e) => { if (e.key === "Escape") closeBatchPicker(); },
+        blur: () => closeBatchPicker(),
+    };
+    document.addEventListener("pointerdown", batchDismiss.pointer, true);
+    document.addEventListener("keydown", batchDismiss.key, true);
+    window.addEventListener("blur", batchDismiss.blur);
+    syncAllLbl();
+}
+
+// ============================================================================
 // 2) Custom menu for DOM-widget text fields (multiline prompts etc.)
 // ============================================================================
 // Multiline / customtext widgets are real <textarea> DOM elements layered
@@ -533,6 +781,9 @@ function attachCtrlRmbOverride() {
                 // Offer the WHOLE-PANEL group embed first (the widget under the
                 // cursor is usually just one row of a multi-widget custom panel),
                 // then node-level viewer embeds, then the under-cursor widget pin.
+                // v35 batch add first, then the whole-panel group embed, viewer
+                // embeds, then the under-cursor widget pin.
+                ...(batchPickerEntry(owner.node) ? [batchPickerEntry(owner.node)] : []),
                 ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node), allHubs()),
                 ...(isViewerNode(owner.node) ? buildViewerSubmenu(owner.node) : []),
                 ...buildPinSubmenu(owner.node, owner.widget),
@@ -578,6 +829,7 @@ function attachPanelSurfacePinMenu() {
         if (detectWidgetType(owner.widget) !== "portal") return;
 
         const entries = [
+            ...(batchPickerEntry(owner.node) ? [batchPickerEntry(owner.node)] : []),
             ...buildWholeBlockEntries(owner.node, listPanelWidgets(owner.node), allHubs()),
             ...(isViewerNode(owner.node) ? buildViewerSubmenu(owner.node) : []),
             ...buildPinSubmenu(owner.node, owner.widget),

@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { getHubConfig, trackHubNode, forgetHubNode } from "./core.js";
 import { syncNode } from "./sync.js";
-import { relayoutHub, disposeHubVisuals, pruneForeignHubs } from "./hub_ui_renderer.js";
+import { relayoutHub, disposeHubVisuals, pruneForeignHubs, installHubTabWatch } from "./hub_ui_renderer.js";
 import * as Pins from "./pins.js";
 
 export const NODE_NAME = "SettingsHub";
@@ -151,6 +151,11 @@ app.registerExtension({
     setup() {
         registerHubNode();
         installBadgePainter();
+        // v35: configure-free workflow TAB switches (the frontend swaps
+        // app.canvas.graph without any configure) need the conservative
+        // watcher - a pinned window must not float over a foreign workflow.
+        // Self-disarming: a pathological frontend degrades to v33 behavior.
+        try { installHubTabWatch(); } catch (_) {}
     },
     afterConfigureGraph() {
         // v31: BEFORE the survivors re-render - a graph configure (workflow

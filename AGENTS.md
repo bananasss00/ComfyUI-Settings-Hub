@@ -29,7 +29,13 @@ __init__.py            — регистрация ноды "SettingsHub" + WEB_D
 py/settings_hub.py     — Python-заглушка (FUNCTION = "noop", возвращает
                          (); БЕЗ OUTPUT_NODE — узел не исполняется на queue),
                          логики НЕТ
-web/settings_hub.js    — точка входа: app.registerExtension, загрузка CSS
+web/settings_hub.js    — точка входа-ЗАГРУЗЧИК (v35): баннер ПЕРВЫМ
+                         (доказательство свежести entry в F12), затем
+                         top-level await import каждого модуля с try/catch
+                         — сбой называет ТОЧНЫЙ файл (тихая смерть графа
+                         импортов больше невозможна); JS-импорты БЕЗ query
+                         (иначе дубли инстансов модулей), styles.css с ?v=;
+                         частичная загрузка = hooks не регистрируются
 web/core.js            — конфиг хаба, detectWidgetType (самолечение типов;
                          type:"button" без DOM-контейнера => "button"),
                          createBinding, liveComboValues, comboTokensMatch-контракт;
@@ -44,7 +50,10 @@ web/core.js            — конфиг хаба, detectWidgetType (самоле
                          hasSliderOverride / applyOverrideToTargetWidgets /
                          clearSliderOverride (рестор native-опций) /
                          maybeReapplySliderOverride (одноразовый session-latch);
-                         createNewHub — канонический LiteGraph.createNode -> graph.add
+                         createNewHub — канонический LiteGraph.createNode -> graph.add;
+                         v35: createBindingsBulk (N items, ОДИН syncNode),
+                         getter-гарды в findWidgetOnNode/sameNameOrdinal,
+                         nodeListOf экспортирован
 web/sync.js            — шина структурных/values-обновлений + shared edit-lock
                          (beginEdit/endEdit), rAF-очередь queueHubRefresh
 web/sync_manager.js    — хуки реактивности на целевых виджетах (обёртка callback),
@@ -56,14 +65,25 @@ web/hub_ui_renderer.js — весь UI хаба: табы, строки зерк
                          Apply/Push/Clear + checkbox auto-apply), layout-движок
                          (AUTO/FILL), события (делегирование; wheel-слайдеры);
                          pruneForeignHubs — санитария реестра и плавающих окон
-                         после graph configure (воркфлоу-переключение)
+                         после graph configure (воркфлоу-переключение);
+                         v35: installHubTabWatch — консервативный
+                         configure-free вотчер смены workflow-вкладок
+                         (identity активных корней, пустое множество =
+                         observe-only, чужой пин -> homeHub с выжившим
+                         cfg.pinned, 5 сбоев = самоотключение)
 web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode;
                          afterConfigureGraph первым делом зовёт
-                         pruneForeignHubs (до syncAll выживших)
+                         pruneForeignHubs (до syncAll выживших);
+                         setup() ставит installHubTabWatch (v35)
 web/context_menu.js    — пиннинг: ПКМ по hover-виджету; пункт меню ноды
                          "Pin custom panel"; "🖼 Pin viewer" (v26); фильтр
-                         служебных "$$"-виджетов фронтенда (v26.1); перехват Ctrl/Cmd+ПКМ (capture)
+                         служебных "$$"-виджетов фронтенда (v26.1); перехват Ctrl/Cmd+ПКМ (capture);
+                         v35: "📦 Add widgets to hub (batch)…" первым пунктом
+                         меню ноды + пикер (чекбоксы, чипы типов,
+                         select all/none, цели хаб/вкладка/New Tab/Create Hub,
+                         Add N disabled при нуле); цели = allHubs() (как у
+                         всех меню, без activeHubs-гейтинга v34)
 web/portal_manager.js  — живые встраивания: DOM-панели — GHOST-ЗЕРКАЛА
                          (неcтруктивный клон в хабе, оригинал НИКОГДА не
                          покидает ноду; события клона → реэвент на
@@ -504,6 +524,58 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v35: откат v34 + консервативная пересборка — batch-пикер на базовом контракте, самоотключающийся tab-watcher, громкий загрузчик
+- РЕПОРТ (поле, после v34): «полностью бракованный коммит, поломал вообще
+  всё» — загрузка старого воркфлоу с сохранённым пином НЕ восстановила
+  привычный интерфейс хаба; на экране висел один DOM-портал кастом-ноды
+  (пол-экрана, неотзакрываемый, переживал смену воркфлоу); пункты
+  «добавить в хаб» исчезли И у виджетов, И у нод; лог консоли — ЧИСТЫЙ:
+  ни баннера пакета, ни одной ошибки.
+- ДИАГНОЗ: (а) ноль строк пакета в логе при живом расширении невозможен —
+  статический граф импортов умирает ДО баннера (стале-кэш/неполная копия
+  web/ = «всё мёртвое, лог чистый»); (б) сама машинерия v34 (weak-реестр,
+  identity-sweep с re-float/livePinPanels, activeHubs-гейтинг ВСЕХ
+  пин-меню) — слишком много одновременных изменений жизненного цикла без
+  полевой страховки.
+- РЕШЕНИЕ: полный revert e05fa9b (6b7e041) к v33-бейзлайну; v35 собирает
+  то же пользовательское поведение из примитивов v33:
+  1) batch-пикер возвращён ADDITIVE: цели = allHubs() (как у всех меню),
+     createBindingsBulk (N items, ОДИН syncNode), getter-гарды
+     (findWidgetOnNode/sameNameOrdinal — экзотический виджет с кидящим
+     name-геттером больше роняет только себя), CSS .hub-batch-*; НИЧЕГО
+     из этого не касается жизненного цикла хаба;
+  2) tab-watcher installHubTabWatch (hub_ui_renderer) вместо sweep:
+     тик 1.2с ТОЛЬКО при смене identity активных корней; active = узлы
+     allGraphs() (текущие корни + сабграфы — семантика v34, которая была
+     верной); ПУСТОЕ/нечитаемое множество = observe-only (сбой walker'а
+     не закрывает окна); чужой пин -> homeHub (cfg.pinned ВЫЖИВАЕТ,
+     возврат ре-флоатит на pinPos); свой -> floatHub / syncNode-rebuild;
+     5 подряд сбоев -> самоотключение + console.warn; setup() ставит,
+     afterConfigureGraph сохраняет v31-prune;
+  3) settings_hub.js -> ЗАГРУЗЧИК: баннер ПЕРВЫМ (свежесть entry
+     доказуема даже при сбое подмодуля), top-level await import каждого
+     модуля с try/catch — сбой называет точный файл; частичная загрузка
+     НЕ регистрирует hooks; JS-импорты без query (другой specifier =
+     ВТОРОЙ инстанс модуля = расщепление состояния), styles.css?v=35;
+  4) УРОК TLA: ComfyUI ждёт import(entry) до конца ОЦЕНКИ модуля —
+     fire-and-forget IIFE зарегистрировал бы расширения ПОСЛЕ
+     app.setup(); только top-level await сохраняет тайминги статического
+     графа.
+- ВЕРИФИКАЦИЯ НА ПОЛЕ: F12 -> баннер «web build: v35 - …»; при частичной
+  копии/стале-кэше консоль ЯВНО назовёт файл: «FAILED to load ./x.js»;
+  при старом баннере — Ctrl+F5 (кэш).
+- СМОУКИ: smoke_v35.mjs 35 чеков (A bulk + evil-виджет; B пикер;
+  C сильный реестр v33 — forget/re-track с учётом graph-scan фолбэка
+  allHubs; D wiring/loader — prune в afterConfigureGraph, watcher в
+  setup(), sweep ОТСУТСТВУЕТ, TLA без IIFE, без query у JS; E watcher на
+  РЕАЛЬНЫХ тиках 1.45с: чужой воркфлоу снимает окно за тик, pin
+  выживает, пустое множество = observe-only, возврат ре-флоатит);
+  smoke_v31 C-секция возвращена на prune-контракт (C1-C8, F1 -> v35);
+  регресс: v33 24, v32 17, v30 35, text_resize 34, presets_v29 78,
+  ghost_lock 8, ghost_prefix 8, canvas_route 2, resize_pin,
+  media_dl_chrome 29 — ALL PASSED; node --check OK.
+- КОММИТ: revert 6b7e041 + v35 (см. git log).
 
 ### v33: зеркала сплит-превью переживают CSS хаба — Model Preview Override исправлен по-настоящему
 - РЕПОРТ (после v32): «в поведении превьюхи в хабе ничего не изменилось» —
@@ -1336,6 +1408,18 @@ RO: аттач к оригиналу, обновление item+клона (360p
 идемпотентность, пауза под touch-локом, изолированность записей,
 дисконнект на release; сплит-драг регресс (форвард в оригинал,
 140->170, клэмп 220); release чистит и зеркала, и RO.
+
+ZU (v35) — smoke_v35.mjs, 35 чеков: bulk-фабрика (6 из 7 виджетов,
+кидающий геттер пропущен, порядки восходящие, пустой батч no-op);
+пикер (первый пункт меню ноды, фильтр helper/internal/evil, панель-чип,
+цели allHubs + New Tab, счётчик Add, дисклик, виджет-лесс нода без
+пункта); сильный реестр (forget/re-track, graph-scan фолбэк не даёт
+призраков после forget); контракты загрузчика (баннер v35 до первого
+await, диагностика по имени файла, TLA без boot-IIFE, JS-импорты без
+query, CSS с ?v=35); watcher на реальных тиках 1.45с — первый тик не
+закрывает живое окно, чужой воркфлоу снимает его за тик (pin
+выживает), ПУСТОЕ active-множество = observe-only (окно НЕ закрывается),
+возврат на вкладку ре-флоатит.
 
 ## 6. Упаковка и коммиты
 

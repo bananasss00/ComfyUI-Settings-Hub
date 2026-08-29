@@ -88,7 +88,7 @@ function looksLikeGraph(obj) {
         (Array.isArray(obj._nodes) || Array.isArray(obj.nodes)));
 }
 
-function nodeListOf(g) {
+export function nodeListOf(g) {
     // Union of the raw + public lists; nodes may legally appear in both,
     // callers tolerate duplicates cheaply (Map/Set by reference).
     const out = [];
@@ -268,7 +268,13 @@ function scanAllNodesFor(pred) {
  * out-of-range ordinals (row removed / re-sorted) degrade to the first hit.
  */
 export function findWidgetOnNode(tn, name, ord) {
-    const list = (tn?.widgets || []).filter((w) => w && w.name === name);
+    // v34: hostile name getters on a SIBLING widget must not kill the
+    // lookup (one exotic custom widget used to take down the whole hub
+    // render - every mirror of that node resolves through here).
+    const list = [];
+    for (const w of tn?.widgets || []) {
+        try { if (w && w.name === name) list.push(w); } catch (_) {}
+    }
     if (!list.length) return null;
     const i = Number.isInteger(ord) && ord >= 0 && ord < list.length ? ord : 0;
     return list[i] ?? list[0];
@@ -1307,7 +1313,15 @@ export function createMediaBinding(node, targetNode, info, tabId, label) {
  * (0 for unique names). Stored on bindings so same-name widget families
  * resolve to the exact row they were pinned from (v30). */
 function sameNameOrdinal(targetNode, widget) {
-    const list = (targetNode?.widgets || []).filter((w) => w && w.name === widget?.name);
+    // v34: hostile name getters (exotic custom widgets) must not kill the
+    // binding - and via the scan below they must not kill the binding of
+    // their INNOCENT SIBLINGS either (the batch picker walks whole nodes).
+    let ownName;
+    try { ownName = widget?.name; } catch (_) { return 0; }
+    const list = [];
+    for (const w of targetNode?.widgets || []) {
+        try { if (w && w.name === ownName) list.push(w); } catch (_) {}
+    }
     const i = list.indexOf(widget);
     return i > 0 ? i : 0;
 }
@@ -1347,7 +1361,7 @@ export function createPortalBinding(node, targetNode, widgets, tabId, label) {
     return item;
 }
 
-export function createBinding(node, targetNode, widget, tabId, type, extra) {
+function makeBindingItem(node, targetNode, widget, tabId, type, extra) {
     const cfg = getHubConfig(node);
     const item = {
         id: genId("item"),
@@ -1394,10 +1408,39 @@ export function createBinding(node, targetNode, widget, tabId, type, extra) {
         }
     }
     cfg.items.push(item);
+    return item;
+}
+
+export function createBinding(node, targetNode, widget, tabId, type, extra) {
+    const item = makeBindingItem(node, targetNode, widget, tabId, type, extra);
     Pins.invalidatePins();
     node.setDirtyCanvas(true, true);
     syncNode(node);
     return item;
+}
+
+/** v34 batch add: N widgets -> N items with ONE re-render. Mirrors the
+ *  single createBinding side effects exactly (pin badges, canvas, sync),
+ *  just coalesced - a 10-widget pick must not rebuild the hub 10 times.
+ *  Portals among the widgets are created by makeBindingItem too (the same
+ *  isPortalWidget branch as the single path); one exotic widget failing
+ *  must not sink the rest of the batch. */
+export function createBindingsBulk(node, targetNode, widgets, tabId) {
+    const cfg = getHubConfig(node);
+    const made = [];
+    for (const w of Array.isArray(widgets) ? widgets : []) {
+        try {
+            const before = cfg.items.length;
+            makeBindingItem(node, targetNode, w, tabId);
+            if (cfg.items.length > before) made.push(cfg.items[cfg.items.length - 1]);
+        } catch (_) { /* one exotic widget must not sink the batch */ }
+    }
+    if (made.length) {
+        Pins.invalidatePins();
+        node.setDirtyCanvas(true, true);
+        syncNode(node);
+    }
+    return made;
 }
 
 /** Remove an item (binding or divider) from hub config with pin invalidation. */
