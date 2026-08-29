@@ -1275,6 +1275,54 @@ export function createViewerBinding(node, targetNode, tabId, label) {
 }
 
 // ---------------------------------------------------------------------------
+// v40 node-UI pins: canvas-drawn widgetless control nodes (Pixaroma
+// Switch / Mute Switch pattern). Their rows are painted in
+// node.onDrawForeground and hit-tested in node.onMouseDown - there is
+// NO widget to pin, so the widget-based menus never saw them. The
+// canvas portal already renders onDrawForeground 1:1 and forwards
+// pointer events with node-local coordinates, so the whole node UI
+// joins the hub LIVE: toggles keep working from the pinned embed.
+// Reuses the viewer binding shape (VIEWER_SENTINEL + options.viewer)
+// so row rendering / orphan handling / persistence behave identically;
+// the extra options.controls flag routes the mount STRAIGHT to the
+// foreground painter (no media/gallery attempts) and flips the row
+// tag to "🎛 live".
+// ---------------------------------------------------------------------------
+
+/**
+ * Bind a canvas-drawn widgetless node (Switch / Mute Switch pattern) as
+ * ONE live node-UI embed. Same persistence as a viewer binding;
+ * options.controls routes the portal mount to the onDrawForeground
+ * painter directly. Persisted like every other item; presets skip
+ * portals already.
+ */
+export function createNodeUIBinding(node, targetNode, tabId, label) {
+    const cfg = getHubConfig(node);
+    const item = {
+        id: genId("item"),
+        type: "widget_portal",
+        tabId,
+        order: nextOrder(cfg, tabId),
+        customLabel: label || targetNode?.title || "node UI",
+        targetNodeId: targetNode.id,
+        targetTitle: targetNode?.title ?? "",   // drift repair anchor
+        widgetToBind: VIEWER_SENTINEL,
+        widgetType: "portal",
+        options: {
+            portalKind: "canvas",
+            viewer: true,
+            controls: true,
+            srcH: Math.max(60, Math.round(Number(targetNode?.size?.[1]) || 200)),
+        },
+    };
+    cfg.items.push(item);
+    Pins.invalidatePins();
+    node.setDirtyCanvas(true, true);
+    syncNode(node);
+    return item;
+}
+
+// ---------------------------------------------------------------------------
 // Group portals ("whole panel" embeds)
 // ---------------------------------------------------------------------------
 // Custom panels are often drawn by SEVERAL sibling widgets on one node

@@ -308,7 +308,8 @@ function itemRowHtml(item) {
     const isViewer = item.type === "widget_portal" && !!item.options?.viewer;
     const ok = !!(tn && (tw || isViewer));
     const label = item.customLabel || tw?.label || tw?.name ||
-        (isViewer ? "viewer" : item.widgetToBind) || "widget";
+        (isViewer ? (item.options?.controls ? "node UI" : "viewer")
+                  : item.widgetToBind) || "widget";
 
     const handle = `<span class="hub-drag-handle" draggable="true" title="Drag to reorder (drop on a tab to move)">⠿</span>`;
     const labelEl = ok
@@ -363,7 +364,7 @@ function itemRowHtml(item) {
     const body = item.type === "widget_portal"
         ? `<div class="hub-portal-host" data-role="portal-host" ` +
           `title="Live embed: interactions go to the source widget (its own menus work). ` +
-          `Presets do not apply to portals."><span class="hub-portal-tag">${item.options?.viewer ? "🖼 live" : "🪟 live"}</span></div>`
+          `Presets do not apply to portals."><span class="hub-portal-tag">${item.options?.viewer ? (item.options?.controls ? "🎛 live" : "🖼 live") : "🪟 live"}</span></div>`
         : (ok ? mirrorHtml(item, tw) : "");
 
     return `<div class="hub-item-row${ok ? "" : " hub-orphan-row"}" data-hub-item="${esc(item.id)}" data-tab-id="${esc(item.tabId)}">` +

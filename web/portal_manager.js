@@ -1435,6 +1435,34 @@ function mountMediaViewer(node, item, tn, host) {
     return rec;
 }
 
+/** v40 node-UI portal: canvas-drawn widgetless control nodes (Pixaroma
+ *  Switch / Mute Switch pattern). Their rows live in
+ *  node.onDrawForeground and are hit-tested in node.onMouseDown - both
+ *  run in node-body-local coordinates, which is exactly the portal
+ *  surface contract (origin at (0,0), pointer events forwarded with
+ *  the same origin). Mounting goes STRAIGHT to the foreground painter:
+ *  no media/gallery attempts, and mode "foreground" from tick 1 makes
+ *  the FULL node height the baseline (the pixel settle loop trims the
+ *  rest). */
+function mountNodeUIPortal(node, item, tn, host) {
+    const persistedH = Number(item.options?.srcH);
+    const srcH = Math.max(60, Number.isFinite(persistedH) && persistedH > 0
+        ? persistedH
+        : Math.round(Number(tn.size?.[1]) || 200));
+    const rec = mountCanvasPortal(node, item, tn, [{ widget: {
+        name: "__node_ui__",
+        label: item.customLabel || "node UI",
+        // Stack draw contract: (ctx, node, W, top, h). The foreground
+        // painter addresses node-local space - exactly what the portal
+        // surface reproduces - so it ignores the row arguments.
+        draw: (ctx) => {
+            try { tn.onDrawForeground?.call(tn, ctx); } catch (_) {}
+        },
+    }, srcH }], host);
+    if (rec) rec.mode = "foreground";
+    return rec;
+}
+
 function mountViewerPortal(node, item, tn, host) {
     const persistedH = Number(item.options?.srcH);
     const srcH = Math.max(60, Number.isFinite(persistedH) && persistedH > 0
@@ -1502,6 +1530,20 @@ export function mountPortals(node, root) {
             //      output-store images -> OUR batch gallery + fullscreen;
             //   3. DOM <canvas> widget      -> blit;
             //   4. nothing                  -> painter portal (hint).
+            // v40 node-UI embeds (canvas-drawn widgetless controls):
+            // skip the media/gallery routing entirely - the foreground
+            // painter portal IS the destination.
+            if (item.options?.controls) {
+                let crec = null;
+                try { crec = mountNodeUIPortal(node, item, tn, host); }
+                catch (err) {
+                    console.warn("[SettingsHub] node-UI mount failed:", err);
+                    crec = null;
+                }
+                if (crec) { crec.set = set; set.add(crec); }
+                continue;
+            }
+
             let vrec = null;
             try { vrec = mountMediaViewer(node, item, tn, host); }
             catch (_) { vrec = null; }

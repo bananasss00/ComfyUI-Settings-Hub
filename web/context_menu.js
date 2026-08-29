@@ -4,6 +4,7 @@ import {
     createNewHub, HUB_NODE_NAME, detectWidgetType, portalKindOf, allHubs,
     isViewerNode, createViewerBinding, isInternalWidget,
     mediaLoaderInfo, createMediaBinding, createBindingsBulk,
+    createNodeUIBinding,
 } from "./core.js";
 
 // ============================================================================
@@ -87,6 +88,24 @@ export function attachContextMenu() {
                     });
                 }
             } catch (_) { /* detection must never kill the menu */ }
+            // v40: canvas-drawn widgetless control nodes (Pixaroma Switch
+            // / Mute Switch pattern): the pack paints its rows straight in
+            // node.onDrawForeground and hit-tests them in onMouseDown -
+            // node.widgets stays EMPTY in the legacy renderer (all inputs
+            // are forceInput sockets, state rides a hidden input), so the
+            // widget paths above see nothing. The canvas portal renders
+            // the node UI 1:1 and forwards clicks - the embed is live.
+            try {
+                if (isNodeUIPinCandidate(node)) {
+                    items.push({
+                        content: "🎛 Pin node UI (live embed)",
+                        has_submenu: true,
+                        submenu: {
+                            options: buildNodeUISubmenu(node),
+                        },
+                    });
+                }
+            } catch (_) { /* detection must never kill the menu */ }
             // v26: viewers that paint straight in onDrawBackground (classic
             // PreviewImage / LoadImage / SaveImage builds, video combiners,
             // custom gallery nodes) own NO widget to pin - offer the whole
@@ -120,10 +139,24 @@ function isHelperWidget(w) {
  *  Mirrors the panel submenu shape (the Vue menu converter supports ONE
  *  submenu level, so cross products stay flat). */
 function buildViewerSubmenu(node) {
-    const hubs = allHubs();
     const title = String(node?.title || "").trim().slice(0, 26) || "node";
     const what = `🖼 viewer «${title}»`;
     const bind = (hub, tabId) => createViewerBinding(hub, node, tabId);
+    return buildNodeEmbedSubmenu(what, bind);
+}
+
+/** v40 node-UI entries - same flat shape, different verb + binding. */
+function buildNodeUISubmenu(node) {
+    const title = String(node?.title || "").trim().slice(0, 26) || "node";
+    const what = `🎛 node UI «${title}»`;
+    const bind = (hub, tabId) => createNodeUIBinding(hub, node, tabId);
+    return buildNodeEmbedSubmenu(what, bind);
+}
+
+/** Shared body of the node-level embed submenus (viewer / node UI):
+ *  hub x tab flat list + Create New / New Tab. */
+function buildNodeEmbedSubmenu(what, bind) {
+    const hubs = allHubs();
 
     if (!hubs.length) {
         return [{
@@ -216,6 +249,25 @@ function listPanelWidgets(node) {
         } catch (_) { /* defensive: exotic getters must not kill the menu */ }
     }
     return out;
+}
+
+/** v40: canvas-drawn widgetless control nodes (Pixaroma "Switch"
+ *  pattern). The pack paints its rows in node.onDrawForeground and
+ *  hit-tests clicks in node.onMouseDown - node.widgets stays EMPTY in
+ *  the legacy renderer (all inputs are forceInput sockets, state rides
+ *  a hidden input), so every widget-based pin path sees nothing.
+ *  Qualifies only when there is truly nothing else to offer: any
+ *  mirror-worthy widget makes the canvas embed the degraded choice
+ *  (batch picker / panel pin cover those instead). */
+function isNodeUIPinCandidate(node) {
+    if (!node || node.type === HUB_NODE_NAME) return false;
+    try {
+        if (mediaLoaderInfo(node)) return false;   // has its own entry
+        if (isViewerNode(node)) return false;      // has its own entry
+        if (typeof node.onDrawForeground !== "function") return false;
+        if (listBatchWidgets(node).length) return false;
+        return true;
+    } catch (_) { return false; }
 }
 
 /** Human-readable, truncated widget label for menu entries. */

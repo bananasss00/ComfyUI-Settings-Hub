@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v39 - TrixLoader Load Image AIO joins the media-source rows: detection reads the pack's own onDropFile hook, hub uploads route through it (native pipeline, declines fall back to /upload/image), and the row preview prefers the source input file over the node's processed outputs");
+console.info("[SettingsHub] web build: v40 - canvas-drawn widgetless nodes get a node-UI pin: Pixaroma Switch / Mute Switch join the hub LIVE (rows render via onDrawForeground, clicks forward to the node, toggles work from the embed)");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v39 - TrixLoader Load Image AIO joins the
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=39", import.meta.url).href;
+    link.href = new URL("styles.css?v=40", import.meta.url).href;
     document.head.appendChild(link);
 })();
 

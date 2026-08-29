@@ -59,7 +59,10 @@ web/core.js            — конфиг хаба, detectWidgetType (самоле
                          reportUnresolved ждёт заселения графа (diagAttempts);
                          v39: mediaLoaderInfo квалифицирует mediaish-combo
                          по инстанс-хуку onDropFile (TrixLoader AIO: без
-                         upload-флагов/кнопки/composables/pasteFiles)
+                         upload-флагов/кнопки/composables/pasteFiles);
+                         v40: createNodeUIBinding - node-level биндинг в
+                         viewer-форме (VIEWER_SENTINEL + options.viewer +
+                         options.controls) для канвас-виджетлесс нод
 web/sync.js            — шина структурных/values-обновлений + shared edit-lock
                          (beginEdit/endEdit), rAF-очередь queueHubRefresh
 web/sync_manager.js    — хуки реактивности на целевых виджетах (обёртка callback),
@@ -104,7 +107,12 @@ web/context_menu.js    — пиннинг: ПКМ по hover-виджету; п�
                          меню ноды + пикер (чекбоксы, чипы типов,
                          select all/none, цели хаб/вкладка/New Tab/Create Hub,
                          Add N disabled при нуле); цели = allHubs() (как у
-                         всех меню, без activeHubs-гейтинга v34)
+                         всех меню, без activeHubs-гейтинга v34);
+                         v40: «🎛 Pin node UI (live embed)» для
+                         канвас-виджетлесс нод (Pixaroma Switch-паттерн),
+                         isNodeUIPinCandidate: НЕ media/viewer + onDraw
+                        Foreground + listBatchWidgets пуст; подменю
+                         node-embed'ов (viewer/node-UI) на общем теле
 web/portal_manager.js  — живые встраивания: DOM-панели — GHOST-ЗЕРКАЛА
                          (неcтруктивный клон в хабе, оригинал НИКОГДА не
                          покидает ноду; события клона → реэвент на
@@ -125,7 +133,12 @@ web/portal_manager.js  — живые встраивания: DOM-панели �
                          инлайн-IMPORTANT (setSplitHeight) против
                          !important-правил CSS зеркал; фолбэк захвата по
                          упакованной высоте клона; ResizeObserver:
-                         ресайз ноды живо ведёт зеркало
+                         ресайз ноды живо ведёт зеркало;
+                         v40: mountNodeUIPortal - форграунд-пейнтер
+                         портал для controls-биндингов (onDrawForeground
+                         1:1 + форвардинг кликов в node-local координатах
+                         - тогглы Switch кликабельны ИЗ хаба), монтируется
+                         МИМО media/gallery роутинга
 web/viewer_gallery.js  — v27 БАТЧ-ГАЛЕРЕЯ вьюверов: свой <img>-вьювер хаба,
                          кормится от выходного стора фронтенда
                          (app.nodeOutputs / app.nodePreviewImages + легаси
@@ -548,6 +561,62 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v40: канвас-виджетлесс ноды в хабе — «Pin node UI (live embed)»
+- ЗАПРОС (поле): у ноды Switch Pixaroma не появляется никакой пункт
+  для выноса в хаб; проверить остальные ноды пака Pixaroma на
+  похожую проблему.
+- ИЗУЧЕНИЕ ПАКА (gitlab.com/pixaroma/ComfyUI-Pixaroma, 82 класса):
+  Switch Pixaroma (js/switch/) и Mute Switch Pixaroma
+  (js/mute_switch/) в legacy-рендере НЕ имеют ни одного виджета:
+  все входы forceInput-сокеты + hidden SwitchState, DOM-строки
+  (vue_list.mjs) строятся ТОЛЬКО в Nodes 2.0 (isVueNodes), а в
+  legacy строки рисуются node.onDrawForeground и хит-тестятся в
+  node.onMouseDown (hitToggle/hitLabel). Все точки входа хаба
+  виджетные -> пункт не появлялся ни один. Остальные ноды пака
+  получают JS-виджеты или безусловные addDOMWidget DOM-панели ->
+  пути Pin/panel-pin уже работали. Фронтенд 1.51.9
+  collectNodeMenuItems = invokeExtensions('getNodeMenuItems').flat()
+  - собственные хуки пака (mute/group switch) КОНКАТЕНИРУЮТСЯ с
+  нашим, подавления нет.
+- РЕШЕНИЕ (patch_v40_nodeui.py, CRLF-safe, 11 патчей): v32+
+  canvas-портал УЖЕ умеет рисовать onDrawForeground 1:1 и
+  форвардить указатель в node-хендлеры с node-local координатами
+  (контракт этих нод) - пин делается ЖИВЫМ И ИНТЕРАКТИВНЫМ.
+  core.js: createNodeUIBinding (viewer-форма: VIEWER_SENTINEL +
+  options.viewer, ПЛЮС options.controls) - вся обвязка viewer-строк
+  (рендер, orphan-гейты, персистентность, exclusion из пресетов)
+  работает без изменений. context_menu.js: isNodeUIPinCandidate
+  (НЕ mediaLoaderInfo, НЕ isViewerNode, onDrawForeground-функция,
+  listBatchWidgets ПУСТ - любой зеркалируемый виджет делает
+  canvas-embed деградацией) + пункт «🎛 Pin node UI (live embed)» +
+  buildNodeUISubmenu (общее тело node-embed подменю с viewer).
+  portal_manager.js: mountNodeUIPortal - СРАЗУ форграунд-пейнтер
+  (painterWidget.draw = onDrawForeground; rec.mode = "foreground"
+  с тика 1: полный size[1] как база высоты), controls-биндинги
+  монтируются МИМО media/gallery попыток; форвардинг и авто-высота
+  достаются от mountCanvasPortal без изменений. hub_ui_renderer.js:
+  тег строки «🎛 live» + label-fallback "node UI". settings_hub:
+  баннер v40 + styles.css?v=40.
+- smoke_v40.mjs (28 чеков, jsdom + pixel-accounting ctx-стаб):
+  меню-квалификация (Switch = ровно один пункт; Mute Switch тоже;
+  негативы: combo/panel/viewer/media ноды НЕ дают дубля, хаб-нода
+  немая), биндинг (viewer-shape + controls, якоря id/title),
+  монтаж (canvas в хосте, onDrawForeground реально красит,
+  тег выживает), ИНТЕРАКТИВНОСТЬ (pointerdown -> onMouseDown с
+  node-local pos [100,55], wheel/contextmenu гасятся, pointerleave
+  -> onMouseLeave), релиз-гигиена (ремаунт без гостов, анпин
+  чистит), wiring (баннер v40, ?v=40, тег, экспорт). Уроки:
+  jsdom document.hidden=true - tick() не красит (нужен стаб);
+  подменю снапшотят allHubs() на момент построения - в смоуке хаб
+  должен существовать ДО построения меню; properties-LESS
+  SettingsHub-фикстура в графе роняет getHubConfig в фолбэк-скане.
+- Регресс: v39/v38/v37/v36/v35/v33/v32/v31/v30 (баннер-чеки
+  подняты до v40), text_resize, presets_v29, ghost_lock,
+  ghost_prefix, canvas_route, resize_pin, media_dl_chrome,
+  repro_v37_field - ALL PASSED; node --check web/*.js.
+- Коммит: «feat(hub): v40 canvas-drawn widgetless nodes get a
+  node-UI pin - Pixaroma Switch / Mute Switch join the hub LIVE …».
 
 ### v39: TrixLoader «Load Image AIO» в media-строках хаба
 - ЗАПРОС (поле): сделать поддержку загрузчика 🌊Load Image AIO из
@@ -1664,6 +1733,14 @@ onDropFile + mediaish-combo; негативы: нет проводки / нет 
 молчит, combo пишет пак) с фолбэками decline/throw -> /upload/image;
 превью: firstMediaSpec input-фильтр (источник, не processed-output),
 subfoldered combo-значения -> subfolder+filename в /view.
+
+ZX (v40) - smoke_v40.mjs, 28 чеков: меню-квалификация
+(Switch/MuteSwitch = один пункт; негативы: combo/panel/viewer/media
+не дублируются, хаб-нода немая), биндинг (viewer-shape + controls +
+якоря), монтаж форграунд-портала (canvas, реальная покраска,
+тег выживает), интерактивность (pointerdown -> onMouseDown
+node-local, wheel/contextmenu гасятся, pointerleave), релиз
+(ремаунт без гостов, анпин чистит), wiring (баннер v40, ?v=40).
 
 ## 6. Упаковка и коммиты
 
