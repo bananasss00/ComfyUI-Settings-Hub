@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v38 - pinned windows die with their workflow, GUARANTEED: DOM-anchored orphan sweep (panels carry their hub; dead/unknown panels are torn down on every watcher tick and after every configure), watcher closes foreign windows in ALL states + forgets dead hubs mid-session, disposeHubVisuals detaches pulled-away wraps, walkers hardened against hostile getters (watcher can no longer self-disarm on one weird node)");
+console.info("[SettingsHub] web build: v39 - FINAL min/max/step fix: mirrors adopt the 1.51.9 step contract (options.step2 is the REAL step, options.step is its deprecated 10x twin, raw steps > 10 are halved like the native renderer does), pin-time snapshots carry step2/precision/round, and custom-step pushes land on options.step2 too - hub sliders now match the source widget exactly");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v38 - pinned windows die with their workf
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=38", import.meta.url).href;
+    link.href = new URL("styles.css?v=39", import.meta.url).href;
     document.head.appendChild(link);
 })();
 

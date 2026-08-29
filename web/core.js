@@ -749,9 +749,12 @@ export function stepDecimals(step) {
  * bound stays open-ended: min/max come out as ±Infinity so the renderer can
  * omit the attribute and coercion skips that clamp.
  *
- * Step resolution order: declared step -> round -> precision-derived
- * (10^-digits) -> range-based fallback. The merged snapshot is also written
- * back into item.options (self-heal) so orphaned rows keep real geometry.
+ * Step resolution order (v39, 1.51.9 contract): step2 - the REAL step
+ * (legacy options.step is its 10x deprecated twin) -> round ->
+ * precision-derived (10^-digits) -> range-based fallback; a raw step > 10
+ * is halved by 10 like the native renderer's large-step rule. The merged
+ * snapshot is also written back into item.options (self-heal) so orphaned
+ * rows keep real geometry.
  */
 export function numericMerge(item, targetWidget) {
     const live = targetWidget?.options || {};
@@ -763,12 +766,32 @@ export function numericMerge(item, targetWidget) {
         max = min + Math.abs(min || 1); // degenerate equal bounds - keep them usable
     }
 
-    const declaredStep = pickNum(live.step, snap.step, NaN);
     const rangeKnown = Number.isFinite(min) && Number.isFinite(max);
     const range = rangeKnown ? max - min : NaN;
     const fallbackStep = rangeKnown
         ? (range <= 1 ? 0.01 : Math.max(range / 200, 0.01))
         : 0.01;
+
+    // v39 FINAL FIX (field report: "в хабе все слайдеры не соответствуют
+    // реальным параметрам виджета из ноды"): 1.51.9 number widgets mark
+    // options.step DEPRECATED and always write it as step*10, while the
+    // REAL step lives in options.step2 (frontend factories:
+    // { step: step*10, step2: step }; PrimitiveInt/Float defineProperty
+    // step2; canonical getWidgetStep(): step2 || step*0.1). Reading raw
+    // step made EVERY hub slider 10x coarser than the node's own widget
+    // and corrupted the decimals of every float mirror. Resolution order
+    // mirrors the native Vue renderer (WidgetInputNumber*):
+    //   1) step2 (live, then snapshot)  - the REAL declared step;
+    //   2) step  (live, then snapshot)  - as declared, but > 10 is halved
+    //      by 10 (useNumberStepCalculation's large-step rule);
+    //   3) round -> precision-derived -> range fallback (legacy chain).
+    const declaredStep2 = pickNum(live.step2, snap.step2, NaN);
+    const declaredStepRaw = pickNum(live.step, snap.step, NaN);
+    let declaredStep = NaN;
+    if (declaredStep2 > 0) declaredStep = declaredStep2;
+    else if (declaredStepRaw > 0) {
+        declaredStep = declaredStepRaw > 10 ? declaredStepRaw / 10 : declaredStepRaw;
+    }
 
     let step = declaredStep;
     if (!(step > 0) && optsHas(live, snap, "round")) step = pickNum(live.round, snap.round, NaN);
@@ -813,6 +836,7 @@ export function numericMerge(item, targetWidget) {
             if (so.min !== min && Number.isFinite(min)) so.min = min;
             if (so.max !== max && Number.isFinite(max)) so.max = max;
             if (so.step !== step && step > 0) so.step = step;
+            if (so.step2 !== step && step > 0) so.step2 = step; // v39: REAL step into the snapshot too
         }
     } catch (_) { /* frozen configs must not break rendering */ }
 
@@ -1050,7 +1074,9 @@ export function applyOverrideToTargetWidgets(item) {
             const rawOv = item.sliderOverride;
             if (rawOv && typeof rawOv === "object" && !rawOv.native) {
                 const nat = {};
-                for (const k of [...OV_KEYS, "precision", "round"]) {
+                // v39: step2 joins the snapshot - 1.51.9 widgets drive their
+                // own granularity from it, so Clear must restore it as well.
+                for (const k of [...OV_KEYS, "step2", "precision", "round"]) {
                     if (k in tw.options) nat[k] = tw.options[k];
                 }
                 rawOv.native = nat;
@@ -1069,6 +1095,10 @@ export function applyOverrideToTargetWidgets(item) {
         // them in line with the pushed step; never invent missing fields.
         if ("step" in ov) {
             const dec = stepDecimals(ov.step);
+            // v39: 1.51.9 drives drag/scrub granularity from options.step2 -
+            // writing options.step alone is a NO-OP on every modern widget
+            // (field report v22: "min/max применяется, а step - нет").
+            if (tw.options.step2 != null) tw.options.step2 = ov.step;
             if (tw.options.round != null) tw.options.round = ov.step;
             if (tw.options.precision != null &&
                 Number.isFinite(Number(tw.options.precision))) {
@@ -1505,12 +1535,26 @@ function makeBindingItem(node, targetNode, widget, tabId, type, extra) {
         const values = extractComboValues(widget);
         if (values) {
             item.options = { values };
-        } else if (widget.options && (widget.options.min != null || widget.options.max != null)) {
-            item.options = {
-                min: widget.options.min,
-                max: widget.options.max,
-                step: widget.options.step,
-            };
+        } else if (widget.options) {
+            // v39: FULL numeric snapshot. 1.51.9 keeps the REAL step in
+            // options.step2 (options.step is the deprecated 10x legacy twin)
+            // and may describe granularity via precision/round - orphaned
+            // rows must keep the real geometry, so all of it is captured.
+            // Hostile getters are guarded one key at a time.
+            const so = {};
+            for (const k of ["min", "max", "step", "step2", "precision", "round"]) {
+                try {
+                    const v = widget.options[k];
+                    if (v != null) so[k] = v;
+                } catch (_) { /* exotic getter - skip this key */ }
+            }
+            if (so.min != null || so.max != null || so.step != null || so.step2 != null) {
+                item.options = so;
+            } else {
+                // Text-family binding: remember multiline so the hub renders a
+                // growing <textarea> instead of a single-line input.
+                item.options = isMultilineWidget(widget) ? { multiline: true } : {};
+            }
         } else {
             // Text-family binding: remember multiline so the hub renders a
             // growing <textarea> instead of a single-line input.
