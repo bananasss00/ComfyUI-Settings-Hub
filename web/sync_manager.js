@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
-import { getHubConfig, HUB_NODE_NAME, allHubs, resolveBindingTarget, findWidgetOnNode } from "./core.js";
+import { getHubConfig, HUB_NODE_NAME, allHubs, resolveBindingTarget, findWidgetOnNode, isNodeInLiveTree, forgetHubNode } from "./core.js";
+import { disposeHubVisuals } from "./hub_ui_renderer.js";
 import { syncNode, queueHubRefresh, inEdit, beginEdit, endEdit } from "./sync.js";
 import * as Pins from "./pins.js";
 
@@ -126,7 +127,21 @@ export function isHubTarget(nodeId) {
 /** Full re-render of every hub on every graph + pin recount. */
 export function syncAll() {
     Pins.invalidatePins();
-    for (const hub of allHubs()) syncNode(hub);
+    for (const hub of allHubs()) {
+        // v37: a configure that skipped removal lifecycle (frontend
+        // 1.51.9 tab switches with a stale canvas.subgraph) leaves dead
+        // hubs registered; re-rendering one resurrects its pinned
+        // window over the new workflow (renderHub re-floats any pinned
+        // hub). Forget + dispose instead of rendering.
+        try {
+            if (!isNodeInLiveTree(hub)) {
+                forgetHubNode(hub);
+                disposeHubVisuals(hub);
+                continue;
+            }
+        } catch (_) { /* walker hiccup: render as before */ }
+        syncNode(hub);
+    }
     // Attach hooks to widgets that are already bound at load time.
     for (const hub of allHubs()) {
         const cfg = getHubConfig(hub);

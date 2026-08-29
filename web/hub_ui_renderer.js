@@ -24,6 +24,7 @@ import {
     liveComboValues, coerceNumeric, removeItem, detectWidgetType,
     isMultilineWidget, portalKindOf, resolveBindingTarget, findHolderChainOf,
     findWidgetOnNode, allGraphs, forgetHubNode, nodeListOf,
+    liveGraphs, isNodeInLiveTree,
     synthSliderWindow, growSynthWindow, allHubs,
     effectiveSliderParams, getSliderOverride, hasSliderOverride,
     setSliderOverride, clearSliderOverride, applyOverrideToTargetWidgets,
@@ -1045,6 +1046,10 @@ export function disposeHubVisuals(node) {
     const p = pinPanels.get(node);
     try { p?.panel.remove(); } catch (_) {}
     pinPanels.delete(node);
+    // v37: the panel body is gone - isWrapInPanel must stop reporting
+    // "floating" for a disposed hub (the wrap still parents to the
+    // detached body otherwise).
+    if (st) st.panelBody = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,17 +1063,15 @@ export function disposeHubVisuals(node) {
 
 /** Is this hub still reachable from the LIVE root graph (root canvas or any
  *  nested subgraph)? A walker failure answers YES - live state is never
- *  destroyed on a tooling hiccup. */
+ *  destroyed on a tooling hiccup.
+ *  v37: LIVE-TREE membership only. The old allGraphs() walk also harvested
+ *  subgraph definition registries (root._subgraphs); frontend 1.51.9 tab
+ *  switches that skip clean() merge the incoming workflow's subgraph
+ *  definitions WITHOUT purging the previous workflow's objects, so dead
+ *  hubs inside stale subgraphs read as reachable - prune skipped them and
+ *  syncAll resurrected their pinned windows over the new workflow. */
 function hubIsReachable(hub) {
-    try {
-        for (const g of allGraphs()) {
-            if (Array.isArray(g?._nodes) && g._nodes.includes(hub)) return true;
-            if (Array.isArray(g?.nodes) && g.nodes.includes(hub)) return true;
-        }
-    } catch (_) {
-        return true;
-    }
-    return false;
+    return isNodeInLiveTree(hub);
 }
 
 /** Drop every tracked hub that no longer belongs to the live graph: forget
@@ -3033,7 +3036,18 @@ function renderHub(node) {
     // element must stay invisible to the DOM-widget manager.
     try {
         if (getHubConfig(node).pinned) {
-            if (!isWrapInPanel(st)) floatHub(node);
+            // v37: a hub dropped by a configure that skipped removal
+            // lifecycle (frontend 1.51.9 tab switches with a stale
+            // canvas.subgraph) is still registered and still pinned -
+            // syncAll and onConfigure both land here and used to
+            // RE-FLOAT its dead window over the new workflow. Live
+            // hubs float exactly as before.
+            if (!isNodeInLiveTree(node)) {
+                if (isWrapInPanel(st)) {
+                    forgetHubNode(node);
+                    disposeHubVisuals(node);
+                }
+            } else if (!isWrapInPanel(st)) floatHub(node);
             else detachHubWidget(node, st);
         }
     } catch (_) {}
@@ -3611,6 +3625,37 @@ export function __hubTestState(node) { return stateMap.get(node) ?? null; }
 //   * 5 consecutive broken ticks disable the watcher for the session with
 //     one console.warn - a pathological frontend degrades to v33 behavior.
 // ===========================================================================
+let stalePinCrumbShown = false;
+
+/** v37: does EVERY widget binding of this hub fail to resolve against the
+ *  live tree? Silent on purpose (no diagnostics side effects - the watcher
+ *  probes with it every tick). A hub with zero bindings never answers yes
+ *  (an intentionally pinned empty hub is not a stale panel), and an
+ *  unpopulated tree never decides (slow boots must not close windows). */
+function pinnedWindowAllRowsDead(hub, cfg) {
+    try {
+        const items = (cfg?.items ?? []).filter(
+            (i) => i?.type === "widget_binding");
+        if (!items.length) return false;
+        const nodes = [];
+        for (const g of liveGraphs()) nodes.push(...nodeListOf(g));
+        if (!nodes.length) return false;
+        const byId = new Map(nodes.map((n) => [String(n?.id), n]));
+        for (const it of items) {
+            let tn = byId.get(String(it?.targetNodeId));
+            if (!tn && it?.targetTitle != null) {
+                const want = String(it.targetTitle);
+                tn = nodes.find((n) => String(n?.title ?? "") === want) ?? null;
+            }
+            if (tn) {
+                const w = findWidgetOnNode(tn, it.widgetToBind, it.widgetOrdinal);
+                if (w) return false; // at least one live row keeps the window
+            }
+        }
+        return true;
+    } catch (_) { return false; }
+}
+
 let tabWatchInstalled = false;
 export function installHubTabWatch() {
     if (tabWatchInstalled) return;
@@ -3647,7 +3692,9 @@ export function installHubTabWatch() {
             if (lastSig !== null && sig === lastSig) return; // nothing changed
             lastSig = sig;
             const active = new Set();
-            for (const g of allGraphs()) {
+            // v37: live tree only - stale subgraph registries must not
+            // count the previous workflow's nodes as "active".
+            for (const g of liveGraphs()) {
                 for (const n of nodeListOf(g)) active.add(n);
             }
             if (active.size) {
@@ -3668,6 +3715,20 @@ export function installHubTabWatch() {
                         if (cfg?.pinned && !floating) {
                             if (st?.wrap?.isConnected) floatHub(hub);
                             else syncNode(hub); // rebuild, renderHub re-floats
+                        } else if (cfg?.pinned && floating &&
+                                   pinnedWindowAllRowsDead(hub, cfg)) {
+                            // v37: a pinned window floating over a
+                            // workflow where EVERY binding row is dead
+                            // (duplicated workflows carry copied hub
+                            // configs) reads as "the previous process's
+                            // window stayed". Take it down; the pin
+                            // survives and re-floats where rows resolve.
+                            homeHub(hub);
+                            if (!stalePinCrumbShown) {
+                                stalePinCrumbShown = true;
+                                console.info(
+                                    "[SettingsHub] pinned hub window closed: none of its bindings resolve in the current workflow (stale or copied hub config). It re-floats where they do.");
+                            }
                         }
                     } else if (floating) {
                         homeHub(hub); // window down; the pin survives

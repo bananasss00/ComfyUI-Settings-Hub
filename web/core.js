@@ -184,6 +184,63 @@ export function allGraphs(maxDepth = 12) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// v37: LIVE-TREE walker - liveness decisions must not consult subgraph
+// DEFINITION registries. allGraphs() also walks g._subgraphs (needed for
+// cross-subgraph pin RESOLUTION), but frontend 1.51.9 tab switches run
+// loadGraphData -> clean() -> configure() and clean() SKIPS rootGraph.clear()
+// whenever canvas.subgraph is set; configure() then replaces _nodes without
+// any removal lifecycle and MERGES the incoming subgraph definitions into
+// the registry - the PREVIOUS workflow's subgraph objects stay reachable
+// through it. Liveness driven by that walker kept dead hubs "alive":
+// prune skipped them and their pinned windows survived tab switches
+// (field report: 1.51.9, frontend package 1.51.9). liveGraphs() walks ONLY
+// the roots plus graphs directly referenced by live nodes' own properties.
+export function liveGraphs(maxDepth = 12) {
+    const seen = new Set();
+    const out = [];
+    const push = (g) => {
+        if (looksLikeGraph(g) && !seen.has(g)) {
+            seen.add(g);
+            out.push(g);
+            return true;
+        }
+        return false;
+    };
+
+    seedRootGraphs(push);
+    let frontier = [...out];
+    for (let depth = 0; depth < maxDepth && frontier.length; depth++) {
+        const next = [];
+        for (const g of frontier) {
+            for (const n of nodeListOf(g)) {
+                for (const child of childGraphsOfNode(n)) {
+                    if (push(child)) next.push(child);
+                }
+            }
+            // NOTE: no registryEntriesOf() here - that is the point.
+        }
+        frontier = next;
+    }
+    return out;
+}
+
+/** True when the node object is a member of the CURRENT workflow tree
+ *  (liveGraphs). A walker hiccup answers YES - live state is never
+ *  destroyed on a tooling failure. */
+export function isNodeInLiveTree(node) {
+    try {
+        for (const g of liveGraphs()) {
+            for (const n of nodeListOf(g)) {
+                if (n === node) return true;
+            }
+        }
+    } catch (_) {
+        return true;
+    }
+    return false;
+}
+
 /** Node by numeric OR stringified id across root graph AND every reachable
  *  subgraph. The loose second pass absorbs frontend generations that re-map
  *  inner ids to strings (a stored numeric pin id still matches). Exact id
@@ -207,6 +264,7 @@ export function findNodeByIdEverywhere(id) {
 
 const diagReported = new Set();
 const diagPending = new WeakSet();
+const diagAttempts = new WeakMap();
 
 /** One-line console breadcrumb when a pin stays unresolved - turns future
  *  field reports into actionable data (how many graphs/nodes were scanned).
@@ -223,19 +281,35 @@ function reportUnresolved(item) {
     try {
         if (!item || diagPending.has(item)) return;
         diagPending.add(item);
+        const tries = diagAttempts.get(item) ?? 0;
         setTimeout(() => {
             try {
                 // Re-entry from resolveBindingTarget -> reportUnresolved is
                 // a no-op while the item is pending (diagPending guard).
-                if (resolveBindingTarget(item)) return; // healed after load
+                if (resolveBindingTarget(item)) {
+                    diagAttempts.delete(item); // healed after load
+                    return;
+                }
                 diagPending.delete(item);
-                const key = `${item?.targetNodeId}|${item?.targetTitle}|${item?.widgetToBind}`;
-                if (diagReported.has(key)) return;
-                diagReported.add(key);
                 // Fresh truthful stats - a nodeId-only pin never populates
                 // lastResolverStats on its own (no title -> no scan ran).
                 scanAllNodesFor(() => false);
                 const st = lastResolverStats();
+                // v37: a scan visiting ZERO nodes means the workflow has
+                // not been populated yet (heavy environments boot slower
+                // than the 2.5s window - one field log showed five pins
+                // reported against an empty graph, all healed later).
+                // Re-arm instead of reporting; only a POPULATED graph that
+                // still cannot serve the pin earns the breadcrumb.
+                if (st.nodes === 0 && tries < 2) {
+                    diagAttempts.set(item, tries + 1);
+                    reportUnresolved(item);
+                    return;
+                }
+                diagAttempts.delete(item);
+                const key = `${item?.targetNodeId}|${item?.targetTitle}|${item?.widgetToBind}`;
+                if (diagReported.has(key)) return;
+                diagReported.add(key);
                 // Viewer embeds bind the whole NODE (no real widget name) -
                 // showing the internal sentinel would just confuse reports.
                 const widgetLabel = item?.options?.viewer

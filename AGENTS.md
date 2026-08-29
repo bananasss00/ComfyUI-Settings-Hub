@@ -53,11 +53,16 @@ web/core.js            — конфиг хаба, detectWidgetType (самоле
                          createNewHub — канонический LiteGraph.createNode -> graph.add;
                          v35: createBindingsBulk (N items, ОДИН syncNode),
                          getter-гарды в findWidgetOnNode/sameNameOrdinal,
-                         nodeListOf экспортирован
+                         nodeListOf экспортирован;
+                         v37: liveGraphs (только живое дерево, БЕЗ реестров
+                         дефиниций) + isNodeInLiveTree (решения о живости),
+                         reportUnresolved ждёт заселения графа (diagAttempts)
 web/sync.js            — шина структурных/values-обновлений + shared edit-lock
                          (beginEdit/endEdit), rAF-очередь queueHubRefresh
 web/sync_manager.js    — хуки реактивности на целевых виджетах (обёртка callback),
-                         writeTargetValue под lock'ом, invokeTargetButton
+                         writeTargetValue под lock'ом, invokeTargetButton;
+                         v37: syncAll forget+dispose мёртвых хабов ДО
+                         syncNode (воскрешение пин-окон закрыто)
                          (запуск запиненной кнопки на ЖИВОЙ ноде,
                          никогда не трогает .value), self-healing вызовы
 web/hub_ui_renderer.js — весь UI хаба: табы, строки зеркал, searchable combo
@@ -526,6 +531,70 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v37: пин-окна умирают вместе со своим воркфлоу (поле: frontend 1.51.9) + бредкрамбы ждут заселения графа
+- РЕПОРТ (поле, после v36, frontend package 1.51.9): проблема «пин окна
+  остаются при смене рабочего процесса» НЕ решена; лог: 5x «pin
+  unresolved {KSampler…} - scanned 1 graph(s), 0 node(s)» + строка
+  «floating hub content was pulled back to the canvas…». Пользователь
+  сообщил версию фронта (1.51.9) — по запросу диагностики v36.
+- ИЗУЧЕНИЕ ИСХОДНИКОВ 1.51.9 (Comfy-Org/ComfyUI_frontend @ v1.51.9):
+  app.graph — СИНГЛТОН rootGraphInternal, identity НЕ меняется НИКОГДА
+  (v35-урок подтверждён); переключение вкладок = workflowService.
+  openWorkflow -> app.loadGraphData -> clean() + rootGraph.configure()
+  НА ТОМ ЖЕ LGraph; хуки before/afterConfigureGraph ЗОВУТСЯ; clean()
+  зовёт rootGraph.clear() ТОЛЬКО при !canvas.subgraph (clear() в 1.51.9
+  честно зовёт fireNodeRemovalLifecycle -> onRemoved), а configure()
+  заменяет _nodes БЕЗ lifecycle и ДОЛИВАЕТ сабграф-дефиниции в
+  root._subgraphs НЕ ЧИСТЯ реестр (при пропущенном clean() там
+  остаются сабграфы ПРЕДЫДУЩЕГО воркфлоу); LGraphCanvas.setGraph не
+  трогает canvas.subgraph.
+- ДИАГНОЗ (три механизма выживания, воспроизведены в jsdom на живом
+  коде расширения — repro_v37_field.mjs):
+  1) configure БЕЗ lifecycle (clean() пропущен) оставляет мёртвый хаб в
+     реестре с плавающим окном; renderHub (блок pinned) РЕ-ФЛОАТИТ ЛЮБОЙ
+     хаб с pinned:true — syncAll/onConfigure воскрешали мёртвое окно;
+  2) СТЕЙЛ-РЕЕСТР ПОДГРАФОВ: allGraphs() черпает и _subgraphs — мёртвый
+     хаб внутри сабграфа прошлого воркфлоу читался «достижимым» ->
+     hubIsReachable отвечал true -> prune ЩАДИЛ его, вотчер считал его
+     ноды «активными» (re-float ветка);
+  3) КОПИРОВАННЫЕ КОНФИГИ хаба (дублированные воркфлоу): каждая копия
+     легитимно ре-флоатит СВОЁ окно с ЧУЖИМИ привязками — окно «с
+     прошлого процесса» висит над новым воркфлоу с мёртвыми строками.
+- РЕШЕНИЕ (v37, примитивы v33/v36 не тронуты):
+  1) core.liveGraphs() — обход ТОЛЬКО живого дерева (корни + сабграфы,
+     на которые ссылаются СОБСТВЕННЫЕ свойства живых нод; реестры
+     дефиниций НЕ обходятся) + core.isNodeInLiveTree(node) (сбой
+     walker'а отвечает «да» — живое состояние не уничтожается);
+     РЕЗОЛЮЦИЯ ПИНОВ по-прежнему через allGraphs() (v24 контракт,
+     пины внутри сабграфов ищутся как раньше);
+  2) renderHub: блок pinned гейтируется живостью — мёртвый хаб НЕ
+     флоатит, плавающий мёртвый — forget+dispose (воскрешение закрыто
+     во ВСЕХ порядках хуков);
+  3) syncAll: перед syncNode мёртвые хабы forget+dispose (sync_manager);
+  4) hubIsReachable = isNodeInLiveTree (prune щадит только живых);
+  5) вотчер: active-множество из liveGraphs(); НОВАЯ ветка — пин-окно,
+     у которого НИ ОДНА строка не резолвится на заселённом графе
+     (копированный конфиг), снимается homeHub'ом (pin выживает,
+     возврат ре-флоатит), один console.info за сессию; пустой хаб и
+     незаселённый граф НЕ закрываются (pinnedWindowAllRowsDead);
+  6) disposeHubVisuals обнуляет st.panelBody (isWrapInPanel больше не
+     врёт «floating» после dispose);
+  7) core.reportUnresolved v2: скан с 0 узлов = граф ещё не заселён
+     (тяжёлые окружения бутятся дольше 2.5с) -> РЕ-АРМ (до 2 раз) вместо
+     репорта; бредкрамб только по заселённому графу (diagAttempts).
+- СМОУКИ: smoke_v37.mjs 22 чека (A1-A7: lifecycle-свитч, свитч без
+  lifecycle, syncAll-до-prune, вотчер-only, стейл-подграфы, копиконфиг
+  + возврат ре-флоат, одна живая строка держит окно; B1-B3: тишина на
+  пустом графе, поздний таргет исцеляется молча, вечный сирота на
+  заселённом графе — ровно один честный бредкрамб; C: баннер v37,
+  ?v=37, гейты на месте). repro_v37_field.mjs — полевой стенд с точной
+  семантикой 1.51.9. Регресс: v36, v35, v33, v32, v31, v30,
+  text_resize, presets_v29, ghost_lock, ghost_prefix, canvas_route,
+  resize_pin, media_dl_chrome — ALL PASSED (пины версий в v36/v35/v31
+  подняты до v37); node --check web/*.js.
+- ВЕРИФИКАЦИЯ НА ПОЛЕ: F12 -> баннер «web build: v37 - pinned windows
+  die with their workflow…»; полная замена web/ из zip + Ctrl+F5.
 
 ### v36: полевой фикс tab-watcher (смена вкладок БЕЗ смены identity графа) + отложенные pin-unresolved репорты
 - РЕПОРТ (поле, после v35): batch-add работает; ОСТАТОЧНОЕ — «при смене
@@ -1482,8 +1551,10 @@ zip -rq ComfyUI-Settings-Hub.zip ComfyUI-Settings-Hub \
 ```
 
 Коммиты — Conventional Commits (`feat(scope): ...`, `fix(ui): ...`,
-`docs: ...`). Стоящее правило проекта: КАЖДОМУ фиксу/фиче — название
-коммита в ответе пользователю, включая ретроспективные.
+`docs: ...`). Стоящее правило проекта (контракт пользователя, v36):
+названия коммитов пишет АССИСТЕНТ — коммитит каждый фикс/фичу сам и
+приводит название коммита в ответе пользователю, включая
+ретроспективные. Пользователь названия не придумывает.
 
 Отладка в реальном ComfyUI: F12 → Console (ошибки модулей всплывают при
 загрузке страницы), либо жёсткое обновление фронта (Ctrl+F5) после замены
