@@ -3574,7 +3574,7 @@ export function syncHubNode(node) {
 export function __hubTestState(node) { return stateMap.get(node) ?? null; }
 
 // ===========================================================================
-// v35: configure-free workflow-tab hygiene, CONSERVATIVE edition.
+// v36: workflow-tab hygiene v2 - the sweep fires on a CONTENT SIGNATURE.
 // ---------------------------------------------------------------------------
 // Field history: v31 closed pinned windows only through afterConfigureGraph
 // (configure-based switches); modern frontends swap app.canvas.graph WITHOUT
@@ -3582,20 +3582,30 @@ export function __hubTestState(node) { return stateMap.get(node) ?? null; }
 // "fixed" that with an identity sweep + weak hub registry + livePinPanels
 // side table + activeHubs() menu re-gating - and regressed the field hard
 // (hub UI never restored, orphan mirrors, dead menus). The whole machinery
-// was reverted; what ships instead is the smallest possible pass with the
-// same user-visible goal, assembled from v33 primitives only:
+// was reverted. v35 re-landed the smallest possible pass from v33
+// primitives - but gated it on ROOT GRAPH OBJECT IDENTITY, and the field
+// came back once more: the pinned window STILL survived tab switches.
+// Frontends that re-deserialize the incoming workflow INTO THE SAME LGraph
+// object never change app.graph / app.canvas.graph identity (and fire no
+// configure hook), so the v35 watcher slept through exactly the switches it
+// was built for. v36 lesson: node membership of the active set is the
+// ground truth, object identity is not:
 //
-//   * fires ONLY when an active root graph object identity changes;
+//   * a cheap id-hash signature of the two roots decides whether anything
+//     changed; only a signature change runs the full sweep - steady-state
+//     ticks stay O(root node ids), no duck-type graph walk;
 //   * "active" = nodes of allGraphs() - the CURRENT roots and their
-//     subgraphs (that part of v34 was sound; background tabs' graphs are
-//     never seeded, so foreign hubs read as foreign);
-//   * enumeration failure or an EMPTY active set = observe-only tick - a
-//     walker hiccup must never close user windows;
+//     subgraphs (background tabs' graphs are never seeded, so foreign hubs
+//     read as foreign);
+//   * EMPTY active set: a REAL state once nodes were seen this session
+//     (new/empty workflow, closed tab) - foreign floats go down. Before
+//     the first-ever node sighting, or with unreadable roots: observe-only
+//     tick - a walker hiccup must never close user windows;
 //   * hub IN the active set: re-float a pinned hub whose wrap is still
 //     connected; a dropped element goes through the syncNode rebuild path
 //     (renderHub re-floats pinned hubs itself);
-//   * FOREIGN hub: take the floating window down via homeHub - cfg.pinned
-//     SURVIVES, switching back re-floats at the same pinPos;
+//   * FOREIGN hub with a floating wrap: take the window down via homeHub -
+//     cfg.pinned SURVIVES, switching back re-floats at the same pinPos;
 //   * NO weak registry, NO menu re-gating, NO panel side table - every
 //     other subsystem keeps its exact v33 shape;
 //   * 5 consecutive broken ticks disable the watcher for the session with
@@ -3605,31 +3615,61 @@ let tabWatchInstalled = false;
 export function installHubTabWatch() {
     if (tabWatchInstalled) return;
     tabWatchInstalled = true;
-    let lastRoot;
-    let lastCanvas;
-    let seen = false;
+    // v36: id-hash of the two roots' node id lists - the change detector.
+    // Any throw answers "!" which forces a sweep (degenerate but safe).
+    const rootSig = (g) => {
+        try {
+            const arr = Array.isArray(g?._nodes) ? g._nodes
+                : Array.isArray(g?.nodes) ? g.nodes : null;
+            if (!arr) return "x";
+            const idHash = (v) => {
+                if (typeof v === "number") return v | 0;
+                let h = 7;
+                const s = String(v ?? "");
+                for (let i = 0; i < s.length; i++) {
+                    h = (Math.imul(h, 33) + s.charCodeAt(i)) | 0;
+                }
+                return h;
+            };
+            let h = arr.length | 0;
+            for (let i = 0; i < arr.length; i++) {
+                h = (Math.imul(h, 31) + idHash(arr[i]?.id)) | 0;
+            }
+            return String(h);
+        } catch (_) { return "!"; }
+    };
+    let lastSig = null;
+    let everActive = false;   // a node sighting at least once this session
     let fails = 0;
     const timer = setInterval(() => {
         try {
-            const root = app?.graph ?? null;
-            const canvas = app?.canvas?.graph ?? null;
-            if (seen && root === lastRoot && canvas === lastCanvas) return;
-            lastRoot = root; lastCanvas = canvas; seen = true;
+            const sig = rootSig(app?.graph) + "|" + rootSig(app?.canvas?.graph);
+            if (lastSig !== null && sig === lastSig) return; // nothing changed
+            lastSig = sig;
             const active = new Set();
             for (const g of allGraphs()) {
                 for (const n of nodeListOf(g)) active.add(n);
             }
-            if (!active.size) return; // unreadable/empty: observe only
+            if (active.size) {
+                everActive = true;
+            } else if (!everActive || !(app?.graph || app?.canvas?.graph)) {
+                return; // no node ever seen / roots unreadable: observe only
+            }
+            // else: readable-but-EMPTY active set (new/empty workflow or a
+            // closed tab) is a REAL state - foreign floats go down below.
             for (const hub of allHubs()) {
                 try {
                     const st = stateMap.get(hub);
+                    // "floating" truth: panelBody follows the pin-panel body
+                    // while the wrap lives there (set by ensurePinPanel).
+                    const floating = isWrapInPanel(st);
                     if (active.has(hub)) {
                         const cfg = getHubConfig(hub);
-                        if (cfg?.pinned && !isWrapInPanel(st)) {
+                        if (cfg?.pinned && !floating) {
                             if (st?.wrap?.isConnected) floatHub(hub);
                             else syncNode(hub); // rebuild, renderHub re-floats
                         }
-                    } else if (isWrapInPanel(st)) {
+                    } else if (floating) {
                         homeHub(hub); // window down; the pin survives
                     }
                 } catch (_) { /* one broken hub must not sink the pass */ }

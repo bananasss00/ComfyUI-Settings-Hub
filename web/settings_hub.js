@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v35 - batch picker re-landed on the v33 baseline (allHubs targets); conservative self-disarming tab watcher replaces the v34 sweep; loud per-module loader diagnostics");
+console.info("[SettingsHub] web build: v36 - tab watcher fires on a content signature (in-place workflow swaps without graph identity change are caught now); readable-but-empty graph takes foreign floats down; pin-unresolved breadcrumbs deferred and re-checked (boot-time false alarms gone)");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v35 - batch picker re-landed on the v33 b
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=35", import.meta.url).href;
+    link.href = new URL("styles.css?v=36", import.meta.url).href;
     document.head.appendChild(link);
 })();
 

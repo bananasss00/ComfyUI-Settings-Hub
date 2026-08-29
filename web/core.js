@@ -206,26 +206,51 @@ export function findNodeByIdEverywhere(id) {
 }
 
 const diagReported = new Set();
+const diagPending = new WeakSet();
 
 /** One-line console breadcrumb when a pin stays unresolved - turns future
  *  field reports into actionable data (how many graphs/nodes were scanned).
- *  Fired once per target identity, never spams. */
-function reportUnresolved(item, graphsScanned, nodesScanned) {
+ *  Fired once per target identity, never spams.
+ *
+ *  v36: the report is DEFERRED (~2.5s) and re-checked first. The hub renders
+ *  DURING graph.configure (onConfigure -> syncNode) while the workflow is
+ *  still being populated, so targets routinely do not exist yet; every
+ *  immediate report fired in that window was a false alarm healed
+ *  milliseconds later by afterConfigureGraph -> syncAll (one field log
+ *  showed ~35 such lines per page load). Only pins that STILL fail against
+ *  the settled graph produce the breadcrumb, with truthful scan stats. */
+function reportUnresolved(item) {
     try {
-        const key = `${item?.targetNodeId}|${item?.targetTitle}|${item?.widgetToBind}`;
-        if (diagReported.has(key)) return;
-        diagReported.add(key);
-        // Viewer embeds bind the whole NODE (no real widget name) - showing
-        // the internal sentinel would just confuse field reports.
-        const widgetLabel = item?.options?.viewer
-            ? "(whole node embed)" : item?.widgetToBind;
-        console.info(
-            "[SettingsHub] pin unresolved:", JSON.stringify({
-                title: item?.targetTitle, widget: widgetLabel,
-                nodeId: item?.targetNodeId,
-            }),
-            `- scanned ${graphsScanned} graph(s), ${nodesScanned} node(s).` +
-            "\nIf this persists please report it with your ComfyUI frontend version.");
+        if (!item || diagPending.has(item)) return;
+        diagPending.add(item);
+        setTimeout(() => {
+            try {
+                // Re-entry from resolveBindingTarget -> reportUnresolved is
+                // a no-op while the item is pending (diagPending guard).
+                if (resolveBindingTarget(item)) return; // healed after load
+                diagPending.delete(item);
+                const key = `${item?.targetNodeId}|${item?.targetTitle}|${item?.widgetToBind}`;
+                if (diagReported.has(key)) return;
+                diagReported.add(key);
+                // Fresh truthful stats - a nodeId-only pin never populates
+                // lastResolverStats on its own (no title -> no scan ran).
+                scanAllNodesFor(() => false);
+                const st = lastResolverStats();
+                // Viewer embeds bind the whole NODE (no real widget name) -
+                // showing the internal sentinel would just confuse reports.
+                const widgetLabel = item?.options?.viewer
+                    ? "(whole node embed)" : item?.widgetToBind;
+                console.info(
+                    "[SettingsHub] pin unresolved:", JSON.stringify({
+                        title: item?.targetTitle, widget: widgetLabel,
+                        nodeId: item?.targetNodeId,
+                    }),
+                    `- scanned ${st.graphs} graph(s), ${st.nodes} node(s).` +
+                    "\nIf this persists please report it with your ComfyUI frontend version.");
+            } catch (_) {
+                try { diagPending.delete(item); } catch (_) {}
+            }
+        }, 2500);
     } catch (_) {}
 }
 
