@@ -98,14 +98,19 @@ function viewUrlFromSpec(spec) {
 /** v30: current media spec of a node WITHOUT the image-only filter - the
  * media-source rows need video/audio input files too. Reads the same
  * output store as findOutputImages (the frontend keeps LoadImage/LoadVideo/
- * LoadAudio inputs there with type:"input"). Returns {url,type,filename}
- * or null. */
-export function firstMediaSpec(tn) {
+ * LoadAudio inputs there with type:"input"). v39: wantType ("input")
+ * restricts the pick to specs of that store type - loader packs whose run
+ * REPLACES the store entry with the processed output (TrixLoader AIO)
+ * then yield null and the row falls back to the combo value. Returns
+ * {url,type,filename} or null. */
+export function firstMediaSpec(tn, wantType) {
     const outputs = firstStoreEntry(tn, app?.nodeOutputs)
         ?? (typeof tn?.images !== "undefined" ? { images: tn.images } : undefined);
     const specs = Array.isArray(outputs?.images) ? outputs.images : [];
     for (const s of specs) {
         try {
+            // v39: optional store-type filter (see the doc block above).
+            if (wantType && String(s?.type ?? "output") !== wantType) continue;
             if (s && typeof s === "object" && s.filename) {
                 return {
                     url: viewUrlFromSpec(s),

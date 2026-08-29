@@ -1308,8 +1308,10 @@ export function widgetNativeHeight(widget, fallback = 30) {
 // Detection mirrors the frontend's own upload extension: media combos carry
 // flags in their options (image_upload / video_upload / audio_upload /
 // animated_image_upload). Fallback: the node carries its OWN onDragOver and
-// onDrop instance props (installed by the upload composables) next to a
-// media-ish combo. Returns {combo, kind, folder} or null.
+// onDrop instance props (installed by the upload composables) - or, v39,
+// litegraph's own onDropFile file-drop hook (TrixLoader "Load Image AIO"
+// wires that one; it has no flags, no upload widget, no composables) -
+// next to a media-ish combo. Returns {combo, kind, folder} or null.
 // ---------------------------------------------------------------------------
 
 const MEDIA_FLAG_KINDS = [
@@ -1364,12 +1366,18 @@ export function mediaLoaderInfo(targetNode) {
         const ownDrop =
             Object.prototype.hasOwnProperty.call(targetNode, "onDragOver") &&
             Object.prototype.hasOwnProperty.call(targetNode, "onDrop");
+        // v39: litegraph's own file-drop hook - an INSTANCE prop (TrixLoader
+        // "Load Image AIO" sets node.onDropFile in onNodeCreated; the
+        // prototype does not declare it, so the hasOwnProperty test stays
+        // strict and nodes without the wiring keep qualifying as before).
+        const ownDropFile =
+            Object.prototype.hasOwnProperty.call(targetNode, "onDropFile");
         const hasUploadBtn = (targetNode.widgets || []).some((w) =>
             (typeof w?.type === "string" && w.type.toLowerCase() === "button") &&
             /upload/i.test(String(w.name ?? "")) &&
             typeof w.callback === "function");
         const hasPaste = typeof targetNode.pasteFiles === "function";
-        if (ownDrop || hasUploadBtn || hasPaste) hit = mediaish;
+        if (ownDrop || ownDropFile || hasUploadBtn || hasPaste) hit = mediaish;
     }
     if (!hit) return null;
     return {

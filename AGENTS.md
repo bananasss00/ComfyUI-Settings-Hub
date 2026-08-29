@@ -56,7 +56,10 @@ web/core.js            — конфиг хаба, detectWidgetType (самоле
                          nodeListOf экспортирован;
                          v37: liveGraphs (только живое дерево, БЕЗ реестров
                          дефиниций) + isNodeInLiveTree (решения о живости),
-                         reportUnresolved ждёт заселения графа (diagAttempts)
+                         reportUnresolved ждёт заселения графа (diagAttempts);
+                         v39: mediaLoaderInfo квалифицирует mediaish-combo
+                         по инстанс-хуку onDropFile (TrixLoader AIO: без
+                         upload-флагов/кнопки/composables/pasteFiles)
 web/sync.js            — шина структурных/values-обновлений + shared edit-lock
                          (beginEdit/endEdit), rAF-очередь queueHubRefresh
 web/sync_manager.js    — хуки реактивности на целевых виджетах (обёртка callback),
@@ -83,7 +86,12 @@ web/hub_ui_renderer.js — весь UI хаба: табы, строки зерк
                          РАНЬШЕ usePaste фронта (иначе тот ставит НОВУЮ
                          LoadImage): pasteFiles ноды → pasteFile →
                          uploadMediaFiles; гарды editable/Shift/файлы,
-                         kind-матч, kind-фоллтринч по строкам хаба
+                         kind-матч, kind-фоллтринч по строкам хаба;
+                         v39: uploadMediaFiles Route A2 - нативный
+                         onDropFile-хук пака (TrixLoader AIO), decline/
+                         throw -> /upload/image; paintMediaPreview
+                         предпочитает input-спеку стора и парсит
+                         subfoldered combo-значения для /view
 web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode;
                          afterConfigureGraph первым делом зовёт
@@ -125,7 +133,10 @@ web/viewer_gallery.js  — v27 БАТЧ-ГАЛЕРЕЯ вьюверов: сво�
                          миниатюры, фуллскрин-оверлей (body-level,
                          Fullscreen API + ←/→/Esc/колесо); вотчер 1с;
                          findOutputImages / mountImageGallery /
-                         openGalleryFullscreen / closeGalleryFullscreen
+                         openGalleryFullscreen / closeGalleryFullscreen;
+                         firstMediaSpec(tn, wantType) - v39 опц. фильтр
+                         типа стора ("input" = спека файла-источника,
+                         processed-output спеки отфильтрованы)
 web/preset_manager.js  — Presets 2.0 (v28) + UX (v29): v2-снапшоты АКТИВНОЙ
                          вкладки (чип item.inPreset, excluded-мета, кнопки/
                          порталы мимо), presetSave (имя из quick-save,
@@ -537,6 +548,49 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v39: TrixLoader «Load Image AIO» в media-строках хаба
+- ЗАПРОС (поле): сделать поддержку загрузчика 🌊Load Image AIO из
+  нодпака ComfyUI-TrixLoader (github.com/trx7111/ComfyUI-TrixLoader) -
+  для него не отображается «Pin media source».
+- ИЗУЧЕНИЕ ПАКА (trix_loader_nodes.py + web/js/trix_loader_ui.js):
+  combo "image" - ОБЫЧНЫЙ combo БЕЗ image_upload-флага; стандартная
+  upload-кнопка SPLICE-ится из node.widgets (override addWidget прячет
+  "choose file to upload"/"upload"), видимая кнопка - кастомный DOM;
+  upload-композаблы фронта на нём не запускаются: НЕТ инстанс-пар
+  onDragOver/onDrop и НЕТ node.pasteFiles (свой paste - пункт меню,
+  сам дергает /upload/image). Единственная проводка - лайтграфовский
+  хук node.onDropFile = (file) => {...} (инстанс-проп из onNodeCreated;
+  его пайплайн: /upload/image type=input, combo unshift + callback,
+  свой превью-рефреш). mediaLoaderInfo() возвращал null -> пункта
+  меню и batch-строки не было.
+- ФИКС (patch_v39_trix.py, CRLF-safe): core.js mediaLoaderInfo -
+  сигнал ownDropFile (hasOwnProperty "onDropFile", строго инстанс:
+  прототип-хук НЕ квалифицирует); viewer_gallery.js firstMediaSpec(tn,
+  wantType) - опц. фильтр типа стора (после прогона Trix кладёт в стор
+  ОБРАБОТАННЫЙ output - для строки источника нужна input-спека);
+  hub_ui_renderer.js: uploadMediaFiles Route A2 (один вызов
+  tn.onDropFile(file) на файл НАТТИВНОГО пайплайна; decline(false)/
+  throw -> /upload/image Route B; успех - отложенный repaint 800мс,
+  без тоста - у пака своя индикация); paintMediaPreview -
+  firstMediaSpec(tn, "input") + фолбэк /view с парсингом
+  subfoldered combo-значений ("aio_input/x.png" -> subfolder+filename);
+  settings_hub - баннер v39 + styles.css?v=39.
+- smoke_v39.mjs (18 чеков): детекция Trix-AIO (plain combo + инстанс
+  onDropFile), негативы (combo без проводки; onDropFile без
+  mediaish-combo; ПРОТОТИП-хук не квалифицирует), биндинг; Route A2
+  через paste-P3 (нативный контракт: fetch НЕ вызван, combo пишет сам
+  пак; decline -> фолбэк /upload/image + combo-запись; throw ->
+  фолбэк); превью (input-фильтр выбирает спеку источника; без фильтра
+  - v30-поведение; output-only стор -> null; subfoldered и plain
+  combo-значения дают точный /view-контракт); wiring (баннер v39,
+  ?v=39, Ctrl+V в тултипе). Урок: Route B пишет ПУТЬ ОТ СЕРВЕРА -
+  fetch-стаб должен возвращать имя, ожидаемое ассертом.
+- Регресс: v38/v37/v36/v35/v33/v32/v31/v30, text_resize,
+  presets_v29, ghost_lock, ghost_prefix, canvas_route, resize_pin,
+  media_dl_chrome, repro_v37_field - ALL PASSED; node --check web/*.js.
+- Коммит: «feat(hub): v39 TrixLoader Load Image AIO - media-source pin
+  via the pack's own onDropFile hook …».
 
 ### v38: вставка из буфера обмена (Ctrl+V) в media-строки хаба
 - ЗАПРОС (поле): input-виджет картинки/видео в хабе с поддержкой
@@ -1603,6 +1657,13 @@ hover, pointerout-разоружение, editable-фокус, Shift+Ctrl+V, pas
 в /upload/image; wiring (баннер v38, ?v=38, Ctrl+V в тултипе 📁).
 Песочница sb_v38: элемент хаба аппендится в document.body (контракт
 arm.zone.isConnected).
+
+ZW (v39) - smoke_v39.mjs, 18 чеков: детекция TrixLoadImageAIO (инстанс
+onDropFile + mediaish-combo; негативы: нет проводки / нет mediaish /
+прототип-хук), Route A2 нативного аплоада через paste-P3 (fetch
+молчит, combo пишет пак) с фолбэками decline/throw -> /upload/image;
+превью: firstMediaSpec input-фильтр (источник, не processed-output),
+subfoldered combo-значения -> subfolder+filename в /view.
 
 ## 6. Упаковка и коммиты
 

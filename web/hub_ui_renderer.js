@@ -2391,14 +2391,22 @@ function paintMediaPreview(node, item) {
             `[data-hub-item="${item.id}"] [data-role="media-prev"]`);
         if (!host) return;
         const { tn } = findTarget(item);
-        const spec = firstMediaSpec(tn);
+        // v39: want the SOURCE file - loader packs whose run replaces the
+        // store entry with the processed output (TrixLoader AIO) would
+        // otherwise paint the wrong picture after a queue run.
+        const spec = firstMediaSpec(tn, "input");
         let url = spec?.url || "";
         if (!url) {
             const cur = String(findTarget(item).tw?.value ?? "");
             if (cur) {
                 try {
                     const q = new URLSearchParams();
-                    q.set("filename", cur);
+                    // v39: subfoldered combo values ("aio_input/x.png" -
+                    // TrixLoader AIO editor picks) split into subfolder +
+                    // filename, the exact /view contract.
+                    const cut = cur.lastIndexOf("/");
+                    q.set("filename", cut > 0 ? cur.slice(cut + 1) : cur);
+                    q.set("subfolder", cut > 0 ? cur.slice(0, cut) : "");
                     q.set("type", item.options?.media?.folder || "input");
                     url = app.api.apiURL(`/view?${q.toString()}`);
                 } catch (_) {}
@@ -2482,7 +2490,12 @@ function pushComboValue(item, tw, path) {
 /** v30: push files into the loader node. Route A - the node's OWN drop
  * pipeline (useNodeDragAndDrop -> /upload/image -> combo update), reused
  * via a synthesized DragEvent so custom packs keep their exact behavior.
- * Route B (no onDrop / no DragEvent) - direct /upload/image + combo write.
+ * v39 Route A2 - litegraph's own file-drop hook (instance onDropFile;
+ * TrixLoader "Load Image AIO" wires it instead of the composables): one
+ * call per file, the pack pipeline does the upload, the combo write and
+ * its own preview refresh. Route B (no onDrop / no onDropFile /
+ * no DragEvent, or every A2 call declined) - direct /upload/image + combo
+ * write.
  */
 async function uploadMediaFiles(node, item, files) {
     const { tn, tw } = findTarget(item);
@@ -2508,6 +2521,24 @@ async function uploadMediaFiles(node, item, files) {
             }
         } catch (err) {
             console.warn("[SettingsHub] media drop route failed:", err);
+        }
+    }
+    // v39 Route A2: the pack's own file-drop hook. A decline (false) or a
+    // throw falls through to our /upload/image route - a pack that rejects
+    // a file kind does not want it uploaded behind its back either, but
+    // the plain route stays the last resort for prototypes without one.
+    if (typeof tn.onDropFile === "function") {
+        let native = 0;
+        for (const f of files) {
+            try { if (tn.onDropFile(f) !== false) native++; } catch (err) {
+                console.warn("[SettingsHub] node onDropFile failed:", err);
+            }
+        }
+        if (native) {
+            // The native pipeline settles asynchronously - one delayed
+            // repaint covers the mirror (Route A contract).
+            setTimeout(() => paintMediaPreview(node, item), 800);
+            return;
         }
     }
     const folder = item.options?.media?.folder || "input";
