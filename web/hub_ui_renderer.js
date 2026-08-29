@@ -219,7 +219,7 @@ function mirrorHtml(item, tw) {
                 `title="${esc(cur)}${cur ? "\n" : ""}Searchable list - filter parts separated by space, all must match, case-insensitive">` +
                 `<span class="hub-combo-label">${esc(cur)}</span><span class="hub-combo-caret">▾</span></button>` +
                 `<button type="button" class="hub-btn hub-media-up" data-role="media-upload" ` +
-                `title="Upload a file into this node (click, or drop a file on the row)">📁</button>` +
+                `title="Upload a file into this node (click, drop, or hover the row and press Ctrl+V to paste)">📁</button>` +
                 `</span>`;
         }
         case "checkbox": {
@@ -786,11 +786,6 @@ function ensurePinPanel(node, st) {
     const panel = document.createElement("div");
     panel.className = "hub-pin-panel";
     panel.dataset.hubPin = "1";
-    // v38: every floating panel carries a back-reference to its hub node.
-    // The orphan sweep (sweepOrphanPinPanels) is anchored in the DOM - the
-    // visible artifact itself - so teardown no longer depends on the node
-    // lifecycle, hook order or registry consistency staying intact.
-    try { panel.__hubNode = node; } catch (_) {}
 
     const head = document.createElement("div");
     head.className = "hub-pin-head";
@@ -1051,16 +1046,6 @@ export function disposeHubVisuals(node) {
     const p = pinPanels.get(node);
     try { p?.panel.remove(); } catch (_) {}
     pinPanels.delete(node);
-    // v38: the hub UI (wrap) must not outlive the hub either. The
-    // frontend's DOM-widget manager can yank the element out of the
-    // panel at ANY moment (field v36: "floating hub content was pulled
-    // back to the canvas") - if that race lands after the keeper was
-    // disarmed, the wrap would linger over the NEW workflow as an orphan
-    // block. Only a CONNECTED element is touched; a detached one is
-    // already invisible.
-    if (st?.wrap?.isConnected) {
-        try { st.wrap.remove(); } catch (_) {}
-    }
     // v37: the panel body is gone - isWrapInPanel must stop reporting
     // "floating" for a disposed hub (the wrap still parents to the
     // detached body otherwise).
@@ -1100,66 +1085,6 @@ export function pruneForeignHubs() {
         if (hubIsReachable(hub)) continue;
         try { forgetHubNode(hub); } catch (_) {}
         try { disposeHubVisuals(hub); } catch (_) {}
-        removed++;
-    }
-    removed += sweepOrphanPinPanels();
-    return removed;
-}
-
-// ---------------------------------------------------------------------------
-// v38: DOM-ANCHORED ORPHAN SWEEP - the safety net that assumes NOTHING.
-// ---------------------------------------------------------------------------
-// Every teardown path so far (onRemoved, pruneForeignHubs, syncAll gate,
-// renderHub gate, tab watcher) is anchored in OUR bookkeeping: the hub
-// registry, the per-node state map, the lifecycle hooks. The field kept
-// finding environments where one of those links silently breaks (a hook
-// that never fires, a registry entry that lingers, a module instance whose
-// class method never runs, a frontend that re-parents the widget element
-// mid-teardown). When one link breaks, a floating window outlives its
-// workflow - exactly the user-visible bug, every time.
-//
-// This sweep is anchored in the DOM instead: every floating panel we
-// create carries __hubNode (set at creation, see ensurePinPanel). A panel
-// whose hub is no longer part of the live tree is BY DEFINITION an orphan
-// over a foreign workflow - tear it down. Liveness is instance-
-// independent (pure graph walk), so panels created by any instance of the
-// pack are judged by the same rule. For live hubs the sweep is a no-op,
-// so steady-state ticks cannot close legitimate user windows.
-/**
- * Remove every floating pin panel whose hub node is not part of the live
- * workflow tree (or that nobody vouches for at all). Called from
- * pruneForeignHubs (afterConfigureGraph) and from every tab-watcher tick.
- * Returns the number of panels torn down.
- */
-export function sweepOrphanPinPanels() {
-    let panels;
-    try {
-        panels = [...document.body.children].filter(
-            (el) => el?.classList?.contains("hub-pin-panel"));
-    } catch (_) { return 0; }
-    if (!panels.length) return 0;
-    let removed = 0;
-    for (const panel of panels) {
-        const hub = panel.__hubNode ?? null;
-        if (hub) {
-            // Known hub: liveness alone decides. A walker hiccup must
-            // never close user windows - skip the panel this tick.
-            try {
-                if (isNodeInLiveTree(hub)) continue;
-            } catch (_) { continue; }
-            // Dead hub: best-effort instance-local teardown first (wrap
-            // home + observer disarm + registry forget), then the element.
-            try { homeHub(hub); } catch (_) {}
-            try { forgetHubNode(hub); } catch (_) {}
-            try { disposeHubVisuals(hub); } catch (_) {}
-            try { panel.remove(); } catch (_) {}
-            removed++;
-            continue;
-        }
-        // No vouching reference: a stale shell from an older build or a
-        // foreign module instance. Removing is self-healing - a LIVE hub
-        // re-floats through the normal pinned path on the next pass.
-        try { panel.remove(); } catch (_) {}
         removed++;
     }
     return removed;
@@ -2617,6 +2542,140 @@ async function uploadMediaFiles(node, item, files) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// v38: clipboard paste (Ctrl+V) into media rows. Loader nodes carry
+// node.pasteFiles(files) (frontend useNodePaste) - the hub arms the media
+// row under the pointer and routes the paste into it in the CAPTURE phase,
+// BEFORE the frontend's own document-level paste handler, which would
+// otherwise ALSO react (pasting a brand-new LoadImage onto the canvas).
+// ---------------------------------------------------------------------------
+
+const mediaPasteArm = { node: null, itemId: null, zone: null };
+
+function armMediaRow(node, item, zoneEl) {
+    mediaPasteArm.node = node;
+    mediaPasteArm.itemId = item?.id ?? null;
+    mediaPasteArm.zone = zoneEl ?? null;
+}
+
+function disarmMediaRow(node, itemId) {
+    if (mediaPasteArm.node !== node) return;
+    if (itemId && mediaPasteArm.itemId !== itemId) return;
+    mediaPasteArm.node = null;
+    mediaPasteArm.itemId = null;
+    mediaPasteArm.zone = null;
+}
+
+/** Text-ish focus keeps the system paste (mirrors the frontend's
+ * shouldIgnoreCopyPaste: textareas, text inputs, contenteditable). */
+function isEditablePasteTarget(t) {
+    if (!t?.closest) return false;
+    const inp = t.closest("input");
+    if (inp) {
+        const type = String(inp.getAttribute?.("type") ?? "text").toLowerCase();
+        if (!["button", "checkbox", "file", "hidden", "image", "radio",
+            "range", "reset", "submit"].includes(type)) return true;
+    }
+    return !!(t.closest("textarea") ||
+        t.closest('[contenteditable="true"], [contenteditable=""]'));
+}
+
+/** Clipboard files of a paste event: prefer .files, fall back to items
+ * (some builds expose the blob only through DataTransferItemList). */
+function mediaFilesOfEvent(e) {
+    const dt = e?.clipboardData;
+    if (!dt) return [];
+    let files = [];
+    try { files = Array.from(dt.files ?? []); } catch (_) { files = []; }
+    if (!files.length && dt.items) {
+        try {
+            files = Array.from(dt.items)
+                .filter((it) => it?.kind === "file")
+                .map((it) => { try { return it.getAsFile(); } catch (_) { return null; } })
+                .filter(Boolean);
+        } catch (_) { /* keep whatever .files gave */ }
+    }
+    return files;
+}
+
+function kindOfBlob(blob) {
+    const mime = String(blob?.type ?? "").toLowerCase();
+    if (mime.startsWith("video/")) return "video";
+    if (mime.startsWith("audio/")) return "audio";
+    if (mime.startsWith("image/")) return "image";
+    return null;
+}
+
+function installMediaPasteCapture() {
+    if (installMediaPasteCapture._done) return;
+    installMediaPasteCapture._done = true;
+    // CAPTURE phase: beats the frontend's bubble-phase usePaste listener
+    // no matter the registration order.
+    document.addEventListener("paste", (e) => {
+        try { routeMediaPaste(e); } catch (err) {
+            console.warn("[SettingsHub] media paste failed:", err);
+        }
+    }, true);
+}
+
+function routeMediaPaste(e) {
+    if (e.shiftKey) return; // Ctrl+Shift+V stays the litegraph node paste
+    if (isEditablePasteTarget(e.target)) return;
+    const files = mediaFilesOfEvent(e);
+    if (!files.length) return;
+    const arm = mediaPasteArm;
+    if (!arm.node || !arm.itemId || !arm.zone || !arm.zone.isConnected) return;
+    const cfg = getHubConfig(arm.node);
+    const items = (cfg.items ?? []).filter((i) =>
+        i.type === "widget_binding" && i.widgetType === "media");
+    // The armed row wins; a kind-mismatched clipboard (a video file while
+    // hovering an image row) falls through to a matching row of the hub.
+    const ordered = [
+        ...items.filter((i) => i.id === arm.itemId),
+        ...items.filter((i) => i.id !== arm.itemId),
+    ];
+    for (const item of ordered) {
+        const { tn, tw } = findTarget(item);
+        if (!tn || !tw) continue;
+        const kind = item.options?.media?.kind || "image";
+        const matched = files.filter((f) => kindOfBlob(f) === kind);
+        if (!matched.length) continue;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        mediaPasteInto(arm.node, tn, item, matched);
+        return;
+    }
+}
+
+function mediaPasteInto(hubNode, tn, item, files) {
+    // Route P1: the node's own pasteFiles (frontend useNodePaste) - native
+    // foldering ('pasted' subfolder for screenshots), combo write, preview
+    // refresh and batch behavior stay exactly upstream.
+    let handled = false;
+    if (typeof tn.pasteFiles === "function") {
+        try { handled = tn.pasteFiles(files) !== false; } catch (err) {
+            console.warn("[SettingsHub] node pasteFiles failed:", err);
+        }
+    }
+    // Route P2: legacy builds expose the singular prototype pasteFile.
+    if (!handled && typeof tn.pasteFile === "function") {
+        for (const f of files) {
+            try { tn.pasteFile(f); handled = true; } catch (err) {
+                console.warn("[SettingsHub] node pasteFile failed:", err);
+            }
+        }
+    }
+    if (handled) {
+        showHubToast(`Pasted ${files.length} file(s) -> ${item.customLabel ?? item.widgetToBind ?? "media"}`, {});
+        // The native pipeline paints asynchronously - repaint the mirror.
+        setTimeout(() => paintMediaPreview(hubNode, item), 800);
+        return;
+    }
+    // Route P3: our own v30 pipeline (node onDrop -> /upload/image) - it
+    // toasts and repaints on its own.
+    uploadMediaFiles(hubNode, item, files);
+}
+
 function refreshValuesDom(node) {
     const st = stateMap.get(node);
     if (!st || !st.root) return;
@@ -3118,14 +3177,10 @@ function renderHub(node) {
             // RE-FLOAT its dead window over the new workflow. Live
             // hubs float exactly as before.
             if (!isNodeInLiveTree(node)) {
-                // v38: dispose a dead hub UNCONDITIONALLY. The old
-                // isWrapInPanel precondition only tore down dead hubs
-                // whose wrap still lived in the panel - a dead hub whose
-                // wrap had been re-parented by the frontend kept its
-                // registry entry AND its panel shell. A dead hub with a
-                // disconnected (or missing) panel is equally dead.
-                forgetHubNode(node);
-                disposeHubVisuals(node);
+                if (isWrapInPanel(st)) {
+                    forgetHubNode(node);
+                    disposeHubVisuals(node);
+                }
             } else if (!isWrapInPanel(st)) floatHub(node);
             else detachHubWidget(node, st);
         }
@@ -3570,6 +3625,27 @@ function wireEvents(node, st) {
         if (item) uploadMediaFiles(node, item, files);
     });
 
+    // v38: hovering (or clicking through) a media row ARMS it as the
+    // paste target - Ctrl+V routes the clipboard file into that row's
+    // loader node (capture handler installed below, once).
+    root.addEventListener("pointerover", (e) => {
+        const zone = e.target.closest?.(".hub-mirror-media");
+        if (!zone) return;
+        const irow = zone.closest("[data-hub-item]");
+        if (!irow) return;
+        const item = getHubConfig(node).items.find((i) => i.id === irow.dataset.hubItem);
+        if (item) armMediaRow(node, item, zone);
+    });
+    root.addEventListener("pointerout", (e) => {
+        const zone = e.target.closest?.(".hub-mirror-media");
+        if (!zone) return;
+        const rt = e.relatedTarget;
+        if (rt && zone.contains(rt)) return; // still inside this row
+        const irow = zone.closest("[data-hub-item]");
+        disarmMediaRow(node, irow?.dataset.hubItem ?? null);
+    });
+    installMediaPasteCapture();
+
     // Pinned button rows RUN their source callback on the live node.
     root.addEventListener("click", async (e) => {
         const runBtn = e.target.closest('button[data-role="btn-run"]');
@@ -3767,15 +3843,6 @@ export function installHubTabWatch() {
     let fails = 0;
     const timer = setInterval(() => {
         try {
-            // v38: the DOM orphan sweep runs EVERY tick, BEFORE the
-            // signature checkpoint. A panel can become orphaned between
-            // two signatures (graph content swapped in place between
-            // ticks, a missed lifecycle, a foreign instance) - the
-            // signature alone would read "nothing changed" and the
-            // foreign window would sit on screen forever. The sweep is
-            // cheap (a handful of panels; a liveness walk only for
-            // panels actually present) and is a no-op for live hubs.
-            try { sweepOrphanPinPanels(); } catch (_) {}
             const sig = rootSig(app?.graph) + "|" + rootSig(app?.canvas?.graph);
             if (lastSig !== null && sig === lastSig) return; // nothing changed
             lastSig = sig;
@@ -3818,27 +3885,8 @@ export function installHubTabWatch() {
                                     "[SettingsHub] pinned hub window closed: none of its bindings resolve in the current workflow (stale or copied hub config). It re-floats where they do.");
                             }
                         }
-                    } else {
-                        // v38: a FOREIGN hub (not part of the current
-                        // workflow tree) must never keep a window in ANY
-                        // state: floating (v36 rule), a panel shell whose
-                        // wrap was re-parented away (tug-of-war residue),
-                        // or an inconsistent panel/wrap split.
-                        const panelAlive =
-                            !!(pinPanels.get(hub)?.panel?.isConnected);
-                        if (floating || panelAlive) homeHub(hub);
-                        // v38: a hub that is gone from the live tree is
-                        // dead for good - its pin state survives in the
-                        // workflow JSON and re-floats on a FRESH object
-                        // when that workflow is opened again. Forget +
-                        // dispose so the registry cannot accumulate
-                        // ghosts between configure hooks.
-                        try {
-                            if (!isNodeInLiveTree(hub)) {
-                                forgetHubNode(hub);
-                                disposeHubVisuals(hub);
-                            }
-                        } catch (_) { /* hiccup: stay conservative */ }
+                    } else if (floating) {
+                        homeHub(hub); // window down; the pin survives
                     }
                 } catch (_) { /* one broken hub must not sink the pass */ }
             }

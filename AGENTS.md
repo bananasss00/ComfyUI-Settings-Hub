@@ -77,7 +77,13 @@ web/hub_ui_renderer.js — весь UI хаба: табы, строки зерк
                          смены identity; пустое-но-читаемое множество =
                          реальный свитч, нечитаемое/ненаблюдавшееся =
                          observe-only, чужой пин -> homeHub с выжившим
-                         cfg.pinned, 5 сбоев = самоотключение)
+                         cfg.pinned, 5 сбоев = самоотключение);
+                         v38: paste из буфера (Ctrl+V) в media-строки —
+                         hover-arm строки + document-CAPTURE перехват
+                         РАНЬШЕ usePaste фронта (иначе тот ставит НОВУЮ
+                         LoadImage): pasteFiles ноды → pasteFile →
+                         uploadMediaFiles; гарды editable/Shift/файлы,
+                         kind-матч, kind-фоллтринч по строкам хаба
 web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode;
                          afterConfigureGraph первым делом зовёт
@@ -532,123 +538,51 @@ dev_plan.md            — исходный технический спек пр
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
 
-### v39: ФИНАЛЬНЫЙ фикс min/max/step зеркал — контракт step2 (1.51.9) (поле: «в хабе все слайдеры не соответствуют реальным параметрам виджета из ноды»)
-- РЕПОРТ (поле, после v38, frontend 1.51.9): слайдеры в хабе систематически
-  не соответствуют реальным параметрам виджетов нод.
-- КОРЕНЬ (доказано по исходникам 1.51.9 из wheel'а): фабрики number-виджетов
-  (useIntWidget/useFloatWidget) пишут опции { step: step*10, step2: step } —
-  options.step помечен DEPRECATED и ВСЕГДА в 10 раз больше реального шага,
-  РЕАЛЬНЫЙ шаг живёт в options.step2 (PrimitiveInt/PrimitiveFloat
-  определяют step2 через defineProperty; канонический хелпер фронта
-  getWidgetStep(): step2 || step*0.1; Vue-рендерер делит сырой step > 10
-  на 10 — useNumberStepCalculation). Хаб читал только options.step ->
-  КАЖДОЕ зеркало получало шаг в 10x крупнее нативного, decimals float-зеркал
-  врали (квантование коммита резало лишние знаки), а кастомный step из
-  шестерёнки писался в options.step, который современные виджеты НЕ читают
-  (известный репорт v22 «min/max применяется, а step - нет» — вот его корень).
-- РЕШЕНИЕ (core.js; интерфейсы рендерера не менялись — чинятся все
-  потребители numericMerge/effectiveSliderParams/coerceNumeric сразу):
-  1) numericMerge: порядок резолюции шага = step2 (live -> снапшот) ->
-     легаси step (live -> снапшот) с правилом «сырой step > 10 делится на 10»
-     -> round -> precision-производный (10^-digits) -> range-фолбэк.
-     Релаксация integral-step (v21) не тронута и работает уже на РЕАЛЬНОМ
-     шаге; self-heal снапшота пишет и step, и step2 = разрешённый реальный
-     шаг (старые снапшоты с x10 лечатся при первом живом контакте);
-  2) makeBindingItem: полный числовой снапшот при пиннинге —
-     min/max/step/step2/precision/round (каждый ключ под try/catch против
-     hostile getters; числовая ветка теперь срабатывает и при «только step»
-     без min/max); осиротевшие ряды сохраняют реальную геометрию через
-     step2 в снапшоте (createBinding -> syncNode -> renderHub синхронен,
-     так что снапшот уже залечен к моменту возврата);
-  3) applyOverrideToTargetWidgets: push кастомного step дополнительно пишет
-     options.step2 (если виджет его объявил — «никогда не изобретать
-     отсутствующие поля» сохранено), native-снапшот для Clear расширен
-     ключом step2 -> Clear возвращает ОБА поля ноде; когерентность
-     round/precision сохранена;
-  4) detectWidgetType НЕ тронут: анализ показал, что x10-твин не меняет
-     классификацию (precision>0 всегда спасает float'ы).
-- СМОУКИ: repro_v39.mjs 26 чеков — S1 современный INT (step=10/step2=1 ->
-  шаг зеркала 1); S2 современный FLOAT (step=0.1/step2=0.01/precision=2 ->
-  0.01, decimals 2, квант 0.125 -> 0.13); S3 легаси step 640 -> 64; S4
-  легаси step 0.05 без изменений; S5 precision-производный 0.001; S6
-  пин-снапшот (step2/precision в item.options, сирота резолвит шаг, хил
-  синхронен); S7 устаревший x10-снапшот + живой виджет -> живой step2
-  побеждает; S8 push step -> step2 И step на живой виджет + Clear
-  восстанавливает оба; S9 accessor-опции Primitive (геттеры читаются, без
-  throw); S10 override-оверлей effectiveSliderParams; S11 геометрия зеркала
-  = геометрии нода. РЕГРЕСС: repro_v38.mjs (11), repro_matrix.mjs (5
-  сценариев), repro_pinned_window.mjs — ALL PASSED. node --check web/*.js.
-- ВЕРИФИКАЦИЯ НА ПОЛЕ: F12 -> баннер «web build: v39 - FINAL min/max/step
-  fix…»; полная замена web/ из zip + Ctrl+F5.
-
-### v38: пин-окна умирают вместе со своим воркфлоу ГАРАНТИРОВАННО — DOM-якорный свип-сироты (поле: симптом повторился на 1.51.9)
-- РЕПОРТ (поле, после v37, frontend 1.51.9): «запиненные окна хаба при смене
-  рабочего процесса на другой не исчезают, остаются в другом рабочем
-  процессе; меняю процесс сменой открытой вкладки; новый пустой воркфлоу
-  тоже не убирает хаб с экрана».
-- ПРОВЕРКА СЕМАНТИКИ 1.51.9 по исходникам (wheel с PyPI, sourcemap'ы):
-  переключение вкладки = workflowService.openWorkflow -> app.loadGraphData ->
-  canvas.setGraph(rootGraph) -> clean() -> rootGraph.configure(data);
-  configure() при !keep_old ЗОВЕТ this.clear(), clear() ЧЕСТНО зовет
-  fireNodeRemovalLifecycle -> onRemoved ДЛЯ КАЖДОЙ ноды рута — т.е. на живом
-  1.51.9 пин-окно корневого хаба умирает УЖЕ на clear(). Репро на jsdom
-  (точная семантика: setGraph+clean+configure с lifecycle + хуки) — все
-  сценарии v37 проходят: рут-хаб -> пустой/другой воркфлоу, stale
-  canvas.subgraph, копиконфиг, хаб в сабграфе. Значит поле ломает одно из
-  ЗВЕНЬЕВ bookkeeping (lifecycle не дошёл, реестр разсинхронился,
-  фронтенд пере-парентит wrap в момент разборки, чужой инстанс модуля),
-  а не саму семантику clear().
-- ДИАГНОЗ (класс уязвимости): ВСЕ пути разборки v31..v37 якорены в НАШЕМ
-  bookkeeping (хуки, hubRegistry, stateMap). Достаточно одного тихо
-  сломанного звена — и окно переживает воркфлоу. Плюс два наиденных
-  конкретных дефекта: (1) вотчер снимал ЧУЖИЕ окна только если floating
-  (isWrapInPanel): оболочка панели с вытянутьм wrap'ом или мёртвый хаб с
-  отключенной панелью оставались; (2) 5-strike self-disarm вотчера:
-  hostile getter на чужой ноде внутри walker'а (looksLikeGraph/
-  nodeListOf) пузырился в тик -> 5 тиков -> вотчер отключен ДО КОНЦА
-  сессии, isNodeInLiveTree падал fail-open (всё «живое») — сеть сноса
-  гасла целиком.
-- РЕШЕНИЕ (v38,defense-in-depth; примитивы v33/v36/v37 не тронуты):
-  1) ГЛАВНОЕ — DOM-ЯКОРНЫЙ СВИП СИРОТ (hub_ui_renderer.
-sweepOrphanPinPanels): каждая панель при создании несет panel.__hubNode;
-  свип обходит document.body > .hub-pin-panel и сносит панели, чей хаб
-  не в живом дереве (isNodeInLiveTree — чистый обход графа,
-  инстанс-независимый) или чей создатель не известен (stale-оболочка от
-  старого билда/чужого инстанса). Живые хабы — no-op; сбой walker'а —
-  тик пропускается (окна не закрываются). Самоисцеление: живой хаб
-  ре-флоатит новую панель с __hubNode на следующем проходе;
-  2) свип зовётся КАЖДЫЙ тик вотчера ДО сигнатурного гейта (панель может
-  осиротеть МЕЖДУ двумя сигнатурами — подмена содержимого графа на месте
-  сигнатуру не меняет) и из pruneForeignHubs (после configure — немедленно);
-  3) вотчер: чужой хаб сносит окно в ЛЮБОМ состоянии — floating (правило
-  v36), panelAlive без floating (остатки перетягивания wrap'а), затем
-  мёртвый хаб (не в live-дереве) forget+dispose — реестр не копит
-  призраков между configure-хуками; пин-стейт живёт в JSON воркфлоу и
-  ре-флоатит СВЕЖИЙ объект при возврате на вкладку;
-  4) renderHub (блок pinned): мёртвый хаб dispose'ится БЕЗУСЛОВНО (старый
-  гейт isWrapInPanel оставлял зарегистрированные мёртвые хабы с
-  пере-парентнутым wrap'ом);
-  5) disposeHubVisuals: если wrap CONNECTED, но вне панели (гонка
-  «вытянули после разоружения кипера», полевой крамб v36) — элемент
-  снимается: сироты над новым воркфлоу больше невозможны;
-  6) core.looksLikeGraph/nodeListOf захарднены против hostile getters
-  (throw внутри обхода больше не доходит до тика вотчера и не роняет
-  liveness в fail-open) — self-disarm вотчера и fail-open prune
-  становятся технически недостижимыми на этом пути.
-- СМОУКИ (jsdom, реальный код расширения, точная семантика 1.51.9):
-  repro_v38.mjs 11 чеков — S1 точный свитч с lifecycle (окно умирает на
-  clear()); S2 ПАТОЛОГИЧЕСКИЙ свитч: подмена _nodes БЕЗ lifecycle и БЕЗ
-  хуков — окно снимает DOM-свип вотчера (ГЛАВНЫЙ контракт v38); S3
-  stale-оболочка без __hubNode сносится, живой хаб ре-флоатит свежую
-  панель; S4 перетягивание wrap'а: кипер возвращает (крамб v36
-  подтверждён в стенде), после разборки wrap НЕ остаётся сиротой; S5
-  возврат на вкладку ре-флоатит (пин выживает в JSON); S6 hostile-node
-  свойства не разоружают свип. Регресс-матрица v37 (рут-хаб -> пустой/
-  другой, stale canvas.subgraph, копиконфиг, хаб в сабграфе) — ALL PASSED.
-  node --check web/*.js.
-- ВЕРИФИКАЦИЯ НА ПОЛЕ: F12 -> баннер «web build: v38 - pinned windows die
-  with their workflow, GUARANTEED…»; полная замена web/ из zip + Ctrl+F5.
-
+### v38: вставка из буфера обмена (Ctrl+V) в media-строки хаба
+- ЗАПРОС (поле): input-виджет картинки/видео в хабе с поддержкой
+  вставки из буфера; ноды-загрузчики это умеют. База: v30 уже даёт
+  media-строку (превью + searchable combo + 📁 пикер + drag&drop) —
+  не хватало только paste.
+- ИЗУЧЕНИЕ ИСХОДНИКОВ 1.51.9 (Comfy-Org/ComfyUI_frontend @ v1.51.9):
+  usePaste слушает paste на document в BUBBLE-фазе и НЕ зовёт
+  preventDefault — при media-клипборде он вставляет в ВЫБРАННУЮ на
+  канвасе ноду-загрузчик или СОЗДАЁТ НОВУЮ LoadImage/LoadVideo;
+  ноды-загрузчики несут node.pasteFiles(files) (useNodePaste через
+  useNodeImageUpload): kind-фильтр, батч, /upload/image (скриншоты —
+  в subfolder 'pasted'), запись combo, обновление превью; возвращает
+  false, если все файлы отфильтрованы. shouldIgnoreCopyPaste:
+  textarea/текстовый input = системный paste, не трогать.
+- ФИКС (patch_v38_media_paste.py, CRLF-safe): hub_ui_renderer —
+  mediaPasteArm {node, itemId, zone}; pointerover/pointerout-делегация
+  в wireEvents (hover армит строку, выход за пределы — разоружает);
+  installMediaPasteCapture — ОДИН document-capture листенер 'paste';
+  routeMediaPaste — гарды (shiftKey = litegraph paste; editable-target
+  = системный paste; файлы через clipboardData.files с фолбэком
+  items.getAsFile; arm.zone.isConnected против перерендера), порядок
+  целей [armed, остальные media-строки хаба], kind-матч файла строке
+  (image/video/audio); mediaPasteInto — P1 tn.pasteFiles(files) !==
+  false → P2 legacy tn.pasteFile → P3 uploadMediaFiles (v30-пайплайн,
+  сам тостит); P1/P2 тостят «Pasted N file(s) → …» + отложенный
+  paintMediaPreview; при захвате — preventDefault +
+  stopImmediatePropagation (upstream не видит событие, новая
+  LoadImage не спаунится); тултип 📁 дополнен Ctrl+V-подсказкой;
+  settings_hub — баннер v38 + styles.css?v=38.
+- smoke_v38.mjs (16 чеков): wiring (баннер v38, ?v=38, Ctrl+V в
+  тултипе); paste без hover не перехватывается; hover-arm роутит в
+  node.pasteFiles (аргументы точные), preventDefault + bubble-шпион
+  молчит, тост «Pasted», combo хабом не тронут (нативный контракт);
+  гарды: editable-фокус, Shift+Ctrl+V, paste без файлов, pointerout;
+  kind-фоллтринч (video-файл при hover image-строки уходит в
+  video-строку: Route B — fetch, combo, тост «Uploaded»); отказы P1
+  (pasteFiles()==false и кидающий) падают в /upload/image. Урок:
+  в jsdom шпион на document регистрируется ПОСЛЕ capture-листенера,
+  поэтому defaultPrevented проверяется на собственном событии.
+- Регресс: v37 22/22, v36/v35/v31 (баннер-чеки подняты до v38),
+  v33, v32, v30, text_resize, presets_v29, ghost_lock, ghost_prefix,
+  canvas_route, resize_pin, media_dl_chrome — ALL PASSED;
+  node --check web/*.js. check_imports.mjs: 9 предупреждений
+  «non-web target ../../scripts/app.js» — старое поведение чекера
+  (воспроизводится и на чистой v37-базе), к v38 отношения не имеет.
 ### v37: пин-окна умирают вместе со своим воркфлоу (поле: frontend 1.51.9) + бредкрамбы ждут заселения графа
 - РЕПОРТ (поле, после v36, frontend package 1.51.9): проблема «пин окна
   остаются при смене рабочего процесса» НЕ решена; лог: 5x «pin
@@ -1659,6 +1593,17 @@ query, CSS с ?v=35); watcher на реальных тиках 1.45с — пер
 выживает), ПУСТОЕ active-множество = observe-only (окно НЕ закрывается),
 возврат на вкладку ре-флоатит.
 
+ZV (v38) — smoke_v38.mjs, 16 чеков: paste-роутинг (hover-arm →
+node.pasteFiles с точными аргументами, preventDefault + молчание
+bubble-шпиона, тост «Pasted», combo хабом не трогается); гарды (без
+hover, pointerout-разоружение, editable-фокус, Shift+Ctrl+V, paste
+без файлов); kind-фоллтринч (video-файл при hover image-строки
+уходит в video-строку через v30-пайплайн: fetch-стаб, combo-запись,
+тост «Uploaded»); отказы P1 (pasteFiles()==false и кидающий) падают
+в /upload/image; wiring (баннер v38, ?v=38, Ctrl+V в тултипе 📁).
+Песочница sb_v38: элемент хаба аппендится в document.body (контракт
+arm.zone.isConnected).
+
 ## 6. Упаковка и коммиты
 
 ```bash
@@ -1668,22 +1613,10 @@ zip -rq ComfyUI-Settings-Hub.zip ComfyUI-Settings-Hub \
 ```
 
 Коммиты — Conventional Commits (`feat(scope): ...`, `fix(ui): ...`,
-`docs: ...`). Стоящее правило проекта (контракт пользователя, v36,
-усилено v38): КАЖДАЯ правка сопровождается готовым названием коммита.
-Пользователь применяет изменения у себя локально в своём
-git-репозитории, поэтому ассистент ОБЯЗАН:
-
-- писать заголовок коммита на АНГЛИЙСКОМ (Conventional Commits —
-  англоязычный стандарт);
-- к КАЖДОМУ фиксу/фиче/правке давать в ответе готовое название
-  коммита (заголовок в формате Conventional Commits; при
-  необходимости — тело коммита со списком изменений);
-- при нескольких логических блоках правок — давать название на
-  каждый блок отдельно;
-- делать это РЕТРОСПЕКТИВНО: если название не было выдано вместе с
-  правкой, выдать его по первой просьбе пользователя;
-- НЕ заставлять пользователя придумывать название самому — он берёт
-  готовое из ответа ассистента.
+`docs: ...`). Стоящее правило проекта (контракт пользователя, v36):
+названия коммитов пишет АССИСТЕНТ — коммитит каждый фикс/фичу сам и
+приводит название коммита в ответе пользователю, включая
+ретроспективные. Пользователь названия не придумывает.
 
 Отладка в реальном ComfyUI: F12 → Console (ошибки модулей всплывают при
 загрузке страницы), либо жёсткое обновление фронта (Ctrl+F5) после замены
