@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v37 - pinned windows die with their workflow: live-tree liveness (stale subgraph registries no longer shield dead hubs), render/syncAll resurrection gates, all-rows-dead pinned windows go down (copied hub configs); pin-unresolved breadcrumbs wait for a populated graph (slow-boot false alarms gone)");
+console.info("[SettingsHub] web build: v38 - pinned windows die with their workflow, GUARANTEED: DOM-anchored orphan sweep (panels carry their hub; dead/unknown panels are torn down on every watcher tick and after every configure), watcher closes foreign windows in ALL states + forgets dead hubs mid-session, disposeHubVisuals detaches pulled-away wraps, walkers hardened against hostile getters (watcher can no longer self-disarm on one weird node)");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v37 - pinned windows die with their workf
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=37", import.meta.url).href;
+    link.href = new URL("styles.css?v=38", import.meta.url).href;
     document.head.appendChild(link);
 })();
 

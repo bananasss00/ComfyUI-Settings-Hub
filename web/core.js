@@ -84,17 +84,28 @@ export function allHubs() {
  *      naming conventions stop mattering; cycles are deduped by identity.
  */
 function looksLikeGraph(obj) {
-    return !!(obj && typeof obj === "object" &&
-        (Array.isArray(obj._nodes) || Array.isArray(obj.nodes)));
+    // v38: property access itself can throw (hostile getters on custom
+    // node payloads harvested by childGraphsOfNode). A throw here used to
+    // bubble into the tab watcher and count against its 5-strike
+    // self-disarm - the session lost its sweep net over one weird node.
+    try {
+        return !!(obj && typeof obj === "object" &&
+            (Array.isArray(obj._nodes) || Array.isArray(obj.nodes)));
+    } catch (_) { return false; }
 }
 
 export function nodeListOf(g) {
     // Union of the raw + public lists; nodes may legally appear in both,
     // callers tolerate duplicates cheaply (Map/Set by reference).
+    // v38: each property access is guarded - the walker must never die on
+    // a hostile graph-like object (watcher disarm / fail-open liveness).
     const out = [];
-    if (Array.isArray(g?._nodes)) out.push(...g._nodes);
-    if (Array.isArray(g?.nodes) && g.nodes !== g._nodes) {
-        for (const n of g.nodes) if (!out.includes(n)) out.push(n);
+    let raw = null, pub = null;
+    try { raw = g?._nodes; } catch (_) {}
+    try { pub = g?.nodes; } catch (_) {}
+    if (Array.isArray(raw)) out.push(...raw);
+    if (Array.isArray(pub) && pub !== raw) {
+        for (const n of pub) if (!out.includes(n)) out.push(n);
     }
     return out;
 }

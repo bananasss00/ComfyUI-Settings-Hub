@@ -786,6 +786,11 @@ function ensurePinPanel(node, st) {
     const panel = document.createElement("div");
     panel.className = "hub-pin-panel";
     panel.dataset.hubPin = "1";
+    // v38: every floating panel carries a back-reference to its hub node.
+    // The orphan sweep (sweepOrphanPinPanels) is anchored in the DOM - the
+    // visible artifact itself - so teardown no longer depends on the node
+    // lifecycle, hook order or registry consistency staying intact.
+    try { panel.__hubNode = node; } catch (_) {}
 
     const head = document.createElement("div");
     head.className = "hub-pin-head";
@@ -1046,6 +1051,16 @@ export function disposeHubVisuals(node) {
     const p = pinPanels.get(node);
     try { p?.panel.remove(); } catch (_) {}
     pinPanels.delete(node);
+    // v38: the hub UI (wrap) must not outlive the hub either. The
+    // frontend's DOM-widget manager can yank the element out of the
+    // panel at ANY moment (field v36: "floating hub content was pulled
+    // back to the canvas") - if that race lands after the keeper was
+    // disarmed, the wrap would linger over the NEW workflow as an orphan
+    // block. Only a CONNECTED element is touched; a detached one is
+    // already invisible.
+    if (st?.wrap?.isConnected) {
+        try { st.wrap.remove(); } catch (_) {}
+    }
     // v37: the panel body is gone - isWrapInPanel must stop reporting
     // "floating" for a disposed hub (the wrap still parents to the
     // detached body otherwise).
@@ -1085,6 +1100,66 @@ export function pruneForeignHubs() {
         if (hubIsReachable(hub)) continue;
         try { forgetHubNode(hub); } catch (_) {}
         try { disposeHubVisuals(hub); } catch (_) {}
+        removed++;
+    }
+    removed += sweepOrphanPinPanels();
+    return removed;
+}
+
+// ---------------------------------------------------------------------------
+// v38: DOM-ANCHORED ORPHAN SWEEP - the safety net that assumes NOTHING.
+// ---------------------------------------------------------------------------
+// Every teardown path so far (onRemoved, pruneForeignHubs, syncAll gate,
+// renderHub gate, tab watcher) is anchored in OUR bookkeeping: the hub
+// registry, the per-node state map, the lifecycle hooks. The field kept
+// finding environments where one of those links silently breaks (a hook
+// that never fires, a registry entry that lingers, a module instance whose
+// class method never runs, a frontend that re-parents the widget element
+// mid-teardown). When one link breaks, a floating window outlives its
+// workflow - exactly the user-visible bug, every time.
+//
+// This sweep is anchored in the DOM instead: every floating panel we
+// create carries __hubNode (set at creation, see ensurePinPanel). A panel
+// whose hub is no longer part of the live tree is BY DEFINITION an orphan
+// over a foreign workflow - tear it down. Liveness is instance-
+// independent (pure graph walk), so panels created by any instance of the
+// pack are judged by the same rule. For live hubs the sweep is a no-op,
+// so steady-state ticks cannot close legitimate user windows.
+/**
+ * Remove every floating pin panel whose hub node is not part of the live
+ * workflow tree (or that nobody vouches for at all). Called from
+ * pruneForeignHubs (afterConfigureGraph) and from every tab-watcher tick.
+ * Returns the number of panels torn down.
+ */
+export function sweepOrphanPinPanels() {
+    let panels;
+    try {
+        panels = [...document.body.children].filter(
+            (el) => el?.classList?.contains("hub-pin-panel"));
+    } catch (_) { return 0; }
+    if (!panels.length) return 0;
+    let removed = 0;
+    for (const panel of panels) {
+        const hub = panel.__hubNode ?? null;
+        if (hub) {
+            // Known hub: liveness alone decides. A walker hiccup must
+            // never close user windows - skip the panel this tick.
+            try {
+                if (isNodeInLiveTree(hub)) continue;
+            } catch (_) { continue; }
+            // Dead hub: best-effort instance-local teardown first (wrap
+            // home + observer disarm + registry forget), then the element.
+            try { homeHub(hub); } catch (_) {}
+            try { forgetHubNode(hub); } catch (_) {}
+            try { disposeHubVisuals(hub); } catch (_) {}
+            try { panel.remove(); } catch (_) {}
+            removed++;
+            continue;
+        }
+        // No vouching reference: a stale shell from an older build or a
+        // foreign module instance. Removing is self-healing - a LIVE hub
+        // re-floats through the normal pinned path on the next pass.
+        try { panel.remove(); } catch (_) {}
         removed++;
     }
     return removed;
@@ -3043,10 +3118,14 @@ function renderHub(node) {
             // RE-FLOAT its dead window over the new workflow. Live
             // hubs float exactly as before.
             if (!isNodeInLiveTree(node)) {
-                if (isWrapInPanel(st)) {
-                    forgetHubNode(node);
-                    disposeHubVisuals(node);
-                }
+                // v38: dispose a dead hub UNCONDITIONALLY. The old
+                // isWrapInPanel precondition only tore down dead hubs
+                // whose wrap still lived in the panel - a dead hub whose
+                // wrap had been re-parented by the frontend kept its
+                // registry entry AND its panel shell. A dead hub with a
+                // disconnected (or missing) panel is equally dead.
+                forgetHubNode(node);
+                disposeHubVisuals(node);
             } else if (!isWrapInPanel(st)) floatHub(node);
             else detachHubWidget(node, st);
         }
@@ -3688,6 +3767,15 @@ export function installHubTabWatch() {
     let fails = 0;
     const timer = setInterval(() => {
         try {
+            // v38: the DOM orphan sweep runs EVERY tick, BEFORE the
+            // signature checkpoint. A panel can become orphaned between
+            // two signatures (graph content swapped in place between
+            // ticks, a missed lifecycle, a foreign instance) - the
+            // signature alone would read "nothing changed" and the
+            // foreign window would sit on screen forever. The sweep is
+            // cheap (a handful of panels; a liveness walk only for
+            // panels actually present) and is a no-op for live hubs.
+            try { sweepOrphanPinPanels(); } catch (_) {}
             const sig = rootSig(app?.graph) + "|" + rootSig(app?.canvas?.graph);
             if (lastSig !== null && sig === lastSig) return; // nothing changed
             lastSig = sig;
@@ -3730,8 +3818,27 @@ export function installHubTabWatch() {
                                     "[SettingsHub] pinned hub window closed: none of its bindings resolve in the current workflow (stale or copied hub config). It re-floats where they do.");
                             }
                         }
-                    } else if (floating) {
-                        homeHub(hub); // window down; the pin survives
+                    } else {
+                        // v38: a FOREIGN hub (not part of the current
+                        // workflow tree) must never keep a window in ANY
+                        // state: floating (v36 rule), a panel shell whose
+                        // wrap was re-parented away (tug-of-war residue),
+                        // or an inconsistent panel/wrap split.
+                        const panelAlive =
+                            !!(pinPanels.get(hub)?.panel?.isConnected);
+                        if (floating || panelAlive) homeHub(hub);
+                        // v38: a hub that is gone from the live tree is
+                        // dead for good - its pin state survives in the
+                        // workflow JSON and re-floats on a FRESH object
+                        // when that workflow is opened again. Forget +
+                        // dispose so the registry cannot accumulate
+                        // ghosts between configure hooks.
+                        try {
+                            if (!isNodeInLiveTree(hub)) {
+                                forgetHubNode(hub);
+                                disposeHubVisuals(hub);
+                            }
+                        } catch (_) { /* hiccup: stay conservative */ }
                     }
                 } catch (_) { /* one broken hub must not sink the pass */ }
             }
