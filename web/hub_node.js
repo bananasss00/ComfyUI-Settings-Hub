@@ -151,10 +151,12 @@ app.registerExtension({
     setup() {
         registerHubNode();
         installBadgePainter();
-        // v35/v36: workflow TAB switches do not necessarily configure the
-        // graph (frontends swap app.canvas.graph, or re-deserialize INTO the
-        // same LGraph object) - the watcher fires on a content signature so
-        // a pinned window never floats over a foreign workflow.
+        // v35/v36/v42: workflow TAB switches do not necessarily configure
+        // the graph (frontends swap app.canvas.graph, or re-deserialize
+        // INTO the same LGraph object) - the watcher sweeps EVERY tick
+        // against a node-identity active set (no signature gate), so a
+        // pinned window never floats over a foreign workflow - same-id
+        // switches included.
         // Self-disarming: a pathological frontend degrades to v33 behavior.
         try { installHubTabWatch(); } catch (_) {}
     },

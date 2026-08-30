@@ -3863,8 +3863,27 @@ export function syncHubNode(node) {
 export function __hubTestState(node) { return stateMap.get(node) ?? null; }
 
 // ===========================================================================
-// v36: workflow-tab hygiene v2 - the sweep fires on a CONTENT SIGNATURE.
+// v42: workflow-tab hygiene v3 - the sweep runs EVERY tick.
 // ---------------------------------------------------------------------------
+// v42 field report: a FOLDED pinned window stayed on screen after a
+// workflow switch (the v41 auto-collapse keeps the window folded when
+// the user reaches for the workflow tab, so the stale strip is what
+// they see). Two holes, both collapse-agnostic:
+//   * v36 gated the sweep on an id-hash SIGNATURE of the roots - a
+//     switch to a workflow with the SAME node ids (a copy, or a
+//     re-deserialize INTO the same LGraph object) never moved the
+//     signature and the sweep never ran. Liveness is node-OBJECT
+//     membership; the bounded live-tree walk (liveGraphs, v37) is cheap
+//     enough to rebuild every tick, so the gate is gone - same-id
+//     switches are caught now.
+//   * the "pinned && !floating" re-float branch RESURRECTED a window
+//     the all-rows-dead rule had just taken down: every signature
+//     change re-floated it and the next one took it down again
+//     (ping-pong driven by graph edits). The re-float now answers to
+//     the same row-liveness rule; the pin survives and re-floats where
+//     the rows resolve.
+//
+// v36 history: the sweep fired on a CONTENT SIGNATURE.
 // Field history: v31 closed pinned windows only through afterConfigureGraph
 // (configure-based switches); modern frontends swap app.canvas.graph WITHOUT
 // any configure, so a pinned window stayed over a foreign workflow. v34
@@ -3901,6 +3920,7 @@ export function __hubTestState(node) { return stateMap.get(node) ?? null; }
 //     one console.warn - a pathological frontend degrades to v33 behavior.
 // ===========================================================================
 let stalePinCrumbShown = false;
+let staleForeignCrumbShown = false;
 
 /** v37: does EVERY widget binding of this hub fail to resolve against the
  *  live tree? Silent on purpose (no diagnostics side effects - the watcher
@@ -3935,37 +3955,13 @@ let tabWatchInstalled = false;
 export function installHubTabWatch() {
     if (tabWatchInstalled) return;
     tabWatchInstalled = true;
-    // v36: id-hash of the two roots' node id lists - the change detector.
-    // Any throw answers "!" which forces a sweep (degenerate but safe).
-    const rootSig = (g) => {
-        try {
-            const arr = Array.isArray(g?._nodes) ? g._nodes
-                : Array.isArray(g?.nodes) ? g.nodes : null;
-            if (!arr) return "x";
-            const idHash = (v) => {
-                if (typeof v === "number") return v | 0;
-                let h = 7;
-                const s = String(v ?? "");
-                for (let i = 0; i < s.length; i++) {
-                    h = (Math.imul(h, 33) + s.charCodeAt(i)) | 0;
-                }
-                return h;
-            };
-            let h = arr.length | 0;
-            for (let i = 0; i < arr.length; i++) {
-                h = (Math.imul(h, 31) + idHash(arr[i]?.id)) | 0;
-            }
-            return String(h);
-        } catch (_) { return "!"; }
-    };
-    let lastSig = null;
     let everActive = false;   // a node sighting at least once this session
     let fails = 0;
     const timer = setInterval(() => {
         try {
-            const sig = rootSig(app?.graph) + "|" + rootSig(app?.canvas?.graph);
-            if (lastSig !== null && sig === lastSig) return; // nothing changed
-            lastSig = sig;
+            // v42: the sweep runs on EVERY tick - the identity active
+            // set is rebuilt unconditionally (the v36 signature gate
+            // slept through switches that kept the same node ids).
             const active = new Set();
             // v37: live tree only - stale subgraph registries must not
             // count the previous workflow's nodes as "active".
@@ -3988,7 +3984,16 @@ export function installHubTabWatch() {
                     if (active.has(hub)) {
                         const cfg = getHubConfig(hub);
                         if (cfg?.pinned && !floating) {
-                            if (st?.wrap?.isConnected) floatHub(hub);
+                            // v42: the re-float respects the same
+                            // row-liveness rule as the branch below - a
+                            // hub whose every binding is dead keeps its
+                            // window DOWN (the all-rows-dead rule took
+                            // it down and the next edit must not
+                            // resurrect it). The pin survives; rows
+                            // resolving again re-floats it.
+                            if (pinnedWindowAllRowsDead(hub, cfg)) {
+                                // window stays down
+                            } else if (st?.wrap?.isConnected) floatHub(hub);
                             else syncNode(hub); // rebuild, renderHub re-floats
                         } else if (cfg?.pinned && floating &&
                                    pinnedWindowAllRowsDead(hub, cfg)) {
@@ -4007,6 +4012,13 @@ export function installHubTabWatch() {
                         }
                     } else if (floating) {
                         homeHub(hub); // window down; the pin survives
+                        // v42: one breadcrumb per session - field
+                        // reports need the take-down to be attributable.
+                        if (!staleForeignCrumbShown) {
+                            staleForeignCrumbShown = true;
+                            console.info(
+                                "[SettingsHub] pinned hub window closed: its hub node is not part of the current workflow anymore. It re-floats where the hub lives.");
+                        }
                     }
                 } catch (_) { /* one broken hub must not sink the pass */ }
             }
