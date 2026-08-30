@@ -715,6 +715,15 @@ function savePinPosFromRect(node, panel) {
 const PIN_MIN_W = 280;   // rows keep their chrome (handles/buttons) below this
 const PIN_MIN_H = 120;   // header + a couple of rows
 
+// v41 auto-collapse mode: the window folds PIN_AUTOHIDE_LEAVE_MS after
+// the cursor leaves it (grace against stray exits; a re-entry cancels
+// the pending fold) and a folded window re-opens after
+// PIN_AUTOHIDE_HOVER_MS of hovering its title bar (hover intent).
+const PIN_AUTOHIDE_LEAVE_MS = 450;
+const PIN_AUTOHIDE_HOVER_MS = 220;
+const PIN_AUTOHIDE_OFF_TIP = "Auto-collapse: OFF - the window folds when the cursor leaves it and re-opens from the folded title hover (click to enable)";
+const PIN_AUTOHIDE_ON_TIP = "Auto-collapse: ON - the window folds when the cursor leaves it and re-opens when you hover the folded title (click to disable)";
+
 function clampPinSize(w, h) {
     const vw = Number(window.innerWidth) > 0 ? Number(window.innerWidth) : 1280;
     const vh = Number(window.innerHeight) > 0 ? Number(window.innerHeight) : 800;
@@ -762,6 +771,19 @@ function savePinSizeFromRect(node, panel) {
     } catch (_) {}
 }
 
+/** v41: the single collapse/expand authority - the manual "-" button
+ *  AND the auto-collapse engine both land here. Keeps the v31 contract:
+ *  folding drops the explicit box (the window shrinks to the header),
+ *  expanding re-applies the persisted size or the hug mode. */
+function applyPinMin(node, p, min) {
+    const cfg = getHubConfig(node);
+    cfg.pinMin = !!min;
+    p.panel.classList.toggle("hub-pin-collapsed", cfg.pinMin);
+    applyPinSize(node, p.panel);
+    p.btnMin.textContent = cfg.pinMin ? "+" : "–";
+    savePinPosFromRect(node, p.panel);
+}
+
 /** While floating, the canvas node collapses to a title-bar ghost so no
  *  dead rectangle lingers under the cursor. The PRE-PIN envelope is saved
  *  and restored verbatim on unpin - a user-sized (FILL) hub must get back
@@ -797,6 +819,15 @@ function ensurePinPanel(node, st) {
     const ttl = document.createElement("span");
     ttl.className = "hub-pin-title";
     ttl.textContent = node.title?.replace(/\s+/g, " ").trim() || "Settings Hub";
+    // v41: auto-collapse mode toggle (state + tooltip read from cfg -
+    // the panel is rebuilt on every float session, so this is the
+    // single place the persisted mode surfaces from).
+    const btnAuto = document.createElement("button");
+    btnAuto.type = "button";
+    btnAuto.className = "hub-pin-btn hub-pin-auto";
+    btnAuto.textContent = "⇲";
+    btnAuto.classList.toggle("hub-pin-auto-on", !!getHubConfig(node).pinAutoHide);
+    btnAuto.title = getHubConfig(node).pinAutoHide ? PIN_AUTOHIDE_ON_TIP : PIN_AUTOHIDE_OFF_TIP;
     const btnMin = document.createElement("button");
     btnMin.type = "button";
     btnMin.className = "hub-pin-btn hub-pin-min";
@@ -809,6 +840,7 @@ function ensurePinPanel(node, st) {
     btnBack.title = "Return the hub onto the canvas";
     head.appendChild(grip);
     head.appendChild(ttl);
+    head.appendChild(btnAuto);
     head.appendChild(btnMin);
     head.appendChild(btnBack);
 
@@ -846,24 +878,19 @@ function ensurePinPanel(node, st) {
         if (!drag) return;
         drag = null;
         savePinPosFromRect(node, panel);
-    };
+        autoHideCheck();   // v41: drag ended off-panel -> fold (mouseleave
+    };                     // was swallowed by the pointer capture)
     head.addEventListener("pointerup", endDrag);
     head.addEventListener("pointercancel", endDrag);
     head.addEventListener("dblclick", (e) => e.stopPropagation());
 
     btnMin.addEventListener("click", (e) => {
         e.stopPropagation();
-        const cfg = getHubConfig(node);
-        cfg.pinMin = !cfg.pinMin;
-        panel.classList.toggle("hub-pin-collapsed", cfg.pinMin);
-        // v31: collapsing must COLLAPSE THE WINDOW, not just hide the body -
-        // an explicit (user-resized) box used to keep its full height and
-        // leave a big empty shell behind the header. Drop the explicit box
-        // while collapsed; expanding re-applies the persisted size (or the
-        // hug mode when the user never resized).
-        applyPinSize(node, panel);
-        btnMin.textContent = cfg.pinMin ? "+" : "–";
-        savePinPosFromRect(node, panel);
+        // v31 (now living inside applyPinMin): collapsing must COLLAPSE
+        // THE WINDOW, not just hide the body. v41: a pending auto action
+        // is dropped first - a manual toggle always wins.
+        clearAuto();
+        applyPinMin(node, p, !getHubConfig(node).pinMin);
     });
     btnBack.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -900,6 +927,7 @@ function ensurePinPanel(node, st) {
         panel.classList.remove("hub-pin-resizing");
         try { rsz.releasePointerCapture?.(e?.pointerId); } catch (_) {}
         savePinSizeFromRect(node, panel);
+        autoHideCheck();   // v41: same off-panel recovery as endDrag
     };
     rsz.addEventListener("pointerup", endRsz);
     rsz.addEventListener("pointercancel", endRsz);
@@ -909,7 +937,65 @@ function ensurePinPanel(node, st) {
         applyPinSize(node, panel);                  // back to hug-content mode
     });
 
-    p = { panel, head, body, btnMin, btnBack, rsz };
+    // --- v41: auto-collapse engine (cfg.pinAutoHide) ----------------------
+    // Fold when the cursor leaves the floating window; re-open when it
+    // comes back onto the folded title bar. Both transitions are delayed
+    // and cancelable (stray exits, hover intent). Suppressed while a
+    // drag/resize gesture is mid-flight (endDrag/endRsz run autoHideCheck
+    // instead) or a hub popup lives OUTSIDE the panel on document.body
+    // (combo & preset pickers, batch box, toast, fullscreen gallery -
+    // reaching them must not fold the hub mid-task).
+    let autoT = null;
+    const clearAuto = () => {
+        if (autoT) { clearTimeout(autoT); autoT = null; }
+    };
+    const hubPopupsOpen = () => !!document.querySelector(
+        ".hub-menu, .hub-batch, .hub-toast, .hub-fs-overlay");
+    const scheduleAuto = (min, delay) => {
+        clearAuto();
+        autoT = setTimeout(() => {
+            autoT = null;
+            if (!getHubConfig(node).pinned) return;  // unpinned meanwhile
+            if (!panel.isConnected) return;          // torn down meanwhile
+            if (drag || rszDrag) return;             // gesture hijacked it
+            if (min && hubPopupsOpen()) return;      // busy in a picker
+            applyPinMin(node, p, min);
+        }, delay);
+    };
+    // Enabling with the pointer already elsewhere folds right away; a
+    // gesture that ended off-panel recovers its swallowed mouseleave.
+    const autoHideCheck = () => {
+        const cfg = getHubConfig(node);
+        if (!cfg.pinAutoHide || cfg.pinMin || drag || rszDrag) return;
+        let hov = true;
+        try { hov = panel.matches(":hover"); } catch (_) { hov = true; }
+        if (!hov) scheduleAuto(true, PIN_AUTOHIDE_LEAVE_MS);
+    };
+    btnAuto.addEventListener("click", (e) => {
+        e.stopPropagation();
+        clearAuto();
+        const cfg = getHubConfig(node);
+        cfg.pinAutoHide = !cfg.pinAutoHide;
+        btnAuto.classList.toggle("hub-pin-auto-on", cfg.pinAutoHide);
+        btnAuto.title = cfg.pinAutoHide ? PIN_AUTOHIDE_ON_TIP : PIN_AUTOHIDE_OFF_TIP;
+        if (cfg.pinAutoHide) autoHideCheck();
+    });
+    panel.addEventListener("mouseleave", () => {
+        const cfg = getHubConfig(node);
+        if (!cfg.pinAutoHide || cfg.pinMin) return;  // off / already folded
+        if (drag || rszDrag) return;                 // gesture: endDrag decides
+        if (hubPopupsOpen()) return;                 // busy in a picker
+        scheduleAuto(true, PIN_AUTOHIDE_LEAVE_MS);
+    });
+    panel.addEventListener("mouseenter", clearAuto); // back in time: no fold
+    head.addEventListener("mouseenter", () => {
+        const cfg = getHubConfig(node);
+        if (!cfg.pinAutoHide || !cfg.pinMin) return; // only the FOLDED one
+        scheduleAuto(false, PIN_AUTOHIDE_HOVER_MS);  // hover intent, then open
+    });
+    head.addEventListener("mouseleave", clearAuto);  // intent aborted
+
+    p = { panel, head, body, btnMin, btnAuto, btnBack, rsz, cancelAuto: clearAuto };
     pinPanels.set(node, p);
     st.panelBody = body;
     return p;
@@ -1003,6 +1089,7 @@ function homeHub(node) {
         st.__hubHomeNext = null;
     }
     const p = pinPanels.get(node);
+    try { p?.cancelAuto?.(); } catch (_) {}   // v41: no auto-fold past teardown
     try { p?.panel.remove(); } catch (_) {}
     if (p) pinPanels.delete(node);
     if (st) {
@@ -1045,6 +1132,7 @@ export function disposeHubVisuals(node) {
     try { st?.wrapObserver?.disconnect(); } catch (_) {}
     if (st) st.wrapObserver = null;
     const p = pinPanels.get(node);
+    try { p?.cancelAuto?.(); } catch (_) {}   // v41: no auto-fold past teardown
     try { p?.panel.remove(); } catch (_) {}
     pinPanels.delete(node);
     // v37: the panel body is gone - isWrapInPanel must stop reporting

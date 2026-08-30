@@ -481,6 +481,10 @@ export function getHubConfig(node) {
         cfg.pinPos = null;
     }
     if (cfg.pinMin !== true) cfg.pinMin = false;
+    // v41: auto-collapse mode - the floating window folds itself when
+    // the cursor leaves it and re-opens when the cursor hovers the
+    // folded title bar (toggle lives in the pin header).
+    if (cfg.pinAutoHide !== true) cfg.pinAutoHide = false;
     // v27.2: user-resized floating window (explicit px size; null = auto,
     // the panel hugs its content like it always did).
     if (cfg.pinSize && typeof cfg.pinSize === "object" &&

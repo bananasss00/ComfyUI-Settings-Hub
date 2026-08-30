@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v40 - canvas-drawn widgetless nodes get a node-UI pin: Pixaroma Switch / Mute Switch join the hub LIVE (rows render via onDrawForeground, clicks forward to the node, toggles work from the embed)");
+console.info("[SettingsHub] web build: v41 - auto-collapse for the pinned hub: toggle the ⇲ button in the pin header and the window folds itself when the cursor leaves it (grace delay, re-entry cancels) and re-opens when you hover the folded title bar");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v40 - canvas-drawn widgetless nodes get a
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=40", import.meta.url).href;
+    link.href = new URL("styles.css?v=41", import.meta.url).href;
     document.head.appendChild(link);
 })();
 

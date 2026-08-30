@@ -1323,6 +1323,19 @@ button.hub-pin-back {
     padding: 1px 7px;
 }
 
+/* v41: auto-collapse toggle in the pin header. ON = amber accent -
+   the same "active" family as the tab-bar pin toggle glow. */
+.hub-pin-btn.hub-pin-auto-on {
+    background: #3d3423;
+    border-color: #8a7a45;
+    color: #ffd479;
+}
+
+.hub-pin-btn.hub-pin-auto-on:hover {
+    background: #4a4028;
+    color: #ffe4a8;
+}
+
 .hub-pin-body {
     max-height: min(76vh, 720px);
     overflow-y: auto;

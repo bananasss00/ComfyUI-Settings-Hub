@@ -63,6 +63,8 @@ web/core.js            — конфиг хаба, detectWidgetType (самоле
                          v40: createNodeUIBinding - node-level биндинг в
                          viewer-форме (VIEWER_SENTINEL + options.viewer +
                          options.controls) для канвас-виджетлесс нод
+                         v41: getHubConfig нормализует cfg.pinAutoHide -
+                         per-hub режим автосворачивания запиненного окна
 web/sync.js            — шина структурных/values-обновлений + shared edit-lock
                          (beginEdit/endEdit), rAF-очередь queueHubRefresh
 web/sync_manager.js    — хуки реактивности на целевых виджетах (обёртка callback),
@@ -95,6 +97,15 @@ web/hub_ui_renderer.js — весь UI хаба: табы, строки зерк
                          throw -> /upload/image; paintMediaPreview
                          предпочитает input-спеку стора и парсит
                          subfoldered combo-значения для /view
+                         v41: авто-сворачивание пин-окна: applyPinMin -
+                         ЕДИНАЯ точка collapse/expand (кнопка «–» и
+                         движок), движок auto-hide (leave -> fold c
+                         grace-задержкой и отменой по re-enter; hover
+                         заголовка свернутого -> expand c intent-
+                         задержкой), гварды драга/ресайза (endDrag/
+                         endRsz -> autoHideCheck) и body-попапов
+                         (.hub-menu/.hub-batch/.hub-toast/
+                         .hub-fs-overlay), кнопка ⇲ в шапке пин-панели
 web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode;
                          afterConfigureGraph первым делом зовёт
@@ -561,6 +572,60 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v41: авто-сворачивание запиненного хаба (auto-collapse)
+- ЗАПРОС (поле): добавить режим автосворачивания запиненного
+  хаба, когда курсор уходит за пределы хаба, и разворачивание,
+  когда курсор попадает на заголовок свернутого хаба.
+- РЕШЕНИЕ (patch_v41_autohide.py, CRLF-safe, 13 патчей): режим
+  per-hub, персистентный cfg.pinAutoHide (нормализация в
+  getHubConfig по образцу pinMin). Кнопка «⇲» в шапке пин-панели
+  (между заголовком и «–») - тоггл режима; ON-состояние =
+  янтарный акцент (семейство hub-pin-on), тултип отражает
+  состояние. applyPinMin(node, p, min) - ЕДИНАЯ точка
+  collapse/expand: и ручная «–», и авто-движок идут через неё
+  (контракт v31 сохранён: складывание сбрасывает явный бокс,
+  разворачивание возвращает персистентный размер). Движок
+  (per-panel, в ensurePinPanel): mouseleave панели -> fold через
+  PIN_AUTOHIDE_LEAVE_MS=450 (grace от случайных выходов);
+  re-enter панели в срок отменяет отложенный fold; mouseenter на
+  заголовке СВЕРНУТОГО окна -> expand через
+  PIN_AUTOHIDE_HOVER_MS=220 (hover intent), head-mouseleave
+  отменяет. Гварды: drag/resize в полёте (mouseleave под
+  pointer-capture не сворачивает; endDrag/endRsz запускают
+  autoHideCheck - драг, закончившийся вне панели, сворачивает
+  окно, «проглоченный» mouseleave восстанавливается);
+  body-попапы .hub-menu/.hub-batch/.hub-toast/.hub-fs-overlay
+  (комбо/пресет-пикеры, batch-бокс, тост, фуллскрин-галерея живут
+  ВНЕ панели - работа с ними не сворачивает хаб; проверка и на
+  schedule, и на fire); fire-гварды живости (pinned,
+  isConnected). homeHub/disposeHubVisuals отменяют отложенный
+  таймер через p.cancelAuto().
+- УРОК СМОУКА: jsdom 30 (dom-selector) трактует :hover как
+  «последнее click/mousedown/mouseup/mouseover событие с target
+  внутри элемента» (currentEvent персистентен!) -
+  matches(":hover") НЕ всегда false; позицией курсора в тесте
+  управляют диспетчем mouseup на нужном хосте (body = курсор вне
+  окна). Клик по кнопке режима сам ставит hover на панель =>
+  включение НЕ сворачивает окно (и в реальном поле тоже).
+- smoke_v41.mjs (30 чеков, jsdom): wiring (кнопка ⇲, дефолт OFF,
+  тултипы), включение не сворачивает, leave->fold с grace,
+  hover заголовка свернутого разворачивает + отмена intent,
+  re-entry отменяет fold, попапы блокируют fold, drag-гвард +
+  endDrag-recovery (mouseup на body = отпускание вне окна),
+  режим OFF замораживает оба направления, контракт v31 через
+  applyPinMin (персистентный размер, сброс бокса),
+  teardown-гигиена (unpin с отложенным fold), персистентность
+  через re-pin, wiring (баннер v41, ?v=41, css-правило,
+  константы).
+- Регресс: v40/v39/v38/v37/v36/v35/v33/v32/v31/v30 (баннер-чеки
+  семи смоуков подняты до v41), text_resize, presets_v29,
+  ghost_lock, ghost_prefix, canvas_route, resize_pin,
+  media_dl_chrome, repro_v37_field - ALL PASSED;
+  node --check web/*.js.
+- Коммит: «feat(hub): v41 auto-collapse for the pinned hub -
+  toggle the ⇲ button and the window folds itself when the
+  cursor leaves …».
 
 ### v40: канвас-виджетлесс ноды в хабе — «Pin node UI (live embed)»
 - ЗАПРОС (поле): у ноды Switch Pixaroma не появляется никакой пункт
@@ -1741,6 +1806,17 @@ ZX (v40) - smoke_v40.mjs, 28 чеков: меню-квалификация
 тег выживает), интерактивность (pointerdown -> onMouseDown
 node-local, wheel/contextmenu гасятся, pointerleave), релиз
 (ремаунт без гостов, анпин чистит), wiring (баннер v40, ?v=40).
+
+ZY (v41) - smoke_v41.mjs, 30 чеков: авто-сворачивание пин-окна
+(кнопка ⇲ в шапке, cfg.pinAutoHide), leave -> fold c grace-задержкой
+и отменой по re-entry, hover заголовка свернутого -> expand c
+intent-задержкой и отменой, блокировка fold открытыми body-попапами
+(.hub-menu/.hub-fs-overlay), drag-гвард + endDrag-recovery (mouseup
+на body = отпускание указателя вне окна), режим OFF замораживает
+оба направления, v31-контракт размеров через applyPinMin,
+teardown-гигиена + персистентность через re-pin, wiring (баннер
+v41, ?v=41). Урок: jsdom 30 :hover = «last mouse-family event
+target inside node» (currentEvent персистентен).
 
 ## 6. Упаковка и коммиты
 
