@@ -573,6 +573,116 @@ dev_plan.md            — исходный технический спек пр
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
 
+### v45: DOM-truth sweep пин-окон + view-авторитетные syncAll/prune (свёрнутые пины переживали все фиксации)
+- ЗАПРОС (поле): «проблема со свернутыми хабами осталась» - после v44.
+- ДИАГНОЗ: все смоделированные пути тейкдауна (swap-тейкдаун вотчером,
+  configure-prune/syncAll, renderHub-гейт) зелёные в репро, но в поле панель
+  выживала. Общий знаменатель: КАЖДЫЙ тейкдаун был опосредован книжностью
+  состояния (stateMap wrap/panelBody, isWrapInPanel, флаг floating) -
+  состояние поля, где книжность врёт (DOM-widget менеджер фронтенда
+  перетаскивает wrap посреди свитча, полурастущая teardown-цепочка,
+  configure, пересобирающий объекты нод при живой записи панели), оставляло
+  панель на document.body БЕЗ единого ответственного пути кода; свёрнутая
+  панель - худший случай (её контент никто не перерисовывает, к ней никто
+  не возвращается). syncAll/pruneForeignHubs отвечали через объединение
+  корней (isNodeInLiveTree/liveGraphs) - гибридный фронт, стреляющий
+  configure-хуками при таб-свитче, ре-рендерил мёртвые хабы вместо prune.
+- РЕШЕНИЕ (patch_v45_dom_sweep.py): (1) DOM-TRUTH SWEEP в вотчере -
+  инвариант на уровне фактического DOM: панель может жить на экране, только
+  пока её хаб запинен И принадлежит видимому воркфлоу (isNodeInViewTree);
+  реестр живых записей pinPanelRecords (pinPanels - WeakMap, ненумеруем),
+  запись штампуется hub-нодой при ensurePinPanel, дренируется в
+  homeHub/disposeHubVisuals; свип идёт каждый тик ПОСЛЕ everActive-гварда
+  (медленный бут не роняет панели), homeHub сохраняет контракт v37 (пин
+  переживает, ре-флоат на возврате); breadcrumb свипа раз за сессию.
+  (2) graphReachableFrom/liveViewGraphs/isNodeInViewTree переехали в core.js
+  (единый источник рядом с liveGraphs); syncAll (sync_manager.js) и
+  pruneForeignHubs (hubIsReachable) переведены на isNodeInViewTree.
+  (3) Баннер v45, styles.css?v=45.
+- smoke_v45.mjs: N1 книжность врёт (wrap выдернут из панели, floating=false -
+  старый вотчер бессилен) - свип закрывает панель; N2 unpinned-хаб с
+  остаточной панелью - закрывается; N3 живая панель (свёрнутая и
+  развёрнутая) не трогается тиками; N4 сабграф-брауз панель сохраняет;
+  N5 swap-тейкдаун + ре-флоат на возврате (контракт v37 через свип);
+  N6 гвард медленного бута (пустой мир - свип не стреляет); N7
+  configure-каскад при свопе без воскрешения; W1-W4 wiring.
+- Коммит: «fix(hub): v45 DOM-truth pinned-window sweep - ...».
+
+### v44: view-authoritative liveness — пин-окна умирают при таб-свитче (добита смена воркфлоу)
+- ЗАПРОС (поле): «при смене рабочего процесса свернутые запиненные хабы
+  не пропадают» — v42 не помог в ЭТОМ режиме смены.
+- ДИАГНОЗ (repro_v44_field.mjs, воспроизвёл ДО фикса, F1/F2): v35-заметка
+  «frontends swap app.canvas.graph» + v37-заметка «app.graph is a SINGLETON
+  root - tab switches NEVER change its identity» вместе означают: при
+  таб-свитче app.canvas.graph указывает на НОВЫЙ граф, а app.graph НАВСЕГДА
+  остаётся со СТАРЫМ воркфлоу; configure-хук НЕ зовётся. liveGraphs() сеет
+  ОБА корня (seedRootGraphs) → ноды старого воркфлоу вечно «active» →
+  pinnedWindowAllRowsDead резолвит строки через старый граф → вотчер считает
+  окно живым. Свёрнутость ни при чём: развёрнутые выживали так же — поле
+  просто всегда видит свёрнутые (авто-сворачивание v41). Все прежние репро
+  моделировали ДРУГИЕ режимы (замена _nodes в том же LGraph / configure без
+  lifecycle), где двойной сид безвреден.
+- РЕШЕНИЕ (patch_v44_view_liveness.py, CRLF-safe, 9 патчей) — LEVEL-TRIGGERED,
+  без event-фронтов, которые теряются между тиками 1.2s: живость решает ВИД.
+  liveViewGraphs(): если canvas.graph === app.graph ИЛИ достижим из дерева
+  app.graph (graphReachableFrom — identity-обход по childGraphsOfNode, без
+  реестров определений) — прежнее поведение, объединение корней (вход/выход
+  в сабграф-вид НЕ рвёт корневой мир, F5). Если НЕ достижим — КОРНИ
+  РАСХОДИЛИСЬ (таб-свитч: синглтон держит СТАРЫЙ воркфлоу) — живо ТОЛЬКО
+  дерево canvas.graph, протухший сид отброшен. На liveViewGraphs переведены
+  ВСЕ гейткиперы окон: identity active-set вотчера, pinnedWindowAllRowsDead,
+  renderHub-пин-рестор (isNodeInViewTree: мёртвая ветка dispose + re-float).
+  Окно над чужим воркфлоу снимается следующим свипом и больше не
+  воскрешается, что бы ни врал протухший корень. Rider-фикс: ensurePinPanel
+  читал isConnected у POJO записи (всегда undefined !== false) вместо
+  p.panel.isConnected — оторванная панель считалась «подключённой».
+  Баннер v44, styles.css?v=44.
+- repro_v44_field.mjs (после фикса): F1 свёрнутое окно умирает при
+  таб-свитче, F2 развёрнутое тоже, F3 возврат на таб ре-флоатит окно
+  (пин выжил), F4 configure-свитч снимает мгновенно + возврат по
+  configure ре-флоатит, F5 вход/выход в сабграф окно НЕ снимает,
+  F6 свой хаб таба B ре-флоатит при возврате, F7 правки графа в новом
+  табе НЕ воскрешают чужое окно. Rider: everActive-гвард вотчера читает
+  МИР по объединению (гвард поднимается, как только читаем хоть один
+  граф), иначе сидение на пустом табе вечно держало свип за гвардом.
+- smoke_v44.mjs + регресс всех смоуков; баннер-чеки подняты до v44.
+- Коммит: «fix(hub): v44 view-authoritative liveness - a workflow tab swap
+  (canvas.graph off the stale singleton root) drops the old workflow from
+  every liveness check, so pinned windows over it go down within one sweep -
+  folded windows included».
+
+### v43: видео живого вьювера играет только под курсором (hover-play)
+- ЗАПРОС (поле): «надо чтобы viewer (live embed) если там видео то
+  воспроизводилось только когда курсор на видео».
+- ДИАГНОЗ: единственный автозапуск — mountMediaViewer
+  (portal_manager.js): собственный плеер <video controls loop> стартовал
+  el.play() на маунте и на КАЖДОЙ смене src (новое поколение) — клип
+  играл вхолостую, пока пользователь не смотрит; глобальный
+  mute/volume (v27) тут не помощник.
+- РЕШЕНИЕ (patch_v43_hoverplay.py, CRLF-safe, 6 патчей): hover-гейт в
+  mountMediaViewer: флаг hovering + слушатели mouseenter/mouseleave на
+  самом <video> (нативные контролы входят в бокс элемента — наведение
+  на них тоже «курсор на видео»). mouseenter -> play() (пользовательский
+  жест — unmuted-play разрешён), mouseleave -> pause(). apply() (смена
+  src от watcher/MutationObserver) вызывает play() ТОЛЬКО при hovering:
+  новое поколение под курсором продолжает играть, без курсора остаётся
+  паузой с первым кадром (preload auto). Ручная пауза нативными
+  контролами держится до повторного входа курсора. Релиз снимает
+  hover-слушатели (вместе с pause/remove). Коммент шапки v26.2 отражает
+  контракт; баннер v43, styles.css?v=43.
+- smoke_v43.mjs (12 чеков): V1 маунт БЕЗ play (пауза, первый кадр),
+  V2 mouseenter -> play, V3 mouseleave -> pause, V4 повторный вход
+  снова играет, V5 смена src без курсора НЕ играет (src перепринят),
+  V6 смена src под курсором играет, V7 release снимает слушатели,
+  W1-W5 wiring (баннер v43 до импортов, ?v=43, hover-гейт в сорсе,
+  controls/loop не потеряны, autoplay-атрибут не выставляется).
+  Регресс: баннер-чеки девяти смоуков подняты до v43; v42/v41/v40/
+  media_dl_chrome — ALL PASSED; node --check web/*.js.
+- Коммит: «feat(hub): v43 hover-gated video - the live embed plays
+  only while the cursor is over the video (mouseenter plays,
+  mouseleave pauses), fresh generations autoplay only under the
+  cursor».
+
 ### v42: протухшие пин-окна — вотчер свипает каждый тик, ре-флоат подчиняется живости строк
 - ЗАПРОС (поле): «когда хаб свернут запиненный хаб, то при смене
   рабочего процесса он остается на экране» — свёрнутый

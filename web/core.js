@@ -225,6 +225,82 @@ export function liveGraphs(maxDepth = 12) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// v45: VIEW-AUTHORITATIVE membership (moved here from hub_ui_renderer.js so
+// that EVERY liveness consumer - the tab watcher, syncAll, pruneForeignHubs,
+// renderHub's pin-restore - answers through ONE function). liveGraphs()
+// unions BOTH seeded roots; after a tab swap (app.canvas.graph points at the
+// other tab while the app.graph singleton still holds the previous
+// workflow) that union vouches for the DEAD workflow. The view decides.
+// ---------------------------------------------------------------------------
+
+/** Is `target` reachable from `root`'s node tree? Identity walk over
+ *  childGraphsOfNode only - definition registries are NOT consulted
+ *  (stale subgraph objects must never vouch for liveness). */
+function graphReachableFrom(root, target) {
+    if (!root || !target) return false;
+    if (root === target) return true;
+    try {
+        const seen = new Set([root]);
+        let frontier = [root];
+        for (let depth = 0; depth < 12 && frontier.length; depth++) {
+            const next = [];
+            for (const g of frontier) {
+                for (const n of nodeListOf(g)) {
+                    for (const child of childGraphsOfNode(n)) {
+                        if (child === target) return true;
+                        if (!seen.has(child)) { seen.add(child); next.push(child); }
+                    }
+                }
+            }
+            frontier = next;
+        }
+    } catch (_) { return false; }
+    return false;
+}
+
+/** The graphs of the workflow the user is LOOKING at. Undiverged: the
+ *  liveGraphs() union (roots + real subgraph views). Diverged (tab swap):
+ *  the canvas.graph tree ONLY - the stale app.graph seed is dropped. */
+export function liveViewGraphs() {
+    const cg = app?.canvas?.graph ?? null;
+    const ag = app?.graph ?? null;
+    if (!cg || cg === ag || graphReachableFrom(ag, cg)) return liveGraphs();
+    const out = [cg];
+    try {
+        const seen = new Set([cg]);
+        let frontier = [cg];
+        for (let depth = 0; depth < 12 && frontier.length; depth++) {
+            const next = [];
+            for (const g of frontier) {
+                for (const n of nodeListOf(g)) {
+                    for (const child of childGraphsOfNode(n)) {
+                        if (!seen.has(child)) { seen.add(child); next.push(child); }
+                    }
+                }
+            }
+            frontier = next;
+        }
+    } catch (_) { /* a broken view tree still beats a stale root */ }
+    return out;
+}
+
+/** View-authoritative membership: is this node part of the workflow the
+ *  user is looking at? A walker hiccup answers YES - live state is never
+ *  destroyed on a tooling failure. */
+export function isNodeInViewTree(node) {
+    try {
+        for (const g of liveViewGraphs()) {
+            for (const n of nodeListOf(g)) {
+                if (n === node) return true;
+            }
+        }
+    } catch (_) {
+        return true;
+    }
+    return false;
+}
+
 /** True when the node object is a member of the CURRENT workflow tree
  *  (liveGraphs). A walker hiccup answers YES - live state is never
  *  destroyed on a tooling failure. */

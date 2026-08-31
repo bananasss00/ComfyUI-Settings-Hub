@@ -1180,10 +1180,13 @@ function releaseRecord(rec) {
 // field as per-frame flicker (re-cloned <video> + seek fighting) and rows
 // that kept jitter-resizing.
 //
-//   video  -> our own native <video controls loop autoplay playsinline>: a
-//             REAL player (seek/pause/volume) as the user asked. We copy the
-//             src (blob: URLs stay valid in the same document) and re-point
-//             it when the source swaps media (new generation).
+//   video  -> our own native <video controls loop playsinline>: a REAL
+//             player (seek/pause/volume) as the user asked. We copy the src
+//             (blob: URLs stay valid in the same document) and re-point it
+//             when the source swaps media (new generation). v43: playback
+//             is HOVER-GATED - the embed plays only while the cursor is on
+//             the video (mouseenter plays, mouseleave pauses); a fresh
+//             generation autoplays only under an already-hovering cursor.
 //             v27: muted/volume start from the GLOBAL preference
 //             (global_settings.getVideoAudio) and every volumechange made
 //             through the native controls writes back - tune audio ONCE,
@@ -1347,6 +1350,31 @@ function mountMediaViewer(node, item, tn, host) {
         if (src.kind === "video") {
             try { el.addEventListener("volumechange", persistAudio); } catch (_) {}
         }
+        // v43 hover-play: the embed plays ONLY while the cursor is on
+        // the video. mouseenter starts playback (a real user gesture -
+        // unmuted play is allowed), mouseleave pauses it; a fresh
+        // generation (src swap in apply) autoplays only under an
+        // already-hovering cursor. A manual pause made through the
+        // native controls keeps the video paused until the cursor
+        // re-enters. The native controls live inside the element's
+        // own box, so hovering them still counts as "cursor on video".
+        let hovering = false;
+        const onEnter = () => {
+            hovering = true;
+            if (rec.dead) return;
+            try {
+                const p = el.play?.();
+                p?.catch?.(() => {});
+            } catch (_) {}
+        };
+        const onLeave = () => {
+            hovering = false;
+            try { el.pause?.(); } catch (_) {}
+        };
+        if (src.kind === "video") {
+            try { el.addEventListener("mouseenter", onEnter); } catch (_) {}
+            try { el.addEventListener("mouseleave", onLeave); } catch (_) {}
+        }
         const apply = () => {
             if (rec.dead) return;
             // Re-resolve the LIVE media element every pass: frontends
@@ -1360,12 +1388,18 @@ function mountMediaViewer(node, item, tn, host) {
                 if (rec.srcKind === "video") {
                     // New generation of the same node: re-apply the
                     // global audio preference (it may have changed since
-                    // this element was mounted), then autoplay. If the
-                    // browser denies unmuted autoplay the video simply
-                    // waits for the user - its controls stay honest.
+                    // this element was mounted), then KEEP THE v43 HOVER
+                    // CONTRACT: an already-hovering cursor autoplays the
+                    // new clip, otherwise the video waits paused - the
+                    // first frame shows (preload auto) and playback
+                    // starts on mouseenter. If the browser denies
+                    // unmuted autoplay the video waits for the user -
+                    // its controls stay honest.
                     applyVideoAudio(el);
-                    const p = el.play?.();
-                    p?.catch?.(() => {}); // autoplay denial is fine
+                    if (hovering) {
+                        const p = el.play?.();
+                        p?.catch?.(() => {}); // autoplay denial is fine
+                    }
                 }
             } catch (_) {}
         };
@@ -1389,7 +1423,10 @@ function mountMediaViewer(node, item, tn, host) {
             rec.observer = null;
             if (src.kind === "video") {
                 try { el.removeEventListener("volumechange", persistAudio); } catch (_) {}
+                try { el.removeEventListener("mouseenter", onEnter); } catch (_) {}
+                try { el.removeEventListener("mouseleave", onLeave); } catch (_) {}
             }
+            hovering = false;
             try { el.pause?.(); } catch (_) {}
             try { dlBtn.remove(); } catch (_) {}
             try { el.remove(); } catch (_) {}

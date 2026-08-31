@@ -1,5 +1,5 @@
 import { app } from "../../scripts/app.js";
-import { getHubConfig, HUB_NODE_NAME, allHubs, resolveBindingTarget, findWidgetOnNode, isNodeInLiveTree, forgetHubNode } from "./core.js";
+import { getHubConfig, HUB_NODE_NAME, allHubs, resolveBindingTarget, findWidgetOnNode, isNodeInViewTree, forgetHubNode } from "./core.js";
 import { disposeHubVisuals } from "./hub_ui_renderer.js";
 import { syncNode, queueHubRefresh, inEdit, beginEdit, endEdit } from "./sync.js";
 import * as Pins from "./pins.js";
@@ -134,7 +134,10 @@ export function syncAll() {
         // window over the new workflow (renderHub re-floats any pinned
         // hub). Forget + dispose instead of rendering.
         try {
-            if (!isNodeInLiveTree(hub)) {
+            // v45: view-authoritative - after a tab swap the stale
+            // app.graph singleton must not vouch for the previous
+            // workflow's hubs (the union seeds both roots).
+            if (!isNodeInViewTree(hub)) {
                 forgetHubNode(hub);
                 disposeHubVisuals(hub);
                 continue;

@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v42 - stale pinned windows: the tab watcher sweeps every tick (same-id workflow switches no longer slip through the signature gate) and a window taken down for dead rows stays down (graph edits no longer resurrect it)");
+console.info("[SettingsHub] web build: v45 - DOM-truth pinned-window sweep: a pin panel may stay on screen only while its hub is pinned and belongs to the workflow the user is looking at - stale panels go down no matter what the per-hub bookkeeping says, folded included; syncAll and prune answer through the view too");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v42 - stale pinned windows: the tab watch
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=42", import.meta.url).href;
+    link.href = new URL("styles.css?v=45", import.meta.url).href;
     document.head.appendChild(link);
 })();
 

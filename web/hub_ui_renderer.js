@@ -24,7 +24,8 @@ import {
     liveComboValues, coerceNumeric, removeItem, detectWidgetType,
     isMultilineWidget, portalKindOf, resolveBindingTarget, findHolderChainOf,
     findWidgetOnNode, allGraphs, forgetHubNode, nodeListOf,
-    liveGraphs, isNodeInLiveTree,
+    childGraphsOfNode,
+    liveGraphs, isNodeInLiveTree, isNodeInViewTree, liveViewGraphs,
     synthSliderWindow, growSynthWindow, allHubs,
     effectiveSliderParams, getSliderOverride, hasSliderOverride,
     setSliderOverride, clearSliderOverride, applyOverrideToTargetWidgets,
@@ -641,6 +642,11 @@ async function clearQueueFlow(node) {
 // ---------------------------------------------------------------------------
 
 const pinPanels = new WeakMap(); // hub node -> { panel, head, body, btnMin, btnPin }
+// v45: every LIVE pin-panel record - the DOM-truth sweep's enumeration base.
+// pinPanels is a WeakMap on purpose (no leaks), so it cannot be iterated;
+// this companion Set holds exactly the windows that are on screen right now
+// and is drained by homeHub/disposeHubVisuals.
+const pinPanelRecords = new Set();
 let pinCascade = 0;
 
 function isWrapInPanel(st) {
@@ -804,7 +810,7 @@ function slimHubSlot(node, st) {
 
 function ensurePinPanel(node, st) {
     let p = pinPanels.get(node);
-    if (p && p.isConnected !== false) return p;
+    if (p && p.panel?.isConnected !== false) return p;
 
     const panel = document.createElement("div");
     panel.className = "hub-pin-panel";
@@ -995,8 +1001,10 @@ function ensurePinPanel(node, st) {
     });
     head.addEventListener("mouseleave", clearAuto);  // intent aborted
 
-    p = { panel, head, body, btnMin, btnAuto, btnBack, rsz, cancelAuto: clearAuto };
+    p = { panel, head, body, btnMin, btnAuto, btnBack, rsz, cancelAuto: clearAuto,
+        hub: node };
     pinPanels.set(node, p);
+    pinPanelRecords.add(p);   // v45: enumerated by the DOM-truth sweep
     st.panelBody = body;
     return p;
 }
@@ -1092,6 +1100,7 @@ function homeHub(node) {
     try { p?.cancelAuto?.(); } catch (_) {}   // v41: no auto-fold past teardown
     try { p?.panel.remove(); } catch (_) {}
     if (p) pinPanels.delete(node);
+    if (p) pinPanelRecords.delete(p);   // v45: off the sweep's radar
     if (st) {
         // Give the node back its pre-pin envelope BEFORE the follow-up
         // render/layout pass - FILL hubs must not adopt the ghost height.
@@ -1135,6 +1144,7 @@ export function disposeHubVisuals(node) {
     try { p?.cancelAuto?.(); } catch (_) {}   // v41: no auto-fold past teardown
     try { p?.panel.remove(); } catch (_) {}
     pinPanels.delete(node);
+    if (p) pinPanelRecords.delete(p);   // v45: off the sweep's radar
     // v37: the panel body is gone - isWrapInPanel must stop reporting
     // "floating" for a disposed hub (the wrap still parents to the
     // detached body otherwise).
@@ -1150,9 +1160,10 @@ export function disposeHubVisuals(node) {
 // from the afterConfigureGraph hook BEFORE syncAll re-renders survivors.
 // ---------------------------------------------------------------------------
 
-/** Is this hub still reachable from the LIVE root graph (root canvas or any
- *  nested subgraph)? A walker failure answers YES - live state is never
- *  destroyed on a tooling hiccup.
+/** v45: is this hub still in the workflow the user is LOOKING at
+ *  (view-authoritative; the old LIVE-root union let the stale singleton
+ *  root vouch for dead hubs after tab swaps)? A walker failure answers
+ *  YES - live state is never destroyed on a tooling hiccup.
  *  v37: LIVE-TREE membership only. The old allGraphs() walk also harvested
  *  subgraph definition registries (root._subgraphs); frontend 1.51.9 tab
  *  switches that skip clean() merge the incoming workflow's subgraph
@@ -1160,7 +1171,7 @@ export function disposeHubVisuals(node) {
  *  hubs inside stale subgraphs read as reachable - prune skipped them and
  *  syncAll resurrected their pinned windows over the new workflow. */
 function hubIsReachable(hub) {
-    return isNodeInLiveTree(hub);
+    return isNodeInViewTree(hub);
 }
 
 /** Drop every tracked hub that no longer belongs to the live graph: forget
@@ -3296,7 +3307,7 @@ function renderHub(node) {
             // syncAll and onConfigure both land here and used to
             // RE-FLOAT its dead window over the new workflow. Live
             // hubs float exactly as before.
-            if (!isNodeInLiveTree(node)) {
+            if (!isNodeInViewTree(node)) {
                 if (isWrapInPanel(st)) {
                     forgetHubNode(node);
                     disposeHubVisuals(node);
@@ -3919,8 +3930,40 @@ export function __hubTestState(node) { return stateMap.get(node) ?? null; }
 //   * 5 consecutive broken ticks disable the watcher for the session with
 //     one console.warn - a pathological frontend degrades to v33 behavior.
 // ===========================================================================
+// ===========================================================================
+// v44: VIEW-AUTHORITATIVE liveness - pinned windows die at the switch.
+//
+// FIELD HOLE (repro_v44_field.mjs): frontend 1.51.9 tab switches swap
+// app.canvas.graph to the other tab's graph object while app.graph stays
+// the OLD singleton (v35 + v37 field notes) - no configure hook fires.
+// liveGraphs() seeds BOTH roots, so the previous workflow's nodes stayed
+// "active" forever, pinnedWindowAllRowsDead resolved rows through the old
+// graph, and pinned windows (the field user always runs folded via the
+// v41 auto-collapse) survived every switch - expanded ones too.
+//
+// FIX, LEVEL-TRIGGERED (no event edge to miss between 1.2s ticks):
+// the VIEW decides. When canvas.graph is app.graph itself or reachable
+// from app.graph's node tree, nothing changes - the union of both roots
+// is live (subgraph view browsing keeps the root world alive). When
+// canvas.graph is NOT reachable from it, the roots DIVERGED (tab swap
+// mode: app.graph still holds the previous workflow) - ONLY the tree the
+// user is actually LOOKING at counts as live. The watcher's identity
+// active set, pinnedWindowAllRowsDead and renderHub's pin-restore all
+// answer through liveViewGraphs(), so a window over a foreign workflow
+// goes down on the next sweep - and stays down however the stale root
+// lies about liveness.
+// ===========================================================================
+
+// v45: graphReachableFrom / liveViewGraphs / isNodeInViewTree moved to
+// core.js (single source of truth) - the tab watcher, syncAll,
+// pruneForeignHubs and renderHub's pin-restore all answer through the same
+// view-authoritative membership now. The DOM-truth sweep below is the
+// user-visible enforcement layer: it polices the actual DOM, not the
+// bookkeeping.
+
 let stalePinCrumbShown = false;
 let staleForeignCrumbShown = false;
+let staleSweepCrumbShown = false;   // v45: DOM-truth sweep attribution
 
 /** v37: does EVERY widget binding of this hub fail to resolve against the
  *  live tree? Silent on purpose (no diagnostics side effects - the watcher
@@ -3933,7 +3976,7 @@ function pinnedWindowAllRowsDead(hub, cfg) {
             (i) => i?.type === "widget_binding");
         if (!items.length) return false;
         const nodes = [];
-        for (const g of liveGraphs()) nodes.push(...nodeListOf(g));
+        for (const g of liveViewGraphs()) nodes.push(...nodeListOf(g));
         if (!nodes.length) return false;
         const byId = new Map(nodes.map((n) => [String(n?.id), n]));
         for (const it of items) {
@@ -3965,16 +4008,61 @@ export function installHubTabWatch() {
             const active = new Set();
             // v37: live tree only - stale subgraph registries must not
             // count the previous workflow's nodes as "active".
-            for (const g of liveGraphs()) {
+            // v44: VIEW-authoritative - a tab swap (canvas.graph changed
+            // away from the stale singleton root) drops the old root's
+            // nodes from the active set entirely.
+            for (const g of liveViewGraphs()) {
                 for (const n of nodeListOf(g)) active.add(n);
             }
-            if (active.size) {
+            // v44: the boot guard reads the UNION world, not the view - a
+            // tab sitting on an EMPTY workflow (diverged, view-only, zero
+            // nodes) is a real readable state, and the sweep must still run
+            // there (foreign windows go down). Only a world where NOTHING
+            // is readable anywhere keeps the guard down.
+            let worldNodes = 0;
+            try {
+                for (const g of liveGraphs()) worldNodes += nodeListOf(g).length;
+            } catch (_) {}
+            if (active.size || worldNodes) {
                 everActive = true;
             } else if (!everActive || !(app?.graph || app?.canvas?.graph)) {
                 return; // no node ever seen / roots unreadable: observe only
             }
             // else: readable-but-EMPTY active set (new/empty workflow or a
             // closed tab) is a REAL state - foreign floats go down below.
+            // v45: DOM-TRUTH sweep - the user-visible invariant, enforced
+            // against the actual DOM: a pin panel may exist on screen only
+            // while its hub is pinned AND belongs to the workflow the user
+            // is looking at. Every previous takedown path was gated on
+            // per-hub bookkeeping (stateMap wrap/panelBody, isWrapInPanel);
+            // a field state where that bookkeeping lies left the panel
+            // orphaned with no code path responsible for it - folded panels
+            // especially (nothing re-renders a folded window). This sweep
+            // answers through the panel registry and the VIEW only;
+            // homeHub keeps the v37 contract: pin survives, re-floats on
+            // return.
+            let sweepClosed = 0;
+            for (const rec of [...pinPanelRecords]) {
+                try {
+                    const hubN = rec?.hub;
+                    if (!hubN) {
+                        try { rec.panel?.remove?.(); } catch (_) {}
+                        pinPanelRecords.delete(rec);
+                        continue;
+                    }
+                    let stale = false;
+                    try { stale = !getHubConfig(hubN)?.pinned; }
+                    catch (_) { stale = true; }
+                    if (!stale) stale = !isNodeInViewTree(hubN);
+                    if (stale) { homeHub(hubN); sweepClosed++; }
+                } catch (_) { /* one broken record must not sink the sweep */ }
+            }
+            if (sweepClosed && !staleSweepCrumbShown) {
+                staleSweepCrumbShown = true;
+                console.info("[SettingsHub] pinned-window sweep closed " + sweepClosed
+                    + " stale panel(s) over a workflow that is not on screen (folded"
+                    + " included). Windows re-float where their hubs live.");
+            }
             for (const hub of allHubs()) {
                 try {
                     const st = stateMap.get(hub);
