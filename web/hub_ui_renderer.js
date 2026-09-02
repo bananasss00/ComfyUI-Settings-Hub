@@ -213,12 +213,22 @@ function mirrorHtml(item, tw) {
             const vals = liveComboValues(item, tw);
             const sig = vals.join("¦");
             const ph = m.kind === "audio" ? "🎵" : m.kind === "video" ? "🎞" : "🖼";
+            // v46: prev/next arrows flank the file combo - cycle the
+            // live list without opening the searchable popup. Disabled
+            // at render time when the list has fewer than 2 entries;
+            // refreshValuesDom keeps the disabled-state in lockstep
+            // with the live combo length (a fresh upload adds a value).
+            const cyc = vals.length > 1;
             return `<span class="hub-mirror hub-mirror-media hub-mirror-grow" data-media-kind="${esc(m.kind || "image")}">` +
                 `<span class="hub-media-prev" data-role="media-prev" title="${esc(cur)}">` +
                 `<span class="hub-media-ph">${ph}</span></span>` +
+                `<button type="button" class="hub-btn hub-media-nav hub-media-prev-btn" data-role="media-prev-btn" ` +
+                `title="Previous file (←)"${cyc ? "" : " disabled"}>◀</button>` +
                 `<button type="button" class="hub-combo" data-role="combo" data-hub-control data-sig="${esc(sig)}" ` +
                 `title="${esc(cur)}${cur ? "\n" : ""}Searchable list - filter parts separated by space, all must match, case-insensitive">` +
                 `<span class="hub-combo-label">${esc(cur)}</span><span class="hub-combo-caret">▾</span></button>` +
+                `<button type="button" class="hub-btn hub-media-nav hub-media-next-btn" data-role="media-next-btn" ` +
+                `title="Next file (→)"${cyc ? "" : " disabled"}>▶</button>` +
                 `<button type="button" class="hub-btn hub-media-up" data-role="media-upload" ` +
                 `title="Upload a file into this node (click, drop, or hover the row and press Ctrl+V to paste)">📁</button>` +
                 `</span>`;
@@ -2542,6 +2552,50 @@ function paintMediaPreview(node, item) {
     } catch (_) { /* a broken preview must never kill the row */ }
 }
 
+/** v46: cycle the media-source combo one step forward or backward.
+ * Mirrors the gallery prev/next pattern (viewer_gallery.js): wrap-
+ * around, no-op when the live list has fewer than 2 values. Reads
+ * LIVE values only (invariant #4 - never the stale snapshot); the
+ * write goes through writeTargetValue under the shared sync lock
+ * (invariant #2). The reactive refresh is suppressed under the lock
+ * (queueHubRefresh early-returns on inEdit), so the combo label and
+ * tooltip are mirrored manually - same pattern as chooseComboValue.
+ * paintMediaPreview is srcSig-guarded -> idempotent, safe to call
+ * synchronously for instant click feedback. */
+function cycleMediaSource(node, item, dir) {
+    const { tn, tw } = findTarget(item);
+    if (!tn || !tw) return;
+    const vals = liveComboValues(item, tw).map(String);
+    if (vals.length < 2) return; // nothing to cycle
+    const cur = String(tw.value ?? "");
+    let idx = vals.indexOf(cur);
+    if (idx < 0) idx = 0; // stale value - start from the top
+    const next = (idx + dir + vals.length) % vals.length;
+    const v = vals[next];
+    if (v === cur) return;
+    beginEdit();
+    try {
+        writeTargetValue(tn, tw, v);
+    } finally {
+        endEdit();
+    }
+    // Reflect instantly on the combo label + tooltip (the rAF refresh
+    // was suppressed by inEdit() - same race chooseComboValue handles).
+    const st = stateMap.get(node);
+    const row = st?.root?.querySelector(`[data-hub-item="${item.id}"]`);
+    if (row) {
+        const lbl = row.querySelector(".hub-combo-label");
+        if (lbl) lbl.textContent = v;
+        const comboBtn = row.querySelector('button[data-role="combo"]');
+        if (comboBtn) {
+            comboBtn.title = `${v}\nSearchable list - filter parts separated by space, all must match, case-insensitive`;
+        }
+    }
+    // Preview follows the value change reactively (srcSig guard makes
+    // this idempotent); calling it directly gives instant feedback.
+    paintMediaPreview(node, item);
+}
+
 /** v30: upload entry point - PREFER the node's own upload button ("upload"
  * on modern builds): its picker, accept list and batch logic stay
  * authoritative. Fallback: our own hidden file input. */
@@ -2836,6 +2890,15 @@ function refreshValuesDom(node) {
         // guard skips the DOM write when the URL did not change.
         if (item.type === "widget_binding" && item.widgetType === "media") {
             paintMediaPreview(node, item);
+            // v46: keep prev/next arrow disabled-state in lockstep with
+            // the live combo length - a fresh upload adds a value and the
+            // arrows must enable without waiting for a structural re-render.
+            const live = liveComboValues(item, tw).map(String);
+            const cyc = live.length > 1;
+            const prevBtn = row.querySelector('[data-role="media-prev-btn"]');
+            const nextBtn = row.querySelector('[data-role="media-next-btn"]');
+            if (prevBtn) prevBtn.disabled = !cyc;
+            if (nextBtn) nextBtn.disabled = !cyc;
         }
 
         for (const control of row.querySelectorAll("[data-hub-control]")) {
@@ -3718,6 +3781,20 @@ function wireEvents(node, st) {
     root.addEventListener("click", (e) => {
         const btn = e.target.closest('button[data-role="combo"]');
         if (btn && !btn.disabled) openComboPopup(node, btn);
+    });
+
+    // v46: prev/next arrows on media-source rows cycle the file combo.
+    // Disabled buttons are skipped natively (their click never fires in
+    // most browsers, but a disabled <button> can still be the event
+    // target for delegated handlers in some setups - guard explicitly).
+    root.addEventListener("click", (e) => {
+        const nav = e.target.closest?.('[data-role="media-prev-btn"],[data-role="media-next-btn"]');
+        if (!nav || nav.disabled) return;
+        const row = nav.closest("[data-hub-item]");
+        const item = getHubConfig(node).items.find((i) => i.id === row?.dataset.hubItem);
+        if (!item) return;
+        const dir = nav.dataset.role === "media-next-btn" ? 1 : -1;
+        cycleMediaSource(node, item, dir);
     });
 
     // v30 media rows: upload picker + drag&drop routing. The drop zone is

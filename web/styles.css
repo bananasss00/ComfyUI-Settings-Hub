@@ -1580,6 +1580,28 @@ button.hub-pin-back {
     flex: 0 0 auto;
 }
 
+/* v46: prev/next arrows on media-source rows - cycle the file combo. */
+.hub-media-nav {
+    flex: 0 0 auto;
+    width: 22px;
+    height: 30px;
+    padding: 0;
+    font-size: 11px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* :disabled inherits .hub-btn:disabled (opacity .35, cursor default);
+   keep the hover-state muted so a disabled arrow never looks clickable.
+   The row shape stays stable across combo-length changes (no layout
+   jump when an upload lands). */
+.hub-media-nav:disabled:hover {
+    background: #2a2a3e;
+    color: #aaa;
+}
+
 .hub-mirror-media.hub-media-drag .hub-media-prev {
     border-color: #7a7ae0;
     box-shadow: 0 0 0 1px #7a7ae0 inset;
