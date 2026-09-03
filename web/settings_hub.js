@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v51.3 - hotfix 3: removed the pointerdown closer from the shared popup outside-click helper (it raced with the popup open path - search.focus during openComboPopup or openMediaThumbPicker triggered pointer events on the previously active element, the capture closer fired synchronously and nulled the state before the next line ran, causing TypeError cannot read properties of null reading search); the per-popup mousedown capture closer already covers outside-click reliably; added fail-soft guards after focus so any future race degrades gracefully");
+console.info("[SettingsHub] web build: v51.4 - reverted wirePopupOutsideClosers to a no-op; the v50 helper added pointerdown/blur/wheel closers on top of the existing per-popup mousedown+Escape, but each addition introduced races with the popup-open path (pointerdown fired during focus, blur fired when the canvas lost focus to the new input, wheel fired on internal scroll); the 9 popups were never broken - v50 was over-engineering; outside-click is handled by the per-popup mousedown capture closer (always present, reliable) and Escape by the per-popup keydown closer; removed the inline pointerdown from media-preview too; helper kept as no-op so the 8 call sites stay valid");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no

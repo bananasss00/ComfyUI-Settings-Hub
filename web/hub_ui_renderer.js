@@ -1395,19 +1395,18 @@ function _popupHitInside(st, target) {
  *  still covers DOM-widget text fields where pointerdown is captured by
  *  the text input). */
 const wiredPopupClosers = new Set();
-function wirePopupOutsideClosers(key, getState, closeFn) {
-    if (wiredPopupClosers.has(key)) return;
-    wiredPopupClosers.add(key);
-    // v51.3: pointerdown closer REMOVED. It raced with the popup-open
-    // path: focus() during openComboPopup can trigger pointer events on
-    // the previously active element, the capture closer would fire
-    // synchronously and null the state before the very next line ran,
-    // causing "Cannot read properties of null (reading 'search')". The
-    // existing per-popup mousedown capture closer already covers outside-
-    // click reliably. window blur kept for alt-tab closure.
-    window.addEventListener("blur", () => {
-        if (getState()) closeFn();
-    }, true);
+// v51.4: wirePopupOutsideClosers is now a NO-OP. The v50 helper added
+// pointerdown/blur/wheel closers on top of the existing per-popup
+// mousedown+Escape, but each addition introduced races with the popup-
+// open path (pointerdown fired during .focus(), blur fired when the
+// canvas lost focus to the new input, wheel fired on internal scroll).
+// Reverting to the pre-v50 state: outside-click is handled by the
+// per-popup mousedown capture closer (always present, reliable), and
+// Escape is handled by the per-popup keydown closer. The 9 popups were
+// never broken — v50 was over-engineering. The function is kept as a
+// no-op so the 8 call sites in ensureXGlobalListeners stay valid.
+function wirePopupOutsideClosers(_key, _getState, _closeFn) {
+    // intentionally empty — see comment above
 }
 
 function ensureComboGlobalListeners() {
@@ -3222,14 +3221,10 @@ function closeMediaPreviewPopup() {
 function ensureMediaPreviewGlobalListeners() {
     if (mediaPreviewGlobalWired) return;
     mediaPreviewGlobalWired = true;
+    // v51.4: pointerdown closer removed (raced with focus() in the main
+    // popups; same risk here). mousedown + Escape + scroll + blur cover
+    // the hover popup contract.
     document.addEventListener("mousedown", () => closeMediaPreviewPopup(), true);
-    document.addEventListener("pointerdown", (e) => {
-        // v50: pointerdown is the primary closer for the hover popup too
-        // — mousedown alone is unreliable on the ComfyUI canvas.
-        if (!mediaPreviewState) return;
-        if (_popupHitInside(mediaPreviewState, e.target)) return;
-        closeMediaPreviewPopup();
-    }, true);
     document.addEventListener("keydown", (e) => {
         if (e.key === "Escape") closeMediaPreviewPopup();
     }, true);
