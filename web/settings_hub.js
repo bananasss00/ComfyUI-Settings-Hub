@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v52 - media picker thumbnail size slider: a range slider in the picker toolbar (60-200px, default 92, step 4) resizes thumbnails live — grid columns + row height + img-box height update in place via inline CSS, no list reload; the choice persists in localStorage (settingshub.mediaThumbSize); img-box height scales at 60 percent of cell width to keep a sensible aspect ratio at every size; re-applied after sort/type reloads");
+console.info("[SettingsHub] web build: v53 - hover-preview for picker cells: hovering a thumbnail in the media picker shows an enlarged preview popup (img / video controls / audio + filename) using the same mediaPreviewState infrastructure as the row-preview; 200ms dwell delay, 300ms grace hide, popup mouseenter cancels pending hide; closing the picker or scrolling closes the preview; cell identity tracked via data-cellIdx so re-entering the same cell does not re-trigger a show");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v52 - media picker thumbnail size slider:
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=52", import.meta.url).href;
+    link.href = new URL("styles.css?v=53", import.meta.url).href;
     document.head.appendChild(link);
 })();
 

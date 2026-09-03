@@ -3235,6 +3235,49 @@ async function openMediaThumbPicker(node, item, trigger) {
         const v = mediaThumbState.filtered[Number(cell.dataset.idx)];
         if (v !== undefined) chooseMediaThumb(node, item, trigger, v);
     });
+
+    // v53: hover a thumbnail cell -> enlarged preview popup (same popup as
+    // the row-preview, reusing mediaPreviewState). Dwell delay (200ms)
+    // filters accidental pass-throughs; the popup's own mouseenter
+    // cancels a pending hide so the user can move into it. Leaving the
+    // cell starts a 300ms grace hide (also cancellable by re-entering).
+    mediaThumbState.grid.addEventListener("pointerover", (e) => {
+        const cell = e.target.closest?.(".hub-media-thumb");
+        if (!cell) return;
+        ensureMediaPreviewGlobalListeners();
+        // Cancel any pending hide — we are still hovering a cell.
+        if (mediaPreviewState?.hideTimer) { clearTimeout(mediaPreviewState.hideTimer); mediaPreviewState.hideTimer = 0; }
+        // If a popup is already showing THIS cell, nothing to do.
+        const sameCell = mediaPreviewState?.pop && mediaPreviewState.pop.dataset.cellIdx === cell.dataset.idx;
+        if (sameCell) return;
+        // Otherwise: close any open popup + cancel any pending show, then
+        // schedule a fresh show after the dwell delay.
+        if (mediaPreviewState?.showTimer) { clearTimeout(mediaPreviewState.showTimer); mediaPreviewState.showTimer = 0; }
+        if (mediaPreviewState?.pop) closeMediaPreviewPopup();
+        const idx = cell.dataset.idx;
+        const showTimer = setTimeout(() => {
+            // Re-check the cell is still in the DOM (a sort/filter may
+            // have rebuilt the grid mid-dwell).
+            const stillThere = mediaThumbState?.grid?.querySelector(
+                `.hub-media-thumb[data-idx="${idx}"]`);
+            if (!stillThere) return;
+            showMediaThumbCellPreview(stillThere);
+            if (mediaPreviewState?.pop) mediaPreviewState.pop.dataset.cellIdx = idx;
+        }, MEDIA_PREVIEW_SHOW_MS);
+        if (!mediaPreviewState) mediaPreviewState = { pop: null, hideTimer: 0, showTimer: 0 };
+        mediaPreviewState.showTimer = showTimer;
+    });
+    mediaThumbState.grid.addEventListener("pointerout", (e) => {
+        const cell = e.target.closest?.(".hub-media-thumb");
+        if (!cell) return;
+        const rt = e.relatedTarget;
+        // Still inside the same cell, or moving into the popup -> keep open.
+        if (rt && (cell.contains(rt) || (mediaPreviewState?.pop?.contains(rt)))) return;
+        if (!mediaPreviewState) return;
+        // Cancel any pending SHOW (we left before the dwell expired).
+        if (mediaPreviewState.showTimer) { clearTimeout(mediaPreviewState.showTimer); mediaPreviewState.showTimer = 0; }
+        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), MEDIA_PREVIEW_HIDE_MS);
+    });
 }
 
 /** v48: reload the picker list after a toolbar state change. The recursive
@@ -3288,7 +3331,9 @@ const MEDIA_PREVIEW_HIDE_MS = 300;  // grace before hiding (allows moving into t
 function closeMediaPreviewPopup() {
     if (!mediaPreviewState) return;
     if (mediaPreviewState.hideTimer) { clearTimeout(mediaPreviewState.hideTimer); mediaPreviewState.hideTimer = 0; }
-    try { mediaPreviewState.pop.remove(); } catch (_) {}
+    // v53: also clear a pending show timer (dwell not yet expired).
+    if (mediaPreviewState.showTimer) { clearTimeout(mediaPreviewState.showTimer); mediaPreviewState.showTimer = 0; }
+    try { mediaPreviewState.pop && mediaPreviewState.pop.remove(); } catch (_) {}
     mediaPreviewState = null;
 }
 
@@ -3357,6 +3402,44 @@ function showMediaPreviewPopup(node, item, srcEl) {
     mediaPreviewState = { pop, hideTimer: 0 };
     positionMediaPreviewPopup(pop, srcEl);
     // Hovering over the popup itself cancels a pending hide.
+    pop.addEventListener("mouseenter", () => {
+        if (mediaPreviewState?.hideTimer) { clearTimeout(mediaPreviewState.hideTimer); mediaPreviewState.hideTimer = 0; }
+    });
+    pop.addEventListener("mouseleave", () => {
+        if (!mediaPreviewState) return;
+        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), MEDIA_PREVIEW_HIDE_MS);
+    });
+}
+
+/** v53: hover-preview for a picker thumbnail cell. Same popup as the
+ *  row-preview (showMediaPreviewPopup), but the source is a picker cell
+ *  that already carries its own data-url / data-kind / data-path — no
+ *  findTarget / firstMediaSpec lookup needed. Reuses mediaPreviewState
+ *  so the existing closer infrastructure (mousedown / Esc / scroll / blur
+ *  + the popup's own mouseenter/mouseleave) applies. */
+function showMediaThumbCellPreview(cell) {
+    closeMediaPreviewPopup();
+    const url = cell?.dataset?.url;
+    if (!url) return;
+    const kind = cell?.dataset?.kind || "image";
+    const path = cell?.dataset?.path || "";
+    const cut = path.lastIndexOf("/");
+    const name = cut >= 0 ? path.slice(cut + 1) : path;
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-media-preview-pop";
+    if (kind === "video") {
+        pop.innerHTML = `<video src="${esc(url)}" controls autoplay muted loop playsinline></video>` +
+            `<div class="hub-media-preview-name">${esc(name)}</div>`;
+    } else if (kind === "audio") {
+        pop.innerHTML = `<audio src="${esc(url)}" controls autoplay></audio>` +
+            `<div class="hub-media-preview-name">${esc(name)}</div>`;
+    } else {
+        pop.innerHTML = `<img src="${esc(url)}" alt="">` +
+            `<div class="hub-media-preview-name">${esc(name)}</div>`;
+    }
+    document.body.appendChild(pop);
+    mediaPreviewState = { pop, hideTimer: 0, showTimer: 0 };
+    positionMediaPreviewPopup(pop, cell);
     pop.addEventListener("mouseenter", () => {
         if (mediaPreviewState?.hideTimer) { clearTimeout(mediaPreviewState.hideTimer); mediaPreviewState.hideTimer = 0; }
     });
