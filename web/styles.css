@@ -1715,6 +1715,36 @@ button.hub-pin-back {
     color: #d6e6ff;
 }
 
+/* v52: thumbnail size slider — sits in the toolbar next to the sort
+   segmented control. Live resize: dragging the slider updates the grid
+   columns + row height + img-box height in place (no list reload). */
+.hub-media-thumb-size {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 4px;
+}
+.hub-media-thumb-size-label {
+    font-size: 9px;
+    color: #6b6b8e;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.hub-media-thumb-size-input {
+    width: 80px;
+    height: 14px;
+    cursor: pointer;
+    accent-color: #7a9dd6;
+    background: transparent;
+}
+.hub-media-thumb-size-val {
+    font-size: 9px;
+    color: #7a9dd6;
+    font-family: monospace;
+    min-width: 22px;
+    text-align: right;
+}
+
 .hub-media-thumb-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));

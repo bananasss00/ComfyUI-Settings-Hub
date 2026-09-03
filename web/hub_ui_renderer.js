@@ -3077,6 +3077,48 @@ function chooseMediaThumb(node, item, trigger, value) {
     paintMediaPreview(node, item);
 }
 
+// ===========================================================================
+// v52: thumbnail size slider — persistent in localStorage, live resize.
+// ---------------------------------------------------------------------------
+const MEDIA_THUMB_SIZE_KEY = "settingshub.mediaThumbSize";
+const MEDIA_THUMB_SIZE_MIN = 60;
+const MEDIA_THUMB_SIZE_MAX = 200;
+const MEDIA_THUMB_SIZE_DEFAULT = 92;
+
+function getMediaThumbSize() {
+    try {
+        const v = Number(localStorage.getItem(MEDIA_THUMB_SIZE_KEY));
+        if (Number.isFinite(v) && v >= MEDIA_THUMB_SIZE_MIN && v <= MEDIA_THUMB_SIZE_MAX) return v;
+    } catch (_) {}
+    return MEDIA_THUMB_SIZE_DEFAULT;
+}
+
+function setMediaThumbSize(v) {
+    const n = Math.max(MEDIA_THUMB_SIZE_MIN, Math.min(MEDIA_THUMB_SIZE_MAX, Math.round(Number(v) || MEDIA_THUMB_SIZE_DEFAULT)));
+    try { localStorage.setItem(MEDIA_THUMB_SIZE_KEY, String(n)); } catch (_) {}
+    return n;
+}
+
+/** Apply a thumbnail size to the picker grid. The img-box height scales
+ *  with the cell width (60% of cell width) so cells keep a sensible
+ *  aspect ratio at every size. grid-auto-rows matches the new cell
+ *  height so the row layout is stable. Called on open and on slider
+ *  input (no list reload — only CSS variables change). */
+function applyMediaThumbSize(grid, size) {
+    if (!grid) return;
+    const cellW = Number(size) || MEDIA_THUMB_SIZE_DEFAULT;
+    const imgH = Math.round(cellW * 0.6); // 60% — keeps a ~5:3 thumb
+    const rowH = imgH + 38; // img + name + dim + dir + padding
+    grid.style.gridTemplateColumns = `repeat(auto-fill, minmax(${cellW}px, 1fr))`;
+    grid.style.gridAutoRows = `${rowH}px`;
+    // Update every img-box height in place (skeletons + mounted).
+    for (const imgBox of grid.querySelectorAll(".hub-media-thumb-img")) {
+        imgBox.style.flex = `0 0 ${imgH}px`;
+        imgBox.style.height = `${imgH}px`;
+        imgBox.style.minHeight = `${imgH}px`;
+    }
+}
+
 async function openMediaThumbPicker(node, item, trigger) {
     if (mediaThumbState?.trigger === trigger) { closeMediaThumbPicker(); return; }
     closeComboPopup();
@@ -3109,6 +3151,11 @@ async function openMediaThumbPicker(node, item, trigger) {
         `<button type="button" class="hub-media-thumb-seg-btn" data-sort="ctime" title="Newest creation time first">Created</button>` +
         `<button type="button" class="hub-media-thumb-seg-btn" data-sort="name" title="Alphabetical (case-insensitive)">Name</button>` +
         `</div>` +
+        `<div class="hub-media-thumb-size">` +
+        `<span class="hub-media-thumb-size-label" title="Thumbnail size (persistent)">Size</span>` +
+        `<input type="range" class="hub-media-thumb-size-input" min="${MEDIA_THUMB_SIZE_MIN}" max="${MEDIA_THUMB_SIZE_MAX}" step="4" value="${getMediaThumbSize()}" title="Drag to resize thumbnails">` +
+        `<span class="hub-media-thumb-size-val" data-size-val>${getMediaThumbSize()}</span>` +
+        `</div>` +
         `</div>` +
         `<input type="text" class="hub-combo-search" spellcheck="false" ` +
         `placeholder="filter… parts separated by space">` +
@@ -3128,6 +3175,8 @@ async function openMediaThumbPicker(node, item, trigger) {
     paintMediaThumbGrid();
     updateMediaThumbHint();
     positionMediaThumbPopup(pop, trigger);
+    // v52: apply the saved thumbnail size to the freshly painted grid.
+    applyMediaThumbSize(mediaThumbState.grid, getMediaThumbSize());
     try { mediaThumbState?.search?.focus(); } catch (_) {}
     if (!mediaThumbState) return; // closed mid-open — fail soft
 
@@ -3151,6 +3200,20 @@ async function openMediaThumbPicker(node, item, trigger) {
         reloadMediaThumbList();
     };
     pop.querySelector(".hub-media-thumb-toolbar").addEventListener("click", onSeg);
+
+    // v52: size slider — live resize, no list reload. Persists to localStorage.
+    const sizeInput = pop.querySelector(".hub-media-thumb-size-input");
+    const sizeVal = pop.querySelector("[data-size-val]");
+    if (sizeInput) {
+        sizeInput.addEventListener("input", () => {
+            const v = setMediaThumbSize(sizeInput.value);
+            if (sizeVal) sizeVal.textContent = String(v);
+            if (mediaThumbState?.grid) applyMediaThumbSize(mediaThumbState.grid, v);
+        });
+        // Stop the slider from stealing keyboard focus / Esc when the user
+        // is interacting with it (it has its own arrow-key behavior).
+        sizeInput.addEventListener("keydown", (e) => e.stopPropagation());
+    }
 
     if (mediaThumbState.search) mediaThumbState.search.addEventListener("input", () => {
         if (!mediaThumbState) return;
@@ -3188,6 +3251,8 @@ async function reloadMediaThumbList() {
         st.vals = [];
     }
     paintMediaThumbGrid();
+    // v52: re-apply the saved size after a grid rebuild (sort/type change).
+    applyMediaThumbSize(st.grid, getMediaThumbSize());
     updateMediaThumbHint();
 }
 

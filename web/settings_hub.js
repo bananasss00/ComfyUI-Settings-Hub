@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v51.5 - restored the pointerdown capture closer in wirePopupOutsideClosers (alone, no blur, no wheel); the per-popup mousedown closer does not fire on clicks over the litegraph canvas (it stopPropagation mousedown in its own capture handler) so clicks on other nodes or empty canvas left the popup open; pointerdown fires BEFORE mousedown and BEFORE litegraph handler so the document capture closer sees the event; v51.3 wrongly blamed pointerdown for the null-search TypeError - the real culprit was the BLUR closer (removed in v51.4); v51.5 brings pointerdown back alone");
+console.info("[SettingsHub] web build: v52 - media picker thumbnail size slider: a range slider in the picker toolbar (60-200px, default 92, step 4) resizes thumbnails live — grid columns + row height + img-box height update in place via inline CSS, no list reload; the choice persists in localStorage (settingshub.mediaThumbSize); img-box height scales at 60 percent of cell width to keep a sensible aspect ratio at every size; re-applied after sort/type reloads");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v51.5 - restored the pointerdown capture 
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=51", import.meta.url).href;
+    link.href = new URL("styles.css?v=52", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
