@@ -2965,11 +2965,6 @@ async function reloadMediaThumbList() {
 function updateMediaThumbHint() {
     const st = mediaThumbState;
     if (!st) return;
-    const typeLabel = st.state.type === "auto"
-        ? `auto (${item.options?.media?.kind || "image"})`.replace("item", st.item.options?.media?.kind || "image")
-        : st.state.type;
-    // The replace above is a no-op safety; the template literal already
-    // reads st.item.options. Re-state cleanly:
     const typeText = st.state.type === "auto"
         ? `auto · ${st.item.options?.media?.kind || "image"}`
         : st.state.type;
