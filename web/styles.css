@@ -1608,7 +1608,10 @@ button.hub-pin-back {
    --------------------------------------------------------------------------- */
 .hub-media-preview-pop {
     position: fixed;
-    z-index: 10001;
+    /* v49: was 10001 — too low, rendered BEHIND the pinned hub panel
+       (.hub-pin-panel z-index 99990). Bumped to 100000 to match the
+       rest of the project popups (.hub-menu combo/gear, .hub-batch). */
+    z-index: 100000;
     max-width: 340px;
     max-height: 280px;
     padding: 4px;
@@ -1650,7 +1653,10 @@ button.hub-pin-back {
    --------------------------------------------------------------------------- */
 .hub-media-thumb-pop {
     position: fixed;
-    z-index: 10001;
+    /* v49: was 10001 — too low, rendered BEHIND the pinned hub panel
+       (.hub-pin-panel z-index 99990). Bumped to 100000 to match the
+       rest of the project popups (.hub-menu combo/gear, .hub-batch). */
+    z-index: 100000;
     width: min(520px, 88vw);
     max-height: 440px;
     display: flex;
@@ -1780,6 +1786,22 @@ button.hub-pin-back {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* v49: resolution + megapixels line. Filled in client-side after the
+   thumbnail's <img>/<video> metadata lands (load / loadedmetadata).
+   Empty until then (the cell keeps its 110px row height — no layout
+   jump when the dim text arrives). Monospace so the numbers align
+   across cells in the same row. */
+.hub-media-thumb-dim {
+    font-size: 8px;
+    color: #7a8aae;
+    padding: 0 3px 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: monospace;
+    min-height: 10px;
 }
 .hub-media-thumb-dir {
     font-size: 8px;

@@ -2826,12 +2826,71 @@ function paintMediaThumbGrid() {
             : ck === "video"
                 ? `<video src="${esc(url)}" preload="metadata" muted playsinline></video>`
                 : `<img src="${esc(url)}" loading="lazy" alt="">`;
+        // v49: dim line is empty on first paint — the resolver below
+        // fills it in once <img>/<video> metadata lands.
         return `<div class="hub-media-thumb${isCur ? " hub-media-thumb-cur" : ""}" data-idx="${i}" title="${esc(v)}">` +
             `<div class="hub-media-thumb-img">${mediaEl}</div>` +
             `<div class="hub-media-thumb-name">${esc(base)}</div>` +
+            `<div class="hub-media-thumb-dim" data-dim></div>` +
             (dir ? `<div class="hub-media-thumb-dir">${esc(dir)}</div>` : "") +
             `</div>`;
     }).join("");
+    // v49: attach resolution resolvers to every <img>/<video> in the
+    // freshly painted grid. Each cell gets its dim line filled when
+    // the thumbnail's metadata is available (load for img, loadedmeta-
+    // data for video). Audio cells skip this (no resolution concept).
+    attachMediaThumbDimResolvers(st.grid);
+}
+
+/** v49: format image/video dimensions + megapixels for a thumbnail cell.
+ *  Returns "" when the dimensions are unknown / degenerate (audio,
+ *  not-yet-decoded, 0x0). Megapixels: width*height/1e6, two decimals.
+ *  Examples: "1920x1080 · 2.07mpx", "512x512 · 0.26mpx". */
+function formatMediaDim(w, h) {
+    w = Number(w) || 0;
+    h = Number(h) || 0;
+    if (!w || !h) return "";
+    const mpx = (w * h) / 1e6;
+    const mpxStr = mpx >= 0.1 ? mpx.toFixed(2) + "mpx" : Math.round(w * h) + "px";
+    return `${w}x${h} · ${mpxStr}`;
+}
+
+/** v49: walk every <img>/<video> in `grid` and wire a one-shot metadata
+ *  listener that fills the sibling .hub-media-thumb-dim line. Handles
+ *  three cases:
+ *    - <img>:        naturalWidth/naturalHeight is ready after `load`.
+ *                    (also catches already-cached images via .complete)
+ *    - <video>:      videoWidth/videoHeight is ready after `loadedmetadata`.
+ *    - audio / icon: skipped (no <img>/<video> in the cell).
+ *  Errors / decode failures leave the dim line empty (the cell keeps
+ *  its row height — no layout shift). */
+function attachMediaThumbDimResolvers(grid) {
+    if (!grid) return;
+    const cells = grid.querySelectorAll(".hub-media-thumb");
+    for (const cell of cells) {
+        try {
+            const media = cell.querySelector("img, video");
+            if (!media) continue; // audio / icon cell
+            const dimEl = cell.querySelector("[data-dim]");
+            if (!dimEl) continue;
+            const apply = () => {
+                const w = media.tagName === "IMG" ? media.naturalWidth : media.videoWidth;
+                const h = media.tagName === "IMG" ? media.naturalHeight : media.videoHeight;
+                const txt = formatMediaDim(w, h);
+                if (txt && dimEl.textContent !== txt) dimEl.textContent = txt;
+            };
+            // Already-cached images fire sync; cover that path.
+            if (media.tagName === "IMG" && media.complete && media.naturalWidth) {
+                apply();
+                continue;
+            }
+            media.addEventListener("load", apply, { once: true });
+            media.addEventListener("loadedmetadata", apply, { once: true });
+            // Decode failures leave the dim line empty (no layout shift);
+            // the row keeps its 110px height via grid-auto-rows + the
+            // min-height on .hub-media-thumb-dim.
+        } catch (_) { /* a broken cell must not kill the grid */ }
+    }
 }
 
 function chooseMediaThumb(node, item, trigger, value) {
