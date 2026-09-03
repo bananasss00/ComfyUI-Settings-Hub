@@ -35,44 +35,112 @@ def _kind_for(ext):
     return None
 
 
+def _walk_one(d):
+    """Walk a single directory and yield {path, kind, size} for each
+    supported media file. Subdirectory paths are relative to d, using
+    forward slashes."""
+    if not isinstance(d, str) or not os.path.isdir(d):
+        return
+    for root, _dirs, fnames in os.walk(d):
+        for fn in fnames:
+            if fn.startswith("."):
+                continue
+            ext = os.path.splitext(fn)[1].lower().lstrip(".")
+            kind = _kind_for(ext)
+            if not kind:
+                continue
+            full = os.path.join(root, fn)
+            try:
+                rel = os.path.relpath(full, d).replace(os.sep, "/")
+            except Exception:
+                continue
+            try:
+                size = os.path.getsize(full)
+            except Exception:
+                size = 0
+            yield {"path": rel, "kind": kind, "size": size}
+
+
+def _resolve_dirs(folder_type):
+    """Collect every directory registered under `folder_type` from any
+    of the folder_paths API shapes ComfyUI has used across builds:
+      * folder_paths.get_<type>_directory() -> str      (modern, single)
+      * folder_paths.get_directory_paths(type) -> list  (canonical)
+      * folder_paths.folder_paths_and_paths[type] -> ([paths], [exts])
+    Accepts both string entries and (path, [exts]) tuples. Returns a
+    flat list of directory strings. Last-resort fallback: <cwd>/<type>.
+    """
+    if folder_paths is None:
+        return []
+    out = []
+    # 1. get_<type>_directory() (modern ComfyUI: input/output/temp).
+    fn = getattr(folder_paths, f"get_{folder_type}_directory", None)
+    if callable(fn):
+        try:
+            d = fn()
+            if isinstance(d, str) and d:
+                out.append(d)
+        except Exception:
+            pass
+    # 2. get_directory_paths(type) - may return list[str] OR list[tuple].
+    try:
+        dirs = folder_paths.get_directory_paths(folder_type)
+        if dirs:
+            for d in dirs:
+                if isinstance(d, str):
+                    out.append(d)
+                elif isinstance(d, (list, tuple)):
+                    for x in d:
+                        if isinstance(x, str):
+                            out.append(x)
+    except Exception:
+        pass
+    # 3. Raw folder_paths_and_paths map: value is ([paths], [exts]).
+    try:
+        entry = folder_paths.folder_paths_and_paths.get(folder_type)
+        if entry:
+            paths_list = entry[0] if isinstance(entry, (list, tuple)) else None
+            if isinstance(paths_list, list):
+                for d in paths_list:
+                    if isinstance(d, str):
+                        out.append(d)
+    except Exception:
+        pass
+    # 4. Last resort: <cwd>/<type> (covers non-standard installs).
+    if not out:
+        cwd_root = os.getcwd()
+        # ComfyUI launches from its own root, so input/ lives here.
+        for cand in (os.path.join(cwd_root, folder_type),
+                     os.path.join(os.path.dirname(cwd_root), folder_type)):
+            if os.path.isdir(cand):
+                out.append(cand)
+                break
+    # Dedup while preserving order.
+    seen = set()
+    flat = []
+    for d in out:
+        if d and d not in seen:
+            seen.add(d)
+            flat.append(d)
+    return flat
+
+
 def _scan_folder(folder_type):
     """Walk every directory registered under `folder_type` and return
     [{path, kind, size}] for each supported media file. Subdirectory paths
-    are relative to the folder root, using forward slashes."""
-    if folder_paths is None:
-        return []
-    try:
-        dirs = folder_paths.get_directory_paths(folder_type)
-    except Exception:
-        return []
+    are relative to the folder root, using forward slashes. Resolves the
+    folder via _resolve_dirs (handles every folder_paths API shape)."""
+    dirs = _resolve_dirs(folder_type)
     if not dirs:
         return []
     seen = set()
     out = []
     for d in dirs:
-        if not isinstance(d, str) or not os.path.isdir(d):
-            continue
-        for root, _dirs, fnames in os.walk(d):
-            for fn in fnames:
-                if fn.startswith("."):
-                    continue
-                ext = os.path.splitext(fn)[1].lower().lstrip(".")
-                kind = _kind_for(ext)
-                if not kind:
-                    continue
-                full = os.path.join(root, fn)
-                try:
-                    rel = os.path.relpath(full, d).replace(os.sep, "/")
-                except Exception:
-                    continue
-                if rel in seen:
-                    continue
-                seen.add(rel)
-                try:
-                    size = os.path.getsize(full)
-                except Exception:
-                    size = 0
-                out.append({"path": rel, "kind": kind, "size": size})
+        for entry in _walk_one(d):
+            if entry["path"] in seen:
+                continue
+            seen.add(entry["path"])
+            out.append(entry)
     out.sort(key=lambda x: x["path"].lower())
     return out
 
@@ -80,5 +148,9 @@ def _scan_folder(folder_type):
 @PromptServer.instance.routes.get("/settings_hub/list_media")
 async def list_media(request):
     folder = request.query.get("type", "input")
+    verbose = request.query.get("verbose") in ("1", "true", "yes")
     files = _scan_folder(folder)
-    return web.json_response({"files": files, "type": folder})
+    resp = {"files": files, "type": folder}
+    if verbose:
+        resp["dirs"] = _resolve_dirs(folder)
+    return web.json_response(resp)

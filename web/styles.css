@@ -1671,6 +1671,11 @@ button.hub-pin-back {
 .hub-media-thumb-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+    /* v47.1 bugfix: pin the row height so lazy <img> decoding does NOT
+       collapse cells into horizontal lines. Without this, flex-column on
+       .hub-media-thumb shrank the empty img-box to 0px before the lazy
+       <img> decoded, and with many cells the grid showed "lines" only. */
+    grid-auto-rows: 110px;
     gap: 4px;
     padding: 6px;
     overflow-y: auto;
@@ -1690,6 +1695,7 @@ button.hub-pin-back {
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    min-height: 0;     /* allow children to manage their own height */
 }
 .hub-media-thumb:hover {
     border-color: #4a5a8a;
@@ -1699,7 +1705,13 @@ button.hub-pin-back {
 }
 .hub-media-thumb-img {
     width: 100%;
+    /* v47.1 bugfix: flex 0 0 60px pins the img-box height so the
+    parent flex-column CANNOT shrink it to 0 while the lazy <img> is
+    still decoding. Combined with grid-auto-rows: 110px above this
+    stabilises the row layout before any thumbnail loads. */
+    flex: 0 0 60px;
     height: 60px;
+    min-height: 60px;
     display: flex;
     align-items: center;
     justify-content: center;
