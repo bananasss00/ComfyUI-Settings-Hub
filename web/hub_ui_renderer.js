@@ -2821,6 +2821,9 @@ let mediaThumbPointerWired = false; // v50: shared-helper sentinel (media-thumb)
 
 function closeMediaThumbPicker() {
     if (!mediaThumbState) return;
+    // v51: tear down the IntersectionObserver so a closed picker leaves
+    // no observer running (and no entries fire for detached cells).
+    disconnectMediaThumbObserver();
     try { mediaThumbState.pop.remove(); } catch (_) {}
     mediaThumbState = null;
 }
@@ -2886,32 +2889,38 @@ function paintMediaThumbGrid() {
         if (["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif", "tif", "tiff", "svg"].includes(ext)) return "image";
         return fallbackKind;
     };
-    st.grid.innerHTML = st.filtered.map((v, i) => {
+    // v51: virtualized render. Each cell is created as a SKELETON
+    // (no <img>/<video>, just a kind-icon placeholder + name + dir).
+    // A single IntersectionObserver swaps the placeholder for the real
+    // media element when the cell scrolls into the viewport (200px
+    // buffer), and swaps it back to a placeholder when it scrolls out —
+    // so only ~30-50 <img> elements live in the DOM at any time, no
+    // matter how many files are in the list. Cells also carry data-
+    // path / data-kind / data-url so the observer can re-mount them
+    // after a sort/filter without rebuilding the whole grid.
+    const html = st.filtered.map((v, i) => {
         const url = mediaViewUrl(v, folder);
         const split = splitComboPathText(v);
         const base = split ? split.base : v;
         const dir = split ? split.dir : "";
         const isCur = v === cur;
         const ck = kindOf(v);
-        const mediaEl = ck === "audio"
-            ? `<div class="hub-media-thumb-ph">🎵</div>`
-            : ck === "video"
-                ? `<video src="${esc(url)}" preload="metadata" muted playsinline></video>`
-                : `<img src="${esc(url)}" loading="lazy" alt="">`;
-        // v49: dim line is empty on first paint — the resolver below
-        // fills it in once <img>/<video> metadata lands.
-        return `<div class="hub-media-thumb${isCur ? " hub-media-thumb-cur" : ""}" data-idx="${i}" title="${esc(v)}">` +
-            `<div class="hub-media-thumb-img">${mediaEl}</div>` +
+        // v51: skeleton placeholder — kind icon only, no media element
+        // until the IntersectionObserver mounts it. Audio cells keep
+        // the 🎵 icon permanently (no media to mount).
+        const phIcon = ck === "audio" ? "🎵" : ck === "video" ? "🎞" : "🖼";
+        return `<div class="hub-media-thumb${isCur ? " hub-media-thumb-cur" : ""} hub-media-thumb-skel" data-idx="${i}" data-path="${esc(v)}" data-kind="${esc(ck)}" data-url="${esc(url)}" title="${esc(v)}">` +
+            `<div class="hub-media-thumb-img"><div class="hub-media-thumb-ph">${phIcon}</div></div>` +
             `<div class="hub-media-thumb-name">${esc(base)}</div>` +
             `<div class="hub-media-thumb-dim" data-dim></div>` +
             (dir ? `<div class="hub-media-thumb-dir">${esc(dir)}</div>` : "") +
             `</div>`;
     }).join("");
-    // v49: attach resolution resolvers to every <img>/<video> in the
-    // freshly painted grid. Each cell gets its dim line filled when
-    // the thumbnail's metadata is available (load for img, loadedmeta-
-    // data for video). Audio cells skip this (no resolution concept).
-    attachMediaThumbDimResolvers(st.grid);
+    st.grid.innerHTML = html;
+    // v51: wire the IntersectionObserver for the freshly painted cells.
+    // disconnectMediaThumbObserver() (called from closeMediaThumbPicker
+    // and BEFORE every repaint) tears down the previous observer.
+    wireMediaThumbObserver(st);
 }
 
 /** v49: format image/video dimensions + megapixels for a thumbnail cell.
@@ -2927,41 +2936,139 @@ function formatMediaDim(w, h) {
     return `${w}x${h} · ${mpxStr}`;
 }
 
-/** v49: walk every <img>/<video> in `grid` and wire a one-shot metadata
- *  listener that fills the sibling .hub-media-thumb-dim line. Handles
- *  three cases:
- *    - <img>:        naturalWidth/naturalHeight is ready after `load`.
- *                    (also catches already-cached images via .complete)
- *    - <video>:      videoWidth/videoHeight is ready after `loadedmetadata`.
- *    - audio / icon: skipped (no <img>/<video> in the cell).
- *  Errors / decode failures leave the dim line empty (the cell keeps
- *  its row height — no layout shift). */
-function attachMediaThumbDimResolvers(grid) {
-    if (!grid) return;
-    const cells = grid.querySelectorAll(".hub-media-thumb");
-    for (const cell of cells) {
-        try {
-            const media = cell.querySelector("img, video");
-            if (!media) continue; // audio / icon cell
-            const dimEl = cell.querySelector("[data-dim]");
-            if (!dimEl) continue;
+// ===========================================================================
+// v51: IntersectionObserver-based virtualization.
+// ---------------------------------------------------------------------------
+// With ~1000 input files the old eager render (1000 <img>/<video> nodes
+// in the DOM at once, 2000 listeners, hundreds of parallel video metadata
+// range requests) lagged badly on software-rendered browsers. The fix:
+// cells start as skeletons (kind-icon placeholder, no media element); a
+// single IntersectionObserver mounts the real <img>/<video> + dim resolver
+// when a cell scrolls into the viewport (200px buffer), and unmounts it
+// when it scrolls out. Only ~30-50 media elements live in the DOM at any
+// time, no matter how many files are in the list.
+// ===========================================================================
+
+let mediaThumbObserver = null;
+const MEDIA_THUMB_BUFFER = 200; // px — preload cells about to scroll in
+
+/** Tear down the previous observer (called on every repaint and on
+ *  closeMediaThumbPicker). The observer itself is cheap, but unobserving
+ *  every cell prevents the "IntersectionObserver entry for a detached
+ *  node" warning when innerHTML swaps the grid. */
+function disconnectMediaThumbObserver() {
+    if (mediaThumbObserver) {
+        try { mediaThumbObserver.disconnect(); } catch (_) {}
+        mediaThumbObserver = null;
+    }
+}
+
+/** Mount the real media element into a skeleton cell + attach the dim
+ *  resolver. Idempotent — calling it on an already-mounted cell is a
+ *  no-op. Audio cells stay as the 🎵 icon (no media to mount). */
+function mountMediaThumbCell(cell) {
+    if (!cell || cell.dataset.mounted === "1") return;
+    const kind = cell.dataset.kind;
+    if (kind === "audio") { cell.dataset.mounted = "1"; return; }
+    const url = cell.dataset.url;
+    if (!url) { cell.dataset.mounted = "1"; return; }
+    const imgBox = cell.querySelector(".hub-media-thumb-img");
+    if (!imgBox) { cell.dataset.mounted = "1"; return; }
+    const dimEl = cell.querySelector("[data-dim]");
+    try {
+        let media;
+        if (kind === "video") {
+            media = document.createElement("video");
+            media.src = url;
+            media.preload = "metadata";
+            media.muted = true;
+            try { media.playsInline = true; } catch (_) { media.setAttribute("playsinline", ""); }
+        } else {
+            media = document.createElement("img");
+            media.src = url;
+            media.loading = "lazy";
+            media.alt = "";
+        }
+        media.className = "hub-media-el";
+        // Clear the placeholder icon, append the real media element.
+        imgBox.textContent = "";
+        imgBox.appendChild(media);
+        cell.dataset.mounted = "1";
+        // Dim resolver: fires once on load / loadedmetadata, fills the
+        // dim line. { once: true } auto-cleans the listener.
+        if (dimEl) {
             const apply = () => {
                 const w = media.tagName === "IMG" ? media.naturalWidth : media.videoWidth;
                 const h = media.tagName === "IMG" ? media.naturalHeight : media.videoHeight;
                 const txt = formatMediaDim(w, h);
                 if (txt && dimEl.textContent !== txt) dimEl.textContent = txt;
             };
-            // Already-cached images fire sync; cover that path.
             if (media.tagName === "IMG" && media.complete && media.naturalWidth) {
                 apply();
-                continue;
+            } else {
+                media.addEventListener("load", apply, { once: true });
+                media.addEventListener("loadedmetadata", apply, { once: true });
             }
-            media.addEventListener("load", apply, { once: true });
-            media.addEventListener("loadedmetadata", apply, { once: true });
-            // Decode failures leave the dim line empty (no layout shift);
-            // the row keeps its 110px height via grid-auto-rows + the
-            // min-height on .hub-media-thumb-dim.
-        } catch (_) { /* a broken cell must not kill the grid */ }
+        }
+    } catch (_) { /* a broken cell must not kill the grid */ }
+}
+
+/** Unmount the media element from a cell, restoring the kind-icon
+ *  placeholder. Frees the decoded image / video metadata memory. */
+function unmountMediaThumbCell(cell) {
+    if (!cell || cell.dataset.mounted !== "1") return;
+    const kind = cell.dataset.kind;
+    if (kind === "audio") return; // audio cells have no media element
+    const imgBox = cell.querySelector(".hub-media-thumb-img");
+    if (!imgBox) return;
+    try {
+        const media = imgBox.querySelector("img, video");
+        if (media) {
+            // Revoke the src so the browser drops the decoded frame / the
+            // video metadata. For <img> the GC will collect once the
+            // element is removed; for <video> pause first.
+            try { if (media.pause) media.pause(); } catch (_) {}
+            try { media.removeAttribute("src"); } catch (_) {}
+            try { media.load(); } catch (_) {}
+        }
+        const phIcon = kind === "video" ? "🎞" : "🖼";
+        imgBox.innerHTML = `<div class="hub-media-thumb-ph">${phIcon}</div>`;
+        cell.dataset.mounted = "0";
+        // Clear the dim line so a re-mount does not show stale text.
+        const dimEl = cell.querySelector("[data-dim]");
+        if (dimEl) dimEl.textContent = "";
+    } catch (_) {}
+}
+
+/** Create the IntersectionObserver for the current grid and observe
+ *  every skeleton cell. Called once per paintMediaThumbGrid / per
+ *  reloadMediaThumbList. The 200px rootMargin preloads cells about to
+ *  scroll in so the user never sees an empty placeholder while
+ *  scrolling. */
+function wireMediaThumbObserver(st) {
+    disconnectMediaThumbObserver();
+    if (typeof IntersectionObserver === "undefined") {
+        // jsdom / very old browser — fall back to eager mount.
+        for (const cell of st.grid.querySelectorAll(".hub-media-thumb")) {
+            mountMediaThumbCell(cell);
+        }
+        return;
+    }
+    mediaThumbObserver = new IntersectionObserver((entries) => {
+        for (const ent of entries) {
+            if (ent.isIntersecting) {
+                mountMediaThumbCell(ent.target);
+            } else {
+                unmountMediaThumbCell(ent.target);
+            }
+        }
+    }, {
+        root: st.grid,
+        rootMargin: `${MEDIA_THUMB_BUFFER}px`,
+        threshold: 0,
+    });
+    for (const cell of st.grid.querySelectorAll(".hub-media-thumb")) {
+        try { mediaThumbObserver.observe(cell); } catch (_) {}
     }
 }
 
