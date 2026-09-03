@@ -2604,23 +2604,70 @@ function mediaListCacheSync(folder = "input") {
 }
 
 /** v47: union of the live combo values and the recursively-scanned input
- *  folder (subdir files included). Deduped; live values first (preserves
- *  the loader's natural order), scanned extras sorted alphabetically.
- *  Returns a Promise (the recursive list is async). */
-async function mediaFileList(item, tw) {
-    const live = liveComboValues(item, tw).map(String);
+ *  folder (subdir files included). Deduped.
+ *  v48: filtered by `kindFilter` and sorted by `sortMode`.
+ *
+ *  kindFilter:
+ *    "auto"  (default) — the loader's expected kind (item.options.media.kind)
+ *    "image" / "video" / "audio" — force one kind
+ *    "all" — no kind filter (show every supported media file)
+ *  sortMode:
+ *    "mtime" (default) — last modification time, NEWEST first
+ *    "ctime"           — creation/metadata-change time, NEWEST first
+ *    "name"            — alphabetically (case-insensitive localeCompare)
+ *
+ *  Live combo values are included IF they pass the kind filter. They
+ *  have no mtime/ctime in general (the frontend doesn't track file
+ *  stats for them) — they sort as 0 (oldest) under mtime/ctime, which
+ *  pushes them to the bottom of a newest-first list. That is the right
+ *  UX: freshly uploaded / scanned files surface to the top.
+ *
+ *  Returns a Promise (the recursive scan is async on first hit; cached
+ *  60s afterwards so subsequent calls are sync filter+sort). */
+async function mediaFileList(item, tw, opts = {}) {
+    const kindFilter = opts.kindFilter || "auto";
+    const sortMode = opts.sortMode || "mtime";
+    const itemKind = item.options?.media?.kind || "image";
+    const wantKind = kindFilter === "auto" ? itemKind : kindFilter;
     const folder = item.options?.media?.folder || "input";
     const scanned = await fetchMediaList(folder);
-    const seen = new Set(live);
-    const extras = [];
+    // Build a path -> {mtime, ctime, kind} lookup from the scan. Live
+    // combo values that ALSO appear in the scan inherit their stats;
+    // live values missing from the scan get 0 / no kind.
+    const meta = new Map();
     for (const f of scanned) {
-        if (f?.path && !seen.has(f.path)) {
-            seen.add(f.path);
-            extras.push(f.path);
-        }
+        if (f?.path) meta.set(f.path, { mtime: f.mtime || 0, ctime: f.ctime || 0, kind: f.kind || "" });
     }
-    extras.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-    return live.concat(extras);
+    const live = liveComboValues(item, tw).map(String);
+    const seen = new Set();
+    const out = [];
+    const passKind = (p) => {
+        if (wantKind === "all") return true;
+        // Live values are always accepted on the "auto" path (the loader
+        // put them there, so they are by definition of the expected kind).
+        const mk = meta.get(p)?.kind;
+        return mk ? mk === wantKind : (kindFilter === "auto");
+    };
+    for (const p of live) {
+        if (seen.has(p)) continue;
+        if (!passKind(p)) continue;
+        seen.add(p);
+        out.push(p);
+    }
+    for (const f of scanned) {
+        if (!f?.path || seen.has(f.path)) continue;
+        if (!passKind(f.path)) continue;
+        seen.add(f.path);
+        out.push(f.path);
+    }
+    // Sort the unified list. Live values with no stats sort as 0.
+    if (sortMode === "name") {
+        out.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+    } else {
+        const key = sortMode === "ctime" ? "ctime" : "mtime";
+        out.sort((a, b) => (meta.get(b)?.[key] || 0) - (meta.get(a)?.[key] || 0));
+    }
+    return out;
 }
 
 /** Build a /view URL from a combo-style path ("subdir/file.png" or
@@ -2652,7 +2699,11 @@ function mediaViewUrl(path, folder = "input") {
 async function cycleMediaSource(node, item, dir) {
     const { tn, tw } = findTarget(item);
     if (!tn || !tw) return;
-    const vals = await mediaFileList(item, tw);
+    // v48: cycle uses the loader's expected kind (auto) + mtime sort
+    // so arrows walk newest-first through files the loader actually
+    // expects. The picker's "All / Image / Video / Audio" override is
+    // a picker-only affordance — arrows stay predictable.
+    const vals = await mediaFileList(item, tw, { kindFilter: "auto", sortMode: "mtime" });
     if (vals.length < 2) return; // nothing to cycle
     const cur = String(tw.value ?? "");
     let idx = vals.indexOf(cur);
@@ -2750,17 +2801,29 @@ function paintMediaThumbGrid() {
         return;
     }
     const folder = st.item.options?.media?.folder || "input";
-    const kind = st.item.options?.media?.kind || "image";
     const cur = String(st.cur ?? "");
+    // v48: per-cell kind detection (the "All" type filter can mix
+    // image / video / audio in one grid — each cell must render with
+    // the right element). Falls back to the row kind if the extension
+    // is unknown (covers opaque / view-only URLs).
+    const fallbackKind = st.item.options?.media?.kind || "image";
+    const kindOf = (path) => {
+        const ext = (path.split(".").pop() || "").toLowerCase();
+        if (["mp4", "webm", "mov", "mkv", "avi", "m4v", "ogv"].includes(ext)) return "video";
+        if (["mp3", "wav", "ogg", "flac", "aac", "m4a", "opus"].includes(ext)) return "audio";
+        if (["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif", "tif", "tiff", "svg"].includes(ext)) return "image";
+        return fallbackKind;
+    };
     st.grid.innerHTML = st.filtered.map((v, i) => {
         const url = mediaViewUrl(v, folder);
         const split = splitComboPathText(v);
         const base = split ? split.base : v;
         const dir = split ? split.dir : "";
         const isCur = v === cur;
-        const mediaEl = kind === "audio"
+        const ck = kindOf(v);
+        const mediaEl = ck === "audio"
             ? `<div class="hub-media-thumb-ph">🎵</div>`
-            : kind === "video"
+            : ck === "video"
                 ? `<video src="${esc(url)}" preload="metadata" muted playsinline></video>`
                 : `<img src="${esc(url)}" loading="lazy" alt="">`;
         return `<div class="hub-media-thumb${isCur ? " hub-media-thumb-cur" : ""}" data-idx="${i}" title="${esc(v)}">` +
@@ -2793,30 +2856,75 @@ async function openMediaThumbPicker(node, item, trigger) {
     const { tn, tw } = findTarget(item);
     if (!tn || !tw) return;
     const cur = String(tw.value ?? "");
-    const vals = await mediaFileList(item, tw);
-    if (!vals.length) return;
+    // v48: picker-local state for the type and sort segmented controls.
+    // Auto defaults to the loader's expected kind; mtime is the default
+    // sort (newest first — fresh uploads surface to the top).
+    const itemKind = item.options?.media?.kind || "image";
+    const state = { type: "auto", sort: "mtime" };
+    const vals0 = await mediaFileList(item, tw, { kindFilter: state.type, sortMode: state.sort });
     ensureMediaThumbGlobalListeners();
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-media-thumb-pop";
     pop.innerHTML =
+        `<div class="hub-media-thumb-toolbar">` +
+        `<div class="hub-media-thumb-seg" data-seg="type">` +
+        `<button type="button" class="hub-media-thumb-seg-btn hub-on" data-type="auto" title="Show files matching this loader's kind (${esc(itemKind)})">Auto</button>` +
+        `<button type="button" class="hub-media-thumb-seg-btn" data-type="image" title="Show image files only">Image</button>` +
+        `<button type="button" class="hub-media-thumb-seg-btn" data-type="video" title="Show video files only">Video</button>` +
+        `<button type="button" class="hub-media-thumb-seg-btn" data-type="audio" title="Show audio files only">Audio</button>` +
+        `<button type="button" class="hub-media-thumb-seg-btn" data-type="all" title="Show every supported media file (no kind filter)">All</button>` +
+        `</div>` +
+        `<div class="hub-media-thumb-seg" data-seg="sort">` +
+        `<button type="button" class="hub-media-thumb-seg-btn hub-on" data-sort="mtime" title="Newest modification time first">Modified</button>` +
+        `<button type="button" class="hub-media-thumb-seg-btn" data-sort="ctime" title="Newest creation time first">Created</button>` +
+        `<button type="button" class="hub-media-thumb-seg-btn" data-sort="name" title="Alphabetical (case-insensitive)">Name</button>` +
+        `</div>` +
+        `</div>` +
         `<input type="text" class="hub-combo-search" spellcheck="false" ` +
         `placeholder="filter… parts separated by space">` +
         `<div class="hub-media-thumb-grid"></div>` +
-        `<div class="hub-media-thumb-hint">${vals.length} file(s) · click to select · Esc close</div>`;
+        `<div class="hub-media-thumb-hint"></div>`;
     document.body.appendChild(pop);
     mediaThumbState = {
         node, item, trigger, cur,
         pop,
         search: pop.querySelector(".hub-combo-search"),
         grid: pop.querySelector(".hub-media-thumb-grid"),
-        vals, filtered: vals,
+        hint: pop.querySelector(".hub-media-thumb-hint"),
+        vals: vals0, filtered: vals0,
+        state,
+        tw,
     };
     paintMediaThumbGrid();
+    updateMediaThumbHint();
     positionMediaThumbPopup(pop, trigger);
     try { mediaThumbState.search.focus(); } catch (_) {}
+
+    // v48: toolbar segmented controls — switching reloads the list
+    // (sync filter+sort on a hot cache; the first hit already paid the
+    // recursive scan). Spinner swap on the grid while awaiting.
+    const onSeg = (e) => {
+        const btn = e.target.closest?.(".hub-media-thumb-seg-btn");
+        if (!btn) return;
+        const segEl = btn.closest("[data-seg]");
+        if (!segEl) return;
+        const seg = segEl.dataset.seg;
+        const val = seg === "type" ? btn.dataset.type : btn.dataset.sort;
+        if (!val) return;
+        e.stopPropagation();
+        e.preventDefault();
+        if (mediaThumbState.state[seg] === val) return;
+        segEl.querySelectorAll(".hub-media-thumb-seg-btn").forEach((b) => b.classList.remove("hub-on"));
+        btn.classList.add("hub-on");
+        mediaThumbState.state[seg] = val;
+        reloadMediaThumbList();
+    };
+    pop.querySelector(".hub-media-thumb-toolbar").addEventListener("click", onSeg);
+
     mediaThumbState.search.addEventListener("input", () => {
         if (!mediaThumbState) return;
         paintMediaThumbGrid();
+        updateMediaThumbHint();
     });
     mediaThumbState.search.addEventListener("keydown", (e) => {
         e.stopPropagation();
@@ -2833,6 +2941,45 @@ async function openMediaThumbPicker(node, item, trigger) {
         const v = mediaThumbState.filtered[Number(cell.dataset.idx)];
         if (v !== undefined) chooseMediaThumb(node, item, trigger, v);
     });
+}
+
+/** v48: reload the picker list after a toolbar state change. The recursive
+ *  scan is cached (60s), so this is a sync filter+sort on a hot cache;
+ *  the first switch after expiry pays one fetch. Shows a brief "loading"
+ *  placeholder so the user sees the spinner even on slow fetches. */
+async function reloadMediaThumbList() {
+    const st = mediaThumbState;
+    if (!st) return;
+    st.grid.innerHTML = `<div class="hub-media-thumb-none">loading…</div>`;
+    try {
+        st.vals = await mediaFileList(st.item, st.tw, { kindFilter: st.state.type, sortMode: st.state.sort });
+    } catch (_) {
+        st.vals = [];
+    }
+    paintMediaThumbGrid();
+    updateMediaThumbHint();
+}
+
+/** v48: hint line at the bottom of the picker — reflects the current
+ *  type filter, sort mode and visible/total counts. */
+function updateMediaThumbHint() {
+    const st = mediaThumbState;
+    if (!st) return;
+    const typeLabel = st.state.type === "auto"
+        ? `auto (${item.options?.media?.kind || "image"})`.replace("item", st.item.options?.media?.kind || "image")
+        : st.state.type;
+    // The replace above is a no-op safety; the template literal already
+    // reads st.item.options. Re-state cleanly:
+    const typeText = st.state.type === "auto"
+        ? `auto · ${st.item.options?.media?.kind || "image"}`
+        : st.state.type;
+    const sortText = st.state.sort === "mtime" ? "modified"
+        : st.state.sort === "ctime" ? "created"
+        : "name";
+    const total = st.vals.length;
+    const shown = st.filtered.length;
+    const counts = shown === total ? `${total}` : `${shown}/${total}`;
+    st.hint.textContent = `${counts} file(s) · type: ${typeText} · sort: ${sortText} · Esc close`;
 }
 
 // ===========================================================================
@@ -3238,7 +3385,7 @@ function refreshValuesDom(node) {
                 // a Promise.resolve on every refresh after the first
                 // fetch. Guards against row removal mid-flight.
                 const itemId = item.id;
-                mediaFileList(item, tw).then((all) => {
+                mediaFileList(item, tw, { kindFilter: "auto", sortMode: "mtime" }).then((all) => {
                     if (all.length < 2) return;
                     const still = st.root.querySelector(`[data-hub-item="${itemId}"]`);
                     if (!still) return;

@@ -36,9 +36,12 @@ def _kind_for(ext):
 
 
 def _walk_one(d):
-    """Walk a single directory and yield {path, kind, size} for each
-    supported media file. Subdirectory paths are relative to d, using
-    forward slashes."""
+    """Walk a single directory and yield {path, kind, size, mtime, ctime}
+    for each supported media file. Subdirectory paths are relative to d,
+    using forward slashes. mtime/ctime are Unix epoch seconds (from
+    os.stat) — the frontend sorts client-side; the server stays stateless.
+    mtime = last modification (content write), ctime = metadata change /
+    creation on Windows. Both default to 0 on stat failure."""
     if not isinstance(d, str) or not os.path.isdir(d):
         return
     for root, _dirs, fnames in os.walk(d):
@@ -55,10 +58,14 @@ def _walk_one(d):
             except Exception:
                 continue
             try:
-                size = os.path.getsize(full)
+                st = os.stat(full)
+                size = st.st_size
+                mtime = int(st.st_mtime)
+                ctime = int(st.st_ctime)
             except Exception:
-                size = 0
-            yield {"path": rel, "kind": kind, "size": size}
+                size = 0; mtime = 0; ctime = 0
+            yield {"path": rel, "kind": kind, "size": size,
+                   "mtime": mtime, "ctime": ctime}
 
 
 def _resolve_dirs(folder_type):

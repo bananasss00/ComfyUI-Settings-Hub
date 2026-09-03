@@ -1668,6 +1668,47 @@ button.hub-pin-back {
     border-right: 0;
     border-top: 0;
 }
+/* v48: picker toolbar — two segmented controls (Type and Sort). Sits
+   above the search input; mirrors the compact .hub-btn look but with a
+   segmented "one active" feel via .hub-on. */
+.hub-media-thumb-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    padding: 6px 6px 4px;
+    border-bottom: 1px solid #33334e;
+    background: #14142440;
+}
+.hub-media-thumb-seg {
+    display: inline-flex;
+    gap: 1px;
+    background: #10101e;
+    border: 1px solid #33334e;
+    border-radius: 3px;
+    padding: 1px;
+}
+.hub-media-thumb-seg-btn {
+    background: transparent;
+    color: #8a8aae;
+    border: 0;
+    border-radius: 2px;
+    padding: 2px 6px;
+    font-size: 10px;
+    line-height: 1.3;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.hub-media-thumb-seg-btn:hover {
+    color: #c6cbde;
+    background: #1c1c34;
+}
+.hub-media-thumb-seg-btn.hub-on {
+    background: #2a4a6e;
+    color: #d6e6ff;
+}
+
 .hub-media-thumb-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
