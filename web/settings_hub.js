@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v53 - hover-preview for picker cells: hovering a thumbnail in the media picker shows an enlarged preview popup (img / video controls / audio + filename) using the same mediaPreviewState infrastructure as the row-preview; 200ms dwell delay, 300ms grace hide, popup mouseenter cancels pending hide; closing the picker or scrolling closes the preview; cell identity tracked via data-cellIdx so re-entering the same cell does not re-trigger a show");
+console.info("[SettingsHub] web build: v54 - on picker open the grid scrolls to center the current-value cell (scrollIntoView block center), so the user starts where they are in the list instead of at the top; same after sort/type reload and after a search filter (when the current value is still in the filtered list); no-op when the current value is not in the visible list");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v53 - hover-preview for picker cells: hov
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=53", import.meta.url).href;
+    link.href = new URL("styles.css?v=54", import.meta.url).href;
     document.head.appendChild(link);
 })();
 

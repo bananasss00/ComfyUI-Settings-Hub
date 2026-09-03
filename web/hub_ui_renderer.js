@@ -3119,6 +3119,24 @@ function applyMediaThumbSize(grid, size) {
     }
 }
 
+/** v54: scroll the picker grid so the current-value cell is centered.
+ *  No-op when the current value is not in the filtered list (the cell
+ *  does not exist). Uses scrollIntoView({ block: "center" }) so the
+ *  cell lands in the middle of the visible area — the user immediately
+ *  sees where they are in the list. */
+function scrollMediaThumbToCurrent() {
+    const st = mediaThumbState;
+    if (!st || !st.grid) return;
+    const cur = String(st.cur ?? "");
+    if (!cur) return;
+    const cell = st.grid.querySelector(`.hub-media-thumb-cur`);
+    if (!cell) return;
+    try {
+        cell.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
+    } catch (_) { /* scrollIntoView options unsupported — fall back */ }
+    try { cell.scrollIntoView({ block: "center" }); } catch (_) {}
+}
+
 async function openMediaThumbPicker(node, item, trigger) {
     if (mediaThumbState?.trigger === trigger) { closeMediaThumbPicker(); return; }
     closeComboPopup();
@@ -3177,6 +3195,9 @@ async function openMediaThumbPicker(node, item, trigger) {
     positionMediaThumbPopup(pop, trigger);
     // v52: apply the saved thumbnail size to the freshly painted grid.
     applyMediaThumbSize(mediaThumbState.grid, getMediaThumbSize());
+    // v54: scroll to the current value so the user starts where they are,
+    // not at the top of the list.
+    scrollMediaThumbToCurrent();
     try { mediaThumbState?.search?.focus(); } catch (_) {}
     if (!mediaThumbState) return; // closed mid-open — fail soft
 
@@ -3218,6 +3239,9 @@ async function openMediaThumbPicker(node, item, trigger) {
     if (mediaThumbState.search) mediaThumbState.search.addEventListener("input", () => {
         if (!mediaThumbState) return;
         paintMediaThumbGrid();
+        // v54: if the current value is still in the filtered list after a
+        // search, keep it centered; otherwise leave the scroll alone.
+        scrollMediaThumbToCurrent();
         updateMediaThumbHint();
     });
     if (mediaThumbState.search) mediaThumbState.search.addEventListener("keydown", (e) => {
@@ -3296,6 +3320,8 @@ async function reloadMediaThumbList() {
     paintMediaThumbGrid();
     // v52: re-apply the saved size after a grid rebuild (sort/type change).
     applyMediaThumbSize(st.grid, getMediaThumbSize());
+    // v54: re-center on the current value after a sort/type change.
+    scrollMediaThumbToCurrent();
     updateMediaThumbHint();
 }
 
