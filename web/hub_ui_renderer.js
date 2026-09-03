@@ -2552,9 +2552,96 @@ function paintMediaPreview(node, item) {
     } catch (_) { /* a broken preview must never kill the row */ }
 }
 
+// ===========================================================================
+// v47: recursive media browser — subdirectory scanning, thumbnail picker,
+// hover preview popup. Three user requests in one feature drop.
+// ---------------------------------------------------------------------------
+// The vanilla ComfyUI combo for LoadImage/LoadVideo is FLAT (folder_paths
+// get_filename_list is os.listdir, not recursive). The loaders themselves
+// ACCEPT relative paths like "subdir/file.png" via tw.value, the combo
+// just doesn't surface them. The hub scans the input folder recursively
+// via /settings_hub/list_media (py/media_list.py), caches the result (60s
+// TTL), and unions it with the live combo values. Cycle arrows + the
+// thumbnail picker use the union; subdir files become reachable without
+// mutating the original node's combo values (non-destructive layer).
+// ===========================================================================
+
+const mediaListCache = new Map(); // folder -> {data: [...] | null, ts, promise}
+const MEDIA_LIST_TTL = 60_000; // 60s — folder contents change rarely
+
+/** Fetch the recursive file list for one folder type. Cached for 60s;
+ *  in-flight dedup (the same folder requested twice returns the same
+ *  Promise). Returns [{path, kind, size}] or [] on failure. */
+function fetchMediaList(folder = "input") {
+    const now = Date.now();
+    const hit = mediaListCache.get(folder);
+    if (hit && hit.data && now - hit.ts < MEDIA_LIST_TTL) return Promise.resolve(hit.data);
+    if (hit && hit.promise) return hit.promise;
+    const promise = (async () => {
+        try {
+            const resp = await fetch(app.api.apiURL(`/settings_hub/list_media?type=${encodeURIComponent(folder)}`));
+            if (!resp.ok) return [];
+            const data = await resp.json();
+            const files = Array.isArray(data?.files) ? data.files : [];
+            mediaListCache.set(folder, { data: files, ts: Date.now(), promise: null });
+            return files;
+        } catch (err) {
+            console.warn("[SettingsHub] list_media fetch failed:", err);
+            mediaListCache.set(folder, { data: [], ts: Date.now(), promise: null });
+            return [];
+        }
+    })();
+    mediaListCache.set(folder, { data: null, ts: now, promise });
+    return promise;
+}
+
+/** Sync peek at the cache (returns [] if not yet fetched, null-safe).
+ *  Used by refreshValuesDom to clear hub-combo-missing for subdir values
+ *  without blocking the rAF flush on a Promise. */
+function mediaListCacheSync(folder = "input") {
+    const hit = mediaListCache.get(folder);
+    return Array.isArray(hit?.data) ? hit.data : null;
+}
+
+/** v47: union of the live combo values and the recursively-scanned input
+ *  folder (subdir files included). Deduped; live values first (preserves
+ *  the loader's natural order), scanned extras sorted alphabetically.
+ *  Returns a Promise (the recursive list is async). */
+async function mediaFileList(item, tw) {
+    const live = liveComboValues(item, tw).map(String);
+    const folder = item.options?.media?.folder || "input";
+    const scanned = await fetchMediaList(folder);
+    const seen = new Set(live);
+    const extras = [];
+    for (const f of scanned) {
+        if (f?.path && !seen.has(f.path)) {
+            seen.add(f.path);
+            extras.push(f.path);
+        }
+    }
+    extras.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+    return live.concat(extras);
+}
+
+/** Build a /view URL from a combo-style path ("subdir/file.png" or
+ *  "file.png") for a given folder type. Mirrors the contract
+ *  paintMediaPreview uses for its fallback. */
+function mediaViewUrl(path, folder = "input") {
+    try {
+        const q = new URLSearchParams();
+        const cut = String(path).lastIndexOf("/");
+        q.set("filename", cut > 0 ? String(path).slice(cut + 1) : String(path));
+        q.set("subfolder", cut > 0 ? String(path).slice(0, cut) : "");
+        q.set("type", folder);
+        return app.api.apiURL(`/view?${q.toString()}`);
+    } catch (_) { return ""; }
+}
+
 /** v46: cycle the media-source combo one step forward or backward.
+ * v47: now async — uses mediaFileList (live combo ∪ recursive subdirs)
+ * so the arrows can reach files the flat combo doesn't surface.
  * Mirrors the gallery prev/next pattern (viewer_gallery.js): wrap-
- * around, no-op when the live list has fewer than 2 values. Reads
+ * around, no-op when the full list has fewer than 2 values. Reads
  * LIVE values only (invariant #4 - never the stale snapshot); the
  * write goes through writeTargetValue under the shared sync lock
  * (invariant #2). The reactive refresh is suppressed under the lock
@@ -2562,10 +2649,10 @@ function paintMediaPreview(node, item) {
  * tooltip are mirrored manually - same pattern as chooseComboValue.
  * paintMediaPreview is srcSig-guarded -> idempotent, safe to call
  * synchronously for instant click feedback. */
-function cycleMediaSource(node, item, dir) {
+async function cycleMediaSource(node, item, dir) {
     const { tn, tw } = findTarget(item);
     if (!tn || !tw) return;
-    const vals = liveComboValues(item, tw).map(String);
+    const vals = await mediaFileList(item, tw);
     if (vals.length < 2) return; // nothing to cycle
     const cur = String(tw.value ?? "");
     let idx = vals.indexOf(cur);
@@ -2594,6 +2681,248 @@ function cycleMediaSource(node, item, dir) {
     // Preview follows the value change reactively (srcSig guard makes
     // this idempotent); calling it directly gives instant feedback.
     paintMediaPreview(node, item);
+}
+
+// ===========================================================================
+// v47 task 3: thumbnail picker for media-source rows.
+// ---------------------------------------------------------------------------
+// Replaces openComboPopup for media rows: a body-level grid of thumbnails
+// (<img loading="lazy"> / <video preload="metadata"> / 🎵 icon) + filename
+// + dimmed dirname. Text search on top (same multi-token AND contract as
+// the combo popup). Click selects under the sync lock; Esc / click-outside
+// closes. Pattern mirrors openComboPopup + the gear popover (body-level
+// fixed, global mousedown/Escape closers, positionNumPopup math).
+// ===========================================================================
+
+let mediaThumbState = null; // { node, item, trigger, cur, pop, search, grid, vals, filtered }
+let mediaThumbGlobalWired = false;
+
+function closeMediaThumbPicker() {
+    if (!mediaThumbState) return;
+    try { mediaThumbState.pop.remove(); } catch (_) {}
+    mediaThumbState = null;
+}
+
+function ensureMediaThumbGlobalListeners() {
+    if (mediaThumbGlobalWired) return;
+    mediaThumbGlobalWired = true;
+    document.addEventListener("mousedown", (e) => {
+        const st = mediaThumbState;
+        if (!st) return;
+        try {
+            if (st.pop.contains(e.target) || st.trigger.contains(e.target)) return;
+        } catch (_) {}
+        closeMediaThumbPicker();
+    }, true);
+    document.addEventListener("keydown", (e) => {
+        if (mediaThumbState && e.key === "Escape") closeMediaThumbPicker();
+    }, true);
+}
+
+function positionMediaThumbPopup(pop, trigger) {
+    let left = 6, top = 6;
+    try {
+        const r = trigger.getBoundingClientRect();
+        const vw = window.innerWidth || 1024;
+        const vh = window.innerHeight || 768;
+        const pw = pop.offsetWidth || 360;
+        const ph = pop.offsetHeight || 360;
+        left = Math.max(6, Math.min(r.left, vw - pw - 6));
+        top = r.bottom + 4;
+        if (top + ph > vh - 6) top = Math.max(6, r.top - ph - 4);
+    } catch (_) { /* jsdom / detached - defaults are fine */ }
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+}
+
+function paintMediaThumbGrid() {
+    const st = mediaThumbState;
+    if (!st) return;
+    const q = String(st.search.value ?? "").trim().toLowerCase();
+    const toks = q.split(/\s+/).filter(Boolean);
+    st.filtered = st.vals.filter((v) => {
+        if (!toks.length) return true;
+        const lc = String(v).toLowerCase();
+        return toks.every((t) => lc.includes(t));
+    });
+    if (!st.filtered.length) {
+        st.grid.innerHTML = `<div class="hub-media-thumb-none">no matches</div>`;
+        return;
+    }
+    const folder = st.item.options?.media?.folder || "input";
+    const kind = st.item.options?.media?.kind || "image";
+    const cur = String(st.cur ?? "");
+    st.grid.innerHTML = st.filtered.map((v, i) => {
+        const url = mediaViewUrl(v, folder);
+        const split = splitComboPathText(v);
+        const base = split ? split.base : v;
+        const dir = split ? split.dir : "";
+        const isCur = v === cur;
+        const mediaEl = kind === "audio"
+            ? `<div class="hub-media-thumb-ph">🎵</div>`
+            : kind === "video"
+                ? `<video src="${esc(url)}" preload="metadata" muted playsinline></video>`
+                : `<img src="${esc(url)}" loading="lazy" alt="">`;
+        return `<div class="hub-media-thumb${isCur ? " hub-media-thumb-cur" : ""}" data-idx="${i}" title="${esc(v)}">` +
+            `<div class="hub-media-thumb-img">${mediaEl}</div>` +
+            `<div class="hub-media-thumb-name">${esc(base)}</div>` +
+            (dir ? `<div class="hub-media-thumb-dir">${esc(dir)}</div>` : "") +
+            `</div>`;
+    }).join("");
+}
+
+function chooseMediaThumb(node, item, trigger, value) {
+    const { tn, tw } = findTarget(item);
+    if (tn && tw) {
+        beginEdit();
+        try { writeTargetValue(tn, tw, value); }
+        finally { endEdit(); }
+    }
+    const lbl = trigger.querySelector(".hub-combo-label");
+    if (lbl) lbl.textContent = String(value);
+    closeMediaThumbPicker();
+    paintMediaPreview(node, item);
+}
+
+async function openMediaThumbPicker(node, item, trigger) {
+    if (mediaThumbState?.trigger === trigger) { closeMediaThumbPicker(); return; }
+    closeComboPopup();
+    closePresetPicker();
+    closePresetQuickSave();
+    closeMediaThumbPicker();
+    const { tn, tw } = findTarget(item);
+    if (!tn || !tw) return;
+    const cur = String(tw.value ?? "");
+    const vals = await mediaFileList(item, tw);
+    if (!vals.length) return;
+    ensureMediaThumbGlobalListeners();
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-media-thumb-pop";
+    pop.innerHTML =
+        `<input type="text" class="hub-combo-search" spellcheck="false" ` +
+        `placeholder="filter… parts separated by space">` +
+        `<div class="hub-media-thumb-grid"></div>` +
+        `<div class="hub-media-thumb-hint">${vals.length} file(s) · click to select · Esc close</div>`;
+    document.body.appendChild(pop);
+    mediaThumbState = {
+        node, item, trigger, cur,
+        pop,
+        search: pop.querySelector(".hub-combo-search"),
+        grid: pop.querySelector(".hub-media-thumb-grid"),
+        vals, filtered: vals,
+    };
+    paintMediaThumbGrid();
+    positionMediaThumbPopup(pop, trigger);
+    try { mediaThumbState.search.focus(); } catch (_) {}
+    mediaThumbState.search.addEventListener("input", () => {
+        if (!mediaThumbState) return;
+        paintMediaThumbGrid();
+    });
+    mediaThumbState.search.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Escape") { e.preventDefault(); closeMediaThumbPicker(); }
+        else if (e.key === "Enter") {
+            e.preventDefault();
+            const v = mediaThumbState.filtered[0];
+            if (v !== undefined) chooseMediaThumb(node, item, trigger, v);
+        }
+    });
+    mediaThumbState.grid.addEventListener("click", (e) => {
+        const cell = e.target.closest(".hub-media-thumb");
+        if (!cell || !mediaThumbState) return;
+        const v = mediaThumbState.filtered[Number(cell.dataset.idx)];
+        if (v !== undefined) chooseMediaThumb(node, item, trigger, v);
+    });
+}
+
+// ===========================================================================
+// v47 task 2: hover preview popup — enlarged media on mouseenter over
+// the 40x30 thumb. Body-level fixed; closes on mouseleave / scroll / Esc
+// / any mousedown. Video gets <controls autoplay muted loop>; audio gets
+// <audio controls> + filename.
+// ===========================================================================
+
+let mediaPreviewState = null; // { pop, hideTimer }
+let mediaPreviewGlobalWired = false;
+const MEDIA_PREVIEW_SHOW_MS = 200;  // hover dwell before showing
+const MEDIA_PREVIEW_HIDE_MS = 300;  // grace before hiding (allows moving into the popup)
+
+function closeMediaPreviewPopup() {
+    if (!mediaPreviewState) return;
+    if (mediaPreviewState.hideTimer) { clearTimeout(mediaPreviewState.hideTimer); mediaPreviewState.hideTimer = 0; }
+    try { mediaPreviewState.pop.remove(); } catch (_) {}
+    mediaPreviewState = null;
+}
+
+function ensureMediaPreviewGlobalListeners() {
+    if (mediaPreviewGlobalWired) return;
+    mediaPreviewGlobalWired = true;
+    document.addEventListener("mousedown", () => closeMediaPreviewPopup(), true);
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeMediaPreviewPopup();
+    }, true);
+    window.addEventListener("scroll", () => closeMediaPreviewPopup(), true);
+    window.addEventListener("blur", () => closeMediaPreviewPopup(), true);
+}
+
+function positionMediaPreviewPopup(pop, srcEl) {
+    let left = 100, top = 100;
+    try {
+        const r = srcEl.getBoundingClientRect();
+        const vw = window.innerWidth || 1024;
+        const vh = window.innerHeight || 768;
+        const pw = pop.offsetWidth || 300;
+        const ph = pop.offsetHeight || 240;
+        // Place to the right of the thumb; flip left if no room.
+        if (r.right + pw + 8 < vw) left = r.right + 8;
+        else left = Math.max(8, r.left - pw - 8);
+        // Vertically centered on the thumb, clamped to viewport.
+        top = Math.max(8, Math.min(vh - ph - 8, r.top + r.height / 2 - ph / 2));
+    } catch (_) { /* jsdom — defaults are fine */ }
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+}
+
+function showMediaPreviewPopup(node, item, srcEl) {
+    closeMediaPreviewPopup();
+    const { tn, tw } = findTarget(item);
+    // Prefer the output-store spec (the frontend keeps loader inputs there,
+    // type:"input"); fall back to the combo value via /view.
+    const spec = firstMediaSpec(tn, "input");
+    let url = spec?.url || "";
+    let name = spec?.filename || "";
+    if (!url) {
+        const cur = String(tw?.value ?? "");
+        if (cur) {
+            url = mediaViewUrl(cur, item.options?.media?.folder || "input");
+            const cut = cur.lastIndexOf("/");
+            name = cut >= 0 ? cur.slice(cut + 1) : cur;
+        }
+    }
+    if (!url) return;
+    const kind = item.options?.media?.kind || "image";
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-media-preview-pop";
+    if (kind === "video") {
+        pop.innerHTML = `<video src="${esc(url)}" controls autoplay muted loop playsinline></video>`;
+    } else if (kind === "audio") {
+        pop.innerHTML = `<audio src="${esc(url)}" controls autoplay></audio>` +
+            `<div class="hub-media-preview-name">${esc(name)}</div>`;
+    } else {
+        pop.innerHTML = `<img src="${esc(url)}" alt="">` +
+            `<div class="hub-media-preview-name">${esc(name)}</div>`;
+    }
+    document.body.appendChild(pop);
+    mediaPreviewState = { pop, hideTimer: 0 };
+    positionMediaPreviewPopup(pop, srcEl);
+    // Hovering over the popup itself cancels a pending hide.
+    pop.addEventListener("mouseenter", () => {
+        if (mediaPreviewState?.hideTimer) { clearTimeout(mediaPreviewState.hideTimer); mediaPreviewState.hideTimer = 0; }
+    });
+    pop.addEventListener("mouseleave", () => {
+        if (!mediaPreviewState) return;
+        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), MEDIA_PREVIEW_HIDE_MS);
+    });
 }
 
 /** v30: upload entry point - PREFER the node's own upload button ("upload"
@@ -2893,12 +3222,37 @@ function refreshValuesDom(node) {
             // v46: keep prev/next arrow disabled-state in lockstep with
             // the live combo length - a fresh upload adds a value and the
             // arrows must enable without waiting for a structural re-render.
+            // v47: the cycle now uses mediaFileList (live ∪ subdirs); if
+            // the flat combo has <2 entries but the recursive list has
+            // more, an async recheck enables the arrows post-fetch.
             const live = liveComboValues(item, tw).map(String);
             const cyc = live.length > 1;
             const prevBtn = row.querySelector('[data-role="media-prev-btn"]');
             const nextBtn = row.querySelector('[data-role="media-next-btn"]');
             if (prevBtn) prevBtn.disabled = !cyc;
             if (nextBtn) nextBtn.disabled = !cyc;
+            if (!cyc) {
+                // Async recheck: subdir files may enable cycling even
+                // when the top-level combo has <2 entries. fire-and-
+                // forget; mediaFileList is cached (60s TTL) so this is
+                // a Promise.resolve on every refresh after the first
+                // fetch. Guards against row removal mid-flight.
+                const itemId = item.id;
+                mediaFileList(item, tw).then((all) => {
+                    if (all.length < 2) return;
+                    const still = st.root.querySelector(`[data-hub-item="${itemId}"]`);
+                    if (!still) return;
+                    const p = still.querySelector('[data-role="media-prev-btn"]');
+                    const n = still.querySelector('[data-role="media-next-btn"]');
+                    if (p) p.disabled = false;
+                    if (n) n.disabled = false;
+                }).catch(() => {});
+            }
+            // v47: warm the recursive-list cache so the next refresh
+            // can use the sync peek (mediaListCacheSync) for the
+            // hub-combo-missing check below.
+            const folder = item.options?.media?.folder || "input";
+            if (!mediaListCache.has(folder)) fetchMediaList(folder);
         }
 
         for (const control of row.querySelectorAll("[data-hub-control]")) {
@@ -2918,7 +3272,20 @@ function refreshValuesDom(node) {
                     if (lblEl && lblEl.textContent !== cur) lblEl.textContent = cur;
                     const fullTip = `${cur}${cur ? "\n" : ""}Searchable list - filter parts separated by space, all must match, case-insensitive`;
                     if (control.getAttribute("title") !== fullTip) control.setAttribute("title", fullTip);
-                    control.classList.toggle("hub-combo-missing", !fresh.includes(cur));
+                    // v47: for media rows, subdir paths ("a/b.png") are
+                    // valid even when the flat combo doesn't list them;
+                    // don't flag missing. Also check the recursive cache
+                    // (sync peek — null while the first fetch is in flight).
+                    let known = fresh.includes(cur);
+                    if (!known && item.type === "widget_binding" && item.widgetType === "media") {
+                        if (cur.includes("/")) known = true;
+                        else {
+                            const folder = item.options?.media?.folder || "input";
+                            const cached = mediaListCacheSync(folder);
+                            if (cached && cached.some((f) => f.path === cur)) known = true;
+                        }
+                    }
+                    control.classList.toggle("hub-combo-missing", !known);
                     break;
                 }
                 case "text":
@@ -3778,9 +4145,19 @@ function wireEvents(node, st) {
     });
 
     // Combo triggers open the searchable list (toggle on repeat click).
+    // v47: media-source rows get the thumbnail picker instead of the
+    // text-only list — the grid shows previews for every file (including
+    // subdirectories the flat combo doesn't surface).
     root.addEventListener("click", (e) => {
         const btn = e.target.closest('button[data-role="combo"]');
-        if (btn && !btn.disabled) openComboPopup(node, btn);
+        if (!btn || btn.disabled) return;
+        const row = btn.closest("[data-hub-item]");
+        const item = getHubConfig(node).items.find((i) => i.id === row?.dataset.hubItem);
+        if (item?.type === "widget_binding" && item.widgetType === "media") {
+            openMediaThumbPicker(node, item, btn);
+            return;
+        }
+        openComboPopup(node, btn);
     });
 
     // v46: prev/next arrows on media-source rows cycle the file combo.
@@ -3795,6 +4172,42 @@ function wireEvents(node, st) {
         if (!item) return;
         const dir = nav.dataset.role === "media-next-btn" ? 1 : -1;
         cycleMediaSource(node, item, dir);
+    });
+
+    // v47 task 2: hover the media preview thumb -> enlarged popup.
+    // Dwell delay (200ms) filters accidental pass-throughs; the popup's
+    // own mouseenter cancels a pending hide so the user can move into it.
+    root.addEventListener("pointerover", (e) => {
+        const prev = e.target.closest?.('[data-role="media-prev"]');
+        if (!prev) return;
+        const irow = prev.closest("[data-hub-item]");
+        const item = getHubConfig(node).items.find((i) => i.id === irow?.dataset.hubItem);
+        if (!item) return;
+        ensureMediaPreviewGlobalListeners();
+        // Cancel any pending hide (re-enter while still open = stay open).
+        if (mediaPreviewState?.hideTimer) { clearTimeout(mediaPreviewState.hideTimer); mediaPreviewState.hideTimer = 0; }
+        // If the popup is already showing THIS item, we are done. Otherwise
+        // start a fresh show timer (cancels any previous pending show).
+        // Guard pop===null: the pending state (timer running, no popup yet)
+        // has pop=null; accessing .dataset on null would throw.
+        const sameItem = mediaPreviewState?.pop && mediaPreviewState.pop.dataset.srcItem === item.id;
+        if (!sameItem) {
+            if (mediaPreviewState) closeMediaPreviewPopup();
+            const timer = setTimeout(() => {
+                showMediaPreviewPopup(node, item, prev);
+                if (mediaPreviewState?.pop) mediaPreviewState.pop.dataset.srcItem = item.id;
+            }, MEDIA_PREVIEW_SHOW_MS);
+            mediaPreviewState = { pop: null, hideTimer: timer };
+        }
+    });
+    root.addEventListener("pointerout", (e) => {
+        const prev = e.target.closest?.('[data-role="media-prev"]');
+        if (!prev) return;
+        const rt = e.relatedTarget;
+        // Still inside the same row (or the popup itself) -> don't hide.
+        if (rt && (prev.contains(rt) || (mediaPreviewState?.pop?.contains(rt)))) return;
+        if (!mediaPreviewState) return;
+        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), MEDIA_PREVIEW_HIDE_MS);
     });
 
     // v30 media rows: upload picker + drag&drop routing. The drop zone is
