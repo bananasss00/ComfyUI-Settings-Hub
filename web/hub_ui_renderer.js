@@ -1277,7 +1277,6 @@ function updateSiblingControl(control, value) {
 
 let comboPopState = null; // { node, trigger, cur, active, pop, search, list, filtered }
 let comboGlobalWired = false;
-let comboPointerWired = false; // v50: shared-helper sentinel (combo)
 
 /** Multi-token live filter - the user-facing contract of this feature. */
 export function comboTokensMatch(text, query) {
@@ -1395,9 +1394,10 @@ function _popupHitInside(st, target) {
  *  per-popup mousedown + Escape handlers stay (belt-and-braces: mousedown
  *  still covers DOM-widget text fields where pointerdown is captured by
  *  the text input). */
-function wirePopupOutsideClosers(wiredFlagRef, getState, closeFn) {
-    if (wiredFlagRef.wired) return;
-    wiredFlagRef.wired = true;
+const wiredPopupClosers = new Set();
+function wirePopupOutsideClosers(key, getState, closeFn) {
+    if (wiredPopupClosers.has(key)) return;
+    wiredPopupClosers.add(key);
     // pointerdown fires before mousedown and is not suppressed by
     // litegraph canvas handlers. Capture phase: catch the event on its
     // way DOWN the tree, before any per-element stopPropagation.
@@ -1434,7 +1434,7 @@ function ensureComboGlobalListeners() {
         if (comboPopState && e.key === "Escape") closeComboPopup();
     }, true);
     // v50: pointerdown + blur + wheel closers (shared helper).
-    wirePopupOutsideClosers({ wired: comboPointerWired }, () => comboPopState, closeComboPopup);
+    wirePopupOutsideClosers('combo', () => comboPopState, closeComboPopup);
 }
 
 function chooseComboValue(node, trigger, value) {
@@ -1538,7 +1538,6 @@ function openComboPopup(node, trigger) {
 
 let numPopState = null; // { node, item, trigger, pop }
 let numPopGlobalWired = false;
-let numPointerWired = false; // v50: shared-helper sentinel (num)
 
 function closeNumPopup() {
     if (!numPopState) return;
@@ -1562,7 +1561,7 @@ function ensureNumPopupGlobalListeners() {
     document.addEventListener("keydown", (e) => {
         if (numPopState && e.key === "Escape") closeNumPopup();
     }, true);
-    wirePopupOutsideClosers({ wired: numPointerWired }, () => numPopState, closeNumPopup);
+    wirePopupOutsideClosers('num', () => numPopState, closeNumPopup);
 }
 
 function positionNumPopup(pop, trigger) {
@@ -1724,7 +1723,6 @@ function openNumPopup(node, trigger) {
 
 let setPopState = null; // { node, trigger, pop }
 let setPopGlobalWired = false;
-let setPointerWired = false; // v50: shared-helper sentinel (settings)
 
 function closeSettingsPopup() {
     if (!setPopState) return;
@@ -1746,7 +1744,7 @@ function ensureSettingsPopupGlobalListeners() {
     document.addEventListener("keydown", (e) => {
         if (setPopState && e.key === "Escape") closeSettingsPopup();
     }, true);
-    wirePopupOutsideClosers({ wired: setPointerWired }, () => setPopState, closeSettingsPopup);
+    wirePopupOutsideClosers('settings', () => setPopState, closeSettingsPopup);
 }
 
 function openSettingsPopup(node, trigger) {
@@ -1802,16 +1800,12 @@ function openSettingsPopup(node, trigger) {
 
 let presetPopState = null; // { node, trigger, pop, plan }
 let presetPopGlobalWired = false;
-let presetPopPointerWired = false; // v50: shared-helper sentinel (preset-pop)
 let presetMenuState = null; // { node, trigger, pop }
 let presetMenuGlobalWired = false;
-let presetMenuPointerWired = false; // v50: shared-helper sentinel (preset-menu)
 let presetPickerState = null; // { node, trigger, pop, search, list, model, query, showOther, active }
 let presetPickerWired = false;
-let presetPickerPointerWired = false; // v50: shared-helper sentinel (preset-picker)
 let presetQuickSaveState = null; // { node, trigger, pop }
 let presetQuickSaveWired = false;
-let presetQuickSavePointerWired = false; // v50: shared-helper sentinel (preset-qs)
 
 function closePresetPopover() {
     if (!presetPopState) return;
@@ -1839,7 +1833,7 @@ function ensurePresetPopGlobalListeners() {
     document.addEventListener("keydown", (e) => {
         if (presetPopState && e.key === "Escape") closePresetPopover();
     }, true);
-    wirePopupOutsideClosers({ wired: presetPopPointerWired }, () => presetPopState, closePresetPopover);
+    wirePopupOutsideClosers('preset-pop', () => presetPopState, closePresetPopover);
 }
 
 function ensurePresetMenuGlobalListeners() {
@@ -1856,7 +1850,7 @@ function ensurePresetMenuGlobalListeners() {
     document.addEventListener("keydown", (e) => {
         if (presetMenuState && e.key === "Escape") closePresetToolsMenu();
     }, true);
-    wirePopupOutsideClosers({ wired: presetMenuPointerWired }, () => presetMenuState, closePresetToolsMenu);
+    wirePopupOutsideClosers('preset-menu', () => presetMenuState, closePresetToolsMenu);
 }
 
 const PPR_STATUS_TITLES = {
@@ -1952,7 +1946,7 @@ function ensurePresetPickerGlobalListeners() {
     document.addEventListener("keydown", (e) => {
         if (presetPickerState && e.key === "Escape") closePresetPicker();
     }, true);
-    wirePopupOutsideClosers({ wired: presetPickerPointerWired }, () => presetPickerState, closePresetPicker);
+    wirePopupOutsideClosers('preset-picker', () => presetPickerState, closePresetPicker);
 }
 
 /** v29: match a preset against the search query - tokens AND,
@@ -2232,7 +2226,7 @@ function ensurePresetQuickSaveGlobalListeners() {
     document.addEventListener("keydown", (e) => {
         if (presetQuickSaveState && e.key === "Escape") closePresetQuickSave();
     }, true);
-    wirePopupOutsideClosers({ wired: presetQuickSavePointerWired }, () => presetQuickSaveState, closePresetQuickSave);
+    wirePopupOutsideClosers('preset-qs', () => presetQuickSaveState, closePresetQuickSave);
 }
 
 function openPresetQuickSave(node, trigger) {
@@ -2817,7 +2811,6 @@ async function cycleMediaSource(node, item, dir) {
 
 let mediaThumbState = null; // { node, item, trigger, cur, pop, search, grid, vals, filtered }
 let mediaThumbGlobalWired = false;
-let mediaThumbPointerWired = false; // v50: shared-helper sentinel (media-thumb)
 
 function closeMediaThumbPicker() {
     if (!mediaThumbState) return;
@@ -2842,7 +2835,7 @@ function ensureMediaThumbGlobalListeners() {
     document.addEventListener("keydown", (e) => {
         if (mediaThumbState && e.key === "Escape") closeMediaThumbPicker();
     }, true);
-    wirePopupOutsideClosers({ wired: mediaThumbPointerWired }, () => mediaThumbState, closeMediaThumbPicker);
+    wirePopupOutsideClosers('media-thumb', () => mediaThumbState, closeMediaThumbPicker);
 }
 
 function positionMediaThumbPopup(pop, trigger) {
