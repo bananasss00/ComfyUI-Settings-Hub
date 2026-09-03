@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v51.4 - reverted wirePopupOutsideClosers to a no-op; the v50 helper added pointerdown/blur/wheel closers on top of the existing per-popup mousedown+Escape, but each addition introduced races with the popup-open path (pointerdown fired during focus, blur fired when the canvas lost focus to the new input, wheel fired on internal scroll); the 9 popups were never broken - v50 was over-engineering; outside-click is handled by the per-popup mousedown capture closer (always present, reliable) and Escape by the per-popup keydown closer; removed the inline pointerdown from media-preview too; helper kept as no-op so the 8 call sites stay valid");
+console.info("[SettingsHub] web build: v51.5 - restored the pointerdown capture closer in wirePopupOutsideClosers (alone, no blur, no wheel); the per-popup mousedown closer does not fire on clicks over the litegraph canvas (it stopPropagation mousedown in its own capture handler) so clicks on other nodes or empty canvas left the popup open; pointerdown fires BEFORE mousedown and BEFORE litegraph handler so the document capture closer sees the event; v51.3 wrongly blamed pointerdown for the null-search TypeError - the real culprit was the BLUR closer (removed in v51.4); v51.5 brings pointerdown back alone");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no

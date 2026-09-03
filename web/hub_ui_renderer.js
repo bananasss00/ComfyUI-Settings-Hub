@@ -1395,18 +1395,27 @@ function _popupHitInside(st, target) {
  *  still covers DOM-widget text fields where pointerdown is captured by
  *  the text input). */
 const wiredPopupClosers = new Set();
-// v51.4: wirePopupOutsideClosers is now a NO-OP. The v50 helper added
-// pointerdown/blur/wheel closers on top of the existing per-popup
-// mousedown+Escape, but each addition introduced races with the popup-
-// open path (pointerdown fired during .focus(), blur fired when the
-// canvas lost focus to the new input, wheel fired on internal scroll).
-// Reverting to the pre-v50 state: outside-click is handled by the
-// per-popup mousedown capture closer (always present, reliable), and
-// Escape is handled by the per-popup keydown closer. The 9 popups were
-// never broken — v50 was over-engineering. The function is kept as a
-// no-op so the 8 call sites in ensureXGlobalListeners stay valid.
-function wirePopupOutsideClosers(_key, _getState, _closeFn) {
-    // intentionally empty — see comment above
+// v51.5: wirePopupOutsideClosers adds ONLY a pointerdown capture closer.
+// The per-popup mousedown capture closer does NOT fire on clicks over the
+// litegraph canvas (LGraphCanvas stopPropagation's mousedown in its own
+// capture-phase handler), so clicks on other nodes / empty canvas leave
+// the popup open. pointerdown fires BEFORE mousedown and BEFORE litegraph's
+// own pointer handler, so the document capture closer sees the event.
+//
+// v51.3 wrongly blamed pointerdown for the "Cannot read properties of
+// null" error — the real culprit was the BLUR closer (added in the same
+// v50 helper), which fired when .search.focus() shifted window focus
+// from the canvas to the new input. v51.4 removed blur (and pointerdown
+// as collateral). v51.5 restores pointerdown alone — no blur, no wheel.
+function wirePopupOutsideClosers(key, getState, closeFn) {
+    if (wiredPopupClosers.has(key)) return;
+    wiredPopupClosers.add(key);
+    document.addEventListener("pointerdown", (e) => {
+        const st = getState();
+        if (!st) return;
+        if (_popupHitInside(st, e.target)) return;
+        closeFn();
+    }, true);
 }
 
 function ensureComboGlobalListeners() {
