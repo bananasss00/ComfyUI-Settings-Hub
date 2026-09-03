@@ -1398,25 +1398,16 @@ const wiredPopupClosers = new Set();
 function wirePopupOutsideClosers(key, getState, closeFn) {
     if (wiredPopupClosers.has(key)) return;
     wiredPopupClosers.add(key);
-    // pointerdown fires before mousedown and is not suppressed by
-    // litegraph canvas handlers. Capture phase: catch the event on its
-    // way DOWN the tree, before any per-element stopPropagation.
-    document.addEventListener("pointerdown", (e) => {
-        const st = getState();
-        if (!st) return;
-        if (_popupHitInside(st, e.target)) return;
-        closeFn();
-    }, true);
-    // window blur: alt-tab / window switch must not leave a popup open.
+    // v51.3: pointerdown closer REMOVED. It raced with the popup-open
+    // path: focus() during openComboPopup can trigger pointer events on
+    // the previously active element, the capture closer would fire
+    // synchronously and null the state before the very next line ran,
+    // causing "Cannot read properties of null (reading 'search')". The
+    // existing per-popup mousedown capture closer already covers outside-
+    // click reliably. window blur kept for alt-tab closure.
     window.addEventListener("blur", () => {
         if (getState()) closeFn();
     }, true);
-    // Wheel outside the popup: close it too (the user is scrolling the
-    // underlying canvas / hub body — the popup is no longer their
-    // focus). Capture + passive so we never block the scroll itself.
-    window.addEventListener("wheel", () => {
-        if (getState()) closeFn();
-    }, { capture: true, passive: true });
 }
 
 function ensureComboGlobalListeners() {
@@ -1485,14 +1476,14 @@ function openComboPopup(node, trigger) {
 
     paintComboList();
     positionComboPopup(pop, trigger);
-    try { comboPopState.search.focus(); } catch (_) {}
-
-    comboPopState.search.addEventListener("input", () => {
+    try { comboPopState?.search?.focus(); } catch (_) {}
+    if (!comboPopState) return; // closed mid-open — fail soft
+    if (comboPopState.search) comboPopState.search.addEventListener("input", () => {
         if (!comboPopState) return;
         comboPopState.active = 0;
         paintComboList();
     });
-    comboPopState.search.addEventListener("keydown", (e) => {
+    if (comboPopState.search) comboPopState.search.addEventListener("keydown", (e) => {
         e.stopPropagation();
         const st = comboPopState;
         if (!st) return;
@@ -3129,7 +3120,8 @@ async function openMediaThumbPicker(node, item, trigger) {
     paintMediaThumbGrid();
     updateMediaThumbHint();
     positionMediaThumbPopup(pop, trigger);
-    try { mediaThumbState.search.focus(); } catch (_) {}
+    try { mediaThumbState?.search?.focus(); } catch (_) {}
+    if (!mediaThumbState) return; // closed mid-open — fail soft
 
     // v48: toolbar segmented controls — switching reloads the list
     // (sync filter+sort on a hot cache; the first hit already paid the
@@ -3152,12 +3144,12 @@ async function openMediaThumbPicker(node, item, trigger) {
     };
     pop.querySelector(".hub-media-thumb-toolbar").addEventListener("click", onSeg);
 
-    mediaThumbState.search.addEventListener("input", () => {
+    if (mediaThumbState.search) mediaThumbState.search.addEventListener("input", () => {
         if (!mediaThumbState) return;
         paintMediaThumbGrid();
         updateMediaThumbHint();
     });
-    mediaThumbState.search.addEventListener("keydown", (e) => {
+    if (mediaThumbState.search) mediaThumbState.search.addEventListener("keydown", (e) => {
         e.stopPropagation();
         if (e.key === "Escape") { e.preventDefault(); closeMediaThumbPicker(); }
         else if (e.key === "Enter") {
