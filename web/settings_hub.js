@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v54 - on picker open the grid scrolls to center the current-value cell (scrollIntoView block center), so the user starts where they are in the list instead of at the top; same after sort/type reload and after a search filter (when the current value is still in the filtered list); no-op when the current value is not in the visible list");
+console.info("[SettingsHub] web build: v55 - a file drag over a FOLDED pinned hub re-opens it after a short intent delay and the whole floating window becomes a file drop zone (a drop on the folded title opens at once; files land in the first media row whose kind matches); the preview filter inputs rebuild their lists after a ~200ms typing pause (Enter/arrows flush the pending repaint); clicking a media row preview opens the thumbnail picker");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v54 - on picker open the grid scrolls to 
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=54", import.meta.url).href;
+    link.href = new URL("styles.css?v=55", import.meta.url).href;
     document.head.appendChild(link);
 })();
 

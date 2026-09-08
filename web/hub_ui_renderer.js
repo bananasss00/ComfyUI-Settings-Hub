@@ -659,6 +659,23 @@ const pinPanels = new WeakMap(); // hub node -> { panel, head, body, btnMin, btn
 const pinPanelRecords = new Set();
 let pinCascade = 0;
 
+// v55: ONE document-level closer pair for every pin panel's file-drag
+// auto-expand - a drag that ends (drop / dragend) anywhere must not leave
+// a pending expand timer behind. Iterates the live pinPanelRecords set
+// (v45), so torn-down panels need no private document listeners.
+let pinFileDragWired = false;
+function ensurePinFileDragGlobals() {
+    if (pinFileDragWired) return;
+    pinFileDragWired = true;
+    const endAll = () => {
+        for (const rec of pinPanelRecords) {
+            try { rec?.cancelDragExpand?.(); } catch (_) {}
+        }
+    };
+    document.addEventListener("drop", endAll, true);
+    document.addEventListener("dragend", endAll, true);
+}
+
 function isWrapInPanel(st) {
     try { return !!(st?.wrap && st.panelBody && st.wrap.parentElement === st.panelBody); }
     catch (_) { return false; }
@@ -1011,8 +1028,65 @@ function ensurePinPanel(node, st) {
     });
     head.addEventListener("mouseleave", clearAuto);  // intent aborted
 
+    // --- v55: file-drag auto-expand + whole-window drop routing ----------
+    // A FOLDED pinned window hides the media rows, so an OS file drag had
+    // nowhere to land. While a file drag hovers the collapsed window, it
+    // re-opens after a short intent delay (stray fly-overs stay folded);
+    // a drop landed ON the folded title opens the window immediately and
+    // routes the files into the first media row whose kind matches. The
+    // row's own drop zone keeps priority (the root handler stopPropagation's).
+    const PIN_DRAG_EXPAND_MS = 250;
+    let dragExpandT = null;
+    let lastFileDrag = 0;
+    const cancelDragExpand = () => {
+        if (dragExpandT) { clearTimeout(dragExpandT); dragExpandT = null; }
+        panel.classList.remove("hub-pin-filedrag");
+    };
+    ensurePinFileDragGlobals();
+    panel.addEventListener("dragover", (e) => {
+        const types = e.dataTransfer?.types;
+        if (!types || !Array.from(types).includes("Files")) return;
+        lastFileDrag = Date.now();
+        // The whole floating window is a legal drop surface (the media
+        // mirror keeps its own highlight + routing inside the body).
+        e.preventDefault();
+        try { e.dataTransfer.dropEffect = "copy"; } catch (_) {}
+        panel.classList.add("hub-pin-filedrag");
+        const cfg = getHubConfig(node);
+        if (cfg.pinMin && !dragExpandT) {
+            dragExpandT = setTimeout(() => {
+                dragExpandT = null;
+                const c = getHubConfig(node);
+                if (!c.pinned || !c.pinMin || !panel.isConnected) return;
+                // Drag moved on / ended while the intent was pending.
+                if (Date.now() - lastFileDrag > PIN_DRAG_EXPAND_MS * 4) return;
+                applyPinMin(node, p, false);   // open for the incoming drop
+            }, PIN_DRAG_EXPAND_MS);
+        }
+    });
+    panel.addEventListener("dragleave", (e) => {
+        const rt = e.relatedTarget;
+        if (rt && panel.contains(rt)) return;  // moving between children
+        cancelDragExpand();                    // drag left before the intent
+    });
+    panel.addEventListener("drop", (e) => {
+        cancelDragExpand();
+        const files = Array.from(e.dataTransfer?.files ?? []);
+        if (!files.length) return;
+        // A drop that already landed on a media mirror is routed by the
+        // hub root handler (it stops propagation) - nothing to do here.
+        if (e.target?.closest?.(".hub-mirror-media")) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const cfg = getHubConfig(node);
+        if (cfg.pinMin) applyPinMin(node, p, false);  // dropped on the folded title
+        if (!routeFilesToHubMedia(node, files)) {
+            showHubToast("No media row matches the dropped file kind", {});
+        }
+    });
+
     p = { panel, head, body, btnMin, btnAuto, btnBack, rsz, cancelAuto: clearAuto,
-        hub: node };
+        cancelDragExpand, hub: node };
     pinPanels.set(node, p);
     pinPanelRecords.add(p);   // v45: enumerated by the DOM-truth sweep
     st.panelBody = body;
@@ -1443,6 +1517,37 @@ function chooseComboValue(node, trigger, value) {
     closeComboPopup();
 }
 
+// ---------------------------------------------------------------------------
+// v55: debounced filter inputs
+// ---------------------------------------------------------------------------
+// Filter inputs of the media pickers (thumbnail picker, combo popup)
+// repaint their lists after a short typing pause instead of on EVERY
+// keystroke - the same intent-delay idea as MEDIA_PREVIEW_SHOW_MS (the
+// hover dwell). The thumbnail grid is the painful case: every keystroke
+// rebuilt the grid and remounted its media elements (flicker + scroll
+// churn); big combo lists churned the same way. Keydown handlers (Enter
+// / arrows) flush the pending repaint so keyboard selection always
+// operates on FRESH results.
+const SEARCH_DEBOUNCE_MS = 200;
+
+/** Attach a debounced input listener; returns flush() - runs the pending
+ *  repaint immediately (no-op when nothing is pending). */
+function wireDebouncedSearch(input, onChange) {
+    if (!input) return () => {};
+    let t = null;
+    const flush = () => {
+        if (!t) return;
+        clearTimeout(t);
+        t = null;
+        onChange();
+    };
+    input.addEventListener("input", () => {
+        if (t) clearTimeout(t);
+        t = setTimeout(() => { t = null; onChange(); }, SEARCH_DEBOUNCE_MS);
+    });
+    return flush;
+}
+
 function openComboPopup(node, trigger) {
     // Clicking the same trigger again toggles the popup closed.
     if (comboPopState?.trigger === trigger) { closeComboPopup(); return; }
@@ -1486,7 +1591,9 @@ function openComboPopup(node, trigger) {
     positionComboPopup(pop, trigger);
     try { comboPopState?.search?.focus(); } catch (_) {}
     if (!comboPopState) return; // closed mid-open — fail soft
-    if (comboPopState.search) comboPopState.search.addEventListener("input", () => {
+    // v55: the filter repaints after a short typing pause (search debounce);
+    // Enter/arrow keys flush the pending repaint first (fresh results).
+    const comboFlush = wireDebouncedSearch(comboPopState.search, () => {
         if (!comboPopState) return;
         comboPopState.active = 0;
         paintComboList();
@@ -1495,6 +1602,7 @@ function openComboPopup(node, trigger) {
         e.stopPropagation();
         const st = comboPopState;
         if (!st) return;
+        comboFlush();   // v55: fresh results before Enter/arrow handling
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
             e.preventDefault();
             const n = st.filtered.length;
@@ -3236,7 +3344,10 @@ async function openMediaThumbPicker(node, item, trigger) {
         sizeInput.addEventListener("keydown", (e) => e.stopPropagation());
     }
 
-    if (mediaThumbState.search) mediaThumbState.search.addEventListener("input", () => {
+    // v55: debounced grid repaint - the grid rebuilds after a short typing
+    // pause instead of on every keystroke (per-keystroke rebuilds remounted
+    // the media elements: flicker + scroll churn on big folders).
+    const thumbFlush = wireDebouncedSearch(mediaThumbState.search, () => {
         if (!mediaThumbState) return;
         paintMediaThumbGrid();
         // v54: if the current value is still in the filtered list after a
@@ -3249,6 +3360,7 @@ async function openMediaThumbPicker(node, item, trigger) {
         if (e.key === "Escape") { e.preventDefault(); closeMediaThumbPicker(); }
         else if (e.key === "Enter") {
             e.preventDefault();
+            thumbFlush();   // v55: fresh results before picking filtered[0]
             const v = mediaThumbState.filtered[0];
             if (v !== undefined) chooseMediaThumb(node, item, trigger, v);
         }
@@ -3709,6 +3821,27 @@ function routeMediaPaste(e) {
         mediaPasteInto(arm.node, tn, item, matched);
         return;
     }
+}
+
+/** v55: route file drops that landed on the floating window itself
+ *  (header / body background / non-media rows) into the first media row
+ *  whose kind matches the files. Mirrors the paste fallthrough
+ *  (routeMediaPaste) minus the hover-arm - an OS drag carries no arm.
+ *  Returns true when a row claimed the files. */
+function routeFilesToHubMedia(node, files) {
+    const cfg = getHubConfig(node);
+    const items = (cfg.items ?? []).filter((i) =>
+        i.type === "widget_binding" && i.widgetType === "media");
+    for (const item of items) {
+        const { tn, tw } = findTarget(item);
+        if (!tn || !tw) continue;
+        const kind = item.options?.media?.kind || "image";
+        const matched = files.filter((f) => kindOfBlob(f) === kind);
+        if (!matched.length) continue;
+        uploadMediaFiles(node, item, matched);
+        return true;
+    }
+    return false;
 }
 
 function mediaPasteInto(hubNode, tn, item, files) {
@@ -4708,6 +4841,19 @@ function wireEvents(node, st) {
             return;
         }
         openComboPopup(node, btn);
+    });
+
+    // v55: clicking the row PREVIEW opens the thumbnail picker too - the
+    // combo button stays the trigger/anchor, so the popup lands where it
+    // always did and a repeat click on either element toggles it closed.
+    root.addEventListener("click", (e) => {
+        const prev = e.target.closest?.('[data-role="media-prev"]');
+        if (!prev) return;
+        const prow = prev.closest("[data-hub-item]");
+        const pitem = getHubConfig(node).items.find((i) => i.id === prow?.dataset.hubItem);
+        if (!pitem || pitem.type !== "widget_binding" || pitem.widgetType !== "media") return;
+        const comboBtn = prow.querySelector('button[data-role="combo"]');
+        if (comboBtn) openMediaThumbPicker(node, pitem, comboBtn);
     });
 
     // v46: prev/next arrows on media-source rows cycle the file combo.

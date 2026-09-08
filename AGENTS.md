@@ -573,6 +573,58 @@ dev_plan.md            — исходный технический спек пр
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
 
+### v55: файл-драг разворачивает свёрнутый пин-хаб, задержка фильтров превью-пикеров, клик по превьюхе открывает пикер
+- ЗАПРОС (поле): (1) «при наведении драг дропом (когда тяну файл) на свернутой
+  закрепленном хабе - разворачивать хаб, для возможности дропнуть в хаб файл»;
+  (2) «надо сделать задержку в input полях для превьюх как есть в пикере»;
+  (3) «клик по превьюхе открывает пикер».
+- РЕШЕНИЕ (patch_v55_file_drag.py, CRLF-safe, 12 патчей):
+  (1) ensurePinPanel: dragover/dragleave/drop НА ПАНЕЛИ. Файл-драг
+  (dataTransfer.types содержит "Files") над СВЁРНУТЫМ окном разворачивает его
+  через applyPinMin после intent-задержки PIN_DRAG_EXPAND_MS=250 (случайный
+  пролёт с файлом не разворачивает; каждый dragover обновляет lastFileDrag,
+  таймер проверяет свежесть x4). dragleave наружу отменяет intent; drop/dragend
+  на document (capture) гасят отложенный разворот через ОДНУ пару глобальных
+  листенеров ensurePinFileDragGlobals (обход pinPanelRecords v45 - без
+  приватных document-листенеров на каждую панель). ВСЁ плавающее окно -
+  легальная drop-зона: drop на заголовок СВЁРНУТОГО окна разворачивает
+  немедленно и роутит; drop на тело мимо media-строки идёт в
+  routeFilesToHubMedia (первая media-строка с совпадающим kind; образец -
+  фоллтринч paste v38 без hover-arm, OS-драг арма не несёт); несовпадение -
+  честный тост «No media row matches the dropped file kind»; drop точно в
+  .hub-mirror-media по-прежнему обслуживается корневым обработчиком строки
+  (stopPropagation - двойной обработки нет). Подсветка-приглашение
+  .hub-pin-filedrag (styles.css, dashed outline; снятие на leave/drop/отмене).
+  (2) wireDebouncedSearch(input, onChange) -> flush(): SEARCH_DEBOUNCE_MS=200 -
+  тот же принцип intent-задержки, что MEDIA_PREVIEW_SHOW_MS (hover-dwell
+  пикера). Грид пикера превьюх (v47) и список комбо-попапа перестраиваются
+  ПОСЛЕ паузы в печати (пер-кейстройч ребилды перемонтировали медиа-элементы:
+  мерцание + скролл-чёрн на больших папках); Enter/стрелки зовут flush() перед
+  обработкой - клавиатура всегда работает по СВЕЖЕМУ filtered. Пресет-пикер и
+  quick-save не тронуты (текстовые списки - мгновенный отклик сохранён).
+  (3) клик по [data-role="media-prev"] media-строки открывает
+  openMediaThumbPicker; триггер/якорь - кнопка комбо той же строки (попап
+  приземляется где привык; повторный клик по превьюхе ИЛИ по комбо тогглит
+  закрытие - один trigger-реф). Hover-превьюха-попап (v47/v53) остаётся.
+- smoke_v55.mjs (59 чеков, jsdom-песочница scripts/v55sandbox, app-стаб:
+  wiring (баннер v55, ?v=55, css-правило, константы), рендер+пин+коллапс,
+  dragover-Files (preventDefault + подсветка + фолд синхронно + разворот по
+  intent), dragleave-отмена, non-Files драг не трогает окно, дроп на свёрнутый
+  заголовок (claim + разворот + Route B /upload/image + combo-запись), дроп в
+  media-зону (ровно одна загрузка, приоритет строки), kind-mismatch (без
+  upload + честный тост), чужой document-drop гасит pending, debounce грида
+  (нет ребилда в 50мс окне, ребилд после паузы, фильтр применён), Enter-flush
+  пикера (filtered[0] свежий), debounce+flush комбо-попапа + Esc, клик-превьюха
+  (открыть/тоггл/комбо-кнопка жива), авто-сворачивание v41 (leave->fold,
+  файл-драг re-opens), dispose-гигиена. УРОК: list_media-кэш (60s TTL) греется
+  refreshValuesDom'ом ПОСЛЕ аплоадов - пикерные секции смоука идут ДО
+  upload-секций, иначе первый список пуст.
+- Баннер v55, styles.css?v=55.
+- Коммит: «feat(hub): v55 file-drag opens a folded pinned hub - the whole
+  floating window becomes a drop zone (folded-title drop routes at once);
+  preview filter inputs get a 200ms typing debounce (Enter/arrows flush);
+  clicking a media row preview opens the thumbnail picker».
+
 ### v45: DOM-truth sweep пин-окон + view-авторитетные syncAll/prune (свёрнутые пины переживали все фиксации)
 - ЗАПРОС (поле): «проблема со свернутыми хабами осталась» - после v44.
 - ДИАГНОЗ: все смоделированные пути тейкдауна (swap-тейкдаун вотчером,

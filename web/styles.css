@@ -1405,6 +1405,13 @@ button.hub-pin-back {
     display: none;
 }
 
+/* v55: file-drag feedback - the floating window accepts a file drop
+   (dashed outline while a file drag hovers it; collapsed included). */
+.hub-pin-panel.hub-pin-filedrag {
+    outline: 2px dashed rgba(126, 168, 255, 0.55);
+    outline-offset: -2px;
+}
+
 /* While a resize gesture is live: no text selection, body ignores pointers
    (pointer capture retargets everything to the grip anyway). */
 .hub-pin-panel.hub-pin-resizing {
