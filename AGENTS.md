@@ -114,6 +114,16 @@ web/hub_ui_renderer.js — весь UI хаба: табы, строки зерк
                          (единый storage со слайдером тулбара, живая
                          синхронизация открытого пикера через
                          mediaThumbState.sizeInput/sizeVal)
+                         v58: превью-попапы (v47 row + v53 cell) получают
+                         класс размера .hub-preview-{s,m,l,xl}
+                         (applyPreviewSizeClass, смена в ⚙ ре-классит
+                         живой попап) и собирают медиа-элемент через
+                         previewMediaTag (autoplay-атрибут по глобальной
+                         настройке, muted/controls - всегда); движок
+                         авто-сворачивания читает getPinFoldLeaveMs/
+                         getPinFoldHoverMs в момент события; ⚙-попап:
+                         строки Preview size/Preview autoplay + секция
+                         Pin window (fold/re-open delay)
 web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode;
                          afterConfigureGraph первым делом зовёт
@@ -194,6 +204,15 @@ web/global_settings.js — ГЛОБАЛЬНЫЕ настройки хаба (v26
                          (0/150/300/500/800, дефолт 300) + previewDelayLabel;
                          сеттеры нормализуют к списку, геттеры читаются
                          рендерером В МОМЕНТ события (без кэша)
+                         v58: размер превью-попапа settingshub.previewSize
+                         (["S","M","L","XL"], дефолт M), автоплей превью
+                         settingshub.previewAutoplay ("1"/"0", дефолт 1) и
+                         тайминги авто-сворачивания пина
+                         settingshub.pinFoldLeaveMs (0/200/450/800/1500/3000,
+                         дефолт 450) / settingshub.pinFoldHoverMs
+                         (0/100/220/400/800, дефолт 220); те же контракты:
+                         whitelist, нормализация к дефолту, чтение в момент
+                         события; дефолты таймингов экспортированы
 web/dnd_manager.js     — HTML5 DnD: reorder строк, drop на вкладку = перенос
 web/pins.js            — кэш счётчиков пинов для бейджа 📌
 web/styles.css         — все стили (тёмная тема); классы *.hub-*
@@ -586,6 +605,62 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v58: размер превью-попапа (S/M/L/XL), автоплей превью, глобальные тайминги авто-сворачивания пина
+- ЗАПРОС (поле): «сделай размер превью-попапа (S/M/L/XL), автоплей видео в
+  превью, тайминги авто-сворачивания пина» (+ напоминание: коммиты - по
+  конвенции этого файла).
+- ДИАГНОЗ: три хардкода рендерера. (1) Размер превью-попапа: статические
+  max-width:340px / max-height:280px (+ фикс 240px у img/video) в
+  .hub-media-preview-pop - на большом мониторе попап мелковат, на маленьком
+  хочется компактнее. (2) Автоплей: оба билдера попапа (v47 row + v53 cell)
+  монтировали <video controls autoplay muted loop> / <audio controls
+  autoplay> безусловно - движение/звук на каждый пролет курсора. (3)
+  Тайминги пина: движок v41 держал константы PIN_AUTOHIDE_LEAVE_MS=450
+  (fold после ухода курсора) и PIN_AUTOHIDE_HOVER_MS=220 (re-open intent
+  на свернутом титуле).
+- РЕШЕНИЕ (прямые правки; контракты v57 соблюдены - whitelist + чтение в
+  момент события):
+  (1) global_settings.js - секция v58: settingshub.previewSize
+  (["S","M","L","XL"], дефолт M, неизвестное -> M), settingshub.previewAutoplay
+  ("1"/"0", дефолт 1), settingshub.pinFoldLeaveMs ([0,200,450,800,1500,3000],
+  дефолт 450), settingshub.pinFoldHoverMs ([0,100,220,400,800], дефолт 220);
+  дефолты таймингов ЭКСПОРТИРОВАНЫ (метки «· default» в селектах ⚙).
+  (2) styles.css - бокс попапа переведен на CSS-переменные --pv-max-w /
+  --pv-max-h / --pv-media-h; классы .hub-preview-s/m/l/xl (S 260x210/170,
+  M 340x280/240 = исторический, L 480x390/350, XL 680x540/500);
+  img/video читают var(--pv-media-h); px-значения в рендерере - ТОЛЬКО
+  текст меток (SET_PREVIEW_SIZE_LABELS), канон - в css.
+  (3) hub_ui_renderer.js - applyPreviewSizeClass вешает класс на корень
+  попапа в ОБОИХ билдерах; смена размера в ⚙ ре-классит ЖИВОЙ попап на
+  месте. previewMediaTag(kind,url) строит медиа-элемент: autoplay-атрибут
+  только при глобальном On; muted/controls/loop/playsinline сохранены
+  ВСЕГДА (политика браузера; тумблер покрывает и audio - трек, стартующий
+  со звуком при пролете курсора, так же навязчив). Константы
+  PIN_AUTOHIDE_* удалены; 3 места движка (autoHideCheck + panel mouseleave
+  -> getPinFoldLeaveMs; head mouseenter -> getPinFoldHoverMs) читают
+  геттеры в момент события; per-hub ⇲-тумблер не тронут (режим ON/OFF,
+  тайминги - глобальная калибровка). ⚙-попап: в Previews добавлены строки
+  «Preview size» и «Preview autoplay», новая секция «Pin window» (Fold
+  delay / Re-open hover delay); автоплей применяется к СЛЕДУЮЩЕМУ билду
+  (открытое видео не рестартуем под курсором).
+  (4) НЕ тронуто: v52 thumb-size (storage+lockstep), v55 debounce, v57
+  dwell/grace (3+5 мест чтения), v27 video-audio (у viewer-плееров СВОЯ
+  настройка, к hover-попапам отношения не имеет).
+- ПРОВЕРКИ: node --check web/*.js (13 файлов) чисто; scripts/wiring_v58.mjs
+  (W1-W7, 42 чека) ALL PASSED: баннер v58 до css-линка, ?v=58 без следа 57,
+  поверхность экспортов v58, LS-ключи, ноль PIN_AUTOHIDE_* в рендерере,
+  точные места геттеров (fold 2+1, hover 1+1), previewMediaTag (1 def +
+  2 вызова), условный autoplay-атрибут + muted всегда, wiring
+  prevsize/prevauto/pinfold/pinopen + секция Pin window, live re-class,
+  css-переменные + 4 класса (M = 340/280/240), инварианты
+  v52/v55/v57/v27. scripts/wiring_v57.mjs после апгрейда падают ТОЛЬКО
+  два version-pinned чека (баннер и ?v=57) - это ожидаемое доказательство
+  апгрейда; структурные чеки v57 зеленые.
+- Баннер v58, styles.css?v=58.
+- Коммит: «feat(hub): v58 preview popup size presets (S/M/L/XL) + preview
+  autoplay toggle + global pin auto-collapse timings» (полная строка - в
+  git log).
 
 ### v57: глобальные настройки превью в ⚙-попапе - hover-delay (одна на пикер и хаб), hide-grace, thumb-size пикера; секции в попапе настроек
 - ЗАПРОС (поле): (1) «нужно в глобальные настройки добавить параметр, через

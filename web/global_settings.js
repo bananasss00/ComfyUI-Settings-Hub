@@ -41,6 +41,12 @@
 //   are now user preferences following the same contract: localStorage,
 //   normalized on read/write, one shared value for every hub (picker AND
 //   hub rows on purpose - one mental model, see the ⚙ popup hint).
+//
+//   v58 continues the family: the preview popup SIZE (S/M/L/XL presets, one
+//   class on the popup root), the preview media AUTOPLAY toggle (video +
+//   audio popups start paused when Off) and the PIN auto-collapse timings
+//   (fold delay after the cursor leaves + re-open hover intent on the
+//   folded title - historically hardcoded 450/220 ms in the renderer).
 // ============================================================================
 
 import { allHubs } from "./core.js";
@@ -226,6 +232,143 @@ export function setPreviewHideMs(ms) {
 export function previewDelayLabel(ms) {
     if (!ms) return "Instant (0 ms)";
     return `${ms} ms`;
+}
+
+// ---------------------------------------------------------------------------
+// v58: GLOBAL preview popup size + media autoplay, pin auto-collapse timings
+// ---------------------------------------------------------------------------
+// Three more user preferences in the same contract family as v57 (localStorage,
+// whitelisted values, read by the renderer at EVENT TIME - never cached):
+//
+//   * Preview popup size - S/M/L/XL presets for the enlarged hover preview
+//     (hub row preview AND picker cells, one shared choice). The renderer
+//     lands the choice as a .hub-preview-{s,m,l,xl} class on the popup root;
+//     styles.css scales the popup box + the media element's max-height through
+//     CSS variables. M is the historical 340x280 box and the default.
+//
+//   * Preview autoplay - the hover popups used to mount <video controls
+//     autoplay muted loop> / <audio controls autoplay> unconditionally
+//     (v47/v53). Off drops the autoplay attribute: the element shows its
+//     first frame (video) / sits silent (audio) with the native controls
+//     visible - the user clicks play. Muted stays ON either way (browser
+//     autoplay policy; the v27 audio preference governs hub viewer players,
+//     NOT these quick hover popups).
+//
+//   * Pin auto-collapse timings - the v41 auto-collapse engine had two
+//     hardcoded delays: how long the cursor may stay away from a floating
+//     pinned window before it folds (450ms) and how long the folded title
+//     must be hovered before it re-opens (220ms hover intent). Both are now
+//     global preferences; the per-hub ⇲ toggle in the pin header keeps
+//     working exactly as before (it turns the MODE on/off, the timings are
+//     global calibration).
+
+const LS_PREVIEW_SIZE = "settingshub.previewSize";
+const LS_PREVIEW_AUTOPLAY = "settingshub.previewAutoplay";
+const LS_PIN_FOLD_LEAVE = "settingshub.pinFoldLeaveMs";
+const LS_PIN_FOLD_HOVER = "settingshub.pinFoldHoverMs";
+
+/** Allowed popup-size presets (class suffix in styles.css). */
+export const PREVIEW_SIZE_CHOICES = ["S", "M", "L", "XL"];
+const PREVIEW_SIZE_DEFAULT = "M";
+
+let previewSize = PREVIEW_SIZE_DEFAULT;
+
+// Boot: restore the persisted preference (if any) once per page load.
+try {
+    const v = String(localStorage.getItem(LS_PREVIEW_SIZE) || "").toUpperCase();
+    if (PREVIEW_SIZE_CHOICES.includes(v)) previewSize = v;
+} catch (_) { /* no storage - the default size stands */ }
+
+/** Current preview popup size preset ("S" | "M" | "L" | "XL"). */
+export function getPreviewSize() { return previewSize; }
+
+/**
+ * Set the global preview popup size. Unknown values normalize to the
+ * default (M). Persists to localStorage. Returns the applied value.
+ */
+export function setPreviewSize(sz) {
+    const v = String(sz ?? "").toUpperCase();
+    previewSize = PREVIEW_SIZE_CHOICES.includes(v) ? v : PREVIEW_SIZE_DEFAULT;
+    try { localStorage.setItem(LS_PREVIEW_SIZE, previewSize); }
+    catch (_) { /* private mode etc. - session-only preference */ }
+    return previewSize;
+}
+
+// Default ON: the historical behavior (v47/v53 popups always autoplayed).
+let previewAutoplay = true;
+
+// Boot: restore the persisted preference (if any) once per page load.
+try {
+    const m = localStorage.getItem(LS_PREVIEW_AUTOPLAY);
+    if (m === "0") previewAutoplay = false;
+    else if (m === "1") previewAutoplay = true;
+} catch (_) { /* no storage - autoplay default stands */ }
+
+/** Current preview autoplay preference (true = media starts playing). */
+export function getPreviewAutoplay() { return previewAutoplay; }
+
+/**
+ * Set the global preview autoplay preference (boolean). Persists to
+ * localStorage. Returns the applied value.
+ */
+export function setPreviewAutoplay(on) {
+    previewAutoplay = !!on;
+    try { localStorage.setItem(LS_PREVIEW_AUTOPLAY, previewAutoplay ? "1" : "0"); }
+    catch (_) { /* private mode etc. - session-only preference */ }
+    return previewAutoplay;
+}
+
+/** Allowed fold delays (ms) after the cursor leaves a pinned window. */
+export const PIN_FOLD_LEAVE_CHOICES = [0, 200, 450, 800, 1500, 3000];
+/** Historical hardcoded leave grace - the default + select label marker. */
+export const PIN_FOLD_LEAVE_DEFAULT = 450;
+
+/** Allowed re-open hover-intent delays (ms) on a folded pin title. */
+export const PIN_FOLD_HOVER_CHOICES = [0, 100, 220, 400, 800];
+/** Historical hardcoded hover intent - the default + select label marker. */
+export const PIN_FOLD_HOVER_DEFAULT = 220;
+
+let pinFoldLeaveMs = PIN_FOLD_LEAVE_DEFAULT;
+let pinFoldHoverMs = PIN_FOLD_HOVER_DEFAULT;
+
+// Boot: restore the persisted preferences (if any) once per page load.
+try {
+    const v = Number(localStorage.getItem(LS_PIN_FOLD_LEAVE));
+    if (Number.isFinite(v) && PIN_FOLD_LEAVE_CHOICES.includes(v)) pinFoldLeaveMs = v;
+} catch (_) { /* no storage - the default fold delay stands */ }
+try {
+    const v = Number(localStorage.getItem(LS_PIN_FOLD_HOVER));
+    if (Number.isFinite(v) && PIN_FOLD_HOVER_CHOICES.includes(v)) pinFoldHoverMs = v;
+} catch (_) { /* no storage - the default re-open delay stands */ }
+
+/** Current fold delay after the cursor leaves a pinned window (ms). */
+export function getPinFoldLeaveMs() { return pinFoldLeaveMs; }
+
+/**
+ * Set the global fold delay. Unknown values normalize to the default
+ * (450). Persists to localStorage. Returns the applied value.
+ */
+export function setPinFoldLeaveMs(ms) {
+    const n = Math.round(Number(ms));
+    pinFoldLeaveMs = PIN_FOLD_LEAVE_CHOICES.includes(n) ? n : PIN_FOLD_LEAVE_DEFAULT;
+    try { localStorage.setItem(LS_PIN_FOLD_LEAVE, String(pinFoldLeaveMs)); }
+    catch (_) { /* private mode etc. - session-only preference */ }
+    return pinFoldLeaveMs;
+}
+
+/** Current re-open hover-intent delay on a folded pin title (ms). */
+export function getPinFoldHoverMs() { return pinFoldHoverMs; }
+
+/**
+ * Set the global re-open hover-intent delay. Unknown values normalize to
+ * the default (220). Persists to localStorage. Returns the applied value.
+ */
+export function setPinFoldHoverMs(ms) {
+    const n = Math.round(Number(ms));
+    pinFoldHoverMs = PIN_FOLD_HOVER_CHOICES.includes(n) ? n : PIN_FOLD_HOVER_DEFAULT;
+    try { localStorage.setItem(LS_PIN_FOLD_HOVER, String(pinFoldHoverMs)); }
+    catch (_) { /* private mode etc. - session-only preference */ }
+    return pinFoldHoverMs;
 }
 
 /** Test hook: run one poller pass immediately (bypasses the hidden guard). */

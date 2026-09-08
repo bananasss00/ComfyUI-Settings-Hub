@@ -1619,8 +1619,14 @@ button.hub-pin-back {
        (.hub-pin-panel z-index 99990). Bumped to 100000 to match the
        rest of the project popups (.hub-menu combo/gear, .hub-batch). */
     z-index: 100000;
-    max-width: 340px;
-    max-height: 280px;
+    /* v58: size presets (S/M/L/XL in the ⚙ popup) scale these three
+       variables through the .hub-preview-* classes below; M keeps the
+       historical 340x280 box (media max-height 240) and is the default. */
+    --pv-max-w: 340px;
+    --pv-max-h: 280px;
+    --pv-media-h: 240px;
+    max-width: var(--pv-max-w);
+    max-height: var(--pv-max-h);
     padding: 4px;
     background: #1a1a2e;
     border: 1px solid #444;
@@ -1631,10 +1637,19 @@ button.hub-pin-back {
     flex-direction: column;
     gap: 2px;
 }
+/* v58: one class per size preset, landed by the renderer
+   (applyPreviewSizeClass). Higher specificity than the base rule, so the
+   three variables resolve per-popup; the img/video/audio rules below read
+   them. Values are labels-only duplicated in the renderer
+   (SET_PREVIEW_SIZE_LABELS) - keep the two in sync. */
+.hub-media-preview-pop.hub-preview-s  { --pv-max-w: 260px; --pv-max-h: 210px; --pv-media-h: 170px; }
+.hub-media-preview-pop.hub-preview-m  { --pv-max-w: 340px; --pv-max-h: 280px; --pv-media-h: 240px; }
+.hub-media-preview-pop.hub-preview-l  { --pv-max-w: 480px; --pv-max-h: 390px; --pv-media-h: 350px; }
+.hub-media-preview-pop.hub-preview-xl { --pv-max-w: 680px; --pv-max-h: 540px; --pv-media-h: 500px; }
 .hub-media-preview-pop img,
 .hub-media-preview-pop video {
     max-width: 100%;
-    max-height: 240px;
+    max-height: var(--pv-media-h);
     display: block;
     border-radius: 2px;
     object-fit: contain;

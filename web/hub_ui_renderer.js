@@ -46,7 +46,13 @@ import * as Portals from "./portal_manager.js";
 import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel,
          PREVIEW_SHOW_CHOICES, PREVIEW_HIDE_CHOICES,
          getPreviewShowMs, setPreviewShowMs, getPreviewHideMs, setPreviewHideMs,
-         previewDelayLabel } from "./global_settings.js";
+         previewDelayLabel,
+         PREVIEW_SIZE_CHOICES, getPreviewSize, setPreviewSize,
+         getPreviewAutoplay, setPreviewAutoplay,
+         PIN_FOLD_LEAVE_CHOICES, PIN_FOLD_LEAVE_DEFAULT,
+         PIN_FOLD_HOVER_CHOICES, PIN_FOLD_HOVER_DEFAULT,
+         getPinFoldLeaveMs, setPinFoldLeaveMs,
+         getPinFoldHoverMs, setPinFoldHoverMs } from "./global_settings.js";
 import { firstMediaSpec } from "./viewer_gallery.js";
 
 // Layout allowances. The title bar height is taken from LiteGraph when
@@ -771,12 +777,15 @@ function savePinPosFromRect(node, panel) {
 const PIN_MIN_W = 280;   // rows keep their chrome (handles/buttons) below this
 const PIN_MIN_H = 120;   // header + a couple of rows
 
-// v41 auto-collapse mode: the window folds PIN_AUTOHIDE_LEAVE_MS after
-// the cursor leaves it (grace against stray exits; a re-entry cancels
-// the pending fold) and a folded window re-opens after
-// PIN_AUTOHIDE_HOVER_MS of hovering its title bar (hover intent).
-const PIN_AUTOHIDE_LEAVE_MS = 450;
-const PIN_AUTOHIDE_HOVER_MS = 220;
+// v41 auto-collapse mode: the window folds after the cursor leaves it
+// (grace against stray exits; a re-entry cancels the pending fold) and a
+// folded window re-opens after a short hover intent on its title bar.
+// v58: BOTH delays are global preferences now (global_settings.js,
+// localStorage "settingshub.pinFoldLeaveMs" / "settingshub.pinFoldHoverMs")
+// - read them at EVENT TIME through getPinFoldLeaveMs()/getPinFoldHoverMs(),
+// never cache them here, so a change in the ⚙ "Pin window" section applies
+// to the very next leave/hover. Defaults remain the historical constants:
+// 450ms leave grace, 220ms re-open intent.
 const PIN_AUTOHIDE_OFF_TIP = "Auto-collapse: OFF - the window folds when the cursor leaves it and re-opens from the folded title hover (click to enable)";
 const PIN_AUTOHIDE_ON_TIP = "Auto-collapse: ON - the window folds when the cursor leaves it and re-opens when you hover the folded title (click to disable)";
 
@@ -1028,7 +1037,7 @@ function ensurePinPanel(node, st) {
         if (!cfg.pinAutoHide || cfg.pinMin || drag || rszDrag) return;
         let hov = true;
         try { hov = panel.matches(":hover"); } catch (_) { hov = true; }
-        if (!hov) scheduleAuto(true, PIN_AUTOHIDE_LEAVE_MS);
+        if (!hov) scheduleAuto(true, getPinFoldLeaveMs());
     };
     btnAuto.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -1044,13 +1053,13 @@ function ensurePinPanel(node, st) {
         if (!cfg.pinAutoHide || cfg.pinMin) return;  // off / already folded
         if (drag || rszDrag) return;                 // gesture: endDrag decides
         if (hubPopupsOpen()) return;                 // busy in a picker
-        scheduleAuto(true, PIN_AUTOHIDE_LEAVE_MS);
+        scheduleAuto(true, getPinFoldLeaveMs());
     });
     panel.addEventListener("mouseenter", clearAuto); // back in time: no fold
     head.addEventListener("mouseenter", () => {
         const cfg = getHubConfig(node);
         if (!cfg.pinAutoHide || !cfg.pinMin) return; // only the FOLDED one
-        scheduleAuto(false, PIN_AUTOHIDE_HOVER_MS);  // hover intent, then open
+        scheduleAuto(false, getPinFoldHoverMs());  // hover intent, then open
     });
     head.addEventListener("mouseleave", clearAuto);  // intent aborted
 
@@ -1922,6 +1931,16 @@ function ensureSettingsPopupGlobalListeners() {
 // as an extra option here).
 const SET_THUMB_SIZE_CHOICES = [60, 76, 92, 120, 160, 200];
 
+// v58: labels for the preview-size select. The px numbers are the CSS
+// contract in styles.css (.hub-preview-* classes) - duplicated here ONLY
+// as display text, never as layout values.
+const SET_PREVIEW_SIZE_LABELS = {
+    S: "small · 260 px",
+    M: "default · 340 px",
+    L: "large · 480 px",
+    XL: "extra large · 680 px",
+};
+
 function openSettingsPopup(node, trigger) {
     // Toggle behavior mirrors the combo / gear triggers.
     if (setPopState?.trigger === trigger) { closeSettingsPopup(); return; }
@@ -1963,10 +1982,22 @@ function openSettingsPopup(node, trigger) {
         PREVIEW_HIDE_CHOICES.map((ms) =>
             `<option value="${ms}">${esc(previewDelayLabel(ms))}</option>`).join("") +
         `</select></label>` +
+        `<label class="hub-set-row"><span>Preview size</span>` +
+        `<select data-set-role="prevsize">` +
+        PREVIEW_SIZE_CHOICES.map((sz) =>
+            `<option value="${sz}">${sz} · ${esc(SET_PREVIEW_SIZE_LABELS[sz])}</option>`).join("") +
+        `</select></label>` +
+        `<label class="hub-set-row"><span>Preview autoplay</span>` +
+        `<select data-set-role="prevauto">` +
+        `<option value="1">On (default)</option>` +
+        `<option value="0">Off - first frame, click to play</option>` +
+        `</select></label>` +
         `<div class="hub-pop-hint">Hover delay = how long the cursor must rest on a media-row thumb ` +
         `(in the hub) or a picker cell before the enlarged preview opens; "Instant (0 ms)" opens it ` +
         `immediately. Hide grace = how long the popup lingers after the cursor leaves (moving into ` +
         `the popup keeps it open regardless). ONE shared value for the picker and every hub. ` +
+        `Size scales the enlarged popup (M = the historical 340 px box; an open popup resizes in ` +
+        `place). Autoplay Off mounts video/audio PAUSED with their controls - a click starts them. ` +
         `Global, applied to the very next hover.</div>` +
 
         `<div class="hub-set-section">Picker</div>` +
@@ -1976,7 +2007,23 @@ function openSettingsPopup(node, trigger) {
             `<option value="${px}">${px} px${px === MEDIA_THUMB_SIZE_DEFAULT ? " · default" : ""}</option>`).join("") +
         `</select></label>` +
         `<div class="hub-pop-hint">Same stored value as the Size slider in the picker toolbar - ` +
-        `change it in either place.</div>`;
+        `change it in either place.</div>` +
+
+        `<div class="hub-set-section">Pin window</div>` +
+        `<label class="hub-set-row"><span>Fold delay (cursor leaves)</span>` +
+        `<select data-set-role="pinfold">` +
+        PIN_FOLD_LEAVE_CHOICES.map((ms) =>
+            `<option value="${ms}">${esc(previewDelayLabel(ms))}${ms === PIN_FOLD_LEAVE_DEFAULT ? " · default" : ""}</option>`).join("") +
+        `</select></label>` +
+        `<label class="hub-set-row"><span>Re-open hover delay</span>` +
+        `<select data-set-role="pinopen">` +
+        PIN_FOLD_HOVER_CHOICES.map((ms) =>
+            `<option value="${ms}">${esc(previewDelayLabel(ms))}${ms === PIN_FOLD_HOVER_DEFAULT ? " · default" : ""}</option>`).join("") +
+        `</select></label>` +
+        `<div class="hub-pop-hint">Timings of the ⇲ auto-collapse mode (the per-hub toggle in the pin ` +
+        `window header stays the ON/OFF switch). Fold delay = how long the cursor may stay away from ` +
+        `a floating pinned window before it folds; re-open delay = hover intent on the folded title ` +
+        `before it expands again. Global for every pinned hub, applied to the very next leave/hover.</div>`;
     document.body.appendChild(pop);
 
     setPopState = { node, trigger, pop };
@@ -2011,6 +2058,27 @@ function openSettingsPopup(node, trigger) {
         flashBtn(trigger, "✓");
     });
 
+    // --- Previews: popup size (v58) ------------------------------------------
+    // A LIVE preview popup is re-classed in place; the next build picks the
+    // size up regardless (applyPreviewSizeClass reads at build time).
+    const psSel = pop.querySelector('[data-set-role="prevsize"]');
+    psSel.value = String(getPreviewSize());
+    psSel.addEventListener("change", () => {
+        psSel.value = String(setPreviewSize(psSel.value));
+        if (mediaPreviewState?.pop) applyPreviewSizeClass(mediaPreviewState.pop);
+        flashBtn(trigger, "✓");
+    });
+
+    // --- Previews: autoplay (v58) --------------------------------------------
+    // Applies to the NEXT popup build - a video that is already open keeps
+    // playing/paused as it is (restarting media under the cursor is rude).
+    const paSel = pop.querySelector('[data-set-role="prevauto"]');
+    paSel.value = getPreviewAutoplay() ? "1" : "0";
+    paSel.addEventListener("change", () => {
+        setPreviewAutoplay(paSel.value === "1");
+        flashBtn(trigger, "✓");
+    });
+
     // --- Picker: thumbnail size (v57) ---------------------------------------
     // Same localStorage key as the v52 in-picker slider. If a picker is
     // open, resize its grid in place and mirror the value onto the
@@ -2023,6 +2091,24 @@ function openSettingsPopup(node, trigger) {
         if (mediaThumbState?.grid) applyMediaThumbSize(mediaThumbState.grid, applied);
         if (mediaThumbState?.sizeInput) mediaThumbState.sizeInput.value = String(applied);
         if (mediaThumbState?.sizeVal) mediaThumbState.sizeVal.textContent = String(applied);
+        flashBtn(trigger, "✓");
+    });
+
+    // --- Pin window: auto-collapse timings (v58) -----------------------------
+    // The engine reads getPinFoldLeaveMs()/getPinFoldHoverMs() at EVENT TIME
+    // (never caches), so the next cursor-leave / folded-title hover uses the
+    // new delay - no rebuild needed.
+    const pfSel = pop.querySelector('[data-set-role="pinfold"]');
+    pfSel.value = String(getPinFoldLeaveMs());
+    pfSel.addEventListener("change", () => {
+        pfSel.value = String(setPinFoldLeaveMs(pfSel.value));
+        flashBtn(trigger, "✓");
+    });
+
+    const poSel = pop.querySelector('[data-set-role="pinopen"]');
+    poSel.value = String(getPinFoldHoverMs());
+    poSel.addEventListener("change", () => {
+        poSel.value = String(setPinFoldHoverMs(poSel.value));
         flashBtn(trigger, "✓");
     });
 
@@ -3599,8 +3685,9 @@ function updateMediaThumbHint() {
 // ===========================================================================
 // v47 task 2: hover preview popup — enlarged media on mouseenter over
 // the 40x30 thumb. Body-level fixed; closes on mouseleave / scroll / Esc
-// / any mousedown. Video gets <controls autoplay muted loop>; audio gets
-// <audio controls> + filename.
+// / any mousedown. v58: the media element comes from previewMediaTag() —
+// video/audio autoplay only while the global "Preview autoplay" preference
+// is On (muted + native controls either way); audio also gets a filename.
 // ===========================================================================
 
 let mediaPreviewState = null; // { pop, hideTimer, showTimer? }
@@ -3611,6 +3698,32 @@ let mediaPreviewGlobalWired = false;
 // a change in the ⚙ popup affects the very next hover. Defaults remain the
 // historical constants: 200ms dwell, 300ms hide grace; one shared value
 // for the picker cells AND the hub row previews (by design).
+//
+// v58: the popup SIZE and media AUTOPLAY are global preferences too. The
+// size lands as a .hub-preview-{s,m,l,xl} class on the popup root (CSS
+// variables in styles.css scale the box + the media max-height; M = the
+// historical 340x280). Autoplay Off drops the `autoplay` attribute - the
+// element keeps its native controls and waits for a click (muted stays ON:
+// browser autoplay policy; the v27 audio preference is for hub viewer
+// players, not these hover popups). Both are read at popup BUILD time; a
+// size change in the ⚙ popup re-classes a LIVE popup in place (see the
+// prevsize wiring).
+
+/** v58: land the current global size preset on a preview popup root. */
+function applyPreviewSizeClass(pop) {
+    pop.classList.remove("hub-preview-s", "hub-preview-m", "hub-preview-l", "hub-preview-xl");
+    pop.classList.add("hub-preview-" + String(getPreviewSize() || "M").toLowerCase());
+}
+
+/** v58: media element for a preview popup with the current autoplay
+ *  preference applied (audio included - a track that starts blaring on a
+ *  stray hover is just as intrusive as a video one). */
+function previewMediaTag(kind, url) {
+    const auto = getPreviewAutoplay() ? " autoplay" : "";
+    if (kind === "video") return `<video src="${esc(url)}" controls${auto} muted loop playsinline></video>`;
+    if (kind === "audio") return `<audio src="${esc(url)}" controls${auto}></audio>`;
+    return `<img src="${esc(url)}" alt="">`;
+}
 
 function closeMediaPreviewPopup() {
     if (!mediaPreviewState) return;
@@ -3673,15 +3786,12 @@ function showMediaPreviewPopup(node, item, srcEl) {
     const kind = item.options?.media?.kind || "image";
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-media-preview-pop";
-    if (kind === "video") {
-        pop.innerHTML = `<video src="${esc(url)}" controls autoplay muted loop playsinline></video>`;
-    } else if (kind === "audio") {
-        pop.innerHTML = `<audio src="${esc(url)}" controls autoplay></audio>` +
-            `<div class="hub-media-preview-name">${esc(name)}</div>`;
-    } else {
-        pop.innerHTML = `<img src="${esc(url)}" alt="">` +
-            `<div class="hub-media-preview-name">${esc(name)}</div>`;
-    }
+    applyPreviewSizeClass(pop);   // v58: S/M/L/XL preset class
+    // v58: autoplay follows the global preference (Off = video shows its
+    // first frame with controls). The row popup never showed a filename
+    // line under a video - kept verbatim.
+    pop.innerHTML = previewMediaTag(kind, url) +
+        (kind === "video" ? "" : `<div class="hub-media-preview-name">${esc(name)}</div>`);
     document.body.appendChild(pop);
     mediaPreviewState = { pop, hideTimer: 0 };
     positionMediaPreviewPopup(pop, srcEl);
@@ -3711,16 +3821,11 @@ function showMediaThumbCellPreview(cell) {
     const name = cut >= 0 ? path.slice(cut + 1) : path;
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-media-preview-pop";
-    if (kind === "video") {
-        pop.innerHTML = `<video src="${esc(url)}" controls autoplay muted loop playsinline></video>` +
-            `<div class="hub-media-preview-name">${esc(name)}</div>`;
-    } else if (kind === "audio") {
-        pop.innerHTML = `<audio src="${esc(url)}" controls autoplay></audio>` +
-            `<div class="hub-media-preview-name">${esc(name)}</div>`;
-    } else {
-        pop.innerHTML = `<img src="${esc(url)}" alt="">` +
-            `<div class="hub-media-preview-name">${esc(name)}</div>`;
-    }
+    applyPreviewSizeClass(pop);   // v58: S/M/L/XL preset class
+    // v58: autoplay follows the global preference; the cell popup keeps
+    // its filename line for every kind.
+    pop.innerHTML = previewMediaTag(kind, url) +
+        `<div class="hub-media-preview-name">${esc(name)}</div>`;
     document.body.appendChild(pop);
     mediaPreviewState = { pop, hideTimer: 0, showTimer: 0 };
     positionMediaPreviewPopup(pop, cell);
