@@ -573,6 +573,44 @@ dev_plan.md            — исходный технический спек пр
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
 
+### v56: файл-драг на свёрнутом пин-хабе не разворачивал окно (полевой фикс v55) - тройной путь триггера, churn-гвард dragleave, бредкрамбы
+- ЗАПРОС (поле, после v55): «при наведении файлом на свернутый закрепленный
+  хаб он все равно не разворачивается».
+- ДИАГНОЗ: v55-механика ЗЕЛЕНАЯ на реальном Chromium-стенде (browser_stand.py,
+  Playwright: реальные DragEvent+DataTransfer с File - разворот по intent, дроп
+  на свёрнутый заголовок, роутинг, elementFromPoint над свёрнутым заголовком =
+  панель). Сбой environment-специфичный. Кандидаты: синтетический dragleave-churn
+  (relatedTarget=null при переходах курсора между детьми) срывал intent-таймер;
+  среды, где панельные листенеры не срабатывают; стале-кэш (v54 без баннера).
+- РЕШЕНИЕ (patch_v56_field_hardening.py + crumb rider, CRLF-safe):
+  (1) ТРОЙНОЙ ПУТЬ триггера: тело dragover вынесено в fileDragOver(e)
+  (идемпотентно: lastFileDrag + single-schedule guard) и доступно через панельный
+  dragover, панельный dragenter И document-capture net в ensurePinFileDragGlobals
+  (dragenter/dragover capture на document, роутинг в rec.fileDragOver по
+  contains(target); запись pinPanelRecords расширена fileDragOver).
+  (2) CHURN-ГВАРД dragleave: leave с координатами ВНУТРИ rect панели
+  игнорируется (Number.isFinite(clientX/Y)); отменяет intent только реальный
+  выход за границы. jsdom-события без координат (NaN) ведут себя по-старому.
+  (3) Recency-окно расширено до PIN_DRAG_EXPAND_MS*6 (1500мс) - переживает
+  разреженные dragover; dragenter тоже refreshed lastFileDrag.
+  (4) БРЕДКРАМБЫ (раз за сессию): первый drag над пин-окном печатает payload
+  types («v56 drag over a pinned hub window - payload types: [...]») - полевой
+  репорт отвечает сразу на два вопроса (события доходят? что в dragе? нет строки
+  = события не доходят); разворот печатает «pinned hub window re-opened for a
+  file drop».
+  (5) applyPinMin(min=true) снимает .hub-pin-filedrag - пунктир больше не
+  переживает ручное сворачивание (нашёл смоук B4a).
+- smoke_v55.mjs 61/61 (+W4b capture net, +B3d inside-coords dragleave);
+  browser_stand.py (Playwright/Chromium 143, реальные DragEvent+DataTransfer+File)
+  16/16: разворот по intent, dragleave rt=null cancel, дроп-роутинг, не-Files без
+  подсветки, bubbling с ребёнка, deep-child dragenter через net, inside-coords
+  churn-гвард, outside-coords cancel, оба бредкрамба, без page errors.
+- Баннер v56, styles.css?v=56.
+- Коммит: «fix(hub): v56 field hardening for the folded-pin file-drag expand -
+  triple-path trigger (panel dragover/dragenter + document-capture net),
+  coordinate-guarded dragleave cannot kill the intent anymore, one-per-session
+  payload breadcrumbs».
+
 ### v55: файл-драг разворачивает свёрнутый пин-хаб, задержка фильтров превью-пикеров, клик по превьюхе открывает пикер
 - ЗАПРОС (поле): (1) «при наведении драг дропом (когда тяну файл) на свернутой
   закрепленном хабе - разворачивать хаб, для возможности дропнуть в хаб файл»;

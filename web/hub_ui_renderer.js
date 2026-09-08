@@ -663,7 +663,13 @@ let pinCascade = 0;
 // auto-expand - a drag that ends (drop / dragend) anywhere must not leave
 // a pending expand timer behind. Iterates the live pinPanelRecords set
 // (v45), so torn-down panels need no private document listeners.
+// v56: the pair became a full CAPTURE NET - dragenter/dragover are also
+// observed at document level and routed to the owning panel via
+// rec.fileDragOver(e). The per-panel listeners stay, but they are no
+// longer the only path: whatever retargets/suppresses events at the
+// panel level cannot silently disable the expand anymore.
 let pinFileDragWired = false;
+let pinFileDragCrumbShown = false;
 function ensurePinFileDragGlobals() {
     if (pinFileDragWired) return;
     pinFileDragWired = true;
@@ -672,8 +678,22 @@ function ensurePinFileDragGlobals() {
             try { rec?.cancelDragExpand?.(); } catch (_) {}
         }
     };
+    const net = (e) => {
+        const t = e.target;
+        if (!t || !t.closest) return;
+        for (const rec of pinPanelRecords) {
+            try {
+                if (rec?.panel?.isConnected && rec.panel.contains(t)) {
+                    rec.fileDragOver?.(e);
+                    return;
+                }
+            } catch (_) {}
+        }
+    };
     document.addEventListener("drop", endAll, true);
     document.addEventListener("dragend", endAll, true);
+    document.addEventListener("dragenter", net, true);
+    document.addEventListener("dragover", net, true);
 }
 
 function isWrapInPanel(st) {
@@ -811,6 +831,9 @@ function savePinSizeFromRect(node, panel) {
 function applyPinMin(node, p, min) {
     const cfg = getHubConfig(node);
     cfg.pinMin = !!min;
+    // v56: folding clears the file-drag invitation - a stale dashed
+    // outline must not outlive the hover that armed it.
+    if (cfg.pinMin) p.panel.classList.remove("hub-pin-filedrag");
     p.panel.classList.toggle("hub-pin-collapsed", cfg.pinMin);
     applyPinSize(node, p.panel);
     p.btnMin.textContent = cfg.pinMin ? "+" : "–";
@@ -1028,13 +1051,23 @@ function ensurePinPanel(node, st) {
     });
     head.addEventListener("mouseleave", clearAuto);  // intent aborted
 
-    // --- v55: file-drag auto-expand + whole-window drop routing ----------
+    // --- v55/v56: file-drag auto-expand + whole-window drop routing -------
     // A FOLDED pinned window hides the media rows, so an OS file drag had
     // nowhere to land. While a file drag hovers the collapsed window, it
     // re-opens after a short intent delay (stray fly-overs stay folded);
     // a drop landed ON the folded title opens the window immediately and
     // routes the files into the first media row whose kind matches. The
     // row's own drop zone keeps priority (the root handler stopPropagation's).
+    // v56 hardening (field: "still does not re-open"): the SAME fileDragOver
+    // body is reachable through THREE paths - the panel dragover listener,
+    // the panel dragenter listener and the document-capture net (above) -
+    // and it is idempotent (lastFileDrag refresh + single-schedule guard),
+    // so whichever path fires first just works. dragleave cancels ONLY when
+    // the pointer coordinates actually left the panel bounds: Chromium
+    // churns synthetic dragleave(relatedTarget=null) while the cursor is
+    // still inside the window, and such leaves used to kill the pending
+    // intent timer. First detection logs a one-per-session breadcrumb so a
+    // field report is verifiable in F12.
     const PIN_DRAG_EXPAND_MS = 250;
     let dragExpandT = null;
     let lastFileDrag = 0;
@@ -1042,9 +1075,18 @@ function ensurePinPanel(node, st) {
         if (dragExpandT) { clearTimeout(dragExpandT); dragExpandT = null; }
         panel.classList.remove("hub-pin-filedrag");
     };
-    ensurePinFileDragGlobals();
-    panel.addEventListener("dragover", (e) => {
+    const fileDragOver = (e) => {
         const types = e.dataTransfer?.types;
+        // v56 rider: ONE diagnostic crumb for the FIRST drag seen over a
+        // pinned window - whatever its payload. A field report with this
+        // line answers both questions at once: events DO reach the panel
+        // and the drag carries types [...]. No line = events never got here.
+        if (!pinFileDragCrumbShown && e.type === "dragenter") {
+            pinFileDragCrumbShown = true;
+            let t = "";
+            try { t = types ? Array.from(types).join(", ") : "none"; } catch (_) {}
+            console.info("[SettingsHub] v56 drag over a pinned hub window - payload types: [" + t + "]");
+        }
         if (!types || !Array.from(types).includes("Files")) return;
         lastFileDrag = Date.now();
         // The whole floating window is a legal drop surface (the media
@@ -1059,15 +1101,27 @@ function ensurePinPanel(node, st) {
                 const c = getHubConfig(node);
                 if (!c.pinned || !c.pinMin || !panel.isConnected) return;
                 // Drag moved on / ended while the intent was pending.
-                if (Date.now() - lastFileDrag > PIN_DRAG_EXPAND_MS * 4) return;
+                if (Date.now() - lastFileDrag > PIN_DRAG_EXPAND_MS * 6) return;
                 applyPinMin(node, p, false);   // open for the incoming drop
+                console.info("[SettingsHub] pinned hub window re-opened for a file drop");
             }, PIN_DRAG_EXPAND_MS);
         }
-    });
+    };
+    ensurePinFileDragGlobals();
+    panel.addEventListener("dragover", fileDragOver);
+    panel.addEventListener("dragenter", fileDragOver);
     panel.addEventListener("dragleave", (e) => {
         const rt = e.relatedTarget;
         if (rt && panel.contains(rt)) return;  // moving between children
-        cancelDragExpand();                    // drag left before the intent
+        try {
+            // Synthetic churn guard: a leave whose coordinates are still
+            // inside the panel is not a real exit - keep the intent armed.
+            const r = panel.getBoundingClientRect();
+            const x = Number(e.clientX), y = Number(e.clientY);
+            if (Number.isFinite(x) && Number.isFinite(y) &&
+                x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return;
+        } catch (_) {}
+        cancelDragExpand();                    // drag truly left the window
     });
     panel.addEventListener("drop", (e) => {
         cancelDragExpand();
