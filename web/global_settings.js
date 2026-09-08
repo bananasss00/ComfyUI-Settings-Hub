@@ -31,6 +31,16 @@
 //   so the user mutes/unmutes/adjusts volume ONCE and every future video
 //   follows. Same philosophy as refreshMs: a user preference, NOT workflow
 //   state (localStorage, never node.properties).
+//
+//   v57 adds the GLOBAL media-preview timing preferences: the hover dwell
+//   (how long the cursor must rest on a hub media-row thumb or a picker
+//   thumbnail cell before the enlarged preview popup opens) and the hide
+//   grace (how long the popup lingers after the cursor leaves, allowing a
+//   move INTO the popup). Both were hardcoded module constants in the
+//   renderer (MEDIA_PREVIEW_SHOW_MS=200 / MEDIA_PREVIEW_HIDE_MS=300) and
+//   are now user preferences following the same contract: localStorage,
+//   normalized on read/write, one shared value for every hub (picker AND
+//   hub rows on purpose - one mental model, see the ⚙ popup hint).
 // ============================================================================
 
 import { allHubs } from "./core.js";
@@ -146,6 +156,76 @@ export function applyVideoAudio(el) {
         el.volume = videoVolume;
     } catch (_) { /* exotic element - keep mounting */ }
     return el;
+}
+
+// ---------------------------------------------------------------------------
+// v57: GLOBAL media-preview hover timings (dwell + hide grace)
+// ---------------------------------------------------------------------------
+// Consumers: hub_ui_renderer.js reads the values through the getters at
+// EVENT TIME (never caches them at module load), so a change in the ⚙ popup
+// affects the very next hover without any re-render. 0 ms dwell = the popup
+// opens on the first pointerover; 0 ms grace = the popup closes as soon as
+// the cursor leaves (moving into the popup still keeps it open while the
+// cursor is over it - that part is not timer-driven).
+
+const LS_PREVIEW_SHOW = "settingshub.previewShowMs";
+const LS_PREVIEW_HIDE = "settingshub.previewHideMs";
+
+/** Allowed dwell values (ms). 0 = open immediately on hover. */
+export const PREVIEW_SHOW_CHOICES = [0, 100, 200, 300, 500, 800, 1200];
+/** Allowed hide-grace values (ms). 0 = close as soon as the cursor leaves. */
+export const PREVIEW_HIDE_CHOICES = [0, 150, 300, 500, 800];
+
+const PREVIEW_SHOW_DEFAULT = 200;  // historical hardcoded dwell
+const PREVIEW_HIDE_DEFAULT = 300;  // historical hardcoded grace
+
+let previewShowMs = PREVIEW_SHOW_DEFAULT;
+let previewHideMs = PREVIEW_HIDE_DEFAULT;
+
+// Boot: restore the persisted preferences (if any) once per page load.
+try {
+    const v = Number(localStorage.getItem(LS_PREVIEW_SHOW));
+    if (Number.isFinite(v) && PREVIEW_SHOW_CHOICES.includes(v)) previewShowMs = v;
+} catch (_) { /* no storage - the default dwell stands */ }
+try {
+    const v = Number(localStorage.getItem(LS_PREVIEW_HIDE));
+    if (Number.isFinite(v) && PREVIEW_HIDE_CHOICES.includes(v)) previewHideMs = v;
+} catch (_) { /* no storage - the default grace stands */ }
+
+/** Current hover dwell before a preview popup opens (ms). */
+export function getPreviewShowMs() { return previewShowMs; }
+
+/**
+ * Set the global hover dwell. Unknown values normalize to the default
+ * (200). Persists to localStorage. Returns the applied value.
+ */
+export function setPreviewShowMs(ms) {
+    const n = Math.round(Number(ms));
+    previewShowMs = PREVIEW_SHOW_CHOICES.includes(n) ? n : PREVIEW_SHOW_DEFAULT;
+    try { localStorage.setItem(LS_PREVIEW_SHOW, String(previewShowMs)); }
+    catch (_) { /* private mode etc. - session-only preference */ }
+    return previewShowMs;
+}
+
+/** Current hide grace before a preview popup closes (ms). */
+export function getPreviewHideMs() { return previewHideMs; }
+
+/**
+ * Set the global hide grace. Unknown values normalize to the default
+ * (300). Persists to localStorage. Returns the applied value.
+ */
+export function setPreviewHideMs(ms) {
+    const n = Math.round(Number(ms));
+    previewHideMs = PREVIEW_HIDE_CHOICES.includes(n) ? n : PREVIEW_HIDE_DEFAULT;
+    try { localStorage.setItem(LS_PREVIEW_HIDE, String(previewHideMs)); }
+    catch (_) { /* private mode etc. - session-only preference */ }
+    return previewHideMs;
+}
+
+/** Human-readable label for the preview delay selects. */
+export function previewDelayLabel(ms) {
+    if (!ms) return "Instant (0 ms)";
+    return `${ms} ms`;
 }
 
 /** Test hook: run one poller pass immediately (bypasses the hidden guard). */

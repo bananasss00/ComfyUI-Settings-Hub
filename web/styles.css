@@ -1899,6 +1899,25 @@ button.hub-pin-back {
     padding: 8px;
 }
 
+/* v57: section headers inside the settings popup (Sync / Previews / Picker).
+   Quiet uppercase divider - keeps the growing settings list scannable. */
+.hub-set-section {
+    margin: 10px 2px 2px;
+    padding-top: 7px;
+    border-top: 1px solid #26263e;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: #6f6f95;
+}
+/* The first section sits right under the popup title - no top border. */
+.hub-set-pop .hub-menu-title + .hub-set-section {
+    margin-top: 6px;
+    padding-top: 0;
+    border-top: none;
+}
+
 .hub-set-row {
     display: flex;
     align-items: center;

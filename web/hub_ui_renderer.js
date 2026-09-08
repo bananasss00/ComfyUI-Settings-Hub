@@ -43,7 +43,10 @@ import { writeTargetValue, ensureHooksForItem, invokeTargetButton } from "./sync
 import { beginEdit, endEdit, registerStructural, registerValues, syncNode, refreshNodeValues } from "./sync.js";
 import { initDrag } from "./dnd_manager.js";
 import * as Portals from "./portal_manager.js";
-import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel } from "./global_settings.js";
+import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel,
+         PREVIEW_SHOW_CHOICES, PREVIEW_HIDE_CHOICES,
+         getPreviewShowMs, setPreviewShowMs, getPreviewHideMs, setPreviewHideMs,
+         previewDelayLabel } from "./global_settings.js";
 import { firstMediaSpec } from "./viewer_gallery.js";
 
 // Layout allowances. The title bar height is taken from LiteGraph when
@@ -1576,8 +1579,9 @@ function chooseComboValue(node, trigger, value) {
 // ---------------------------------------------------------------------------
 // Filter inputs of the media pickers (thumbnail picker, combo popup)
 // repaint their lists after a short typing pause instead of on EVERY
-// keystroke - the same intent-delay idea as MEDIA_PREVIEW_SHOW_MS (the
-// hover dwell). The thumbnail grid is the painful case: every keystroke
+// keystroke - the same intent-delay idea as the global preview dwell
+// ("Preview hover delay" in the ⚙ popup, global_settings.js). The
+// thumbnail grid is the painful case: every keystroke
 // rebuilt the grid and remounted its media elements (flicker + scroll
 // churn); big combo lists churned the same way. Keydown handlers (Enter
 // / arrows) flush the pending repaint so keyboard selection always
@@ -1881,6 +1885,11 @@ function openNumPopup(node, trigger) {
 // Same body-level fixed-popup pattern as the combo / gear popups (immune to
 // hub scroll clipping, one global closer pair). The backing state lives in
 // global_settings.js - GLOBAL across hubs, persisted in localStorage.
+// v57: the popup grew SECTION headers (Sync / Previews / Picker) and hosts
+// the media-preview timing preferences (hover delay + hide grace, shared by
+// the picker cells and the hub row previews) plus the picker thumbnail size
+// (same localStorage value as the in-picker Size slider - one storage, two
+// doors; an open picker is kept in lockstep by the change handler).
 
 let setPopState = null; // { node, trigger, pop }
 let setPopGlobalWired = false;
@@ -1908,6 +1917,11 @@ function ensureSettingsPopupGlobalListeners() {
     wirePopupOutsideClosers('settings', () => setPopState, closeSettingsPopup);
 }
 
+// v57: preset values for the picker thumbnail size select (the in-picker
+// slider stays free-form 60..200 step 4; a dragged value simply shows up
+// as an extra option here).
+const SET_THUMB_SIZE_CHOICES = [60, 76, 92, 120, 160, 200];
+
 function openSettingsPopup(node, trigger) {
     // Toggle behavior mirrors the combo / gear triggers.
     if (setPopState?.trigger === trigger) { closeSettingsPopup(); return; }
@@ -1917,10 +1931,18 @@ function openSettingsPopup(node, trigger) {
     closePresetPicker();
     closePresetQuickSave();
 
+    // Thumbnail-size options = presets ∪ current (a slider-dragged value
+    // is not lost; sorted numerically, duplicates removed).
+    const curThumb = getMediaThumbSize();
+    const thumbChoices = [...new Set([...SET_THUMB_SIZE_CHOICES, curThumb])]
+        .sort((a, b) => a - b);
+
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-set-pop";
     pop.innerHTML =
         `<div class="hub-menu-title">⚙ Hub settings</div>` +
+
+        `<div class="hub-set-section">Sync</div>` +
         `<label class="hub-set-row"><span>Mirror update rate</span>` +
         `<select data-set-role="refresh">` +
         REFRESH_CHOICES.map((ms) =>
@@ -1928,12 +1950,39 @@ function openSettingsPopup(node, trigger) {
         `</select></label>` +
         `<div class="hub-pop-hint">How fast mirrors follow values that change WITHOUT events ` +
         `(node scripts, backend updates, onExecuted patches). "Events only" = zero background polling. ` +
-        `Global for every hub.</div>`;
+        `Global for every hub.</div>` +
+
+        `<div class="hub-set-section">Previews</div>` +
+        `<label class="hub-set-row"><span>Preview hover delay</span>` +
+        `<select data-set-role="prevshow">` +
+        PREVIEW_SHOW_CHOICES.map((ms) =>
+            `<option value="${ms}">${esc(previewDelayLabel(ms))}</option>`).join("") +
+        `</select></label>` +
+        `<label class="hub-set-row"><span>Preview hide grace</span>` +
+        `<select data-set-role="prevhide">` +
+        PREVIEW_HIDE_CHOICES.map((ms) =>
+            `<option value="${ms}">${esc(previewDelayLabel(ms))}</option>`).join("") +
+        `</select></label>` +
+        `<div class="hub-pop-hint">Hover delay = how long the cursor must rest on a media-row thumb ` +
+        `(in the hub) or a picker cell before the enlarged preview opens; "Instant (0 ms)" opens it ` +
+        `immediately. Hide grace = how long the popup lingers after the cursor leaves (moving into ` +
+        `the popup keeps it open regardless). ONE shared value for the picker and every hub. ` +
+        `Global, applied to the very next hover.</div>` +
+
+        `<div class="hub-set-section">Picker</div>` +
+        `<label class="hub-set-row"><span>Picker thumbnail size</span>` +
+        `<select data-set-role="thumbsize">` +
+        thumbChoices.map((px) =>
+            `<option value="${px}">${px} px${px === MEDIA_THUMB_SIZE_DEFAULT ? " · default" : ""}</option>`).join("") +
+        `</select></label>` +
+        `<div class="hub-pop-hint">Same stored value as the Size slider in the picker toolbar - ` +
+        `change it in either place.</div>`;
     document.body.appendChild(pop);
 
     setPopState = { node, trigger, pop };
     ensureSettingsPopupGlobalListeners();
 
+    // --- Sync: mirror update rate (v26) ------------------------------------
     const sel = pop.querySelector('[data-set-role="refresh"]');
     sel.value = String(getRefreshMs());
     if (sel.value !== String(getRefreshMs())) sel.value = "0"; // stale persisted value
@@ -1941,6 +1990,39 @@ function openSettingsPopup(node, trigger) {
         const applied = setRefreshMs(sel.value);
         sel.value = String(applied);
         trigger.classList.toggle("hub-settings-on", getRefreshMs() > 0);
+        flashBtn(trigger, "✓");
+    });
+
+    // --- Previews: hover dwell (v57) ----------------------------------------
+    // Picker cells AND hub row previews read this getter at event time, so
+    // the change applies to the very next hover - no re-render needed.
+    const showSel = pop.querySelector('[data-set-role="prevshow"]');
+    showSel.value = String(getPreviewShowMs());
+    showSel.addEventListener("change", () => {
+        showSel.value = String(setPreviewShowMs(showSel.value));
+        flashBtn(trigger, "✓");
+    });
+
+    // --- Previews: hide grace (v57) -----------------------------------------
+    const hideSel = pop.querySelector('[data-set-role="prevhide"]');
+    hideSel.value = String(getPreviewHideMs());
+    hideSel.addEventListener("change", () => {
+        hideSel.value = String(setPreviewHideMs(hideSel.value));
+        flashBtn(trigger, "✓");
+    });
+
+    // --- Picker: thumbnail size (v57) ---------------------------------------
+    // Same localStorage key as the v52 in-picker slider. If a picker is
+    // open, resize its grid in place and mirror the value onto the
+    // toolbar slider + readout so the two controls never disagree.
+    const tsSel = pop.querySelector('[data-set-role="thumbsize"]');
+    tsSel.value = String(curThumb);
+    tsSel.addEventListener("change", () => {
+        const applied = setMediaThumbSize(tsSel.value);
+        tsSel.value = String(applied);
+        if (mediaThumbState?.grid) applyMediaThumbSize(mediaThumbState.grid, applied);
+        if (mediaThumbState?.sizeInput) mediaThumbState.sizeInput.value = String(applied);
+        if (mediaThumbState?.sizeVal) mediaThumbState.sizeVal.textContent = String(applied);
         flashBtn(trigger, "✓");
     });
 
@@ -3348,6 +3430,11 @@ async function openMediaThumbPicker(node, item, trigger) {
         search: pop.querySelector(".hub-combo-search"),
         grid: pop.querySelector(".hub-media-thumb-grid"),
         hint: pop.querySelector(".hub-media-thumb-hint"),
+        // v57: toolbar size-slider refs - the ⚙ popup's "Picker thumbnail
+        // size" select keeps them in lockstep when it changes the size
+        // while a picker is somehow still open (both popups can coexist).
+        sizeInput: pop.querySelector(".hub-media-thumb-size-input"),
+        sizeVal: pop.querySelector("[data-size-val]"),
         vals: vals0, filtered: vals0,
         state,
         tw,
@@ -3427,10 +3514,11 @@ async function openMediaThumbPicker(node, item, trigger) {
     });
 
     // v53: hover a thumbnail cell -> enlarged preview popup (same popup as
-    // the row-preview, reusing mediaPreviewState). Dwell delay (200ms)
-    // filters accidental pass-throughs; the popup's own mouseenter
-    // cancels a pending hide so the user can move into it. Leaving the
-    // cell starts a 300ms grace hide (also cancellable by re-entering).
+    // the row-preview, reusing mediaPreviewState). Dwell delay (global
+    // "Preview hover delay" setting, default 200ms) filters accidental
+    // pass-throughs; the popup's own mouseenter cancels a pending hide so
+    // the user can move into it. Leaving the cell starts the hide grace
+    // (global setting, default 300ms; also cancellable by re-entering).
     mediaThumbState.grid.addEventListener("pointerover", (e) => {
         const cell = e.target.closest?.(".hub-media-thumb");
         if (!cell) return;
@@ -3453,7 +3541,7 @@ async function openMediaThumbPicker(node, item, trigger) {
             if (!stillThere) return;
             showMediaThumbCellPreview(stillThere);
             if (mediaPreviewState?.pop) mediaPreviewState.pop.dataset.cellIdx = idx;
-        }, MEDIA_PREVIEW_SHOW_MS);
+        }, getPreviewShowMs());
         if (!mediaPreviewState) mediaPreviewState = { pop: null, hideTimer: 0, showTimer: 0 };
         mediaPreviewState.showTimer = showTimer;
     });
@@ -3466,7 +3554,7 @@ async function openMediaThumbPicker(node, item, trigger) {
         if (!mediaPreviewState) return;
         // Cancel any pending SHOW (we left before the dwell expired).
         if (mediaPreviewState.showTimer) { clearTimeout(mediaPreviewState.showTimer); mediaPreviewState.showTimer = 0; }
-        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), MEDIA_PREVIEW_HIDE_MS);
+        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), getPreviewHideMs());
     });
 }
 
@@ -3515,10 +3603,14 @@ function updateMediaThumbHint() {
 // <audio controls> + filename.
 // ===========================================================================
 
-let mediaPreviewState = null; // { pop, hideTimer }
+let mediaPreviewState = null; // { pop, hideTimer, showTimer? }
 let mediaPreviewGlobalWired = false;
-const MEDIA_PREVIEW_SHOW_MS = 200;  // hover dwell before showing
-const MEDIA_PREVIEW_HIDE_MS = 300;  // grace before hiding (allows moving into the popup)
+// v57: the dwell/grace are GLOBAL preferences now (global_settings.js,
+// localStorage "settingshub.previewShowMs" / "settingshub.previewHideMs").
+// Read them at EVENT TIME through the getters - never cache them here - so
+// a change in the ⚙ popup affects the very next hover. Defaults remain the
+// historical constants: 200ms dwell, 300ms hide grace; one shared value
+// for the picker cells AND the hub row previews (by design).
 
 function closeMediaPreviewPopup() {
     if (!mediaPreviewState) return;
@@ -3599,7 +3691,7 @@ function showMediaPreviewPopup(node, item, srcEl) {
     });
     pop.addEventListener("mouseleave", () => {
         if (!mediaPreviewState) return;
-        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), MEDIA_PREVIEW_HIDE_MS);
+        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), getPreviewHideMs());
     });
 }
 
@@ -3637,7 +3729,7 @@ function showMediaThumbCellPreview(cell) {
     });
     pop.addEventListener("mouseleave", () => {
         if (!mediaPreviewState) return;
-        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), MEDIA_PREVIEW_HIDE_MS);
+        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), getPreviewHideMs());
     });
 }
 
@@ -4925,8 +5017,9 @@ function wireEvents(node, st) {
     });
 
     // v47 task 2: hover the media preview thumb -> enlarged popup.
-    // Dwell delay (200ms) filters accidental pass-throughs; the popup's
-    // own mouseenter cancels a pending hide so the user can move into it.
+    // Dwell delay (global "Preview hover delay" setting, default 200ms)
+    // filters accidental pass-throughs; the popup's own mouseenter cancels
+    // a pending hide so the user can move into it.
     root.addEventListener("pointerover", (e) => {
         const prev = e.target.closest?.('[data-role="media-prev"]');
         if (!prev) return;
@@ -4946,7 +5039,7 @@ function wireEvents(node, st) {
             const timer = setTimeout(() => {
                 showMediaPreviewPopup(node, item, prev);
                 if (mediaPreviewState?.pop) mediaPreviewState.pop.dataset.srcItem = item.id;
-            }, MEDIA_PREVIEW_SHOW_MS);
+            }, getPreviewShowMs());
             mediaPreviewState = { pop: null, hideTimer: timer };
         }
     });
@@ -4957,7 +5050,7 @@ function wireEvents(node, st) {
         // Still inside the same row (or the popup itself) -> don't hide.
         if (rt && (prev.contains(rt) || (mediaPreviewState?.pop?.contains(rt)))) return;
         if (!mediaPreviewState) return;
-        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), MEDIA_PREVIEW_HIDE_MS);
+        mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), getPreviewHideMs());
     });
 
     // v30 media rows: upload picker + drag&drop routing. The drop zone is

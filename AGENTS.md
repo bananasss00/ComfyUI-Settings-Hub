@@ -106,6 +106,14 @@ web/hub_ui_renderer.js — весь UI хаба: табы, строки зерк
                          endRsz -> autoHideCheck) и body-попапов
                          (.hub-menu/.hub-batch/.hub-toast/
                          .hub-fs-overlay), кнопка ⇲ в шапке пин-панели
+                         v57: hover-dwell/grace превью (пикерные ячейки +
+                         медиа-строки хаба) читают ГЛОБАЛЬНЫЕ настройки
+                         (getPreviewShowMs/getPreviewHideMs в момент
+                         события, без кэша); ⚙-попап настроек с секциями
+                         Sync/Previews/Picker + контрол thumb-size пикера
+                         (единый storage со слайдером тулбара, живая
+                         синхронизация открытого пикера через
+                         mediaThumbState.sizeInput/sizeVal)
 web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode;
                          afterConfigureGraph первым делом зовёт
@@ -180,6 +188,12 @@ web/global_settings.js — ГЛОБАЛЬНЫЕ настройки хаба (v26
                          setVideoAudio / applyVideoAudio)
                          опциональный catch-up поллер refreshNodeValues по
                          всем хабам; 0 = только события (дефолт)
+                         v57: глобальные тайминги превью — hover-dwell
+                         settingshub.previewShowMs (0/100/200/300/500/800/1200,
+                         дефолт 200) и hide-grace settingshub.previewHideMs
+                         (0/150/300/500/800, дефолт 300) + previewDelayLabel;
+                         сеттеры нормализуют к списку, геттеры читаются
+                         рендерером В МОМЕНТ события (без кэша)
 web/dnd_manager.js     — HTML5 DnD: reorder строк, drop на вкладку = перенос
 web/pins.js            — кэш счётчиков пинов для бейджа 📌
 web/styles.css         — все стили (тёмная тема); классы *.hub-*
@@ -572,6 +586,57 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v57: глобальные настройки превью в ⚙-попапе - hover-delay (одна на пикер и хаб), hide-grace, thumb-size пикера; секции в попапе настроек
+- ЗАПРОС (поле): (1) «нужно в глобальные настройки добавить параметр, через
+  какое время открываются превьюхи при наведении мыши в пикере и в самом
+  хабе на превьюшке»; (2) «какие бы параметры в настройки добавить для
+  большей кастомизации?» (по ответам: hide-grace + thumb-size пикера;
+  контрол - select-варианты; одна общая задержка; попап с подзаголовками).
+- ДИАГНОЗ: dwell/grace были хардкодом рендерера - MEDIA_PREVIEW_SHOW_MS=200
+  (v47 row-preview + v53 picker cells) и MEDIA_PREVIEW_HIDE_MS=300 (все
+  пути скрытия попапа). Пользовательская калибровка невозможна: на больших
+  папках 200ms провоцирует ложные показы при пролёте курсора, на маленьких
+  наоборот хочется мгновенно.
+- РЕШЕНИЕ (без patch-скрипта, прямые правки; CRLF не трогаем):
+  (1) global_settings.js - секция v57: LS-ключи settingshub.previewShowMs /
+  settingshub.previewHideMs, PREVIEW_SHOW_CHOICES [0,100,200,300,500,800,1200]
+  / PREVIEW_HIDE_CHOICES [0,150,300,500,800] (0 = Instant / закрыть сразу),
+  дефолты - исторические 200/300; boot-restore принимает ТОЛЬКО значения из
+  списка; сеттеры нормализуют чужое к дефолту и пишут localStorage;
+  previewDelayLabel(ms) - лейблы «Instant (0 ms)» / «N ms».
+  (2) hub_ui_renderer.js - константы УДАЛЕНЫ; все места использования
+  (2 dwell: грид пикера v53 + медиа-строки хаба v47; 5 grace: pointerout
+  обоих источников, mouseleave обоих билдеров попапа) читают
+  getPreviewShowMs()/getPreviewHideMs() В МОМЕНТ события - смена в ⚙
+  действует на следующий же hover БЕЗ ререндера (инвариант: не кэшировать).
+  (3) openSettingsPopup - секции .hub-set-section (Sync / Previews /
+  Picker; styles.css: тихий uppercase, первая секция без бордера) + три
+  новых контрола: «Preview hover delay» (общий, хинт объясняет контракт
+  ОДНОГО значения на пикер и хаб), «Preview hide grace», «Picker thumbnail
+  size» - ОДИН storage со слайдером тулбара пикера v52
+  (settingshub.mediaThumbSize): опции = пресеты [60,76,92,120,160,200] ∪
+  текущее значение (слайдер тащили на не-пресет - значение не теряется,
+  сортировка числовая, дубликаты сняты); при change в ⚙ открытый пикер
+  ресайзится на живую (applyMediaThumbSize по mediaThumbState.grid) и
+  тулбар-слайдер/цифра синхронизируются через новые
+  mediaThumbState.sizeInput/sizeVal (оба попапа могут сосуществовать).
+  (4) НЕ тронуто: SEARCH_DEBOUNCE_MS=200 (v55), PIN_AUTOHIDE_* (v41),
+  PIN_DRAG_EXPAND_MS (v55/v56), акцент .hub-settings-on (семантика
+  «поллер запущен» сохранена).
+- ПРОВЕРКИ: node --check web/*.js (13 файлов) - чисто; wiring-ассерты
+  (W1-W6, 26 чеков): баннер v57 ДО css-линка, ?v=57 без следа 56,
+  экспорт-поверхность global_settings (7 символов), LS-ключи, ноль
+  упоминаний MEDIA_PREVIEW_SHOW_MS/HIDE_MS в рендерере (кроме шапки-
+  документации global_settings), счётчики мест геттеров (3 dwell = 2
+  hover-сайта + инициализация селекта; 5 grace), wiring попапа
+  (prevshow/prevhide/thumbsize + секции), lockstep открытого пикера,
+  инварианты v52/v55 не тронуты.
+- Баннер v57, styles.css?v=57.
+- Коммит: «feat(hub): v57 global preview settings in the ⚙ popup - shared
+  hover delay for picker cells + hub row previews, hide grace, picker
+  thumbnail size (one storage with the in-picker slider); sectioned
+  settings popup».
 
 ### v56: файл-драг на свёрнутом пин-хабе не разворачивал окно (полевой фикс v55) - тройной путь триггера, churn-гвард dragleave, бредкрамбы
 - ЗАПРОС (поле, после v55): «при наведении файлом на свернутый закрепленный

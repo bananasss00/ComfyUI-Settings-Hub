@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v56 - field hardening of the folded-pin file-drag expand: the trigger is now reachable through THREE paths (panel dragover + panel dragenter + a document-capture net routing to the owning panel), synthetic dragleave churn (relatedTarget=null while the cursor is still inside) no longer kills the pending intent, and the first file-drag detection logs a one-per-session console breadcrumb for verifiable field reports");
+console.info("[SettingsHub] web build: v57 - global preview settings in the ⚙ popup: 'Preview hover delay' (dwell before the enlarged preview opens - ONE shared value for the picker cells AND the hub row previews), 'Preview hide grace' (linger after the cursor leaves) and 'Picker thumbnail size' (the same storage as the in-picker Size slider, an open picker is resized in place); the settings popup is now grouped into Sync / Previews / Picker sections");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v56 - field hardening of the folded-pin f
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=56", import.meta.url).href;
+    link.href = new URL("styles.css?v=57", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
