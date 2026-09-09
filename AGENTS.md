@@ -124,6 +124,13 @@ web/hub_ui_renderer.js — весь UI хаба: табы, строки зерк
                          getPinFoldHoverMs в момент события; ⚙-попап:
                          строки Preview size/Preview autoplay + секция
                          Pin window (fold/re-open delay)
+                         v59: полевой фикс «мёртвого пикера» - открытие
+                         single-flight (mediaThumbOpenSeq + пост-await
+                         чекпойнт: строит попап только последний open),
+                         closeMediaThumbPicker сметает ВСЕ
+                         .hub-media-thumb-pop с body ДО null-state
+                         early-out (призраки умирают от любого closer'а),
+                         onSeg-гард: нет стейта -> закрыть, не падать
 web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode;
                          afterConfigureGraph первым делом зовёт
@@ -605,6 +612,52 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v59: полевой фикс «мёртвого пикера» - гонка async-открытия, попапы-призраки без стейта, TypeError в onSeg
+- ЗАПРОС (поле): «бывает пролагивает при открытии пикера инпутов из
+  закрепленного хаба, и пикер остается висеть на экране и у него не
+  показываются превьюхи (он мертвый груз), чтоб окошко пикера исчезло
+  помогает только обновить страницу»; при кликах по фильтрам image/audio
+  и смене сортировки в этом мертвом пикере - «hub_ui_renderer.js:3552
+  Uncaught TypeError: Cannot read properties of null (reading 'state')
+  at HTMLDivElement.onSeg».
+- ДИАГНОЗ: openMediaThumbPicker - async: await mediaFileList (рекурсивный
+  скан папки; холодный кэш = те самые «пролагивания») стоит ДО создания
+  попапа и стейта. Второй клик по триггеру в этом окне стартовал ВТОРУЮ
+  сборку (toggle-чек mediaThumbState?.trigger не срабатывал - стейт еще
+  null), и оба продолжения после await строили попап. Проигравший гонку
+  оставался на body БЕЗ стейта: (1) все closer'ы (mousedown/Escape/
+  outside) идут через closeMediaThumbPicker с early-out «if
+  (!mediaThumbState) return» - призрак НЕЗАКРЫВАЕМ (спасает только F5);
+  (2) синглтон IntersectionObserver после закрытия живого пикера
+  дисконнектится - немонтированные ячейки призрака никогда не получают
+  медиа = пустая сетка («мертвый груз»); (3) onSeg читал
+  mediaThumbState.state без гарда = точный TypeError из поля. Попапы
+  позиционируются от одного триггера в одну точку, поэтому пользователь
+  видит «один и тот же» пикер; после Esc живого верхним остается пустой
+  призрак.
+- РЕШЕНИЕ (три независимых слоя):
+  (1) single-flight open: mediaThumbOpenSeq++, пост-await чекпойнт
+  «openSeq !== mediaThumbOpenSeq -> return» - строит попап ТОЛЬКО
+  последний open, проигравшие не создают ничего;
+  (2) closeMediaThumbPicker сметает ВСЕ .hub-media-thumb-pop с body ДО
+  early-out (пикер - синглтон по дизайну; призрак умирает от любого
+  Esc/клика мимо/открытия нового) - незакрываемых попапов больше нет
+  в принципе;
+  (3) onSeg-гард: нет стейта -> closeMediaThumbPicker() + return вместо
+  TypeError (гвард ставит крест на всем классе таких крашей).
+- ПРОВЕРКИ: node --check чисто; scripts/wiring_v59.mjs (W1-W5, 14 чеков)
+  ALL PASSED: баннер v59 до css-линка ?v=59, токен + пост-await чекпойнт,
+  ЕДИНСТВЕННОЕ место сборки попапа, sweep до early-out, гард ДО чтения
+  state, инварианты v57 (3+5 геттеров) / v58 (size class 4х, mediaTag 3х,
+  pinfold/pinopen) на месте, ровно 1 гард (нет двойного закрытия живого
+  пикера), 3 места await mediaFileList (fill/open/reload), python-стаб
+  не тронут. wiring_v58.mjs после апгрейда падает только на двух
+  version-pinned чеках (баннер/?v=58) - ожидаемое доказательство
+  апгрейда.
+- Баннер v59, styles.css?v=59.
+- Коммит: «fix(hub): v59 field fix - dead media picker after a slow open»
+  (полная строка - в git log).
 
 ### v58: размер превью-попапа (S/M/L/XL), автоплей превью, глобальные тайминги авто-сворачивания пина
 - ЗАПРОС (поле): «сделай размер превью-попапа (S/M/L/XL), автоплей видео в

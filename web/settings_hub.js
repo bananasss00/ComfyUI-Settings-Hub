@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v58 - preview popup size presets (S/M/L/XL, M = the historical 340px box, an open popup resizes in place), preview autoplay toggle (video AND audio hover popups mount paused with controls when Off), and GLOBAL pin auto-collapse timings in the new ⚙ 'Pin window' section (fold delay after the cursor leaves + re-open hover intent on the folded title - both were hardcoded 450/220ms, read at event time so a change applies to the next leave/hover)");
+console.info("[SettingsHub] web build: v59 - field fix: the media picker could lag on open (folder-scan await) and a second trigger click during that window stacked a second popup; the loser stayed on screen as a stateless orphan (dead picker - empty grid, unclosable, toolbar click threw 'Cannot read properties of null (reading state)'). The open is single-flight now (only the latest build wins), closeMediaThumbPicker sweeps every leftover .hub-media-thumb-pop from the body, and the toolbar handler dismisses a stale popup instead of crashing");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v58 - preview popup size presets (S/M/L/X
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=58", import.meta.url).href;
+    link.href = new URL("styles.css?v=59", import.meta.url).href;
     document.head.appendChild(link);
 })();
 

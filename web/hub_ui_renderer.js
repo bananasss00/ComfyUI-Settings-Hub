@@ -3140,8 +3140,26 @@ async function cycleMediaSource(node, item, dir) {
 
 let mediaThumbState = null; // { node, item, trigger, cur, pop, search, grid, vals, filtered }
 let mediaThumbGlobalWired = false;
+// v59: single-flight open guard. openMediaThumbPicker AWAITS the folder
+// scan BEFORE any popup exists, so a second trigger click during that
+// window started a second build. The loser of that race stayed on the
+// body WITHOUT state - an orphan every closer ignores (they early-return
+// on null state), whose unmounted cells the singleton IntersectionObserver
+// never mounts (dead picker: empty grid), and whose toolbar click crashed
+// on mediaThumbState.state (field TypeError at onSeg). Only the LATEST
+// open may build a popup now, and closeMediaThumbPicker sweeps any
+// leftover popup element from the body.
+let mediaThumbOpenSeq = 0;
 
 function closeMediaThumbPicker() {
+    // v59: sweep ORPHAN popups too. Every closer funnels through here and
+    // used to early-return on null state, leaving a stale picker on the
+    // body with no way to dismiss it (page refresh was the only cure). The
+    // picker is a singleton by design - any .hub-media-thumb-pop still on
+    // the body dies together with the state, orphan or not.
+    try {
+        document.querySelectorAll(".hub-media-thumb-pop").forEach((el) => el.remove());
+    } catch (_) {}
     if (!mediaThumbState) return;
     // v51: tear down the IntersectionObserver so a closed picker leaves
     // no observer running (and no entries fire for detached cells).
@@ -3473,6 +3491,9 @@ async function openMediaThumbPicker(node, item, trigger) {
     closePresetPicker();
     closePresetQuickSave();
     closeMediaThumbPicker();
+    // v59: claim the single build slot. An open started EARLIER (its folder
+    // scan still in flight) aborts at its post-await checkpoint below.
+    const openSeq = ++mediaThumbOpenSeq;
     const { tn, tw } = findTarget(item);
     if (!tn || !tw) return;
     const cur = String(tw.value ?? "");
@@ -3482,6 +3503,10 @@ async function openMediaThumbPicker(node, item, trigger) {
     const itemKind = item.options?.media?.kind || "image";
     const state = { type: "auto", sort: "mtime" };
     const vals0 = await mediaFileList(item, tw, { kindFilter: state.type, sortMode: state.sort });
+    // v59: a newer open superseded this one while the scan was in flight
+    // (double-click on the trigger, another row's picker button, the
+    // toggle-reopen path). Build nothing - the winner owns the screen.
+    if (openSeq !== mediaThumbOpenSeq) return;
     ensureMediaThumbGlobalListeners();
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-media-thumb-pop";
@@ -3549,6 +3574,11 @@ async function openMediaThumbPicker(node, item, trigger) {
         if (!val) return;
         e.stopPropagation();
         e.preventDefault();
+        // v59: a stale popup must never crash here (field: TypeError on
+        // mediaThumbState.state at this exact line). No state = the popup
+        // is an orphan - dismiss it (the sweep inside removes every
+        // leftover picker element) instead of throwing.
+        if (!mediaThumbState) { closeMediaThumbPicker(); return; }
         if (mediaThumbState.state[seg] === val) return;
         segEl.querySelectorAll(".hub-media-thumb-seg-btn").forEach((b) => b.classList.remove("hub-on"));
         btn.classList.add("hub-on");
