@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v59 - field fix: the media picker could lag on open (folder-scan await) and a second trigger click during that window stacked a second popup; the loser stayed on screen as a stateless orphan (dead picker - empty grid, unclosable, toolbar click threw 'Cannot read properties of null (reading state)'). The open is single-flight now (only the latest build wins), closeMediaThumbPicker sweeps every leftover .hub-media-thumb-pop from the body, and the toolbar handler dismisses a stale popup instead of crashing");
+console.info("[SettingsHub] web build: v60 - field fix: the hub row hover-preview could pop up AFTER the cursor had already left and then never close (it covered everything until the user waved the cursor through it). Root cause: the row pointerover stored the pending SHOW timer in the hideTimer slot, and pointerout blind-overwrote that slot with the hide grace - orphaning the show timer. Any closer firing in between (scroll/mousedown/Esc/blur/pin fold) then cleared the state, the orphan still fired, and the popup was built into a fresh state with NO pending hide. Three layers now: the show timer lives in showTimer (like the picker cells since v53), pointerout cancels a pending show before scheduling the hide, and both show callbacks re-verify the anchor is still connected AND genuinely :hover - a slipped-through orphan can no longer materialize a popup under an absent cursor");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v59 - field fix: the media picker could l
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=59", import.meta.url).href;
+    link.href = new URL("styles.css?v=60", import.meta.url).href;
     document.head.appendChild(link);
 })();
 

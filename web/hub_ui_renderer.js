@@ -3654,7 +3654,11 @@ async function openMediaThumbPicker(node, item, trigger) {
             // have rebuilt the grid mid-dwell).
             const stillThere = mediaThumbState?.grid?.querySelector(
                 `.hub-media-thumb[data-idx="${idx}"]`);
-            if (!stillThere) return;
+            // v60: a rebuilt grid can serve a fresh node for the same idx
+            // that is NOT under the cursor anymore - only show while the
+            // cell is genuinely hovered (same last-line guard as the row
+            // preview above).
+            if (!stillThere || !stillThere.isConnected || !stillThere.matches(":hover")) return;
             showMediaThumbCellPreview(stillThere);
             if (mediaPreviewState?.pop) mediaPreviewState.pop.dataset.cellIdx = idx;
         }, getPreviewShowMs());
@@ -5172,10 +5176,26 @@ function wireEvents(node, st) {
         if (!sameItem) {
             if (mediaPreviewState) closeMediaPreviewPopup();
             const timer = setTimeout(() => {
+                // v60: the cursor may have left during the dwell (or the row
+                // been torn down by a pin fold/re-render) - only show while
+                // the anchor is still in the DOM AND genuinely hovered. Every
+                // cancel path must already have cleared this timer, but a
+                // slipped-through orphan must never pop a preview under a
+                // cursor that is somewhere else entirely.
+                if (!prev.isConnected || !prev.matches(":hover")) return;
                 showMediaPreviewPopup(node, item, prev);
                 if (mediaPreviewState?.pop) mediaPreviewState.pop.dataset.srcItem = item.id;
             }, getPreviewShowMs());
-            mediaPreviewState = { pop: null, hideTimer: timer };
+            // v60: the SHOW timer lives in showTimer (was hideTimer - v47 bug).
+            // pointerout replaces hideTimer with the hide grace WITHOUT
+            // clearing the pending show, so the old slot orphaned the show
+            // timer: it fired after the cursor had left, the popup was built
+            // into a fresh state { pop, hideTimer: 0 } with NO pending hide,
+            // and nothing would ever close it (the user had to wave the
+            // cursor through the popup to dismiss it). The picker-cell path
+            // already used showTimer correctly since v53 - the row path
+            // simply never caught up.
+            mediaPreviewState = { pop: null, hideTimer: 0, showTimer: timer };
         }
     });
     root.addEventListener("pointerout", (e) => {
@@ -5185,6 +5205,11 @@ function wireEvents(node, st) {
         // Still inside the same row (or the popup itself) -> don't hide.
         if (rt && (prev.contains(rt) || (mediaPreviewState?.pop?.contains(rt)))) return;
         if (!mediaPreviewState) return;
+        // v60: cancel a pending SHOW before scheduling the hide. This used
+        // to blind-overwrite hideTimer (which held the pending show timer)
+        // and orphan it - the show then fired with the cursor long gone.
+        if (mediaPreviewState.showTimer) { clearTimeout(mediaPreviewState.showTimer); mediaPreviewState.showTimer = 0; }
+        if (mediaPreviewState.hideTimer) { clearTimeout(mediaPreviewState.hideTimer); mediaPreviewState.hideTimer = 0; }
         mediaPreviewState.hideTimer = setTimeout(() => closeMediaPreviewPopup(), getPreviewHideMs());
     });
 
