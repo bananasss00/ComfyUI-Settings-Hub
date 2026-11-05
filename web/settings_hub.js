@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v61 - NEW FEATURE: navigation points (nav items). A hub row that JUMPS the camera to a saved place of the workflow: root canvas, a subgraph, or a subgraph nested inside another subgraph. Add via the ＋🧭 toolbar button (aim mode: click the canvas), re-place any point via its 📍 button or by dragging its canvas marker, per-point custom zoom in the point popover (default: zoom untouched - only panning). Targets resolve by subgraph UUID at jump time (BFS from the roots, same shape space as the pin resolver); a dead uuid degrades to an ⚠ orphan row. Also: the locate entry ladder moved to nav_points.js (locate + nav share ONE implementation) which fixes a latent `sleep is not defined` ReferenceError in the synthetic-dblclick fallback that used to kill that strategy silently");
+console.info("[SettingsHub] web build: v62 - FIX: nav-point jump drift. The v61 delta centering turned RELATIVE on real frontends (subgraph-open animations / view-restore / DPR layers answer the ds.offset write with a slope other than +1), so every click landed a bit further from the point. v62: centering is ABSOLUTE (offset = point - center/scale, written in one shot, verified through the canvas' own converter) + an empirical probe (measured d(world)/d(offset) response, Newton step - exact for ANY affine slope) + array-assignment fallback for getter/setter-backed offsets + a post-jump settle guard that re-asserts the center while a view-restore animation drags the camera away. Repeated clicks on the same point now land on exactly the same place");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v61 - NEW FEATURE: navigation points (nav
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=61", import.meta.url).href;
+    link.href = new URL("styles.css?v=62", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
