@@ -377,3 +377,50 @@ export function __refreshTickForTest() {
         try { refreshNodeValues(hub); } catch (_) {}
     }
 }
+
+// ============================================================================
+// v61: NAVIGATION preferences (nav points feature)
+// ----------------------------------------------------------------------------
+// Two global switches for the 🧭 nav-point feature (same philosophy as the
+// rest of this file: a USER preference, never workflow state - localStorage,
+// normalized on read/write, one value for every hub):
+//   * navMarkers   - paint nav points of the graph being browsed as small
+//                    draggable markers on the canvas (default ON);
+//   * navCanvasMenu- offer "🧭 Add navigation point here" in the canvas
+//                    right-click menu (default ON).
+// ============================================================================
+
+const LS_NAV_MARKERS = "settingshub.navMarkers";
+const LS_NAV_MENU = "settingshub.navCanvasMenu";
+
+function readBoolFlag(key, def) {
+    try {
+        const raw = localStorage.getItem(key);
+        if (raw === null || raw === "") return def;   // absent key ≠ false
+        return raw === "1";
+    } catch (_) { return def; }
+}
+
+function writeBoolFlag(key, v) {
+    try { localStorage.setItem(key, v ? "1" : "0"); }
+    catch (_) { /* private mode etc. - session-only preference */ }
+}
+
+let navMarkersOn = readBoolFlag(LS_NAV_MARKERS, true);
+let navMenuOn = readBoolFlag(LS_NAV_MENU, true);
+
+export function getNavMarkersOn() { return navMarkersOn; }
+
+export function setNavMarkersOn(on) {
+    navMarkersOn = on !== false;
+    writeBoolFlag(LS_NAV_MARKERS, navMarkersOn);
+    return navMarkersOn;
+}
+
+export function getNavMenuOn() { return navMenuOn; }
+
+export function setNavMenuOn(on) {
+    navMenuOn = on !== false;
+    writeBoolFlag(LS_NAV_MENU, navMenuOn);
+    return navMenuOn;
+}

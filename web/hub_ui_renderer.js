@@ -52,8 +52,22 @@ import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel,
          PIN_FOLD_LEAVE_CHOICES, PIN_FOLD_LEAVE_DEFAULT,
          PIN_FOLD_HOVER_CHOICES, PIN_FOLD_HOVER_DEFAULT,
          getPinFoldLeaveMs, setPinFoldLeaveMs,
-         getPinFoldHoverMs, setPinFoldHoverMs } from "./global_settings.js";
+         getPinFoldHoverMs, setPinFoldHoverMs,
+         getNavMarkersOn, setNavMarkersOn,
+         getNavMenuOn, setNavMenuOn } from "./global_settings.js";
 import { firstMediaSpec } from "./viewer_gallery.js";
+import {
+    isNavItem, normalizeNav, createNavItem, navJump, armAim,
+    enterOwnerGraph, markersVersionBump, resolveNavTarget,
+    activeGraphContext, setNavUiHooks,
+} from "./nav_points.js";
+
+// v61: one-way UI bridge - nav_points NEVER imports this module (the dep
+// graph stays core -> global_settings -> nav_points -> renderer). The jump /
+// capture flows ask IT to re-render hubs and raise toasts through these
+// hooks; renderHub/showHubToast are hoisted function declarations, so the
+// assignment at load time is safe.
+setNavUiHooks({ rerender: renderHub, toast: showHubToast });
 
 // Layout allowances. The title bar height is taken from LiteGraph when
 // available (themes vary); SLOT_TOP_GAP is the canvas-side offset above the
@@ -399,6 +413,42 @@ function dividerRowHtml(item) {
         `</div>`;
 }
 
+// ---------------------------------------------------------------------------
+// v61: NAVIGATION point row (item.type === "nav")
+// ----------------------------------------------------------------------------
+// A nav row is a jump button, not a value mirror: click = enter the point's
+// graph + center the camera (+ optional per-point zoom, null = keep current).
+// The zoom chip opens the point popover (coords, custom zoom, test jump);
+// 📍 re-arms the aim mode to RE-PLACE the point (new click = new graph+pos,
+// zoom kept). Orphaned points (their subgraph uuid died) show ⚠ and refuse
+// the jump with an explanatory toast instead of crashing (ZB4 degradation).
+// Search (v25) picks nav rows up automatically through customLabel.
+function navRowHtml(item) {
+    const nav = normalizeNav(item) ?? { graphUuid: null, graphName: "", pos: [0, 0], zoom: null };
+    let orphan = false;
+    if (nav.graphUuid) {
+        try { orphan = !resolveNavTarget(nav).ok; } catch (_) { orphan = true; }
+    }
+    const zc = nav.zoom != null ? `z${String(Math.round(nav.zoom * 100) / 100)}` : "z·";
+    const where = nav.graphUuid ? (nav.graphName || nav.graphUuid) : "Main canvas";
+    const title = orphan
+        ? `⚠ Subgraph not found (${where}) - the point is orphaned; re-place it with 📍`
+        : `Jump to: ${where} · x ${Math.round(nav.pos[0])} y ${Math.round(nav.pos[1])}` +
+          (nav.zoom != null ? ` · zoom ${Math.round(nav.zoom * 100) / 100}` : " · zoom kept");
+    return `<div class="hub-nav-row hub-item-row${orphan ? " hub-orphan-row" : ""}" data-hub-item="${esc(item.id)}" data-tab-id="${esc(item.tabId)}">` +
+        `<span class="hub-drag-handle" draggable="true" title="Drag to reorder">⠿</span>` +
+        `<span class="hub-nav-jump${orphan ? " hub-nav-orphan" : ""}" data-action="nav-jump" title="${esc(title)}">` +
+            `<span class="hub-nav-ico">${orphan ? "⚠" : "🧭"}</span>` +
+            `<span class="hub-nav-label" title="Dbl-click to rename">${esc(item.customLabel || "Point")}</span>` +
+            `<span class="hub-nav-zoom${nav.zoom != null ? " hub-nav-zoom-on" : ""}" data-action="nav-zoom" title="Zoom setting - click to open">${esc(zc)}</span>` +
+        `</span>` +
+        `<span class="hub-row-tools">` +
+            `<button type="button" class="hub-btn hub-nav-move" data-action="nav-move" title="Re-place this point: aim mode - a new click sets graph + position (zoom setting kept)">📍</button>` +
+            `<button type="button" class="hub-btn hub-remove" data-action="unpin" title="Remove point">✕</button>` +
+        `</span>` +
+        `</div>`;
+}
+
 function containerHtml(node, cfg) {
     const activeTabId = getActiveTabId(cfg);
     const items = itemsOfTab(cfg, activeTabId);
@@ -411,7 +461,8 @@ function containerHtml(node, cfg) {
             `</div></div>`;
     }
     const rows = items.map((it) =>
-        it.type === "divider" ? dividerRowHtml(it) : itemRowHtml(it)).join("");
+        it.type === "nav" ? navRowHtml(it)
+        : it.type === "divider" ? dividerRowHtml(it) : itemRowHtml(it)).join("");
     return `<div class="hub-container"><div class="hub-container-inner">${rows}</div></div>`;
 }
 
@@ -447,6 +498,7 @@ function presetRowHtml(cfg, node) {
         `<button type="button" class="hub-btn" data-action="preset-save" title="Capture ACTIVE tab rows into a preset - choose name, overwrite or merge (chip-excluded rows are skipped)">💾</button>` +
         undoBtn +
         `<button type="button" class="hub-btn" data-action="preset-more" title="Preset tools: export, import, include/exclude all rows">⋯</button>` +
+        `<button type="button" class="hub-btn hub-add-nav" data-action="add-navpoint" title="Add navigation point: aim mode - click a spot on the canvas (Esc / right-click cancels)">＋🧭</button>` +
         `<button type="button" class="hub-btn hub-add-divider" data-action="add-divider" title="Add section divider">＋Div</button>` +
         `<button type="button" class="hub-btn hub-settings" data-action="hub-settings" title="Hub settings (mirror update rate)">⚙</button>` +
         `</div>`;
@@ -2023,7 +2075,23 @@ function openSettingsPopup(node, trigger) {
         `<div class="hub-pop-hint">Timings of the ⇲ auto-collapse mode (the per-hub toggle in the pin ` +
         `window header stays the ON/OFF switch). Fold delay = how long the cursor may stay away from ` +
         `a floating pinned window before it folds; re-open delay = hover intent on the folded title ` +
-        `before it expands again. Global for every pinned hub, applied to the very next leave/hover.</div>`;
+        `before it expands again. Global for every pinned hub, applied to the very next leave/hover.</div>` +
+
+        `<div class="hub-set-section">Navigation</div>` +
+        `<label class="hub-set-row"><span>Canvas markers of nav points</span>` +
+        `<select data-set-role="navmarkers">` +
+        `<option value="1">On (default)</option>` +
+        `<option value="0">Off</option>` +
+        `</select></label>` +
+        `<label class="hub-set-row"><span>"Add navigation point here" in canvas right-click</span>` +
+        `<select data-set-role="navmenu">` +
+        `<option value="1">On (default)</option>` +
+        `<option value="0">Off</option>` +
+        `</select></label>` +
+        `<div class="hub-pop-hint">Markers: every 🧭 point of the graph you are browsing is drawn on ` +
+        `the canvas - a click near a marker (not on a node) and drag MOVES the point. The right-click ` +
+        `item adds a point at the clicked spot. Points themselves are created from the hub toolbar ` +
+        `(＋🧭). Global for every hub.</div>`;
     document.body.appendChild(pop);
 
     setPopState = { node, trigger, pop };
@@ -2112,8 +2180,180 @@ function openSettingsPopup(node, trigger) {
         flashBtn(trigger, "✓");
     });
 
+    // --- Navigation: canvas markers + right-click item (v61) ----------------
+    // Both flags are read at EVENT TIME by nav_points (painter / menu wrapper),
+    // so flipping them applies instantly - markers appear/disappear on the
+    // next canvas frame, no re-render needed.
+    const nmSel = pop.querySelector('[data-set-role="navmarkers"]');
+    nmSel.value = getNavMarkersOn() ? "1" : "0";
+    nmSel.addEventListener("change", () => {
+        setNavMarkersOn(nmSel.value === "1");
+        nmSel.value = getNavMarkersOn() ? "1" : "0";
+        try { app.canvas?.setDirtyCanvas?.(true, true); } catch (_) {}
+        flashBtn(trigger, "✓");
+    });
+
+    const ngSel = pop.querySelector('[data-set-role="navmenu"]');
+    ngSel.value = getNavMenuOn() ? "1" : "0";
+    ngSel.addEventListener("change", () => {
+        setNavMenuOn(ngSel.value === "1");
+        ngSel.value = getNavMenuOn() ? "1" : "0";
+        flashBtn(trigger, "✓");
+    });
+
     positionNumPopup(pop, trigger);
     try { sel.focus(); } catch (_) {}
+}
+
+// ---------------------------------------------------------------------------
+// v61: NAV POINT popover (zoom chip / ⚙ of a nav row)
+// ---------------------------------------------------------------------------
+// Body-level fixed popup (invariant 7), same lifecycle contract as the
+// slider-override gear popup: single instance, outside-click + Esc closers,
+// ✓ commits into the item config. Shows the point's target path + coords
+// (read-only) and the OPTIONAL per-point zoom: checkbox ON + number = the
+// jump sets this zoom before centering; OFF / empty = zoom===null = the
+// jump never touches ds.scale. "= now" reads the CURRENT canvas zoom and is
+// only enabled while the canvas actually shows the point's graph.
+
+let navPopState = null;        // { node, item, trigger, pop }
+let navPopGlobalWired = false;
+
+function closeNavPopup() {
+    if (!navPopState) return;
+    try { navPopState.pop.remove(); } catch (_) {}
+    navPopState = null;
+}
+
+function ensureNavPopupGlobalListeners() {
+    if (navPopGlobalWired) return;
+    navPopGlobalWired = true;
+    document.addEventListener("mousedown", (e) => {
+        const st = navPopState;
+        if (!st) return;
+        try {
+            if (st.pop.contains(e.target) || st.trigger.contains(e.target)) return;
+        } catch (_) {}
+        closeNavPopup();
+    }, true);
+    document.addEventListener("keydown", (e) => {
+        if (navPopState && e.key === "Escape") closeNavPopup();
+    }, true);
+    wirePopupOutsideClosers('nav', () => navPopState, closeNavPopup);
+}
+
+function parseNavZoomField(el) {
+    const t = String(el.value ?? "").trim().replace(",", ".");
+    if (t === "") return { clear: true };
+    if (!/^(\d+\.?\d*|\.\d+)$/.test(t)) return { error: true };
+    const n = Number(t);
+    return n > 0 ? { ok: true, v: n } : { error: true };
+}
+
+function openNavPopup(node, trigger, item) {
+    // Toggle behavior mirrors the gear popup.
+    if (navPopState?.trigger === trigger) { closeNavPopup(); return; }
+    closeComboPopup();
+    closeNumPopup();
+    closeSettingsPopup();
+    closePresetPicker();
+    closePresetQuickSave();
+    closeNavPopup();
+
+    const nav = normalizeNav(item);
+    if (!nav) return;
+    let t = { ok: false };
+    try { t = resolveNavTarget(nav); } catch (_) {}
+    const orphan = !!nav.graphUuid && !t.ok;
+    const where = nav.graphUuid ? (nav.graphName || nav.graphUuid) : "Main canvas";
+    const hasZ = nav.zoom != null;
+
+    // "= now" is truthful only when the canvas currently shows the SAME
+    // graph the point points to - otherwise the read zoom belongs to
+    // another canvas and would silently mis-calibrate the point.
+    let sameGraph = false;
+    try { sameGraph = !orphan && t.ok && t.graph === activeGraphContext().graph; } catch (_) {}
+
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-nav-pop";
+    pop.innerHTML =
+        `<div class="hub-menu-title">🧭 ${esc(item.customLabel || "Point")}</div>` +
+        `<div class="hub-pop-hint">Target: ${esc(where)}${orphan ? " · ⚠ NOT FOUND - re-place the point with 📍" : ""}</div>` +
+        `<div class="hub-nav-grid">` +
+            `<label>x</label><input data-nav-field="x" readonly value="${esc(String(Math.round(nav.pos[0] * 100) / 100))}">` +
+            `<label>y</label><input data-nav-field="y" readonly value="${esc(String(Math.round(nav.pos[1] * 100) / 100))}">` +
+        `</div>` +
+        `<label class="hub-pop-auto"><input type="checkbox" data-nav-role="usezoom"${hasZ ? " checked" : ""}>` +
+        ` custom zoom (off = keep the CURRENT zoom on jump)</label>` +
+        `<div class="hub-nav-grid hub-nav-grid-zoom">` +
+            `<label>zoom</label>` +
+            `<input data-nav-field="zoom" inputmode="decimal" spellcheck="false" placeholder="1.0" value="${hasZ ? esc(String(Math.round(nav.zoom * 100) / 100)) : ""}"${hasZ ? "" : " disabled"}>` +
+            `<button type="button" class="hub-btn" data-nav-btn="zoomnow" title="Read the CURRENT canvas zoom of this point's graph"${sameGraph ? "" : " disabled"}>= now</button>` +
+        `</div>` +
+        `<div class="hub-pop-hint">Coordinates are read-only - re-place the point with 📍 on the row (or drag its canvas marker). Zoom is applied BEFORE centering and clamped to the canvas zoom limits.</div>` +
+        `<div class="hub-pop-btns">` +
+            `<button type="button" data-nav-btn="jump" title="Test jump now">▶ jump</button>` +
+            `<button type="button" data-nav-btn="apply" title="Save the zoom setting">✓</button>` +
+            `<button type="button" data-nav-btn="close" title="Close">✕</button>` +
+        `</div>`;
+    document.body.appendChild(pop);
+
+    navPopState = { node, item, trigger, pop };
+    ensureNavPopupGlobalListeners();
+
+    const cb = pop.querySelector('[data-nav-role="usezoom"]');
+    const zi = pop.querySelector('[data-nav-field="zoom"]');
+    const syncZoomEnabled = () => { try { zi.disabled = !cb.checked; } catch (_) {} };
+    cb.addEventListener("change", syncZoomEnabled);
+
+    pop.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-nav-btn]");
+        if (!btn || !navPopState) return;
+        e.stopPropagation();
+        const act = btn.dataset.navBtn;
+        if (act === "close") { closeNavPopup(); return; }
+        if (act === "zoomnow") {
+            const z = Number(app.canvas?.ds?.scale);
+            if (Number.isFinite(z) && z > 0) {
+                zi.value = String(Math.round(z * 100) / 100);
+                cb.checked = true;
+                syncZoomEnabled();
+            }
+            return;
+        }
+        if (act === "jump") {
+            if (!commitNavZoomFields(node, item, cb, zi)) return;
+            closeNavPopup();
+            navJump(item);
+            return;
+        }
+        if (act === "apply") {
+            if (!commitNavZoomFields(node, item, cb, zi)) return;
+            flashBtn(trigger, "✓");
+            closeNavPopup();
+            renderHub(node);   // refresh the zoom chip (z· -> z0.5)
+        }
+    });
+
+    positionNumPopup(pop, trigger);
+    try { zi.focus(); } catch (_) {}
+}
+
+/** Commit the popover fields into item.nav.zoom. Returns false on a bad
+ *  number (invalid input keeps the popup open, like the gear popup). */
+function commitNavZoomFields(node, item, cb, zi) {
+    if (!cb.checked) {
+        item.nav.zoom = null;                 // off = keep current zoom
+        return true;
+    }
+    const parsed = parseNavZoomField(zi);
+    if (parsed.error) {
+        try { zi.classList.add("hub-pop-bad"); } catch (_) {}
+        return false;
+    }
+    try { zi.classList.remove("hub-pop-bad"); } catch (_) {}
+    item.nav.zoom = parsed.clear ? null : parsed.v;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -4282,93 +4522,11 @@ function refreshValuesDom(node) {
 // ---------------------------------------------------------------------------
 // Locate (🎯): ENTER the owner graph (subgraph!), center camera, highlight
 // ---------------------------------------------------------------------------
-
-const nextFrame = () => new Promise((r) => {
-    try { requestAnimationFrame(() => r()); }
-    catch (_) { setTimeout(r, 16); }
-});
-const napFrames = async (n) => { for (let i = 0; i < n; i++) await nextFrame(); };
-
-/** Last-resort opener for frontends exposing no programmatic navigation:
- *  synthesize the SAME gesture the user would make - a double click on the
- *  holder node, mapped world->screen through the canvas transform. */
-function emulateDblClickAt(holder) {
-    const c = app.canvas ?? {};
-    const el = c.canvas ?? c.canvas_element ??
-        (typeof document !== "undefined" ? document.querySelector("canvas") : null);
-    if (!el || typeof el.dispatchEvent !== "function" ||
-        !Array.isArray(holder?.pos)) return false;
-    const rect = el.getBoundingClientRect?.() ?? { left: 0, top: 0 };
-    const ds = c.ds ?? {};
-    const scale = Number(ds.scale) > 0 ? Number(ds.scale) : 1;
-    const ox = Array.isArray(ds.offset) ? Number(ds.offset[0]) || 0 : 0;
-    const oy = Array.isArray(ds.offset) ? Number(ds.offset[1]) || 0 : 0;
-    const wx = holder.pos[0] + (holder.size?.[0] ?? 140) / 2;
-    const wy = holder.pos[1] + (holder.size?.[1] ?? 60) / 2;
-    const base = {
-        clientX: rect.left + (wx - ox) * scale,
-        clientY: rect.top + (wy - oy) * scale,
-        bubbles: true, cancelable: true, view: window,
-    };
-    const fire = (Ctor, type) => {
-        if (typeof Ctor !== "function") return;
-        try { el.dispatchEvent(new Ctor(type, base)); } catch (_) {}
-    };
-    const tap = () => {
-        fire(window.PointerEvent, "pointerdown");
-        fire(window.MouseEvent, "mousedown");
-        fire(window.PointerEvent, "pointerup");
-        fire(window.MouseEvent, "mouseup");
-        fire(window.MouseEvent, "click");
-    };
-    tap();
-    setTimeout(tap, 110);
-    setTimeout(() => fire(window.MouseEvent, "dblclick"), 160);
-    return true;
-}
-
-/**
- * Make the ACTIVE canvas graph become `ownerGraph`.
- * Strategy ladder (availability differs between litegraph generations):
- *   1. direct setters: setGraph / openGraph / openSubgraph / showSubgraph;
- *   2. replaying the canonical gesture along the holder chain -
- *      processNodeDoubleClicked when exposed, synthetic dblclick otherwise.
- */
-async function enterOwnerGraph(ownerGraph, holders) {
-    const c = app.canvas;
-    if (!c || !ownerGraph) return false;
-
-    for (const name of ["setGraph", "openGraph", "openSubgraph", "showSubgraph"]) {
-        try {
-            if (typeof c[name] !== "function") continue;
-            c[name].call(c, ownerGraph);
-            await napFrames(2);
-            if ((c.graph ?? null) === ownerGraph) return true;
-        } catch (_) { /* fall through to the next strategy */ }
-    }
-
-    for (const holder of holders ?? []) {
-        if (!holder || typeof holder !== "object") continue;
-        try {
-            if (typeof c.processNodeDoubleClicked === "function") {
-                c.processNodeDoubleClicked.call(c, holder);
-                for (let i = 0; i < 4; i++) {
-                    await napFrames(1);
-                    if ((c.graph ?? null) === ownerGraph) return true;
-                }
-            }
-        } catch (_) { /* ignore broken overrides, keep trying */ }
-        try {
-            if (emulateDblClickAt(holder)) {
-                for (let i = 0; i < 8; i++) {
-                    await sleep(40);
-                    if ((c.graph ?? null) === ownerGraph) return true;
-                }
-            }
-        } catch (_) {}
-    }
-    return (c.graph ?? null) === ownerGraph;
-}
+// v61: the entry ladder (direct setters -> gesture replay) MOVED to
+// nav_points.js - locate and nav-point jumps must share ONE implementation
+// (a copy had already drifted: the synthetic-dblclick wait loop referenced a
+// `sleep` helper that did not exist in this module, so that strategy died
+// silently in its try/catch). enterOwnerGraph is imported at the top.
 
 let locateSeq = 0;
 
@@ -4968,6 +5126,61 @@ function wireEvents(node, st) {
                 renderHub(node);
                 break;
             }
+            // v61: navigation point actions. add-navpoint / nav-move both arm
+            // the aim mode; the PICK callback is where the hub config is
+            // written (nav_points owns only the capture mechanics). nav-zoom
+            // opens the point popover; nav-jump delegates to the jump engine.
+            case "add-navpoint": {
+                const tabId = getActiveTabId(cfg);
+                const okArm = armAim({
+                    onPick: (ctx, pos) => {
+                        const c2 = getHubConfig(node);
+                        const item = createNavItem(node, c2.activeTabId ?? tabId, {
+                            graphUuid: ctx.uuid, graphName: ctx.path, pos,
+                        });
+                        markersVersionBump();
+                        renderHub(node);
+                        showHubToast(`🧭 "${item.customLabel}" added (${ctx.path})`);
+                    },
+                    onCancel: () => showHubToast("Navigation point cancelled"),
+                });
+                if (okArm) showHubToast("🧭 Click the canvas to place the point");
+                else showHubToast("⚠ Canvas is not ready");
+                break;
+            }
+            case "nav-jump": {
+                const row = btn.closest("[data-hub-item]");
+                const item = cfg.items.find((i) => i.id === row?.dataset.hubItem);
+                if (item && isNavItem(item)) navJump(item);
+                break;
+            }
+            case "nav-move": {
+                const row = btn.closest("[data-hub-item]");
+                const item = cfg.items.find((i) => i.id === row?.dataset.hubItem);
+                if (item && isNavItem(item)) {
+                    const okArm = armAim({
+                        onPick: (ctx, pos) => {
+                            item.nav.graphUuid = ctx.uuid;
+                            item.nav.graphName = ctx.path;
+                            item.nav.pos = pos;
+                            normalizeNav(item);
+                            markersVersionBump();
+                            renderHub(node);
+                            showHubToast(`📍 "${item.customLabel}" re-placed (${ctx.path})`);
+                        },
+                        onCancel: () => showHubToast("Re-place cancelled"),
+                    });
+                    if (okArm) showHubToast("📍 Click the canvas to re-place the point");
+                    else showHubToast("⚠ Canvas is not ready");
+                }
+                break;
+            }
+            case "nav-zoom": {
+                const row = btn.closest("[data-hub-item]");
+                const item = cfg.items.find((i) => i.id === row?.dataset.hubItem);
+                if (item && isNavItem(item)) openNavPopup(node, btn, item);
+                break;
+            }
             case "ml-toggle": {
                 // v30: flip the row between single-line input and the
                 // multiline (resizable) textarea mirror.
@@ -5055,6 +5268,24 @@ function wireEvents(node, st) {
                 node.setDirtyCanvas(true, true);
                 renderHub(node);
             });
+            return;
+        }
+        // v61: nav label rename - same click-level inline edit as tabs and
+        // dividers. MUST run before the generic label branch: nav items have
+        // no widget target, findTarget() is meaningless for them.
+        const navLabel = e.target.closest(".hub-nav-label");
+        if (navLabel) {
+            e.stopPropagation();
+            const row = navLabel.closest("[data-hub-item]");
+            const cfg2 = getHubConfig(node);
+            const item = cfg2.items.find((i) => i.id === row?.dataset.hubItem);
+            if (item && isNavItem(item)) {
+                startInlineEdit(navLabel, item.customLabel || "Point", (val) => {
+                    item.customLabel = val;
+                    node.setDirtyCanvas(true, true);
+                    renderHub(node);
+                });
+            }
             return;
         }
         const labelEl = e.target.closest('.hub-item-label[data-action="rename-item"], .hub-divider-label');

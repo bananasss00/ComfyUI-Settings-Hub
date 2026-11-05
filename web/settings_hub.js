@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v60 - field fix: the hub row hover-preview could pop up AFTER the cursor had already left and then never close (it covered everything until the user waved the cursor through it). Root cause: the row pointerover stored the pending SHOW timer in the hideTimer slot, and pointerout blind-overwrote that slot with the hide grace - orphaning the show timer. Any closer firing in between (scroll/mousedown/Esc/blur/pin fold) then cleared the state, the orphan still fired, and the popup was built into a fresh state with NO pending hide. Three layers now: the show timer lives in showTimer (like the picker cells since v53), pointerout cancels a pending show before scheduling the hide, and both show callbacks re-verify the anchor is still connected AND genuinely :hover - a slipped-through orphan can no longer materialize a popup under an absent cursor");
+console.info("[SettingsHub] web build: v61 - NEW FEATURE: navigation points (nav items). A hub row that JUMPS the camera to a saved place of the workflow: root canvas, a subgraph, or a subgraph nested inside another subgraph. Add via the ＋🧭 toolbar button (aim mode: click the canvas), re-place any point via its 📍 button or by dragging its canvas marker, per-point custom zoom in the point popover (default: zoom untouched - only panning). Targets resolve by subgraph UUID at jump time (BFS from the roots, same shape space as the pin resolver); a dead uuid degrades to an ⚠ orphan row. Also: the locate entry ladder moved to nav_points.js (locate + nav share ONE implementation) which fixes a latent `sleep is not defined` ReferenceError in the synthetic-dblclick fallback that used to kill that strategy silently");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v60 - field fix: the hub row hover-previe
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=60", import.meta.url).href;
+    link.href = new URL("styles.css?v=61", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -41,6 +41,7 @@ console.info("[SettingsHub] web build: v60 - field fix: the hub row hover-previe
 const FILES = [
     "./sync.js",            // internal bus (locks, rAF queue)
     "./pins.js",            // badge counter cache
+    "./nav_points.js",      // v61: nav points - resolver/jump/aim/markers/RMB
     "./hub_node.js",        // node registration + drawNode badge painter
     "./hub_ui_renderer.js", // DOM widget rendering
     "./sync_manager.js",    // target-widget callback hooks (reactive sync)

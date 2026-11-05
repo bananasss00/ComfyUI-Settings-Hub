@@ -131,6 +131,30 @@ web/hub_ui_renderer.js — весь UI хаба: табы, строки зерк
                          .hub-media-thumb-pop с body ДО null-state
                          early-out (призраки умирают от любого closer'а),
                          onSeg-гард: нет стейта -> закрыть, не падать
+                         v61: строки точек навигации (navRowHtml — прыжковая строка
+                         с чипом зума z·/z1.0, ⚠-сироты), кнопка тулбара ＋🧭 (add-navpoint),
+                         actions nav-jump/nav-move/nav-zoom, поповер точки (.hub-nav-pop:
+                         x/y readonly, чекбокс «custom zoom» + поле, «= now» активен только
+                         на графе точки, ▶ jump/✓/✕), dblclick-rename .hub-nav-label, секция
+                         Navigation в ⚙-попапе (тумблеры маркеров и ПКМ-пункта)
+web/nav_points.js      — v61 ТОЧКИ НАВИГАЦИИ (item.type:"nav"): uuid-резолвер целей
+                         (двухпроходный BFS от корней: СПЕРВА холдерные цепи,
+                         потом реестры дефиниций; просматриваемый canvas.graph сидируется
+                         без uuid и АПГРЕЙДИТСЯ холдерной цепью — чужой протухший граф
+                         остаётся сиротой); enterOwnerGraph — ЕДИНСТВЕННАЯ лестница входа
+                         (сюда переехала из рендерера, locate импортирует её же; починен
+                         латентный ReferenceError:sleep в синтетическом dblclick); камера:
+                         дельта-центрирование через СОБСТВЕННЫЙ конвертер канвы
+                         (canvas.convertCanvasToOffset ? ds.convertCanvasToOffset — знак-агностично)
+                         с фолбэком по контракту screen=(world-offset)*scale; зум null = ds.scale
+                         НЕ трогаем, число — клэмп по ds.min/max_scale; navJump (seq-гонки как у
+                         locate) + flash-кольцо ~900мс; armAim — прицел (document-CAPTURE
+                         pointerdown, LMB = пик, Esc/ПКМ/клик мимо канвы = отмена); маркеры точек
+                         на канве (обёртка LGraphCanvas.draw, рисование в базовом трансформе
+                         через ds.convertOffsetToCanvas; драг — document-capture перехват
+                         pointerdown ТОЛЬКО когда под курсором нет ноды; rAF-коалесинг);
+                         пункт ПКМ-меню канвы (обёртка getCanvasMenuOptions, выбор хаба при
+                         нескольких); кэш индекса TTL 1.5с + markersVersionBump на CRUD/конфиг
 web/hub_node.js        — класс узла: onResize (user vs auto sizing),
                          бейдж 📌 через обёртку LGraphCanvas.drawNode;
                          afterConfigureGraph первым делом зовёт
@@ -220,6 +244,9 @@ web/global_settings.js — ГЛОБАЛЬНЫЕ настройки хаба (v26
                          (0/100/220/400/800, дефолт 220); те же контракты:
                          whitelist, нормализация к дефолту, чтение в момент
                          события; дефолты таймингов экспортированы
+                         v61: nav-настройки — settingshub.navMarkers /
+                         settingshub.navCanvasMenu (bool-флаги "1"/"0",
+                         дефолт ON; absent-ключ localStorage ≠ false)
 web/dnd_manager.js     — HTML5 DnD: reorder строк, drop на вкладку = перенос
 web/pins.js            — кэш счётчиков пинов для бейджа 📌
 web/styles.css         — все стили (тёмная тема); классы *.hub-*
@@ -612,6 +639,65 @@ dev_plan.md            — исходный технический спек пр
   только после confirm; ошибки — console.warn + flash ⚠).
 - Пресет-ряд: select | 💾 | ➕ | ↩ (условный) | 🗑️ | ⋯ | ＋Div | ⚙.
   Титул 💾 обновлён (ACTIVE tab + opt-out).
+
+### v61: ТОЧКИ НАВИГАЦИИ (🧭 nav) — прыжок в любое место воркфлоу
+- МОДЕЛЬ: item { type:"nav", customLabel, nav:{ graphUuid: null|"<uuid>"
+  (null = главный холст), graphName: «путь на момент захвата» (диагностика
+  сирот), pos:[x,y] (МИРОВЫЕ координаты), zoom: null|number } }. Живёт в
+  cfg.items → сериализуется с воркфлоу → переживает save/load/шеринг
+  (uuid сабграфов стабилен в definitions). Пресеты пропускают nav
+  автоматически (фильтр type==="widget_binding"), DnD/поиск работают как
+  для обычных строк (handle ⠿, customLabel в hay фильтра).
+- РЕЗОЛВЕР (nav_points.buildGraphIndex): ДВА прохода BFS от корней
+  (app.graph + canvas.graph + comfyAPI): П1 — ТОЛЬКО холдерные дети
+  (полная цепь SubgraphNode для реплея жеста); П2 — реестры дефиниций
+  (_subgraphs/subgraphs/subgraphsById, Array/Map/Set/object) для всего,
+  что П1 не нашёл (цепь наследуется от владельца). Просматриваемый
+  canvas.graph сидируется БЕЗ uuid и апгрейдится, когда П1 доходит до него
+  по холдерам: чужой (протухший после таб-свитча) граф остаётся сиротой
+  ⚠, свой — честная цепь + бредкрамб. Кэш индекса: TTL 1.5с + identity
+  корня + markersVersionBump() на CRUD и afterConfigureGraph.
+- КАМЕРА: сначала зум (если число; клэмп ds.min/max_scale), потом
+  центрирование ДЕЛЬТА-методом: читаем мир под центром экрана СОБСТВЕННЫМ
+  конвертером канвы (canvas.convertCanvasToOffset, фолбэк
+  ds.convertCanvasToOffset), сдвигаем ds.offset на разницу — верно при
+  ЛЮБОЙ конвенции знака offset. Фолбэк без конвертеров — контракт проекта
+  screen=(world-offset)*scale → offset = p − центр/scale.
+  ЗУМ-КОНТРАКТ: zoom===null — ds.scale НЕ трогается (только пан); это
+  дефолт каждой новой точки.
+- ПРЫЖОК (navJump): seq-гвард как у locate → resolveNavTarget → если
+  canvas.graph ≠ цель — enterOwnerGraph (импорт из nav_points; locate
+  использует ТУ ЖЕ лестницу) → napFrames(2) (фронт донастраивает свой вью)
+  → камера → flash-кольцо ~900мс (setDirtyCanvas-тики rAF-цепочкой).
+  Сирота/неудача входа — тост, НЕ краш (дух ZB4).
+- ПРИЦЕЛ (armAim): ＋🧭 в тулбаре хаба или 📍 на строке → курсор-crosshair
+  + чип-подсказка на body → ОДИН document-CAPTURE pointerdown: LMB по
+  канве = пик (screenToWorld через собственный конвертер; stopPropagation
+  гасит жест канвы), Esc/ПКМ/клик мимо канвы = отмена. Повторный прицел
+  (📍) перезаписывает graphUuid+pos, ЗУМ точки сохраняется.
+- МАРКЕРЫ: обёртка LGraphCanvas.draw (фолбэк drawGraph); рисуем ПОСЛЕ
+  родного draw в БАЗОВОМ трансформе (getTransform — DPR-безопасно) через
+  ds.convertOffsetToCanvas; точки активного графа из ВСЕХ хабов (кэш по
+  графу, TTL+версия). Драг: document-capture pointerdown — перехват ТОЛЬКО
+  если под курсором нет ноды (rect-тест union: тело + титул) и курсор в
+  радиусе 11px/scale от маркера; move — rAF-коалесинг, пишет item.nav.pos
+  прямо в cfg (сериализуется с воркфлоу). Тумблер — ⚙ → Navigation.
+- ПКМ КАНВЫ: обёртка getCanvasMenuOptions добавляет «🧭 Add navigation
+  point here» (позиция = graph_mouse на момент открытия меню; несколько
+  хабов → пикер .hub-menu на body). Тумблер — ⚙ → Navigation.
+- ПОПОВЕР ТОЧКИ (.hub-nav-pop, по чипу зума): x/y readonly; чекбокс
+  «custom zoom» + поле (пусто/off = zoom null); «= now» читает ТЕКУЩИЙ
+  ds.scale и активен только когда канва показывает граф точки (иначе
+  чужой зум молча калибровал бы точку мимо); ▶ jump — тест-прыжок.
+- ТЕСТЫ: tests/smoke_nav.mjs (В РЕПО, Node ESM + jsdom, npm i jsdom):
+  NA конфиг/нормализация/round-trip; NB резолвер (вложенность, Map/object
+  реестры, сироты, протухший canvas-граф, activeGraphContext); NC камера
+  (дельта под ДВУМЯ конвенциями знака, зум null/число/клэмп, фолбэк,
+  screenToWorld); ND прыжок (вход+центр, зум-семантика, сирота, гонка);
+  NE лестница (сеттер/жест/полная деградация — регресс-гард ReferenceError
+  sleep); NF прицел (пик/отмены/Esc/ПКМ/single-flight); NG хуки канвы
+  (painter-wrap, ПКМ-меню, создание точки); NH драг маркера (перехват,
+  приоритет ноды, тумблер); NI пресеты не захватывают nav.
 
 ### v59: полевой фикс «мёртвого пикера» - гонка async-открытия, попапы-призраки без стейта, TypeError в onSeg
 - ЗАПРОС (поле): «бывает пролагивает при открытии пикера инпутов из
@@ -2014,6 +2100,19 @@ dev_plan.md            — исходный технический спек пр
    {tn,tw}; потребители ищут виджет сами (tw = tn.widgets.find(...)). Новые
    вызовы обязаны null-check'ить до destructuring (инцидент v21: TypeError
    при orphan-resolve в push-фиче).
+15. ТОЧКИ НАВИГАЦИИ (v61): цели резолвятся ТОЛЬКО через
+   resolveNavTarget/buildGraphIndex (nav_points.js) — BFS по uuid от
+   корней; никаких canvas.graph.getNodeById-аналогов и кэшей, пережи-
+   вающих воркфлоу (TTL 1.5с + markersVersionBump на afterConfigureGraph).
+   zoom===null точки означает: ds.scale НЕ трогается НИКОГДА (только пан).
+   Весь world↔screen — только через собственный конвертер канвы (canvas/
+   ds convertCanvasToOffset / ds.convertOffsetToCanvas) или контрактную
+   формулу screen=(world-offset)*scale; центр — дельта-методом (знак-
+   агностично). Прицельные и драг-слушатели — document-CAPTURE, снимаются
+   обязательно и идемпотентны; маркеры — ЧИСТАЯ отрисовка + мутация cfg
+   хаба: графы/ноды воркфлоу точками не создаются и не мутируются.
+   Отрисовка маркеров — в базовом трансформе ctx после родного draw
+   (координаты ds.convertOffsetToCanvas; getTransform — DPR-безопасность).
 
 ## 5. Тесты
 
