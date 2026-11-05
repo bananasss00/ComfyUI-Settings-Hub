@@ -4,6 +4,15 @@ import { disposeHubVisuals } from "./hub_ui_renderer.js";
 import { syncNode, queueHubRefresh, inEdit, beginEdit, endEdit } from "./sync.js";
 import * as Pins from "./pins.js";
 
+// v64 BUILD GUARD (see settings_hub.js): every submodule self-reports
+// under __SettingsHubLoaded so the entry can NAME stale cached files.
+globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
+globalThis.__SettingsHubLoaded["sync_manager"] = true;
+if (globalThis.__SettingsHubBuild !== "v64") {
+    console.error("[SettingsHub] STALE BUILD: sync_manager.js (v64) was loaded under entry build [" +
+        (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
+}
+
 export const HUB_NODE_NAME_LOCAL = HUB_NODE_NAME;
 
 const hookedWidgets = new WeakSet();

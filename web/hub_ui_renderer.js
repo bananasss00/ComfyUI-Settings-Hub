@@ -1,6 +1,22 @@
 // ============================================================================
 // SettingsHub - DOM UI renderer
 // ----------------------------------------------------------------------------
+// v64 BUILD GUARD (must be the FIRST executable statement, before any work):
+// the loader entry stamps globalThis.__SettingsHubBuild before importing the
+// submodules; this module refuses to stay silent if it was loaded as part of
+// a MIXED build (browser cache served a stale entry or a stale sibling).
+// Field lesson: a half-updated module set reproduces bugs that no longer
+// exist in the source tree, and the F12 banner alone cannot prove that the
+// SUBMODULES are fresh.
+// ============================================================================
+globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
+globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
+if (globalThis.__SettingsHubBuild !== "v64") {
+    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v64) was loaded under entry build [" +
+        (globalThis.__SettingsHubBuild ?? "unknown") +
+        "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
+}
+
 // The whole hub interface lives inside a single LiteGraph DOM widget
 // (node.addDOMWidget), so the CSS in styles.css actually applies:
 //
@@ -2454,7 +2470,8 @@ function hideHubToast() {
     hubToastState = null;
 }
 
-function showHubToast(text, opts = {}) {
+// v64: exported - hub_node.js raises the fresh-add repair toast through it.
+export function showHubToast(text, opts = {}) {
     hideHubToast();
     const el = document.createElement("div");
     el.className = "hub-toast";
@@ -5025,6 +5042,67 @@ export function relayoutHub(node) {
     scheduleLayout(node, stateMap.get(node));
 }
 
+// ---------------------------------------------------------------------------
+// v63 fresh-add lifecycle probes (consumed by hub_node.js)
+// ---------------------------------------------------------------------------
+// Frontend field report (v63): a hub added from the Add-Node menu appeared
+// EMPTY until the page was reloaded or the workflow was switched. Root
+// cause: extension `nodeCreated` fires at the END of the node constructor -
+// BEFORE `graph.add()` - and the modern frontend's DOM-widget layer only
+// mounts elements for widgets of nodes that are IN the graph
+// (src/scripts/domWidget.ts: `if (node.graph) registerWidget(widget)`,
+// the rest deferred onto node.onAdded). A DOM widget built graph-less can
+// stay unmounted forever: nothing re-renders a fresh node afterwards.
+// The fix lives in hub_node.js (build the UI from onAdded, never from
+// nodeCreated); these two probes let its fallback ladder verify and repair
+// the mount truthfully, regardless of frontend internals.
+
+/**
+ * Positive mount check for the hub DOM widget. True only when the widget
+ * object exists AND its wrap element is really in the document (or parked
+ * in our floating panel, which owns the DOM in pinned mode). A widget that
+ * is merely present in node.widgets but never got connected was created
+ * graph-less and will never be mounted by the frontend.
+ */
+export function isHubUiMounted(node) {
+    const st = stateMap.get(node);
+    if (!st || !st.widget) return false;
+    if (st.__widgetDetached) return true; // floating panel owns the DOM
+    if (!node.widgets?.includes(st.widget)) return false;
+    return !!(st.wrap && st.wrap.isConnected);
+}
+
+/**
+ * Drop a poisoned hub widget and rebuild the UI from scratch. Must only be
+ * called while node.graph is set (see the v63 note above): the fresh
+ * addDOMWidget then lands on the registration path every frontend handles
+ * correctly - the same one the workflow-load (configure) path uses.
+ */
+export function forceHubRebuild(node) {
+    if (!node || node.type !== "SettingsHub") return;
+    const st = stateMap.get(node);
+    if (st) {
+        try { st.contentRO?.disconnect(); } catch (_) {}
+        // Unregister the stale widget the same way the frontend's own
+        // refusal path does: splice out of node.widgets, widget.onRemove()
+        // (DOM-widget store unregistration), release any registered state.
+        if (st.widget && !st.__widgetDetached) {
+            try {
+                const w = st.widget;
+                const i = node.widgets ? node.widgets.indexOf(w) : -1;
+                if (i >= 0) node.widgets.splice(i, 1);
+                try { w.onRemove?.(); } catch (_) {}
+                try { w.releaseRegisteredState?.(); } catch (_) {}
+            } catch (_) {}
+        }
+        // The wrap is ours; the frontend may have parked it in its layer
+        // without ever showing it - take it home before dropping the state.
+        try { if (st.wrap?.isConnected) st.wrap.remove(); } catch (_) {}
+        stateMap.delete(node);
+    }
+    renderHub(node);
+}
+
 /**
  * Test/RO hook: the hub CONTENT changed size outside a structural render
  * (e.g. the user stretched a mirror textarea). Runs a normal layout pass;
@@ -5688,6 +5766,7 @@ export function __hubTestState(node) { return stateMap.get(node) ?? null; }
 let stalePinCrumbShown = false;
 let staleForeignCrumbShown = false;
 let staleSweepCrumbShown = false;   // v45: DOM-truth sweep attribution
+let staleMountCrumbShown = false;   // v64: fresh-add mount repair attribution
 
 /** v37: does EVERY widget binding of this hub fail to resolve against the
  *  live tree? Silent on purpose (no diagnostics side effects - the watcher
@@ -5719,12 +5798,20 @@ function pinnedWindowAllRowsDead(hub, cfg) {
 }
 
 let tabWatchInstalled = false;
+// v64: the sweep body was lifted out of installHubTabWatch into an exported
+// tick so tests (and the fresh-add diagnostics) can run ONE sweep pass
+// synchronously instead of waiting for the real 1200ms interval.
+let hubTabWatchTimer = null;
+let everActive = false;   // a node sighting at least once this session
+let tabWatchFails = 0;
+
 export function installHubTabWatch() {
     if (tabWatchInstalled) return;
     tabWatchInstalled = true;
-    let everActive = false;   // a node sighting at least once this session
-    let fails = 0;
-    const timer = setInterval(() => {
+    hubTabWatchTimer = setInterval(hubTabSweepTick, 1200);
+}
+
+export function hubTabSweepTick() {
         try {
             // v42: the sweep runs on EVERY tick - the identity active
             // set is rebuilt unconditionally (the v36 signature gate
@@ -5821,6 +5908,39 @@ export function installHubTabWatch() {
                                 console.info(
                                     "[SettingsHub] pinned hub window closed: none of its bindings resolve in the current workflow (stale or copied hub config). It re-floats where they do.");
                             }
+                        } else if (!cfg?.pinned && !floating && !hub.flags?.collapsed) {
+                            // v64 DOM-TRUTH MOUNT REPAIR (fresh-add field
+                            // report, round 2): a hub that is on screen, not
+                            // collapsed and not pinned MUST have its DOM
+                            // widget element mounted. v63 rebuilt such hubs
+                            // only through the one-shot 3-tick ladder; a
+                            // frontend that mounts late widget registrations
+                            // later than the ladder's last tick (or drops the
+                            // element during the post-add reactive flush)
+                            // still ended with a permanently EMPTY node. The
+                            // sweep now enforces the invariant forever: while
+                            // the element is disconnected, rebuild it (the
+                            // fresh widget re-registers in-graph - the path
+                            // every frontend mounts). Each attempt grants a
+                            // grace window (shared with the hub_node ladder)
+                            // so a slow-but-honest mount is never churned.
+                            if (!isHubUiMounted(hub) &&
+                                Date.now() >= (hub.__hubMountGraceUntil ?? 0)) {
+                                hub.__hubMountGraceUntil = Date.now() + 2500;
+                                hub.__hubMountRepairs = (hub.__hubMountRepairs ?? 0) + 1;
+                                forceHubRebuild(hub);
+                                if (!staleMountCrumbShown) {
+                                    staleMountCrumbShown = true;
+                                    console.info("[SettingsHub] rebuilt a hub whose DOM widget was not mounted (fresh-add frontend quirk). Repeats stop the moment the element stays connected; if they never do, hard-refresh (Ctrl+F5) and check that the F12 banner says v64.");
+                                }
+                                if (hub.__hubMountRepairs === 3) {
+                                    console.warn("[SettingsHub] fresh-add mount diagnostics (3rd repair): node #" + hub.id +
+                                        " widgets=" + (hub.widgets?.length ?? 0) +
+                                        " graphSet=" + !!hub.graph +
+                                        " build=" + (globalThis.__SettingsHubBuild ?? "unknown") +
+                                        " - if the node is STILL empty, copy the F12 console output for a bug report.");
+                                }
+                            }
                         }
                     } else if (floating) {
                         homeHub(hub); // window down; the pin survives
@@ -5834,12 +5954,12 @@ export function installHubTabWatch() {
                     }
                 } catch (_) { /* one broken hub must not sink the pass */ }
             }
-            fails = 0;
+            tabWatchFails = 0;
         } catch (err) {
-            if (++fails >= 5) {
-                clearInterval(timer);
+            if (++tabWatchFails >= 5) {
+                clearInterval(hubTabWatchTimer);
+                hubTabWatchTimer = null;
                 console.warn("[SettingsHub] tab watcher disabled after repeated failures - staying on the v33 lifecycle:", err);
             }
         }
-    }, 1200);
 }

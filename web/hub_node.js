@@ -1,8 +1,18 @@
 import { app } from "../../scripts/app.js";
-import { getHubConfig, trackHubNode, forgetHubNode } from "./core.js";
+import { getHubConfig, trackHubNode, forgetHubNode, isNodeInViewTree } from "./core.js";
 import { syncNode } from "./sync.js";
-import { relayoutHub, disposeHubVisuals, pruneForeignHubs, installHubTabWatch } from "./hub_ui_renderer.js";
+import { relayoutHub, disposeHubVisuals, pruneForeignHubs, installHubTabWatch, isHubUiMounted, forceHubRebuild, showHubToast } from "./hub_ui_renderer.js";
 import * as Pins from "./pins.js";
+
+// v64 BUILD GUARD (see settings_hub.js): every submodule self-reports
+// under __SettingsHubLoaded so the entry can NAME stale cached files.
+globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
+globalThis.__SettingsHubLoaded["hub_node"] = true;
+if (globalThis.__SettingsHubBuild !== "v64") {
+    console.error("[SettingsHub] STALE BUILD: hub_node.js (v64) was loaded under entry build [" +
+        (globalThis.__SettingsHubBuild ?? "unknown") +
+        "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5).");
+}
 
 export const NODE_NAME = "SettingsHub";
 
@@ -139,14 +149,134 @@ function tryInstallBadgeSoon() {
 }
 tryInstallBadgeSoon();
 
+// ---------------------------------------------------------------------------
+// v64 fresh-add lifecycle: build the UI only while the node is IN the graph
+// ---------------------------------------------------------------------------
+// `nodeCreated` fires at the END of the node constructor (docs: "right at
+// the end of the ComfyNode() function"), i.e. BEFORE graph.add() - the node
+// has no graph and no real id yet. The frontend's DOM-widget layer only
+// mounts elements for widgets whose node is in the graph
+// (domWidget.ts: `if (node.graph) registerWidget(widget)`, the rest is
+// deferred onto node.onAdded). A UI built here used to produce a DOM widget
+// that never mounted: the node stayed EMPTY until the workflow was reloaded
+// or re-configured (field report v63; page reload / workflow switch were
+// the only workarounds).
+//
+// v63 field round 2: building from onAdded alone was NOT enough - the hub
+// still landed empty on the user's frontend (the element mount happens in
+// the frontend's reactive layer some time AFTER registration, and exotic
+// builds can drop it entirely). v64 therefore enforces the INVARIANT, not
+// one timing: a visible, non-collapsed, non-pinned hub always ends up with
+// its element connected - through a longer repair ladder here and a
+// persistent DOM-truth repair in the 1200ms tab-watch sweep
+// (hub_ui_renderer.hubTabSweepTick), with a one-time workflow reconfigure
+// (the user's own manual workaround) as the final escalation.
+
+function syncIfInGraph(node) {
+    if (!node || node.type !== NODE_NAME || !node.graph) return false;
+    syncNode(node);
+    return true;
+}
+
+function deferHubUiBuild(node) {
+    // Primary: chain onAdded (prev first - foreign chains keep working).
+    const prev = node.onAdded;
+    node.onAdded = function (graph) {
+        try { prev?.call(this, graph); } catch (_) {}
+        try { syncIfInGraph(node); } catch (_) {}
+    };
+    // v64 post-add canonical sync: every add flow calls graph.add()
+    // synchronously right after the constructor, so a macrotask armed in
+    // nodeCreated runs AFTER graph.add() has fully returned - the exact
+    // timing of the proven context-menu creation path (core.createNewHub:
+    // add() THEN syncNode()). Gentle on purpose: it only re-renders content
+    // into an already-mounted widget; the ladder owns the hard repairs.
+    for (const ms of [0, 60]) {
+        setTimeout(() => {
+            try {
+                if (!node.graph || node.type !== NODE_NAME) return;
+                if (node.flags?.collapsed) return;
+                if (!isHubUiMounted(node)) return;
+                syncNode(node);
+            } catch (_) {}
+        }, ms);
+    }
+    // Fallback ladder for exotic frontends (an extension or build that
+    // clobbers node.onAdded after us, add flows without it, or a mount that
+    // lands later than the reactive flush). Each tick is a no-op when the
+    // UI is healthy; the repair runs only while the node is in the graph,
+    // so a fresh widget always lands on the registration path every
+    // frontend handles correctly. Ticks grant a shared grace window so the
+    // sweep (hubTabSweepTick) does not churn the same node mid-repair.
+    for (const ms of [250, 700, 1600, 3000]) {
+        setTimeout(() => {
+            try {
+                if (!node.graph || node.type !== NODE_NAME) return;
+                if (node.flags?.collapsed) return; // mount unverifiable
+                if (isHubUiMounted(node)) return;
+                // A hub whose view tree is not open (closed subgraph) has a
+                // legitimately unmounted element - not a poisoned widget.
+                if (!isNodeInViewTree(node)) return;
+                node.__hubMountGraceUntil = Date.now() + 2500;
+                node.__hubMountRepairs = (node.__hubMountRepairs ?? 0) + 1;
+                forceHubRebuild(node);
+            } catch (_) {}
+        }, ms);
+    }
+    // v64 FINAL escalation (~6s after the add): the user's own proven
+    // workaround, automated - reconfigure the workflow. Fires only when
+    // every repair failed, at most once per node, never while healthy.
+    setTimeout(() => {
+        try { freshAddFinalRepair(node); } catch (_) {}
+    }, 6000);
+}
+
+// v64: one-time final repair - reconfigure the current workflow from its own
+// serialization. This is EXACTLY what the user does by hand ("switch to
+// another workflow and back") and it is the one path their frontend
+// demonstrably mounts correctly: nodes are rebuilt graph-less and their Vue
+// components mount only after every widget already exists. Exported for the
+// smoke suite. Guarded: in-graph, in view, not collapsed, still unmounted,
+// once per node, once globally at a time.
+let freshAddReconfiguring = false;
+export function freshAddFinalRepair(node) {
+    if (!node || node.type !== NODE_NAME) return;
+    if (node.__hubReconfiguredForMount) return;
+    if (!node.graph) return;
+    if (node.flags?.collapsed) return;
+    if (isHubUiMounted(node)) return;
+    if (!isNodeInViewTree(node)) return;
+    node.__hubReconfiguredForMount = true;
+    if (freshAddReconfiguring) return;
+    const data = node.graph.serialize?.();
+    if (!data || typeof app?.loadGraphData !== "function") {
+        console.warn("[SettingsHub] a fresh hub's UI did not mount and the workflow reconfigure is unavailable (build " +
+            (globalThis.__SettingsHubBuild ?? "?") + ") - switch workflows away and back once to mount it.");
+        return;
+    }
+    freshAddReconfiguring = true;
+    console.info("[SettingsHub] a fresh hub's UI did not mount ~6s after the add - reconfiguring the workflow (the same thing switching workflows away and back does). One-time repair for this node.");
+    try { showHubToast("SettingsHub: remounting the hub UI - reloading the workflow once…"); } catch (_) {}
+    try {
+        const p = app.loadGraphData(data);
+        Promise.resolve(p).catch((err) => {
+            console.warn("[SettingsHub] fresh-add reconfigure failed:", err);
+        }).finally(() => { freshAddReconfiguring = false; });
+    } catch (err) {
+        freshAddReconfiguring = false;
+        console.warn("[SettingsHub] fresh-add reconfigure failed:", err);
+    }
+}
+
 app.registerExtension({
     name: "Comfy.SettingsHub.node",
     nodeCreated(node) {
-        if (node.type === NODE_NAME) {
-            getHubConfig(node);
-            syncNode(node);
-            trackHubNode(node); // cross-graph discovery (subgraph-safe menus)
-        }
+        if (node.type !== NODE_NAME) return;
+        getHubConfig(node);
+        trackHubNode(node); // cross-graph discovery (subgraph-safe menus)
+        // v64: UI build is deferred until the node is in the graph - see
+        // "v64 fresh-add lifecycle" above.
+        if (!syncIfInGraph(node)) deferHubUiBuild(node);
     },
     setup() {
         registerHubNode();
