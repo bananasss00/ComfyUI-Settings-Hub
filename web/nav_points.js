@@ -79,8 +79,8 @@ import { getNavMarkersOn, getNavMenuOn, getNavHotkeysOn } from "./global_setting
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["nav_points"] = true;
-if (globalThis.__SettingsHubBuild !== "v68") {
-    console.error("[SettingsHub] STALE BUILD: nav_points.js (v68) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v69") {
+    console.error("[SettingsHub] STALE BUILD: nav_points.js (v69) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
 }
 
@@ -165,9 +165,26 @@ function defaultNavLabel(cfg) {
     return `Point ${n + 1}`;
 }
 
-/** Create a nav item in cfg (push + order). Does NOT re-render - callers do. */
+/** Current canvas zoom (finite, > 0) or null - the single read-point for
+ *  "what zoom is the canvas at RIGHT NOW": the v69 point-creation capture
+ *  (addPointViaMenu / add-navpoint pass it into createNavItem) and the
+ *  popover's "= now" button. Never throws; a dead canvas yields null. */
+export function currentCanvasZoom() {
+    try {
+        const z = Number(app.canvas?.ds?.scale);
+        return Number.isFinite(z) && z > 0 ? z : null;
+    } catch (_) { return null; }
+}
+
+/** Create a nav item in cfg (push + order). Does NOT re-render - callers do.
+ *  v69: patch.zoom (finite > 0) becomes the point's INITIAL zoom - the UI
+ *  creation paths pass currentCanvasZoom() so a freshly added point pins the
+ *  zoom the user was looking at ("custom zoom" lands ON). Without patch.zoom
+ *  the point stays zoom-null (keep current zoom on jump) - deterministic for
+ *  tests and programmatic creation. */
 export function createNavItem(node, tabId, patch = {}) {
     const cfg = getHubConfig(node);
+    const z = Number(patch.zoom);
     const item = {
         id: genId("item"),
         type: NAV_TYPE,
@@ -179,7 +196,7 @@ export function createNavItem(node, tabId, patch = {}) {
             graphUuid: patch.graphUuid == null ? null : String(patch.graphUuid),
             graphName: typeof patch.graphName === "string" ? patch.graphName : "",
             pos: normalizePos(patch.pos) ?? [0, 0],
-            zoom: null,   // a fresh point NEVER forces a zoom - the user opts in
+            zoom: Number.isFinite(z) && z > 0 ? z : null, // v69: capture on create
             hotkey: null, // v67: assigned ONLY via assignNavHotkey (dup-check)
         },
     };
@@ -1287,6 +1304,7 @@ function addPointViaMenu(worldPos) {
         const tabId = getActiveTabId(cfg ?? {}) ?? "tab_default";
         const item = createNavItem(hub, tabId, {
             graphUuid: ctx.uuid, graphName: ctx.path, pos: worldPos,
+            zoom: currentCanvasZoom(),   // v69: pin the zoom the user sees
         });
         rerenderUi(hub);
         toastUi(`🧭 "${item.customLabel}" → ${hub.title ?? "Settings Hub"} (${ctx.path})`);

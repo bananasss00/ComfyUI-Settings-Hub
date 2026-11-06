@@ -11,8 +11,8 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
-if (globalThis.__SettingsHubBuild !== "v68") {
-    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v68) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v69") {
+    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v69) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
 }
@@ -77,6 +77,7 @@ import {
     isNavItem, normalizeNav, createNavItem, navJump, armAim,
     enterOwnerGraph, markersVersionBump, resolveNavTarget,
     activeGraphContext, setNavUiHooks, assignNavHotkey, hotkeyFromEvent,
+    currentCanvasZoom,
 } from "./nav_points.js";
 
 // v61: one-way UI bridge - nav_points NEVER imports this module (the dep
@@ -2444,8 +2445,8 @@ function openNavPopup(node, trigger, item) {
             return;
         }
         if (act === "zoomnow") {
-            const z = Number(app.canvas?.ds?.scale);
-            if (Number.isFinite(z) && z > 0) {
+            const z = currentCanvasZoom();   // v69: one shared zoom reader
+            if (z != null) {
                 zi.value = String(Math.round(z * 100) / 100);
                 cb.checked = true;
                 syncZoomEnabled();
@@ -5353,8 +5354,13 @@ function wireEvents(node, st) {
                 const okArm = armAim({
                     onPick: (ctx, pos) => {
                         const c2 = getHubConfig(node);
+                        // v69: the zoom the user is looking at RIGHT NOW is
+                        // pinned into the fresh point ("custom zoom" lands ON
+                        // in the popover) - re-placing (nav-move) still keeps
+                        // the EXISTING zoom setting on purpose.
                         const item = createNavItem(node, c2.activeTabId ?? tabId, {
                             graphUuid: ctx.uuid, graphName: ctx.path, pos,
+                            zoom: currentCanvasZoom(),
                         });
                         markersVersionBump();
                         renderHub(node);

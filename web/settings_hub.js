@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v68 - HOTKEY CAPTURE FIX: the point-popover key cap no longer wedges in 'press keys...' - the v67 capture handler referenced hotkeyFromEvent WITHOUT importing it, so the very first keypress threw a silent ReferenceError (visible only in F12), the pending combo was never stored and the window-capture listener stayed armed forever; the import is added and the handler now wraps its work in a try/catch that ENDS the session on any error, and the listener removal is unconditional (a torn-down popup can never leak a shield that swallows every future keydown). Includes v67 (per-point hotkeys: single key or Ctrl/Alt/Shift/Meta combo, physical-key matching across layouts, duplicate refusal with the owner named, document-capture jump engine, master switch in \u2699 -> Navigation), v66 (fail-open registration + visible degradation banner), v65 (nav jump anchored to the TOP-LEFT of the view, 80px margin, absolute-offset anti-drift ladder + settle guard) and the v64 fresh-add mount invariant");
+console.info("[SettingsHub] web build: v69 - NAV POINT ZOOM PINNED ON CREATE: adding a navigation point (\u23f8\u2192 canvas click aim flow OR the canvas RMB menu item) now captures the CURRENT canvas zoom into the fresh point (new currentCanvasZoom() reader, createNavItem honors patch.zoom), so the popover lands with 'custom zoom' CHECKED and the jump restores exactly the zoom the user was looking at - re-placing an existing point (\ud83d\udccd nav-move) still keeps its zoom setting on purpose, and createNavItem without patch.zoom stays zoom-null for deterministic programmatic creation. Includes v68 (hotkey capture fix: the v67 key cap wedged in press-keys-forever on a missing hotkeyFromEvent import - now imported, any handler error ends the capture session, listener removal is unconditional), v67 (per-point hotkeys, physical-key matching), v66 (fail-open registration + degradation banner), v65 (top-left jump anchor) and v64 (fresh-add mount invariant)");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v68 - HOTKEY CAPTURE FIX: the point-popov
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=68", import.meta.url).href;
+    link.href = new URL("styles.css?v=69", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -49,7 +49,7 @@ console.info("[SettingsHub] web build: v68 - HOTKEY CAPTURE FIX: the point-popov
 // silently removed every "Pin to Settings Hub" menu item and the sync hooks
 // (the user saw the menus vanish and had no idea why). The detector keeps its
 // diagnostic value but is NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v68";
+globalThis.__SettingsHubBuild = "v69";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -93,7 +93,7 @@ const FILES = [
     if (missing.length) {
         console.error("[SettingsHub] MIXED BUILD detected: STALE CACHED module(s) " +
             missing.map((k) => k + ".js").join(", ") +
-            " did not self-report as v68. The pack still registers what loaded (v67 fail-open), but a HARD REFRESH (Ctrl+F5) is required after updating the extension folder.");
+            " did not self-report as v69. The pack still registers what loaded (v67 fail-open), but a HARD REFRESH (Ctrl+F5) is required after updating the extension folder.");
     }
 
     // v66/v67 FAIL-OPEN registration, per module: menus first (the most visible

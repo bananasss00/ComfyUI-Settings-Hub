@@ -8,8 +8,8 @@ import * as Pins from "./pins.js";
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["hub_node"] = true;
-if (globalThis.__SettingsHubBuild !== "v68") {
-    console.error("[SettingsHub] STALE BUILD: hub_node.js (v68) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v69") {
+    console.error("[SettingsHub] STALE BUILD: hub_node.js (v69) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5).");
 }
