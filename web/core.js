@@ -2,12 +2,12 @@ import { app } from "../../scripts/app.js";
 import { syncNode } from "./sync.js";
 import * as Pins from "./pins.js";
 
-// v64 BUILD GUARD (see settings_hub.js): every submodule self-reports
+// v65 BUILD GUARD (see settings_hub.js): every submodule self-reports
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["core"] = true;
-if (globalThis.__SettingsHubBuild !== "v64") {
-    console.error("[SettingsHub] STALE BUILD: core.js (v64) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v65") {
+    console.error("[SettingsHub] STALE BUILD: core.js (v65) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
 }
 

@@ -1,7 +1,7 @@
 // ============================================================================
 // SettingsHub - DOM UI renderer
 // ----------------------------------------------------------------------------
-// v64 BUILD GUARD (must be the FIRST executable statement, before any work):
+// v65 BUILD GUARD (must be the FIRST executable statement, before any work):
 // the loader entry stamps globalThis.__SettingsHubBuild before importing the
 // submodules; this module refuses to stay silent if it was loaded as part of
 // a MIXED build (browser cache served a stale entry or a stale sibling).
@@ -11,8 +11,8 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
-if (globalThis.__SettingsHubBuild !== "v64") {
-    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v64) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v65") {
+    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v65) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
 }
@@ -5931,7 +5931,7 @@ export function hubTabSweepTick() {
                                 forceHubRebuild(hub);
                                 if (!staleMountCrumbShown) {
                                     staleMountCrumbShown = true;
-                                    console.info("[SettingsHub] rebuilt a hub whose DOM widget was not mounted (fresh-add frontend quirk). Repeats stop the moment the element stays connected; if they never do, hard-refresh (Ctrl+F5) and check that the F12 banner says v64.");
+                                    console.info("[SettingsHub] rebuilt a hub whose DOM widget was not mounted (fresh-add frontend quirk). Repeats stop the moment the element stays connected; if they never do, hard-refresh (Ctrl+F5) and check that the F12 banner says v65.");
                                 }
                                 if (hub.__hubMountRepairs === 3) {
                                     console.warn("[SettingsHub] fresh-add mount diagnostics (3rd repair): node #" + hub.id +

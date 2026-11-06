@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v64 - FIX (round 2): a hub added from the Add-Node menu could still appear WITHOUT its UI on some frontends: the v63 one-shot repair ladder gave up before the frontend's reactive DOM-widget layer ever mounted the late-registered element. v64 enforces the INVARIANT instead of one timing: a visible, non-collapsed, non-pinned hub always ends up with its element connected - a longer repair ladder (250/700/1600/3000ms) plus a persistent DOM-truth repair in the 1200ms tab-watch sweep, plus a one-time workflow reconfigure (the same thing switching workflows away and back does) as the last resort ~6s after the add. v64 also stamps __SettingsHubBuild and requires a self-report flag from every module, so a browser that serves STALE cached modules now names them in F12 instead of reproducing fixed bugs");
+console.info("[SettingsHub] web build: v65 - NAV ANCHOR: a nav-point jump now pins the point at the TOP-LEFT of the view (80px margin; the user's reference-corner preference) instead of the screen center. The v62 anti-drift machinery is unchanged and now guards the new anchor: absolute offset writes only (no read-modify-write delta), verification through the canvas' own converter, an empirical probe that handles any affine response slope, and a settle guard against view-restore animations. Also ships the v64 mount invariant: a visible, non-collapsed, non-pinned hub always ends up with its DOM element connected (repair ladder + persistent 1200ms sweep + one-time workflow reconfigure ~6s after the add), and the __SettingsHubBuild stamp that names stale cached modules in F12");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,11 +32,11 @@ console.info("[SettingsHub] web build: v64 - FIX (round 2): a hub added from the
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=64", import.meta.url).href;
+    link.href = new URL("styles.css?v=65", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
-// v64 BUILD GUARD: stamped BEFORE any submodule import. Every submodule
+// v65 BUILD GUARD: stamped BEFORE any submodule import. Every submodule
 // self-reports under globalThis.__SettingsHubLoaded[module] and verifies this
 // stamp at load time, so a half-updated module set (the browser serving a
 // cached v62/v63 file next to fresh ones) announces itself in F12 - with the
@@ -44,7 +44,7 @@ console.info("[SettingsHub] web build: v64 - FIX (round 2): a hub added from the
 // exist in the source tree. Field lesson from the v63 rollout: "the fix did
 // not work" was indistinguishable from "the fix never loaded" - the banner
 // alone cannot prove the SUBMODULES are fresh.
-globalThis.__SettingsHubBuild = "v64";
+globalThis.__SettingsHubBuild = "v65";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -79,14 +79,14 @@ const FILES = [
         console.error("[SettingsHub] partial load:", FILES.length - failed.length, "of", FILES.length, "modules; not registering the sync hooks. Failed:", failed.join(", "));
     } else {
         // v64: name stale cached modules precisely - a fresh module sets its
-        // flag; a stale cached file has no v64 code to run and stays silent.
+        // flag; a stale cached file has no v65 code to run and stays silent.
         const missing = FILES
             .map((f) => f.replace(/^\.\//, "").replace(/\.js$/, ""))
             .filter((k) => !globalThis.__SettingsHubLoaded?.[k]);
         if (missing.length) {
             console.error("[SettingsHub] MIXED BUILD detected: STALE CACHED module(s) " +
                 missing.map((k) => k + ".js").join(", ") +
-                " did not self-report as v64. Hard-refresh the page (Ctrl+F5) after updating the extension folder.");
+                " did not self-report as v65. Hard-refresh the page (Ctrl+F5) after updating the extension folder.");
         } else {
             mods["./context_menu.js"].attachContextMenu();
 

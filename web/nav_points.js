@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - Navigation points ("nav" items, 🧭) - v62
+// SettingsHub - Navigation points ("nav" items, 🧭) - v65
 // ----------------------------------------------------------------------------
 // A nav item is a hub row that JUMPS the camera to a saved place of the
 // workflow: the root canvas, a subgraph, or a subgraph nested inside another
@@ -11,7 +11,8 @@
 //     nav: {
 //       graphUuid: null | "<subgraph uuid>",   // null = ROOT canvas
 //       graphName: "Main ▸ Sub A ▸ Sub B",     // capture-time path (diagnostics)
-//       pos: [x, y],                           // WORLD coordinates to center on
+//       pos: [x, y],                           // WORLD coordinates pinned at
+//                                              // the view's TOP-LEFT anchor (v65)
 //       zoom: null | number,                   // null = DON'T touch zoom (default)
 //     },
 //   }
@@ -25,14 +26,17 @@
 //   * All world<->screen math goes through the canvas' OWN converters
 //     (convertCanvasToOffset / ds.convertOffsetToCanvas). The only fallback
 //     is the project relation screen = (world - offset) * scale (the same
-//     one emulateDblClickAt was field-verified against). Centering (v62) is
-//     ABSOLUTE-first: write offset = point - center/scale directly, then
+//     one emulateDblClickAt was field-verified against). Placement (v62) is
+//     ABSOLUTE-first: write offset = point - anchor/scale directly, then
 //     VERIFY through the canvas' own converter; an empirical probe (measured
 //     d(world)/d(offset) response) covers frontends whose view layer answers
 //     the offset write with any other slope, and a post-jump settle loop
-//     re-asserts the center if a view restore/open animation drags it away.
+//     re-asserts the anchor if a view restore/open animation drags it away.
 //     (v61's read-modify-write delta method turned RELATIVE on such
 //     frontends: every click landed a bit further from the point.)
+//     v65: the anchor is the TOP-LEFT corner of the view (80px margin) -
+//     the user's reference-corner preference - not the screen center; the
+//     whole anti-drift machinery is unchanged, only S changed.
 //   * Aim mode and marker dragging intercept the canvas via DOCUMENT-level
 //     capture listeners (registered before the canvas sees the event) and
 //     ALWAYS uninstall them; no polling is introduced anywhere.
@@ -51,12 +55,12 @@ import {
 } from "./core.js";
 import { getNavMarkersOn, getNavMenuOn } from "./global_settings.js";
 
-// v64 BUILD GUARD (see settings_hub.js): every submodule self-reports
+// v65 BUILD GUARD (see settings_hub.js): every submodule self-reports
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["nav_points"] = true;
-if (globalThis.__SettingsHubBuild !== "v64") {
-    console.error("[SettingsHub] STALE BUILD: nav_points.js (v64) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v65") {
+    console.error("[SettingsHub] STALE BUILD: nav_points.js (v65) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
 }
 
@@ -417,21 +421,37 @@ export function screenToWorld(clientX, clientY) {
     return [lx / s + ox, ly / s + oy];
 }
 
-/**
- * Center of the visible viewport in canvas-local px (CSS space - the same
- * space litegraph's converters expect mouse positions in).
- */
-function viewCenterPx(c) {
+// v65 ANCHOR: a jumped point is pinned at the TOP-LEFT of the visible view
+// (the user's reference-corner preference) instead of the screen center.
+// The margin keeps the marker clear of the canvas edge and of the overlays
+// hugging the corner (sidebars / toolbars); on tiny windows the margin
+// shrinks so the anchor can never leave the view (min 24px, max 25% side).
+const NAV_ANCHOR_MARGIN = 80;
+
+/** Visible view size in canvas-local px (CSS space - the same space
+ *  litegraph's converters expect mouse positions in). */
+function viewDimsPx(c) {
     const el = canvasElement(c);
     let rect = null;
     try { rect = el?.getBoundingClientRect?.() ?? null; } catch (_) {}
-    const Sx = rect && rect.width > 0 ? rect.width / 2 : ((c.canvas?.width ?? 800) / 2);
-    const Sy = rect && rect.height > 0 ? rect.height / 2 : ((c.canvas?.height ?? 600) / 2);
-    return [Sx, Sy];
+    const W = rect && rect.width > 0 ? rect.width
+        : (Number(c.canvas?.width) > 0 ? Number(c.canvas.width) : 800);
+    const H = rect && rect.height > 0 ? rect.height
+        : (Number(c.canvas?.height) > 0 ? Number(c.canvas.height) : 600);
+    return [W, H];
 }
 
-/** World point under the screen center, through the canvas' OWN converter. */
-function readWorldUnderCenter(c, toWorld, Sx, Sy) {
+/** Screen anchor (canvas-local px): the screen position a nav point lands
+ *  on when the camera jumps. v65: top-left + NAV_ANCHOR_MARGIN. */
+function viewAnchorPx(c) {
+    const [W, H] = viewDimsPx(c);
+    const mx = Math.max(24, Math.min(NAV_ANCHOR_MARGIN, W * 0.25));
+    const my = Math.max(24, Math.min(NAV_ANCHOR_MARGIN, H * 0.25));
+    return [mx, my];
+}
+
+/** World point under a screen position, through the canvas' OWN converter. */
+function readWorldUnderScreen(c, toWorld, Sx, Sy) {
     if (typeof toWorld !== "function") return null;
     try {
         const w = toWorld([Sx, Sy]);
@@ -444,7 +464,7 @@ function readWorldUnderCenter(c, toWorld, Sx, Sy) {
 
 /** Verification tolerance: Float32 conversions inside litegraph lose
  *  precision on huge world coords, so scale the epsilon with |p|. */
-function centerTol(p) {
+function anchorTol(p) {
     return 0.05 + 1e-6 * Math.max(Math.abs(p[0]), Math.abs(p[1]), 1);
 }
 
@@ -463,15 +483,15 @@ function writeOffset(c, arr, mode) {
 }
 
 /** Absolute one-shot write under the documented project contract
- *  screen = (world - offset) * scale  =>  offset = world - screen/scale.
+ *  screen = (world - offset) * scale  =>  offset = world - anchor/scale.
  *  No read-modify-write: repeated calls are IDEMPOTENT by construction. */
-function applyAbsoluteCenter(c, Sx, Sy, p, mode) {
+function applyAbsoluteAnchor(c, Sx, Sy, p, mode) {
     const s = Number(c.ds.scale) > 0 ? Number(c.ds.scale) : 1;
     return writeOffset(c, [p[0] - Sx / s, p[1] - Sy / s], mode);
 }
 
 /**
- * Empirical-probe centering (v62): measure the REAL d(world-under-center)/
+ * Empirical-probe anchoring (v62): measure the REAL d(world-under-anchor)/
  * d(offset) response of the running frontend by nudging the offset a little
  * and re-reading the converter, then Newton-step to the target. Exact for
  * ANY affine response (slope +1, -1, 2, 0.5...), which is what killed the
@@ -479,10 +499,10 @@ function applyAbsoluteCenter(c, Sx, Sy, p, mode) {
  * All writes/reads happen inside one synchronous block - nothing paints the
  * intermediate states.
  */
-function applyProbeCenter(c, toWorld, Sx, Sy, p, mode) {
+function applyProbeAnchor(c, toWorld, Sx, Sy, p, mode) {
     const PROBE = 128;   // offset units; response slope is scale-independent
     const o0 = [Number(c.ds.offset?.[0]) || 0, Number(c.ds.offset?.[1]) || 0];
-    const cur0 = readWorldUnderCenter(c, toWorld, Sx, Sy);
+    const cur0 = readWorldUnderScreen(c, toWorld, Sx, Sy);
     if (!cur0) return false;
 
     const slope = [0, 0];
@@ -490,7 +510,7 @@ function applyProbeCenter(c, toWorld, Sx, Sy, p, mode) {
         const o1 = [o0[0], o0[1]];
         o1[axis] += PROBE;
         if (!writeOffset(c, o1, mode)) continue;
-        const cur1 = readWorldUnderCenter(c, toWorld, Sx, Sy);
+        const cur1 = readWorldUnderScreen(c, toWorld, Sx, Sy);
         writeOffset(c, o0, mode);   // restore before judging
         if (!cur1) continue;
         const k = (cur1[axis] - cur0[axis]) / PROBE;
@@ -500,7 +520,7 @@ function applyProbeCenter(c, toWorld, Sx, Sy, p, mode) {
 
     let o = [o0[0], o0[1]];
     for (let iter = 0; iter < 2; iter++) {      // affine -> 1 step is exact
-        const cur = readWorldUnderCenter(c, toWorld, Sx, Sy);
+        const cur = readWorldUnderScreen(c, toWorld, Sx, Sy);
         if (!cur) break;
         const next = [o[0], o[1]];
         let moved = false;
@@ -513,17 +533,19 @@ function applyProbeCenter(c, toWorld, Sx, Sy, p, mode) {
         o = next;
         writeOffset(c, o, mode);
     }
-    const tol = centerTol(p);
-    const fin = readWorldUnderCenter(c, toWorld, Sx, Sy);
+    const tol = anchorTol(p);
+    const fin = readWorldUnderScreen(c, toWorld, Sx, Sy);
     return !!fin && Math.abs(fin[0] - p[0]) <= tol && Math.abs(fin[1] - p[1]) <= tol;
 }
 
 /**
- * Center the ACTIVE view on a world point; apply zoom first when numeric.
- * v62 strategy ladder - every step is ABSOLUTE (the old delta method could
- * drift further away on every click when the frontend's view layer answered
- * the offset write with a slope other than +1) and every step with a working
- * converter is VERIFIED through that same converter before we accept it:
+ * Pin the ACTIVE view so a world point lands on the view's ANCHOR
+ * (v65: top-left + margin - the reference-corner preference); apply zoom
+ * first when numeric. v62 strategy ladder - every step is ABSOLUTE (the old
+ * delta method could drift further away on every click when the frontend's
+ * view layer answered the offset write with a slope other than +1) and every
+ * step with a working converter is VERIFIED through that same converter
+ * before we accept it:
  *   1. absolute write, in-place (standard litegraph - the 99.9% path);
  *   2. empirical probe, in-place (any affine response slope);
  *   3. absolute write via array replacement (getter/setter-backed offset);
@@ -531,7 +553,7 @@ function applyProbeCenter(c, toWorld, Sx, Sy, p, mode) {
  *   5. unverifiable (no converter): best-effort absolute write under the
  *      documented project contract.
  */
-export function setActiveViewCenter(pos, zoom = null) {
+export function setActiveViewAnchor(pos, zoom = null) {
     const c = app.canvas;
     if (!c || !c.ds) return false;
     const p = normalizePos(pos);
@@ -539,25 +561,25 @@ export function setActiveViewCenter(pos, zoom = null) {
     const z = clampZoom(zoom);
     if (z != null) c.ds.scale = z;
 
-    const [Sx, Sy] = viewCenterPx(c);
+    const [Sx, Sy] = viewAnchorPx(c);
     const toWorld = canvasToOffsetFn(c);
-    const tol = centerTol(p);
-    const centered = () => {
-        const cur = readWorldUnderCenter(c, toWorld, Sx, Sy);
+    const tol = anchorTol(p);
+    const anchored = () => {
+        const cur = readWorldUnderScreen(c, toWorld, Sx, Sy);
         return !!cur && Math.abs(cur[0] - p[0]) <= tol && Math.abs(cur[1] - p[1]) <= tol;
     };
 
     let applied = false;
     if (toWorld) {
-        if (applyAbsoluteCenter(c, Sx, Sy, p, "elements") && centered()) applied = true;
-        if (!applied) applied = applyProbeCenter(c, toWorld, Sx, Sy, p, "elements");
-        if (!applied && applyAbsoluteCenter(c, Sx, Sy, p, "assign") && centered()) applied = true;
-        if (!applied) applied = applyProbeCenter(c, toWorld, Sx, Sy, p, "assign");
+        if (applyAbsoluteAnchor(c, Sx, Sy, p, "elements") && anchored()) applied = true;
+        if (!applied) applied = applyProbeAnchor(c, toWorld, Sx, Sy, p, "elements");
+        if (!applied && applyAbsoluteAnchor(c, Sx, Sy, p, "assign") && anchored()) applied = true;
+        if (!applied) applied = applyProbeAnchor(c, toWorld, Sx, Sy, p, "assign");
     }
     if (!applied) {
         // Converter-less / unverifiable frontend: keep the documented-contract
         // absolute write (same value strategy 1 wrote) as the best effort.
-        applyAbsoluteCenter(c, Sx, Sy, p, "elements");
+        applyAbsoluteAnchor(c, Sx, Sy, p, "elements");
     }
     try { c.setDirtyCanvas?.(true, true); } catch (_) {}
     return true;
@@ -672,17 +694,21 @@ function startFlash(pos) {
 }
 
 /**
- * Generous post-jump check: is the point still visually under the screen
- * center? Tolerance is a fraction of the view diagonal (world units at the
+ * Generous post-jump check: is the point still visually AT the anchor?
+ * Tolerance is a fraction of the FULL view diagonal (world units at the
  * current scale) - big enough to never fight a user's own pan, small enough
- * to catch a view-restore animation that dragged the camera away.
+ * to catch a view-restore animation that dragged the camera away. It is
+ * deliberately NOT tied to the anchor position: the v65 top-left anchor
+ * must not make this guard stricter than the v62 center one
+ * (0.12 * 2 * hypot(W/2, H/2) === 0.12 * hypot(W, H)).
  */
-function viewNearlyCentered(c, toWorld, pos) {
-    const [Sx, Sy] = viewCenterPx(c);
-    const cur = readWorldUnderCenter(c, toWorld, Sx, Sy);
+function viewAtAnchor(c, toWorld, pos) {
+    const [Sx, Sy] = viewAnchorPx(c);
+    const [W, H] = viewDimsPx(c);
+    const cur = readWorldUnderScreen(c, toWorld, Sx, Sy);
     if (!cur) return true;   // unverifiable -> never fight the view
     const s = Number(c.ds?.scale) > 0 ? Number(c.ds.scale) : 1;
-    const tol = (0.12 * 2 * Math.hypot(Sx, Sy)) / s;
+    const tol = (0.12 * Math.hypot(W, H)) / s;
     return Math.abs(cur[0] - pos[0]) <= tol && Math.abs(cur[1] - pos[1]) <= tol;
 }
 
@@ -691,11 +717,12 @@ function viewNearlyCentered(c, toWorld, pos) {
  * subgraph, nested subgraph - whichever the uuid resolves to), THEN set the
  * camera. zoom===null keeps the current zoom - only panning happens.
  *
- * v62: after centering, a short SETTLE guard re-asserts the center while the
+ * v62: after the jump, a short SETTLE guard re-asserts the anchor while the
  * frontend's own view restore / subgraph-open animation keeps dragging the
- * camera away. Every re-assert goes through setActiveViewCenter, which is
+ * camera away. Every re-assert goes through setActiveViewAnchor, which is
  * ABSOLUTE - so neither the animation nor repeated clicks can accumulate a
  * drifting offset (the v61 "jump lands further away every click" bug).
+ * v65: the anchor is the TOP-LEFT of the view (80px margin), not the center.
  */
 export async function navJump(item) {
     const nav = normalizeNav(item);
@@ -721,22 +748,22 @@ export async function navJump(item) {
     }
 
     // Let the frontend settle its own view restore after the graph switch,
-    // then apply OUR camera (zoom first, then center).
+    // then apply OUR camera (zoom first, then the anchor).
     await napFrames(2);
     if (seq !== navSeq) return;
-    setActiveViewCenter(nav.pos, nav.zoom);
+    setActiveViewAnchor(nav.pos, nav.zoom);
     startFlash(nav.pos);
 
     // Settle guard: verify through the canvas' own converter that the point
-    // really IS under the screen center once the frontend stops animating;
-    // re-assert (absolutely) while it is not. Superseded by any fresher jump.
+    // really IS at the anchor once the frontend stops animating; re-assert
+    // (absolutely) while it is not. Superseded by any fresher jump.
     const toWorld = canvasToOffsetFn(c);
     if (!toWorld) return;
     for (let pass = 0; pass < 4; pass++) {
         await napFrames(4);
         if (seq !== navSeq) return;
-        if (viewNearlyCentered(c, toWorld, nav.pos)) return;
-        setActiveViewCenter(nav.pos, null);   // zoom already applied above
+        if (viewAtAnchor(c, toWorld, nav.pos)) return;
+        setActiveViewAnchor(nav.pos, null);   // zoom already applied above
     }
 }
 
