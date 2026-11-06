@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - Navigation points ("nav" items, 🧭) - v65
+// SettingsHub - Navigation points ("nav" items, 🧭) - v67
 // ----------------------------------------------------------------------------
 // A nav item is a hub row that JUMPS the camera to a saved place of the
 // workflow: the root canvas, a subgraph, or a subgraph nested inside another
@@ -14,8 +14,28 @@
 //       pos: [x, y],                           // WORLD coordinates pinned at
 //                                              // the view's TOP-LEFT anchor (v65)
 //       zoom: null | number,                   // null = DON'T touch zoom (default)
-//     },
-//   }
+//       hotkey: null | "Ctrl+Shift+1",         // v67 keyboard shortcut (null =
+//     },                                      //   no hotkey) - canonical form:
+//   }                                         //   Ctrl/Alt/Shift/Meta prefixes in
+//                                             //   THIS order, then the physical key
+//
+// v67 HOTKEYS: every point may carry a keyboard shortcut - a single key or a
+// modifier combination. Canonical storage is PHYSICAL-KEY based (e.code):
+// "Ctrl+Shift+Digit1" is stored as "Ctrl+Shift+1", so an assigned combo works
+// across keyboard layouts (a RU-layout user who assigned Ctrl+G presses the
+// same physical key with "п" printed on it and the point still jumps). The
+// engine is ONE document-CAPTURE keydown listener installed at module load:
+//   * guard chain: global toggle (⚙ -> Navigation) -> aim/marker-drag modal
+//     states -> typing targets (INPUT/TEXTAREA/SELECT/contentEditable) ->
+//     e.repeat -> modifier-only presses;
+//   * a matched combo is preventDefault+stopPropagation'ed (it wins over
+//     ComfyUI's own shortcuts by design) and jumps via the SAME navJump
+//     ladder - any tab, any hub, the row does not have to be visible;
+//   * an unmatched key is left COMPLETELY untouched (no default prevented).
+// Assignment goes through assignNavHotkey(): duplicates are REFUSED with the
+// owning point named (first match wins would make the second silent-dead),
+// and the canonical form is recomputed on every heal so old/garbage values
+// degrade to null instead of crashing the matcher.
 //
 // CONTRACTS (see AGENTS.md, v61 + invariant 15):
 //   * Graph addressing is UUID-based and resolved at JUMP time by BFS from
@@ -53,14 +73,14 @@ import {
     genId, allHubs, getHubConfig, getActiveTabId, nextOrder,
     nodeListOf, childGraphsOfNode,
 } from "./core.js";
-import { getNavMarkersOn, getNavMenuOn } from "./global_settings.js";
+import { getNavMarkersOn, getNavMenuOn, getNavHotkeysOn } from "./global_settings.js";
 
-// v66 BUILD GUARD (see settings_hub.js): every submodule self-reports
+// v67 BUILD GUARD (see settings_hub.js): every submodule self-reports
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["nav_points"] = true;
-if (globalThis.__SettingsHubBuild !== "v66") {
-    console.error("[SettingsHub] STALE BUILD: nav_points.js (v66) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v67") {
+    console.error("[SettingsHub] STALE BUILD: nav_points.js (v67) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
 }
 
@@ -126,11 +146,15 @@ export function normalizeNav(item) {
     const pos = [Number.isFinite(x) ? x : 0, Number.isFinite(y) ? y : 0];
     const z = Number(raw.zoom);
     const uuid = raw.graphUuid == null ? null : String(raw.graphUuid);
+    // v67 hotkey heal: garbage/deprecated spellings re-canonicalize; an
+    // unparseable value degrades to null (never crashes the matcher).
+    const hk = canonicalHotkey(raw.hotkey);
     item.nav = {
         graphUuid: uuid,
         graphName: typeof raw.graphName === "string" ? raw.graphName : "",
         pos,
         zoom: Number.isFinite(z) && z > 0 ? z : null,   // null = keep current zoom
+        hotkey: hk,                                     // null = no hotkey
     };
     return item.nav;
 }
@@ -156,6 +180,7 @@ export function createNavItem(node, tabId, patch = {}) {
             graphName: typeof patch.graphName === "string" ? patch.graphName : "",
             pos: normalizePos(patch.pos) ?? [0, 0],
             zoom: null,   // a fresh point NEVER forces a zoom - the user opts in
+            hotkey: null, // v67: assigned ONLY via assignNavHotkey (dup-check)
         },
     };
     cfg.items.push(item);
@@ -1057,6 +1082,192 @@ function navPointerUp() {
     try { if (wasDrag.raf) cancelAnimationFrame(wasDrag.raf); } catch (_) {}
     try { app.canvas?.setDirtyCanvas?.(true, true); } catch (_) {}
 }
+
+// ---------------------------------------------------------------------------
+// v67: POINT HOTKEYS - canonical combos + assignment + the keydown engine
+// ---------------------------------------------------------------------------
+// Canonical form (the ONLY thing stored / compared):
+//     [Ctrl+][Alt+][Shift+][Meta+]<KEY>   e.g. "F3", "Ctrl+Shift+1", "Alt+G"
+// KEY is derived from the PHYSICAL key (e.code), so an assignment survives
+// keyboard-layout switches (RU/EN): the same keycap always matches. Numpad
+// keys become word tokens (Num1, NumPlus...) so the "+"-split can never
+// mis-parse a stored combo.
+
+const HOTKEY_CODE_KEY_MAP = {
+    Space: "Space", Enter: "Enter", NumpadEnter: "NumEnter", Tab: "Tab",
+    Backspace: "Backspace", Delete: "Delete", Insert: "Insert",
+    Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown",
+    ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
+    Comma: ",", Period: ".", Slash: "/", Backquote: "`",
+    BracketLeft: "[", BracketRight: "]", Semicolon: ";", Quote: "'",
+    Backslash: "\\", Minus: "-", Equal: "=",
+    NumpadAdd: "NumPlus", NumpadSubtract: "NumMinus", NumpadMultiply: "NumMul",
+    NumpadDivide: "NumDiv", NumpadDecimal: "NumDot", ContextMenu: "Menu",
+};
+
+const HOTKEY_WORD_KEYS = {
+    space: "Space", enter: "Enter", numpadenter: "NumEnter", tab: "Tab",
+    backspace: "Backspace", delete: "Delete", del: "Delete", insert: "Insert",
+    home: "Home", end: "End", pageup: "PageUp", pagedown: "PageDown",
+    up: "Up", arrowup: "Up", down: "Down", arrowdown: "Down",
+    left: "Left", arrowleft: "Left", right: "Right", arrowright: "Right",
+    menu: "Menu", numpadplus: "NumPlus", numpadminus: "NumMinus",
+    numpadmul: "NumMul", numpaddivide: "NumDiv", numpaddot: "NumDot",
+};
+
+function canonKeyFromCode(code) {
+    if (!code) return null;
+    let m = /^Key([A-Z])$/.exec(code);
+    if (m) return m[1];
+    m = /^Digit([0-9])$/.exec(code);
+    if (m) return m[1];
+    m = /^Numpad([0-9])$/.exec(code);
+    if (m) return "Num" + m[1];
+    m = /^F(\d{1,2})$/.exec(code);
+    if (m) return code;                                    // F1..F24 as-is
+    return HOTKEY_CODE_KEY_MAP[code] ?? null;
+}
+
+/** Canonicalize ONE stored key token; null = invalid (rejects the combo). */
+function canonKeyToken(tok) {
+    const t = String(tok ?? "").trim();
+    if (!t) return null;
+    if (/^F\d{1,2}$/i.test(t)) return t.toUpperCase();
+    if (/^[a-z]$/i.test(t)) return t.toUpperCase();
+    if (/^[0-9]$/.test(t)) return t;
+    if (/^Num(?:[0-9]|Enter|Plus|Minus|Mul|Div|Dot)$/i.test(t)) {
+        const body = t.slice(3);
+        return "Num" + (/^[0-9]$/.test(body) ? body : body.charAt(0).toUpperCase() + body.slice(1).toLowerCase());
+    }
+    const w = HOTKEY_WORD_KEYS[t.toLowerCase()];
+    if (w) return w;
+    if (/^[,.\[\];'`\\\/\-=]$/.test(t)) return t;
+    return null;
+}
+
+/**
+ * Live KeyboardEvent -> canonical combo string, or null when the event must
+ * NOT become a hotkey: Escape is reserved (aim/popup cancellation), modifier
+ * presses alone are not combos, unknown/exotic codes are rejected rather
+ * than guessed.
+ */
+export function hotkeyFromEvent(e) {
+    try {
+        if (!e || typeof e !== "object") return null;
+        if (e.key === "Escape" || e.key === "Dead") return null;
+        if (/^(Shift|Control|Alt|Meta)$/.test(String(e.key ?? ""))) return null;
+        if (/^(Shift|Control|Alt|Meta|OS|Fn|CapsLock|Hyper|Super|Code\d*)\w*$/.test(String(e.code ?? ""))) {
+            return null;                                   // bare modifier press
+        }
+        let key = canonKeyFromCode(e.code);
+        if (!key) {
+            // No usable e.code (synthetic events / exotic keyboards): accept a
+            // plain single-character or F-key from e.key, reject the rest.
+            const k = String(e.key ?? "");
+            if (k.length === 1) key = /[a-z]/i.test(k) ? k.toUpperCase() : k;
+            else if (/^F\d{1,2}$/.test(k)) key = k;
+            else return null;
+        }
+        const parts = [];
+        if (e.ctrlKey) parts.push("Ctrl");
+        if (e.altKey) parts.push("Alt");
+        if (e.shiftKey) parts.push("Shift");
+        if (e.metaKey) parts.push("Meta");
+        parts.push(key);
+        return parts.join("+");
+    } catch (_) { return null; }
+}
+
+/** Stored (possibly old / hand-edited) string -> canonical combo or null. */
+export function canonicalHotkey(str) {
+    if (typeof str !== "string") return null;
+    const s = str.trim();
+    if (!s) return null;
+    const mods = { Ctrl: false, Alt: false, Shift: false, Meta: false };
+    let keyToken = null;
+    for (const rawPart of s.split("+")) {
+        const p = rawPart.trim().toLowerCase();
+        if (!p) return null;                               // "Ctrl++" and friends
+        if (p === "ctrl" || p === "control") { mods.Ctrl = true; continue; }
+        if (p === "alt" || p === "option") { mods.Alt = true; continue; }
+        if (p === "shift") { mods.Shift = true; continue; }
+        if (p === "meta" || p === "cmd" || p === "command" ||
+            p === "win" || p === "super") { mods.Meta = true; continue; }
+        if (keyToken !== null) return null;                // two key tokens
+        keyToken = rawPart;
+    }
+    if (!keyToken) return null;                            // modifiers only
+    const key = canonKeyToken(keyToken);
+    if (!key) return null;
+    const parts = [];
+    if (mods.Ctrl) parts.push("Ctrl");
+    if (mods.Alt) parts.push("Alt");
+    if (mods.Shift) parts.push("Shift");
+    if (mods.Meta) parts.push("Meta");
+    parts.push(key);
+    return parts.join("+");
+}
+
+/** First nav item (all hubs, any tab) owning this combo, or null. */
+export function findNavHotkeyOwner(combo, exceptItem = null) {
+    const c = canonicalHotkey(combo);
+    if (!c) return null;
+    for (const { item, hub } of getNavItems()) {
+        if (exceptItem && item === exceptItem) continue;
+        const nav = normalizeNav(item);
+        if (nav && nav.hotkey === c) return { item, hub, combo: c };
+    }
+    return null;
+}
+
+/**
+ * Assign (or clear) a point's hotkey. Duplicates are REFUSED - two points on
+ * one combo would make the second silently dead (first match wins). Returns
+ * { ok:true, combo } | { ok:false, reason, combo?, owner? }.
+ */
+export function assignNavHotkey(item, combo) {
+    const nav = normalizeNav(item);
+    if (!nav) return { ok: false, reason: "not-nav" };
+    if (combo == null || combo === "") {                   // explicit clear
+        nav.hotkey = null;
+        return { ok: true, combo: null };
+    }
+    const c = canonicalHotkey(combo);
+    if (!c) return { ok: false, reason: "invalid", combo: null };
+    const owner = findNavHotkeyOwner(c, item);
+    if (owner) return { ok: false, reason: "duplicate", combo: c, owner };
+    nav.hotkey = c;
+    return { ok: true, combo: c };
+}
+
+// The engine: ONE permanent document-CAPTURE keydown listener (same
+// interception discipline as the aim/marker listeners - it sees every key
+// before the canvas and ComfyUI's own shortcut handlers do).
+function navHotkeyKeyDown(e) {
+    try {
+        if (!getNavHotkeysOn()) return;
+        if (aimState || markerDrag) return;                // modal modes win
+        if (e.repeat) return;
+        const t = e.target ?? null;
+        if (t) {
+            const tag = String(t.tagName ?? "").toUpperCase();
+            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+            if (t.isContentEditable === true) return;
+        }
+        const combo = hotkeyFromEvent(e);
+        if (!combo) return;
+        const owner = findNavHotkeyOwner(combo);
+        if (!owner) return;          // unmatched keys stay COMPLETELY native
+        e.preventDefault();
+        e.stopPropagation();
+        toastUi(`⌨ ${owner.item.customLabel ?? "Point"}`);
+        navJump(owner.item);
+    } catch (_) { /* a hotkey failure must never break the page's keyboard */ }
+}
+
+// Registered at module load: the engine needs no canvas init, and a keydown
+// before ComfyUI finishes booting simply finds no match (no-op).
+try { document.addEventListener("keydown", navHotkeyKeyDown, true); } catch (_) {}
 
 // ---------------------------------------------------------------------------
 // Canvas right-click menu: "Add navigation point here"

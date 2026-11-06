@@ -388,10 +388,16 @@ export function __refreshTickForTest() {
 //                    draggable markers on the canvas (default ON);
 //   * navCanvasMenu- offer "🧭 Add navigation point here" in the canvas
 //                    right-click menu (default ON).
+//   * navHotkeys   - v67: honor the per-point keyboard shortcuts (⌨ chips):
+//                    one document-capture keydown engine matches assigned
+//                    combos and jumps the point. Default ON; the assignments
+//                    themselves live in the workflow config (item.nav.hotkey),
+//                    ONLY this switch is a user preference.
 // ============================================================================
 
 const LS_NAV_MARKERS = "settingshub.navMarkers";
 const LS_NAV_MENU = "settingshub.navCanvasMenu";
+const LS_NAV_HOTKEYS = "settingshub.navHotkeys";
 
 function readBoolFlag(key, def) {
     try {
@@ -423,4 +429,15 @@ export function setNavMenuOn(on) {
     navMenuOn = on !== false;
     writeBoolFlag(LS_NAV_MENU, navMenuOn);
     return navMenuOn;
+}
+
+let navHotkeysOn = readBoolFlag(LS_NAV_HOTKEYS, true);
+
+/** Current global nav-hotkey engine state (true = assigned combos jump). */
+export function getNavHotkeysOn() { return navHotkeysOn; }
+
+export function setNavHotkeysOn(on) {
+    navHotkeysOn = on !== false;
+    writeBoolFlag(LS_NAV_HOTKEYS, navHotkeysOn);
+    return navHotkeysOn;
 }

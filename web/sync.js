@@ -1,9 +1,9 @@
-// v66 BUILD GUARD (see settings_hub.js): every submodule self-reports
+// v67 BUILD GUARD (see settings_hub.js): every submodule self-reports
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["sync"] = true;
-if (globalThis.__SettingsHubBuild !== "v66") {
-    console.error("[SettingsHub] STALE BUILD: sync.js (v66) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v67") {
+    console.error("[SettingsHub] STALE BUILD: sync.js (v67) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
 }
 // ============================================================================

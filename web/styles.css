@@ -2641,6 +2641,31 @@ button.hub-pin-back {
     color: #ffd66e;
 }
 
+/* v67: hotkey chip of a nav row (next to the zoom chip) - shown only when
+   a combo is assigned; dimmed while the engine is globally off */
+.hub-nav-key {
+    flex: none;
+    font-size: 10px;
+    line-height: 1;
+    padding: 3px 6px;
+    border-radius: 8px;
+    background: rgba(124, 150, 255, 0.16);
+    color: #9fb4ff;
+    cursor: pointer;
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hub-nav-key:hover {
+    background: rgba(124, 150, 255, 0.28);
+}
+
+.hub-nav-key-off {
+    opacity: 0.45;
+}
+
 /* Aim mode: floating hint chip on document.body (pointer-events: none, so a
    click "through" it still reaches the canvas and cancels/places normally) */
 .hub-nav-aim-hint {
@@ -2706,6 +2731,38 @@ button.hub-pin-back {
 
 .hub-nav-grid-zoom .hub-btn {
     padding: 2px 8px;
+}
+
+/* v67 hotkey row: [label] [capture button] [clear] */
+.hub-nav-grid-key {
+    grid-template-columns: auto 1fr auto;
+}
+
+.hub-nav-keycap {
+    padding: 2px 8px;
+    text-align: center;
+    font-family: inherit;
+}
+
+.hub-nav-keycap.hub-nav-keycap-on {
+    color: #9fb4ff;
+    border-color: #4a5a9e;
+}
+
+.hub-nav-keycap.hub-nav-keycap-wait {
+    color: #ffd66e;
+    border-color: #d9a441;
+    animation: hub-keycap-pulse 1s ease-in-out infinite;
+}
+
+@keyframes hub-keycap-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+}
+
+.hub-nav-keycap.hub-pop-bad {
+    border-color: #c05050;
+    color: #ff9c9c;
 }
 
 /* Hub picker (canvas right-click, several hubs) */

@@ -1,7 +1,7 @@
 // ============================================================================
 // SettingsHub - DOM UI renderer
 // ----------------------------------------------------------------------------
-// v66 BUILD GUARD (must be the FIRST executable statement, before any work):
+// v67 BUILD GUARD (must be the FIRST executable statement, before any work):
 // the loader entry stamps globalThis.__SettingsHubBuild before importing the
 // submodules; this module refuses to stay silent if it was loaded as part of
 // a MIXED build (browser cache served a stale entry or a stale sibling).
@@ -11,8 +11,8 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
-if (globalThis.__SettingsHubBuild !== "v66") {
-    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v66) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v67") {
+    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v67) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
 }
@@ -70,12 +70,13 @@ import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel,
          getPinFoldLeaveMs, setPinFoldLeaveMs,
          getPinFoldHoverMs, setPinFoldHoverMs,
          getNavMarkersOn, setNavMarkersOn,
-         getNavMenuOn, setNavMenuOn } from "./global_settings.js";
+         getNavMenuOn, setNavMenuOn,
+         getNavHotkeysOn, setNavHotkeysOn } from "./global_settings.js";
 import { firstMediaSpec } from "./viewer_gallery.js";
 import {
     isNavItem, normalizeNav, createNavItem, navJump, armAim,
     enterOwnerGraph, markersVersionBump, resolveNavTarget,
-    activeGraphContext, setNavUiHooks,
+    activeGraphContext, setNavUiHooks, assignNavHotkey,
 } from "./nav_points.js";
 
 // v61: one-way UI bridge - nav_points NEVER imports this module (the dep
@@ -435,12 +436,14 @@ function dividerRowHtml(item) {
 // A nav row is a jump button, not a value mirror: click = enter the point's
 // graph + center the camera (+ optional per-point zoom, null = keep current).
 // The zoom chip opens the point popover (coords, custom zoom, test jump);
-// 📍 re-arms the aim mode to RE-PLACE the point (new click = new graph+pos,
-// zoom kept). Orphaned points (their subgraph uuid died) show ⚠ and refuse
-// the jump with an explanatory toast instead of crashing (ZB4 degradation).
-// Search (v25) picks nav rows up automatically through customLabel.
+// v67 adds the ⌨ hotkey chip (shown only when a combo is assigned) which
+// opens the SAME popover; 📍 re-arms the aim mode to RE-PLACE the point
+// (new click = new graph+pos, zoom kept). Orphaned points (their subgraph
+// uuid died) show ⚠ and refuse the jump with an explanatory toast instead of
+// crashing (ZB4 degradation). Search (v25) picks nav rows up automatically
+// through customLabel.
 function navRowHtml(item) {
-    const nav = normalizeNav(item) ?? { graphUuid: null, graphName: "", pos: [0, 0], zoom: null };
+    const nav = normalizeNav(item) ?? { graphUuid: null, graphName: "", pos: [0, 0], zoom: null, hotkey: null };
     let orphan = false;
     if (nav.graphUuid) {
         try { orphan = !resolveNavTarget(nav).ok; } catch (_) { orphan = true; }
@@ -450,13 +453,22 @@ function navRowHtml(item) {
     const title = orphan
         ? `⚠ Subgraph not found (${where}) - the point is orphaned; re-place it with 📍`
         : `Jump to: ${where} · x ${Math.round(nav.pos[0])} y ${Math.round(nav.pos[1])}` +
-          (nav.zoom != null ? ` · zoom ${Math.round(nav.zoom * 100) / 100}` : " · zoom kept");
+          (nav.zoom != null ? ` · zoom ${Math.round(nav.zoom * 100) / 100}` : " · zoom kept") +
+          (nav.hotkey ? ` · ⌨ ${nav.hotkey}` : "");
+    // v67: the ⌨ chip renders ONLY when a combo is assigned; a click opens
+    // the point popover (capture row there). Dimmed when the engine is
+    // globally off (⚙ -> Navigation) so "why does nothing jump" is visible.
+    const hkChip = nav.hotkey
+        ? `<span class="hub-nav-key${getNavHotkeysOn() ? "" : " hub-nav-key-off"}" ` +
+          `data-action="nav-hotkey" title="Hotkey: ${esc(nav.hotkey)}${getNavHotkeysOn() ? "" : " (hotkeys are OFF in ⚙ -> Navigation)"} - click to change">⌨ ${esc(nav.hotkey)}</span>`
+        : "";
     return `<div class="hub-nav-row hub-item-row${orphan ? " hub-orphan-row" : ""}" data-hub-item="${esc(item.id)}" data-tab-id="${esc(item.tabId)}">` +
         `<span class="hub-drag-handle" draggable="true" title="Drag to reorder">⠿</span>` +
         `<span class="hub-nav-jump${orphan ? " hub-nav-orphan" : ""}" data-action="nav-jump" title="${esc(title)}">` +
             `<span class="hub-nav-ico">${orphan ? "⚠" : "🧭"}</span>` +
             `<span class="hub-nav-label" title="Dbl-click to rename">${esc(item.customLabel || "Point")}</span>` +
             `<span class="hub-nav-zoom${nav.zoom != null ? " hub-nav-zoom-on" : ""}" data-action="nav-zoom" title="Zoom setting - click to open">${esc(zc)}</span>` +
+            hkChip +
         `</span>` +
         `<span class="hub-row-tools">` +
             `<button type="button" class="hub-btn hub-nav-move" data-action="nav-move" title="Re-place this point: aim mode - a new click sets graph + position (zoom setting kept)">📍</button>` +
@@ -2104,10 +2116,17 @@ function openSettingsPopup(node, trigger) {
         `<option value="1">On (default)</option>` +
         `<option value="0">Off</option>` +
         `</select></label>` +
+        `<label class="hub-set-row"><span>Hotkeys of nav points (⌨)</span>` +
+        `<select data-set-role="navhotkeys">` +
+        `<option value="1">On (default)</option>` +
+        `<option value="0">Off</option>` +
+        `</select></label>` +
         `<div class="hub-pop-hint">Markers: every 🧭 point of the graph you are browsing is drawn on ` +
         `the canvas - a click near a marker (not on a node) and drag MOVES the point. The right-click ` +
         `item adds a point at the clicked spot. Points themselves are created from the hub toolbar ` +
-        `(＋🧭). Global for every hub.</div>`;
+        `(＋🧭). Hotkeys: every point may carry a keyboard shortcut (assign it in the point popover, ` +
+        `click the ⌨ chip) - pressing it jumps to the point from anywhere. This switch turns the ` +
+        `hotkey engine ON/OFF globally (assignments are kept). Global for every hub.</div>`;
     document.body.appendChild(pop);
 
     setPopState = { node, trigger, pop };
@@ -2217,6 +2236,18 @@ function openSettingsPopup(node, trigger) {
         flashBtn(trigger, "✓");
     });
 
+    // v67: hotkey engine master switch. The engine reads the flag at EVENT
+    // time, so the very next keypress honors the change; the ⌨ chips on nav
+    // rows dim/brighten on the next re-render (a rebuild is NOT forced from
+    // here - no reason to churn open popups for a cosmetic state).
+    const nkSel = pop.querySelector('[data-set-role="navhotkeys"]');
+    nkSel.value = getNavHotkeysOn() ? "1" : "0";
+    nkSel.addEventListener("change", () => {
+        setNavHotkeysOn(nkSel.value === "1");
+        nkSel.value = getNavHotkeysOn() ? "1" : "0";
+        flashBtn(trigger, "✓");
+    });
+
     positionNumPopup(pop, trigger);
     try { sel.focus(); } catch (_) {}
 }
@@ -2231,12 +2262,21 @@ function openSettingsPopup(node, trigger) {
 // jump sets this zoom before centering; OFF / empty = zoom===null = the
 // jump never touches ds.scale. "= now" reads the CURRENT canvas zoom and is
 // only enabled while the canvas actually shows the point's graph.
+// v67 adds the KEY row: the capture button arms a window-capture keydown
+// session ("press keys…") - the NEXT pressed key or combination becomes the
+// point's hotkey; Esc cancels the capture, ✖ clears the assignment. The
+// capture listener lives on WINDOW capture so it runs BEFORE the document
+// engine (no accidental jump while capturing) and before this popup's own
+// Esc closer (Esc cancels the capture, not the popup). The captured combo
+// is committed by ✓ / ▶ jump through assignNavHotkey - duplicates are
+// refused with the owning point named in a toast.
 
 let navPopState = null;        // { node, item, trigger, pop }
 let navPopGlobalWired = false;
 
 function closeNavPopup() {
     if (!navPopState) return;
+    try { navPopState.endCapture?.(); } catch (_) {}   // v67: kill a pending capture
     try { navPopState.pop.remove(); } catch (_) {}
     navPopState = null;
 }
@@ -2283,6 +2323,7 @@ function openNavPopup(node, trigger, item) {
     const orphan = !!nav.graphUuid && !t.ok;
     const where = nav.graphUuid ? (nav.graphName || nav.graphUuid) : "Main canvas";
     const hasZ = nav.zoom != null;
+    const hasK = !!nav.hotkey;
 
     // "= now" is truthful only when the canvas currently shows the SAME
     // graph the point points to - otherwise the read zoom belongs to
@@ -2306,7 +2347,13 @@ function openNavPopup(node, trigger, item) {
             `<input data-nav-field="zoom" inputmode="decimal" spellcheck="false" placeholder="1.0" value="${hasZ ? esc(String(Math.round(nav.zoom * 100) / 100)) : ""}"${hasZ ? "" : " disabled"}>` +
             `<button type="button" class="hub-btn" data-nav-btn="zoomnow" title="Read the CURRENT canvas zoom of this point's graph"${sameGraph ? "" : " disabled"}>= now</button>` +
         `</div>` +
-        `<div class="hub-pop-hint">Coordinates are read-only - re-place the point with 📍 on the row (or drag its canvas marker). Zoom is applied BEFORE centering and clamped to the canvas zoom limits.</div>` +
+        `<div class="hub-nav-grid hub-nav-grid-key">` +
+            `<label>key</label>` +
+            `<button type="button" class="hub-btn hub-nav-keycap${hasK ? " hub-nav-keycap-on" : ""}" data-nav-btn="keycap" ` +
+            `title="Click, then press a key or combination - it becomes this point's jump hotkey (physical key: works across keyboard layouts). Esc cancels the capture.">${hasK ? esc(nav.hotkey) : "not set"}</button>` +
+            `<button type="button" class="hub-btn" data-nav-btn="keyclear" title="Remove the hotkey"${hasK ? "" : " disabled"}>✖</button>` +
+        `</div>` +
+        `<div class="hub-pop-hint">Coordinates are read-only - re-place the point with 📍 on the row (or drag its canvas marker). Zoom is applied BEFORE centering and clamped to the canvas zoom limits. The hotkey jumps here from any tab/hub; some browser-reserved combos (Ctrl+1..9, Ctrl+T/W/N) cannot be intercepted.</div>` +
         `<div class="hub-pop-btns">` +
             `<button type="button" data-nav-btn="jump" title="Test jump now">▶ jump</button>` +
             `<button type="button" data-nav-btn="apply" title="Save the zoom setting">✓</button>` +
@@ -2314,7 +2361,7 @@ function openNavPopup(node, trigger, item) {
         `</div>`;
     document.body.appendChild(pop);
 
-    navPopState = { node, item, trigger, pop };
+    navPopState = { node, item, trigger, pop, pendingKey: undefined, capturing: false };
     ensureNavPopupGlobalListeners();
 
     const cb = pop.querySelector('[data-nav-role="usezoom"]');
@@ -2322,12 +2369,69 @@ function openNavPopup(node, trigger, item) {
     const syncZoomEnabled = () => { try { zi.disabled = !cb.checked; } catch (_) {} };
     cb.addEventListener("change", syncZoomEnabled);
 
+    // --- v67 hotkey capture session -----------------------------------------
+    const keycapBtn = pop.querySelector('[data-nav-btn="keycap"]');
+    const keyClearBtn = pop.querySelector('[data-nav-btn="keyclear"]');
+    // pendingKey: undefined = untouched (keep item.nav.hotkey) | null = cleared
+    // | string = the captured combo (canonical, from hotkeyFromEvent).
+    const displayKey = () => {
+        const v = navPopState?.pendingKey !== undefined
+            ? navPopState.pendingKey : (nav.hotkey ?? null);
+        return v || null;
+    };
+    const paintKeycap = () => {
+        const v = displayKey();
+        keycapBtn.textContent = v ? v : "not set";
+        keycapBtn.classList.toggle("hub-nav-keycap-on", !!v);
+    };
+    const captureKeyDown = (e) => {
+        // Window-capture shield: runs before the document-level hotkey engine
+        // AND before the popup's document-capture Esc closer - a capture
+        // session is modal, nothing else may react to these keys.
+        e.preventDefault();
+        e.stopPropagation();
+        if (!navPopState) { endKeyCapture(); return; }
+        if (e.key === "Escape") { endKeyCapture(); return; }   // cancel capture
+        const combo = hotkeyFromEvent(e);
+        if (!combo) return;                    // modifier-only: keep waiting
+        navPopState.pendingKey = combo;
+        keycapBtn.classList.remove("hub-pop-bad");
+        endKeyCapture();                       // paints the combo on the cap
+    };
+    const endKeyCapture = () => {
+        if (!navPopState) return;
+        navPopState.capturing = false;
+        try { window.removeEventListener("keydown", captureKeyDown, true); } catch (_) {}
+        keycapBtn.classList.remove("hub-nav-keycap-wait");
+        paintKeycap();
+        try { keyClearBtn.disabled = !displayKey(); } catch (_) {}
+    };
+    navPopState.endCapture = endKeyCapture;    // closeNavPopup sweeps this
+    const startKeyCapture = () => {
+        if (!navPopState) return;
+        navPopState.capturing = true;
+        keycapBtn.classList.add("hub-nav-keycap-wait");
+        keycapBtn.classList.remove("hub-pop-bad");
+        keycapBtn.textContent = "press keys…";
+        try { window.addEventListener("keydown", captureKeyDown, true); } catch (_) {}
+    };
+
     pop.addEventListener("click", (e) => {
         const btn = e.target.closest("[data-nav-btn]");
         if (!btn || !navPopState) return;
         e.stopPropagation();
         const act = btn.dataset.navBtn;
         if (act === "close") { closeNavPopup(); return; }
+        if (act === "keycap") {
+            if (navPopState.capturing) endKeyCapture();    // click = cancel
+            else startKeyCapture();
+            return;
+        }
+        if (act === "keyclear") {
+            navPopState.pendingKey = null;
+            endKeyCapture();
+            return;
+        }
         if (act === "zoomnow") {
             const z = Number(app.canvas?.ds?.scale);
             if (Number.isFinite(z) && z > 0) {
@@ -2339,20 +2443,45 @@ function openNavPopup(node, trigger, item) {
         }
         if (act === "jump") {
             if (!commitNavZoomFields(node, item, cb, zi)) return;
+            if (!commitNavHotkeyField(node, item)) return;
             closeNavPopup();
             navJump(item);
             return;
         }
         if (act === "apply") {
             if (!commitNavZoomFields(node, item, cb, zi)) return;
+            const prevKey = item.nav?.hotkey ?? null;
+            if (!commitNavHotkeyField(node, item)) return;
             flashBtn(trigger, "✓");
             closeNavPopup();
-            renderHub(node);   // refresh the zoom chip (z· -> z0.5)
+            renderHub(node);   // refresh the zoom chip (z· -> z0.5) + ⌨ chip
+            if (item.nav?.hotkey && item.nav.hotkey !== prevKey) {
+                showHubToast(`⌨ "${item.customLabel}" → ${item.nav.hotkey}`);
+            }
         }
     });
 
     positionNumPopup(pop, trigger);
     try { zi.focus(); } catch (_) {}
+}
+
+/** Commit the popover's pending hotkey into item.nav.hotkey via the engine's
+ *  assignNavHotkey (duplicate refusal names the owning point). Returns false
+ *  on a refusal (the popup stays open, the keycap turns red). */
+function commitNavHotkeyField(node, item) {
+    if (!navPopState) return true;
+    if (navPopState.pendingKey === undefined) return true;   // untouched
+    const r = assignNavHotkey(item, navPopState.pendingKey);
+    if (!r.ok) {
+        try { navPopState.pop.querySelector('[data-nav-btn="keycap"]')?.classList.add("hub-pop-bad"); } catch (_) {}
+        if (r.reason === "duplicate") {
+            showHubToast(`⚠ Hotkey ${r.combo} is already used by "${r.owner?.item?.customLabel ?? "?"}"`);
+        } else {
+            showHubToast("⚠ Invalid hotkey");
+        }
+        return false;
+    }
+    return true;
 }
 
 /** Commit the popover fields into item.nav.zoom. Returns false on a bad
@@ -5259,6 +5388,14 @@ function wireEvents(node, st) {
                 if (item && isNavItem(item)) openNavPopup(node, btn, item);
                 break;
             }
+            case "nav-hotkey": {
+                // v67: the ⌨ chip opens the same point popover (the key row
+                // there hosts the capture flow).
+                const row = btn.closest("[data-hub-item]");
+                const item = cfg.items.find((i) => i.id === row?.dataset.hubItem);
+                if (item && isNavItem(item)) openNavPopup(node, btn, item);
+                break;
+            }
             case "ml-toggle": {
                 // v30: flip the row between single-line input and the
                 // multiline (resizable) textarea mirror.
@@ -5931,7 +6068,7 @@ export function hubTabSweepTick() {
                                 forceHubRebuild(hub);
                                 if (!staleMountCrumbShown) {
                                     staleMountCrumbShown = true;
-                                    console.info("[SettingsHub] rebuilt a hub whose DOM widget was not mounted (fresh-add frontend quirk). Repeats stop the moment the element stays connected; if they never do, hard-refresh (Ctrl+F5) and check that the F12 banner says v66.");
+                                    console.info("[SettingsHub] rebuilt a hub whose DOM widget was not mounted (fresh-add frontend quirk). Repeats stop the moment the element stays connected; if they never do, hard-refresh (Ctrl+F5) and check that the F12 banner says v67.");
                                 }
                                 if (hub.__hubMountRepairs === 3) {
                                     console.warn("[SettingsHub] fresh-add mount diagnostics (3rd repair): node #" + hub.id +

@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v66 - CONTEXT-MENU FAIL-OPEN: the v64 stale-cache detector could BLOCK the whole registration (no 'Pin to Settings Hub' items anywhere, no sync hooks) when the browser served a single outdated cached web file after an update - and that F12-only error went unnoticed in the field. v66 registers whatever LOADED (menus first), names the stale/failed files in the console AND shows a visible bottom-left banner telling the user to hard-refresh; a cache detector must NAME files, never disable working features. Includes v65 (nav jump anchored to the TOP-LEFT of the view, 80px margin, absolute-offset anti-drift ladder + settle guard) and the v64 fresh-add mount invariant (repair ladder + 1200ms DOM-truth sweep + one-time workflow reconfigure escalation)");
+console.info("[SettingsHub] web build: v67 - NAV POINT HOTKEYS: every 🧭 point can carry a keyboard shortcut (a single key or a Ctrl/Alt/Shift/Meta combination) assigned in the point popover - click the key cap, press the keys, ✓ saves it; the combo is stored in the item config (serialized with the workflow) and matched by PHYSICAL key, so an assignment works across keyboard layouts. One document-capture keydown engine jumps the point (any hub, any tab - the row need not be visible), guards skip typing targets and auto-repeat, unmatched keys stay native, duplicate assignments are refused with the owner named, master switch in ⚙ -> Navigation. Includes v66 (fail-open registration + visible degradation banner), v65 (nav jump anchored to the TOP-LEFT of the view, 80px margin, absolute-offset anti-drift ladder + settle guard) and the v64 fresh-add mount invariant");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,11 +32,11 @@ console.info("[SettingsHub] web build: v66 - CONTEXT-MENU FAIL-OPEN: the v64 sta
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=66", import.meta.url).href;
+    link.href = new URL("styles.css?v=67", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
-// v66 BUILD GUARD: stamped BEFORE any submodule import. Every submodule
+// v67 BUILD GUARD: stamped BEFORE any submodule import. Every submodule
 // self-reports under globalThis.__SettingsHubLoaded[module] and verifies this
 // stamp at load time, so a half-updated module set (the browser serving a
 // cached v62/v63 file next to fresh ones) announces itself in F12 - with the
@@ -49,7 +49,7 @@ console.info("[SettingsHub] web build: v66 - CONTEXT-MENU FAIL-OPEN: the v64 sta
 // silently removed every "Pin to Settings Hub" menu item and the sync hooks
 // (the user saw the menus vanish and had no idea why). The detector keeps its
 // diagnostic value but is NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v66";
+globalThis.__SettingsHubBuild = "v67";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -93,10 +93,10 @@ const FILES = [
     if (missing.length) {
         console.error("[SettingsHub] MIXED BUILD detected: STALE CACHED module(s) " +
             missing.map((k) => k + ".js").join(", ") +
-            " did not self-report as v66. The pack still registers what loaded (v66 fail-open), but a HARD REFRESH (Ctrl+F5) is required after updating the extension folder.");
+            " did not self-report as v67. The pack still registers what loaded (v67 fail-open), but a HARD REFRESH (Ctrl+F5) is required after updating the extension folder.");
     }
 
-    // v66 FAIL-OPEN registration, per module: menus first (the most visible
+    // v66/v67 FAIL-OPEN registration, per module: menus first (the most visible
     // feature), then the reactive-sync hooks; each guarded independently so
     // one dead file cannot take the others down with it (v60 semantics plus
     // the v64 diagnostics).
