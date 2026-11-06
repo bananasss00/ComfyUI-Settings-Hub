@@ -11,8 +11,8 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
-if (globalThis.__SettingsHubBuild !== "v67") {
-    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v67) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v68") {
+    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v68) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
 }
@@ -76,7 +76,7 @@ import { firstMediaSpec } from "./viewer_gallery.js";
 import {
     isNavItem, normalizeNav, createNavItem, navJump, armAim,
     enterOwnerGraph, markersVersionBump, resolveNavTarget,
-    activeGraphContext, setNavUiHooks, assignNavHotkey,
+    activeGraphContext, setNavUiHooks, assignNavHotkey, hotkeyFromEvent,
 } from "./nav_points.js";
 
 // v61: one-way UI bridge - nav_points NEVER imports this module (the dep
@@ -2390,20 +2390,31 @@ function openNavPopup(node, trigger, item) {
         // session is modal, nothing else may react to these keys.
         e.preventDefault();
         e.stopPropagation();
-        if (!navPopState) { endKeyCapture(); return; }
-        if (e.key === "Escape") { endKeyCapture(); return; }   // cancel capture
-        const combo = hotkeyFromEvent(e);
-        if (!combo) return;                    // modifier-only: keep waiting
-        navPopState.pendingKey = combo;
-        keycapBtn.classList.remove("hub-pop-bad");
-        endKeyCapture();                       // paints the combo on the cap
+        // v68 hardening: any handler error must END the session (listener
+        // removed, cap repainted) instead of wedging it in "press keys..."
+        // forever - the v67 field bug was exactly this shape (a missing
+        // import threw on the first keydown and the listener stayed armed,
+        // swallowing every key with no visible progress).
+        try {
+            if (!navPopState) return;
+            if (e.key === "Escape") { endKeyCapture(); return; }  // cancel
+            const combo = hotkeyFromEvent(e);
+            if (!combo) return;                    // modifier-only: keep waiting
+            navPopState.pendingKey = combo;
+            keycapBtn.classList.remove("hub-pop-bad");
+            endKeyCapture();                       // paints the combo on the cap
+        } catch (_) {
+            try { endKeyCapture(); } catch (_2) {}
+        }
     };
     const endKeyCapture = () => {
-        if (!navPopState) return;
-        navPopState.capturing = false;
+        // v68: the listener removal is UNCONDITIONAL - even a null navPopState
+        // (popup already torn down) must never leak an armed shield that
+        // preventDefaults every future keydown.
+        try { navPopState && (navPopState.capturing = false); } catch (_) {}
         try { window.removeEventListener("keydown", captureKeyDown, true); } catch (_) {}
-        keycapBtn.classList.remove("hub-nav-keycap-wait");
-        paintKeycap();
+        try { keycapBtn.classList.remove("hub-nav-keycap-wait"); } catch (_) {}
+        try { paintKeycap(); } catch (_) {}
         try { keyClearBtn.disabled = !displayKey(); } catch (_) {}
     };
     navPopState.endCapture = endKeyCapture;    // closeNavPopup sweeps this
