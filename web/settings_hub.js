@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v65 - NAV ANCHOR: a nav-point jump now pins the point at the TOP-LEFT of the view (80px margin; the user's reference-corner preference) instead of the screen center. The v62 anti-drift machinery is unchanged and now guards the new anchor: absolute offset writes only (no read-modify-write delta), verification through the canvas' own converter, an empirical probe that handles any affine response slope, and a settle guard against view-restore animations. Also ships the v64 mount invariant: a visible, non-collapsed, non-pinned hub always ends up with its DOM element connected (repair ladder + persistent 1200ms sweep + one-time workflow reconfigure ~6s after the add), and the __SettingsHubBuild stamp that names stale cached modules in F12");
+console.info("[SettingsHub] web build: v66 - CONTEXT-MENU FAIL-OPEN: the v64 stale-cache detector could BLOCK the whole registration (no 'Pin to Settings Hub' items anywhere, no sync hooks) when the browser served a single outdated cached web file after an update - and that F12-only error went unnoticed in the field. v66 registers whatever LOADED (menus first), names the stale/failed files in the console AND shows a visible bottom-left banner telling the user to hard-refresh; a cache detector must NAME files, never disable working features. Includes v65 (nav jump anchored to the TOP-LEFT of the view, 80px margin, absolute-offset anti-drift ladder + settle guard) and the v64 fresh-add mount invariant (repair ladder + 1200ms DOM-truth sweep + one-time workflow reconfigure escalation)");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,11 +32,11 @@ console.info("[SettingsHub] web build: v65 - NAV ANCHOR: a nav-point jump now pi
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=65", import.meta.url).href;
+    link.href = new URL("styles.css?v=66", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
-// v65 BUILD GUARD: stamped BEFORE any submodule import. Every submodule
+// v66 BUILD GUARD: stamped BEFORE any submodule import. Every submodule
 // self-reports under globalThis.__SettingsHubLoaded[module] and verifies this
 // stamp at load time, so a half-updated module set (the browser serving a
 // cached v62/v63 file next to fresh ones) announces itself in F12 - with the
@@ -44,7 +44,12 @@ console.info("[SettingsHub] web build: v65 - NAV ANCHOR: a nav-point jump now pi
 // exist in the source tree. Field lesson from the v63 rollout: "the fix did
 // not work" was indistinguishable from "the fix never loaded" - the banner
 // alone cannot prove the SUBMODULES are fresh.
-globalThis.__SettingsHubBuild = "v65";
+// v66 FIELD LESSON: the v64 gate treated the mixed-build report as FATAL and
+// skipped the registration entirely - after an update, ONE stale cached file
+// silently removed every "Pin to Settings Hub" menu item and the sync hooks
+// (the user saw the menus vanish and had no idea why). The detector keeps its
+// diagnostic value but is NO LONGER allowed to disable the pack.
+globalThis.__SettingsHubBuild = "v66";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -75,30 +80,73 @@ const FILES = [
             console.error("[SettingsHub] FAILED to load " + f + " - the pack is PARTIAL; re-copy web/ and hard-refresh (Ctrl+F5). Error:", err);
         }
     }
-    if (failed.length) {
-        console.error("[SettingsHub] partial load:", FILES.length - failed.length, "of", FILES.length, "modules; not registering the sync hooks. Failed:", failed.join(", "));
-    } else {
-        // v64: name stale cached modules precisely - a fresh module sets its
-        // flag; a stale cached file has no v65 code to run and stays silent.
-        const missing = FILES
-            .map((f) => f.replace(/^\.\//, "").replace(/\.js$/, ""))
-            .filter((k) => !globalThis.__SettingsHubLoaded?.[k]);
-        if (missing.length) {
-            console.error("[SettingsHub] MIXED BUILD detected: STALE CACHED module(s) " +
-                missing.map((k) => k + ".js").join(", ") +
-                " did not self-report as v65. Hard-refresh the page (Ctrl+F5) after updating the extension folder.");
-        } else {
-            mods["./context_menu.js"].attachContextMenu();
 
-            app.registerExtension({
-                name: "Comfy.SettingsHub.hooks",
-                setup() {
-                    mods["./sync_manager.js"].syncAll();
-                },
-                afterConfigureGraph() {
-                    mods["./sync_manager.js"].syncAll();
-                },
+    // v64 diagnostic, v66 NON-FATAL: a LOADED module that did not self-report
+    // is a stale cached file (its old code has no flag line). We still name
+    // the files, but the pack registers whatever actually loaded - a cache
+    // detector must not take working menus hostage.
+    const keyOf = (f) => f.replace(/^\.\//, "").replace(/\.js$/, "");
+    const missing = FILES
+        .filter((f) => mods[f])
+        .map(keyOf)
+        .filter((k) => !globalThis.__SettingsHubLoaded?.[k]);
+    if (missing.length) {
+        console.error("[SettingsHub] MIXED BUILD detected: STALE CACHED module(s) " +
+            missing.map((k) => k + ".js").join(", ") +
+            " did not self-report as v66. The pack still registers what loaded (v66 fail-open), but a HARD REFRESH (Ctrl+F5) is required after updating the extension folder.");
+    }
+
+    // v66 FAIL-OPEN registration, per module: menus first (the most visible
+    // feature), then the reactive-sync hooks; each guarded independently so
+    // one dead file cannot take the others down with it (v60 semantics plus
+    // the v64 diagnostics).
+    if (mods["./context_menu.js"]?.attachContextMenu) {
+        try { mods["./context_menu.js"].attachContextMenu(); }
+        catch (err) { console.error("[SettingsHub] attachContextMenu failed:", err); }
+    } else {
+        console.error("[SettingsHub] context_menu.js unavailable - 'Pin to Settings Hub' menus CANNOT register (see the failed list above if any).");
+    }
+
+    if (mods["./sync_manager.js"]?.syncAll) {
+        app.registerExtension({
+            name: "Comfy.SettingsHub.hooks",
+            setup() {
+                mods["./sync_manager.js"].syncAll();
+            },
+            afterConfigureGraph() {
+                mods["./sync_manager.js"].syncAll();
+            },
+        });
+    } else {
+        console.error("[SettingsHub] sync_manager.js unavailable - reactive sync CANNOT register (see the failed list above if any).");
+    }
+
+    // v66: the degradation is made VISIBLE - the field report proved an
+    // F12-only error never gets seen ("the menus just disappeared"). Inline
+    // styles only: styles.css itself may be the stale file here.
+    if (failed.length || missing.length) {
+        try {
+            const parts = [];
+            if (failed.length) {
+                parts.push("failed to load: " + failed.map((f) => f.replace(/^\.\//, "")).join(", "));
+            }
+            if (missing.length) {
+                parts.push("stale cached: " + missing.map((k) => k + ".js").join(", "));
+            }
+            const el = document.createElement("div");
+            el.textContent = "⚠ SettingsHub build degraded - " + parts.join(" · ") +
+                " - HARD-REFRESH the page (Ctrl+F5); until then some menus may be missing. Click to dismiss.";
+            el.title = "Click to dismiss";
+            Object.assign(el.style, {
+                position: "fixed", left: "12px", bottom: "12px", zIndex: "999999",
+                maxWidth: "560px", padding: "10px 14px", borderRadius: "8px",
+                background: "#4a1f1f", color: "#ffd9d9", border: "1px solid #a5533f",
+                font: "12px/1.45 system-ui, sans-serif", cursor: "pointer",
+                boxShadow: "0 4px 16px rgba(0,0,0,0.4)", userSelect: "none",
             });
-        }
+            el.addEventListener("click", () => el.remove());
+            document.body.appendChild(el);
+            setTimeout(() => el.remove(), 25000);
+        } catch (_) { /* the banner is best-effort; registration is done */ }
     }
 }

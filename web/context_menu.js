@@ -7,12 +7,12 @@ import {
     createNodeUIBinding,
 } from "./core.js";
 
-// v65 BUILD GUARD (see settings_hub.js): every submodule self-reports
+// v66 BUILD GUARD (see settings_hub.js): every submodule self-reports
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["context_menu"] = true;
-if (globalThis.__SettingsHubBuild !== "v65") {
-    console.error("[SettingsHub] STALE BUILD: context_menu.js (v65) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v66") {
+    console.error("[SettingsHub] STALE BUILD: context_menu.js (v66) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
 }
 
@@ -23,7 +23,15 @@ if (globalThis.__SettingsHubBuild !== "v65") {
 // append our "Pin to Settings Hub" entry there when the pointer is over a
 // canvas-rendered widget.
 
+// v66: double-registration guard. The v66 entry registers per-module
+// (fail-open), so unusual load paths can reach this function more than
+// once; a second call would add the three document listeners AND a second
+// extension hook - every pin entry would appear TWICE in the menu.
+let contextMenuAttached = false;
+
 export function attachContextMenu() {
+    if (contextMenuAttached) return;
+    contextMenuAttached = true;
     attachDomWidgetPinMenu();
     attachCtrlRmbOverride();
     attachPanelSurfacePinMenu();
