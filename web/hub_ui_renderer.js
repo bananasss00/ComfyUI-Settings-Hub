@@ -11,8 +11,8 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
-if (globalThis.__SettingsHubBuild !== "v74") {
-    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v74) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v75") {
+    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v75) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
 }
@@ -2155,7 +2155,8 @@ function openSettingsPopup(node, trigger) {
         `</select></label>` +
         `<div class="hub-pop-hint">Floating clipboard panel (works alongside every hub): click its paste ` +
         `area or press Ctrl+V over it to save text and images; click a card to copy it back; drag it by ` +
-        `the header, [–] minimizes to a chip. Entries live in ComfyUI's user folder ` +
+        `the header, [–] minimizes to a chip. There is NO close button on the panel (v75) - this ` +
+        `On/Off switch is the only way to remove it. Entries live in ComfyUI's user folder ` +
         `(user/settings_hub/stack/) - they survive page reloads, are shared by every browser and move ` +
         `with the ComfyUI folder. Max = the panel drops the oldest entries beyond it (server hard caps ` +
         `apply regardless). The 🗑 button in the PANEL HEADER wipes the whole stack (asks twice).</div>`;

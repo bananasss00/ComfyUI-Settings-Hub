@@ -1,15 +1,15 @@
 // ============================================================================
-// SettingsHub - Paste Stack (v74): standalone floating clipboard panel
+// SettingsHub - Paste Stack (v75): standalone floating clipboard panel
 // ----------------------------------------------------------------------------
-// v71-v74 BUILD GUARD (must be the FIRST executable statement, before any work):
+// v71-v75 BUILD GUARD (must be the FIRST executable statement, before any work):
 // the loader entry stamps globalThis.__SettingsHubBuild before importing the
 // submodules; this module refuses to stay silent if it was loaded as part of
 // a MIXED build. See settings_hub.js for the field history.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["stack"] = true;
-if (globalThis.__SettingsHubBuild !== "v74") {
-    console.error("[SettingsHub] STALE BUILD: stack.js (v74) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v75") {
+    console.error("[SettingsHub] STALE BUILD: stack.js (v75) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5).");
 }
@@ -59,8 +59,16 @@ if (globalThis.__SettingsHubBuild !== "v74") {
 //     guard the storage regardless.
 //
 //   * UI: drag the header, resize from the bottom-right grip, [–] minimizes
-//     to a chip with a live count badge, [✕] hides the panel (gear popup
-//     "Stack" section brings it back). Position/size state in localStorage.
+//     to a chip with a live count badge. There is NO close button (v75 owner
+//     request): the only way to remove the panel is the gear popup "Stack"
+//     section -> Off. Position/size state in localStorage.
+//
+// v75 (owner request 2026-11-08):
+//   * the header [✕] hide button is GONE - only [–] (minimize to chip) and
+//     🗑 (clear) remain in the header. The panel is intentionally an
+//     always-there tool; hiding/disabling happens ONLY through the settings
+//     (⚙ Hub settings -> Stack -> Off, the pre-existing stackon switch),
+//     which stays the single source of truth for the panel's existence.
 //
 // v74 (owner QA round 2026-11-08):
 //   * 🗑 CLEAR moved INTO the panel header (the settings popup no longer
@@ -1378,7 +1386,8 @@ function buildDom() {
         `<span class="hub-stack-count">0</span>` +
         `<button type="button" class="hub-btn hub-stack-clear" title="Clear ALL entries (click twice to confirm)">🗑</button>` +
         `<button type="button" class="hub-btn hub-stack-min" title="Minimize to chip">–</button>` +
-        `<button type="button" class="hub-btn hub-stack-hide" title="Hide panel (⚙ Hub settings → Stack brings it back)">✕</button>` +
+        // v75: no [✕] close button - the panel is dismissed only via
+        // ⚙ Hub settings → Stack → Off (setStackOn(false) from the renderer).
         `</div>` +
         `<div class="hub-stack-note" style="display:none"></div>` +
         `<div class="hub-stack-tools">` +
@@ -1420,7 +1429,7 @@ function buildDom() {
     pasteEl.addEventListener("click", () => captureFromRead());
     panel.querySelector(".hub-stack-clear").addEventListener("click", (e) => panelClearAll(e.currentTarget));
     panel.querySelector(".hub-stack-min").addEventListener("click", () => setMinimized(true));
-    panel.querySelector(".hub-stack-hide").addEventListener("click", () => { saveUi({ min: false }); setStackOn(false); });
+    // v75: the hide/close wiring is intentionally absent - see buildDom().
     chip.addEventListener("click", () => setMinimized(false));
 
     makeDraggable(headEl, panel,

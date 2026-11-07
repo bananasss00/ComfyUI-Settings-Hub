@@ -79,8 +79,8 @@ import { getNavMarkersOn, getNavMenuOn, getNavHotkeysOn } from "./global_setting
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["nav_points"] = true;
-if (globalThis.__SettingsHubBuild !== "v74") {
-    console.error("[SettingsHub] STALE BUILD: nav_points.js (v74) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v75") {
+    console.error("[SettingsHub] STALE BUILD: nav_points.js (v75) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
 }
 

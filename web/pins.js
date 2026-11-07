@@ -2,8 +2,8 @@
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["pins"] = true;
-if (globalThis.__SettingsHubBuild !== "v74") {
-    console.error("[SettingsHub] STALE BUILD: pins.js (v74) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v75") {
+    console.error("[SettingsHub] STALE BUILD: pins.js (v75) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
 }
 // ============================================================================

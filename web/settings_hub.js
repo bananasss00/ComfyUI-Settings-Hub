@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v74 - Paste Stack QA round: the list SCROLLS for real (min-height:0 + a styled always-visible scrollbar), a 🗑 CLEAR button lives in the panel header (double-click confirm; removed from the settings popup), stack cards drag onto REAL nodes for every kind (image -> LoadImage, video -> VHS/native LoadVideo via options.video_upload, audio -> LoadAudio via options.audio_upload, all uploaded through /upload/image - ComfyUI has no /upload/audio), TEXT cards drop onto prompt nodes and write the string widget under the cursor, the inline rename/tags editor commits on Enter (Esc cancels), and a focused input (even inside the panel) wins Ctrl+V over capture; the eye toggle now also hides the nav authoring buttons (AGENTS.md 5.1). Includes v73 (IMAGE COMPARE: right-click a media row/gallery thumbnail/stack image card -> Add to Compare, a floating A/B panel with WIPE/FADE/BLINK/DIFF modes + gain, A/B swap, auto-refresh on executed), v72 (Paste Stack snippets: pins/rename/tags/search/kind filters/usage counter/into-the-string insert), v71 (files & drag + OS-clipboard helper + drag-to-Load-Image), v70 (Paste Stack standalone floating panel with server-side storage), v69 (nav points pin the CURRENT canvas zoom on create), v68 (hotkey capture fix), v67 (per-point hotkeys), v66 (fail-open registration), v65 (top-left jump anchor), v64 (fresh-add mount invariant)");
+console.info("[SettingsHub] web build: v75 - Paste Stack header cleanup (owner request): the [✕] close button is REMOVED from the panel header - only [–] (minimize to chip) and 🗑 (clear) remain; the panel is an always-there tool and is disabled ONLY via ⚙ Hub settings → Stack → Off (the pre-existing stackon switch, whose hint now explains this). Includes v74 (Paste Stack QA round: the list SCROLLS for real (min-height:0 + a styled always-visible scrollbar), a 🗑 CLEAR button lives in the panel header (double-click confirm; removed from the settings popup), stack cards drag onto REAL nodes for every kind (image -> LoadImage, video -> VHS/native LoadVideo via options.video_upload, audio -> LoadAudio via options.audio_upload, all uploaded through /upload/image - ComfyUI has no /upload/audio), TEXT cards drop onto prompt nodes and write the string widget under the cursor, the inline rename/tags editor commits on Enter (Esc cancels), and a focused input (even inside the panel) wins Ctrl+V over capture; the eye toggle now also hides the nav authoring buttons (AGENTS.md 5.1)). Includes v73 (IMAGE COMPARE: right-click a media row/gallery thumbnail/stack image card -> Add to Compare, a floating A/B panel with WIPE/FADE/BLINK/DIFF modes + gain, A/B swap, auto-refresh on executed), v72 (Paste Stack snippets: pins/rename/tags/search/kind filters/usage counter/into-the-string insert), v71 (files & drag + OS-clipboard helper + drag-to-Load-Image), v70 (Paste Stack standalone floating panel with server-side storage), v69 (nav points pin the CURRENT canvas zoom on create), v68 (hotkey capture fix), v67 (per-point hotkeys), v66 (fail-open registration), v65 (top-left jump anchor), v64 (fresh-add mount invariant)");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v74 - Paste Stack QA round: the list SCRO
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=74", import.meta.url).href;
+    link.href = new URL("styles.css?v=75", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -49,7 +49,7 @@ console.info("[SettingsHub] web build: v74 - Paste Stack QA round: the list SCRO
 // silently removed every "Pin to Settings Hub" menu item and the sync hooks
 // (the user saw the menus vanish and had no idea why). The detector keeps its
 // diagnostic value but is NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v74";
+globalThis.__SettingsHubBuild = "v75";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in

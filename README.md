@@ -1,7 +1,7 @@
 # Settings Hub для ComfyUI
 
-[![build](https://img.shields.io/badge/web%20build-v74-3d5a80)](#как-это-работает)
-[![tests](https://img.shields.io/badge/tests-463%20passing-2b6b3f)](#разработка-и-тесты)
+[![build](https://img.shields.io/badge/web%20build-v75-3d5a80)](#как-это-работает)
+[![tests](https://img.shields.io/badge/tests-468%20passing-2b6b3f)](#разработка-и-тесты)
 [![python](https://img.shields.io/badge/python-stub-lightgrey)](#как-это-работает)
 [![frontend](https://img.shields.io/badge/ComfyUI-frontend%20extension-3d5a80)](#установка)
 
@@ -254,6 +254,10 @@ LoadVideo), аудио — на LoadAudio, текст — на любые нод
 подтверждает). Список карточек полноценно скроллится с подсвеченным
 скроллбаром.
 
+**Крестика в панели нет (v75)** — свернуть можно только в капсулу кнопкой
+[–]; полностью убрать панель можно лишь через настройки: ⚙ → Stack →
+«Paste Stack panel: Off».
+
 **Хранение — на сервере ComfyUI** (`user/default/settings_hub/stack/`,
 index.json + items/): стек портабелен (переезжает вместе с папкой ComfyUI),
 общий для localhost/127.0.0.1/LAN и любых браузеров, переживает очистку
@@ -296,7 +300,7 @@ site-data. Лимиты настраиваются в ⚙ → Stack (по умо
 | **Picker** | размер миниатюр пикера файлов |
 | **Pin window** | тайминги авто-сворачивания плавающего окна (fold / re-open) |
 | **Navigation** | маркеры точек на канве, пункт ПКМ-меню, тумблер горячих клавиш |
-| **Stack** | Paste Stack вкл/выкл, лимит записей (25–500). Очистка — кнопкой 🗑 в шапке самой панели |
+| **Stack** | Paste Stack вкл/выкл, лимит записей (25–500). Очистка — кнопкой 🗑 в шапке самой панели. Крестика у панели нет — выключение только этим переключателем |
 
 ![Попап глобальных настроек](docs/screenshots/11_settings.png)
 
@@ -332,7 +336,7 @@ ComfyUI и гоняют настоящие модули (Node ESM + jsdom).
 ```bash
 npm i jsdom          # единственная jsdom-зависимость
 node tests/smoke_nav.mjs    # движок точек навигации, камера, хоткеи, UI-путь, stack-bridge, глаз-скрытие (239 проверок)
-node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке + Image Compare (157)
+node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке/без-крестика + Image Compare (162)
 node tests/smoke_menu.mjs   # регистрация меню, fail-open, баннер деградации (24)
 python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файловый/patch-роуты стека (43)
 ```
