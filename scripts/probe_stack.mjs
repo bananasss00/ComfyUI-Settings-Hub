@@ -1,0 +1,24 @@
+import { createRequire } from "node:module";
+import fs from "node:fs"; import path from "node:path"; import os from "node:os"; import url from "node:url";
+const require = createRequire(import.meta.url);
+const jsdom = require("jsdom");
+const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), "..");
+const WEB = path.join(ROOT, "web");
+const { JSDOM } = jsdom;
+const dom = new JSDOM("<!doctype html><html><body></body></html>", { pretendToBeVisual: true });
+globalThis.window = dom.window; globalThis.document = dom.window.document;
+globalThis.localStorage = dom.window.localStorage;
+const appStub = { registerExtension(ext){ appStub.__extensions.push(ext); }, __extensions: [], canvas:null, graph:null,
+  api: { apiURL: p=>p, fetchApi: async (u, o={}) => ({ ok:true, status:200, json: async()=>({ok:true, items:[]}) }) } };
+globalThis.__HUB_APP_STUB__ = appStub;
+const sb = fs.mkdtempSync(path.join(os.tmpdir(), "probe-"));
+fs.mkdirSync(path.join(sb,"scripts"),{recursive:true}); fs.mkdirSync(path.join(sb,"Hub","web"),{recursive:true});
+for (const f of fs.readdirSync(WEB)) if (f.endsWith(".js")) fs.copyFileSync(path.join(WEB,f), path.join(sb,"Hub","web",f));
+fs.writeFileSync(path.join(sb,"scripts","app.js"), "export const app = globalThis.__HUB_APP_STUB__;\n");
+const stack = await import("file://" + path.join(sb,"Hub","web","stack.js"));
+console.log("setStackMax(2) returns:", stack.setStackMax(2));
+console.log("getStackMax:", stack.getStackMax());
+console.log("LS_MAX raw:", localStorage.getItem("settingshub.stack.max"));
+console.log("isStackOn before:", stack.isStackOn());
+stack.setStackOn(false);
+console.log("isStackOn after off:", stack.isStackOn(), "LS_ON:", localStorage.getItem("settingshub.stack.on"));

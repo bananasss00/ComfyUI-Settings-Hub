@@ -9,19 +9,27 @@ profile, and survives site-data wipes.
 Layout under the user directory:
 
     <user>/settings_hub/stack/index.json   - metadata, top-first order:
-        [{id, type, created, hash, size, text?, file?, pinned?}]
-    <user>/settings_hub/stack/items/<id>.<ext> - blobs (images)
+        [{id, type, created, hash, size, text?, file?, name?, tags?,
+          pinned?, uses?}]
+    <user>/settings_hub/stack/items/<id>.<ext> - blobs (any kind)
 
 Routes (registered at import, PromptServer aiohttp, same style as
 media_list.py; the SettingsHub node class itself stays a stub and these
 routes never run during a queue):
 
     GET    /settings_hub/stack             -> {ok, items}
-    POST   /settings_hub/stack/item        -> JSON {type:"text", text}     add text
+    POST   /settings_hub/stack/item        -> JSON {type:"text", text, name?} add text
     POST   /settings_hub/stack/image       -> raw bytes, ?ext=png|jpg|...  add image
+    POST   /settings_hub/stack/file        -> raw bytes, ?ext=&name=        add ANY
+                                            file (v71: video/audio/text/
+                                            binary cards from drag&drop or
+                                            the OS-clipboard helper)
     DELETE /settings_hub/stack/item/{id}   -> remove one entry (+ blob)
     POST   /settings_hub/stack/clear       -> wipe entries + blobs
     GET    /settings_hub/stack/file/{name} -> serve a stored blob
+
+v71 also adds POST /settings_hub/stack/patch (rename/tags/pin/uses - the
+snippet engine of v72) in the same file below.
 
 Safety: names are validated against ^[A-Za-z0-9._-]{1,120}$ and resolved
 INSIDE the items directory (no traversal); writes are size-capped; the
@@ -61,7 +69,11 @@ MAX_ITEMS = 500
 MAX_TOTAL_BYTES = 200 * 1024 * 1024
 MAX_TEXT_CHARS = 1_000_000
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
+MAX_BLOB_BYTES = MAX_IMAGE_BYTES  # v71: the same cap applies to any blob kind
 TEXT_INLINE_LIMIT = 100 * 1024  # larger texts become files too
+MAX_NAME_CHARS = 120            # display name of an entry (v71)
+MAX_TAGS = 8                    # v72: per-entry tag cap
+MAX_TAG_CHARS = 24              # v72: per-tag cap
 
 _IMG_EXT = {
     "png": "image/png",
@@ -72,6 +84,23 @@ _IMG_EXT = {
     "bmp": "image/bmp",
 }
 _TEXT_EXT = {"txt", "md", "json", "csv", "log", "py", "js", "css", "html", "xml", "yml", "yaml"}
+# v71: blob kinds the generic file route accepts, with their content types.
+_VID_EXT = {
+    "mp4": "video/mp4", "webm": "video/webm", "mov": "video/quicktime",
+    "mkv": "video/x-matroska", "avi": "video/x-msvideo",
+    "m4v": "video/x-m4v", "ogv": "video/ogg",
+}
+_AUD_EXT = {
+    "mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg",
+    "flac": "audio/flac", "aac": "audio/aac", "m4a": "audio/mp4",
+    "opus": "audio/opus",
+}
+_DOC_MIME = {
+    "txt": "text/plain", "md": "text/markdown", "json": "application/json",
+    "csv": "text/csv", "log": "text/plain", "pdf": "application/pdf",
+}
+_FILE_MIME = {**_IMG_EXT, **_VID_EXT, **_AUD_EXT, **_DOC_MIME}
+_ALL_BLOB_EXT = set(_FILE_MIME) | {"zip", "safetensors"}
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 _ID_RE = re.compile(r"^[a-f0-9]{8,32}$")
 
@@ -188,6 +217,28 @@ def _evict(items):
 # Handlers
 # ---------------------------------------------------------------------------
 
+def _sanitize_name(raw):
+    """v71: a DISPLAY name for an entry (never a path) - strip control
+    characters / separators, cap the length. Empty input -> None."""
+    if not isinstance(raw, str):
+        return None
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", raw).strip()
+    if not cleaned:
+        return None
+    return cleaned[:MAX_NAME_CHARS]
+
+
+def _blob_type_for(ext):
+    """v71: index `type` for a stored blob extension."""
+    if ext in _IMG_EXT:
+        return "image"
+    if ext in _VID_EXT:
+        return "video"
+    if ext in _AUD_EXT:
+        return "audio"
+    return "file"
+
+
 def _touch_dup(items, content_hash):
     """If an entry with this hash exists, move it to the top (fresh created)
     and return (entry, True). Returns None when there is no duplicate."""
@@ -219,21 +270,28 @@ async def stack_add_text(request):
         return web.json_response({"ok": False, "error": "empty text"}, status=400)
     if len(text) > MAX_TEXT_CHARS:
         return web.json_response({"ok": False, "error": "text too large"}, status=413)
+    name = _sanitize_name(body.get("name")) if isinstance(body, dict) else None
     size = len(text.encode("utf-8", "ignore"))
     async with _lock:
         items = _read_index()
         h = _hash_bytes(text.encode("utf-8"))
         dup = _touch_dup(items, h)
         if dup is not None:
+            # v71: a fresh drop of the same content may carry a better name.
+            if name and not dup[0].get("name"):
+                dup[0]["name"] = name
+                _write_index(items)
             return web.json_response({"ok": True, "item": dup[0], "moved": True})
         item = {"id": uuid.uuid4().hex[:12], "type": "text", "hash": h,
                 "text": text, "size": size}
+        if name:
+            item["name"] = name
         if size > TEXT_INLINE_LIMIT:
             _ensure_dirs()
-            name = item["id"] + ".txt"
-            with open(os.path.join(_items_dir(), name), "wb") as f:
+            blob_name = item["id"] + ".txt"
+            with open(os.path.join(_items_dir(), blob_name), "wb") as f:
                 f.write(text.encode("utf-8"))
-            item["file"] = name
+            item["file"] = blob_name
             del item["text"]
         item["created"] = int(time.time())
         items.insert(0, item)
@@ -244,12 +302,14 @@ async def stack_add_text(request):
 
 @PromptServer.instance.routes.post("/settings_hub/stack/image")
 async def stack_add_image(request):
-    """Add an IMAGE entry. Body: raw bytes, ?ext=png|jpg|jpeg|webp|gif|bmp.
-    A duplicate (same bytes hash) moves the existing entry to the top and
-    the new payload is discarded without touching the stored blob."""
+    """Add an IMAGE entry. Body: raw bytes, ?ext=png|jpg|jpeg|webp|gif|bmp and
+    an optional ?name= display name (v71: the OS-helper payload keeps its
+    file name). A duplicate (same bytes hash) moves the existing entry to the
+    top and the new payload is discarded without touching the stored blob."""
     ext = (request.query.get("ext") or "png").lower().lstrip(".")
     if ext not in _IMG_EXT:
         return web.json_response({"ok": False, "error": "bad ext"}, status=400)
+    name = _sanitize_name(request.query.get("name"))
     payload = await request.read()
     if not payload:
         return web.json_response({"ok": False, "error": "empty payload"}, status=400)
@@ -260,18 +320,118 @@ async def stack_add_image(request):
         h = _hash_bytes(payload)
         dup = _touch_dup(items, h)
         if dup is not None:
+            if name and not dup[0].get("name"):
+                dup[0]["name"] = name
+                _write_index(items)
             return web.json_response({"ok": True, "item": dup[0], "moved": True})
         item_id = uuid.uuid4().hex[:12]
-        name = item_id + "." + ext
+        name2 = item_id + "." + ext
         _ensure_dirs()
-        with open(os.path.join(_items_dir(), name), "wb") as f:
+        with open(os.path.join(_items_dir(), name2), "wb") as f:
             f.write(payload)
         item = {"id": item_id, "type": "image", "hash": h,
-                "file": name, "size": len(payload), "created": int(time.time())}
+                "file": name2, "size": len(payload), "created": int(time.time())}
+        if name:
+            item["name"] = name
         items.insert(0, item)
         _evict(items)
         _write_index(items)
     return web.json_response({"ok": True, "item": item, "moved": False})
+
+
+@PromptServer.instance.routes.post("/settings_hub/stack/file")
+async def stack_add_file(request):
+    """v71: add ANY allowed file as an entry (drag&drop from the OS or the
+    clipboard-helper payload). Body: raw bytes; query: ?ext=mp4&name=... .
+    The index type is derived from the extension (image/video/audio/file);
+    dedup by content hash still applies (a re-drop MOVES the entry)."""
+    ext = (request.query.get("ext") or "").lower().lstrip(".")
+    if ext not in _ALL_BLOB_EXT:
+        return web.json_response({"ok": False, "error": "bad ext"}, status=400)
+    name = _sanitize_name(request.query.get("name"))
+    payload = await request.read()
+    if not payload:
+        return web.json_response({"ok": False, "error": "empty payload"}, status=400)
+    if len(payload) > MAX_BLOB_BYTES:
+        return web.json_response({"ok": False, "error": "file too large"}, status=413)
+    async with _lock:
+        items = _read_index()
+        h = _hash_bytes(payload)
+        dup = _touch_dup(items, h)
+        if dup is not None:
+            if name and not dup[0].get("name"):
+                dup[0]["name"] = name
+                _write_index(items)
+            return web.json_response({"ok": True, "item": dup[0], "moved": True})
+        item_id = uuid.uuid4().hex[:12]
+        blob_name = item_id + "." + ext
+        _ensure_dirs()
+        with open(os.path.join(_items_dir(), blob_name), "wb") as f:
+            f.write(payload)
+        item = {"id": item_id, "type": _blob_type_for(ext), "hash": h,
+                "file": blob_name, "size": len(payload),
+                "created": int(time.time())}
+        if name:
+            item["name"] = name
+        items.insert(0, item)
+        _evict(items)
+        _write_index(items)
+    return web.json_response({"ok": True, "item": item, "moved": False})
+
+
+@PromptServer.instance.routes.post("/settings_hub/stack/patch")
+async def stack_patch(request):
+    """v72: edit ONE entry's metadata: rename, tags, pin, usage counter.
+    Body: JSON {id, name?, tags?, pinned?, uses?, bumpUses?}. Missing keys
+    leave the entry untouched. The response carries the updated entry so the
+    client can mirror the server truth instead of guessing."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"ok": False, "error": "bad body"}, status=400)
+    item_id = body.get("id") or ""
+    if not _ID_RE.match(item_id):
+        return web.json_response({"ok": False, "error": "bad id"}, status=400)
+    async with _lock:
+        items = _read_index()
+        it = next((x for x in items if x.get("id") == item_id), None)
+        if it is None:
+            return web.json_response({"ok": True, "gone": True})
+        if "name" in body:
+            nm = _sanitize_name(body.get("name"))
+            if nm:
+                it["name"] = nm
+            else:
+                it.pop("name", None)
+        if "tags" in body:
+            tags = body.get("tags")
+            clean = []
+            if isinstance(tags, list):
+                for t in tags:
+                    if not isinstance(t, str):
+                        continue
+                    t = _sanitize_name(t)
+                    if t and t.lower() not in [x.lower() for x in clean]:
+                        clean.append(t)
+                    if len(clean) >= MAX_TAGS:
+                        break
+            if clean:
+                it["tags"] = clean
+            else:
+                it.pop("tags", None)
+        if "pinned" in body:
+            it["pinned"] = bool(body.get("pinned"))
+        if "uses" in body:
+            try:
+                it["uses"] = max(0, min(1_000_000, int(body.get("uses"))))
+            except (TypeError, ValueError):
+                pass
+        if body.get("bumpUses"):
+            it["uses"] = min(1_000_000, int(it.get("uses", 0)) + 1)
+        _write_index(items)
+    return web.json_response({"ok": True, "item": it})
 
 
 @PromptServer.instance.routes.delete("/settings_hub/stack/item/{item_id}")
@@ -310,7 +470,10 @@ async def stack_file(request):
     if not path.startswith(root + os.sep) or not os.path.isfile(path):
         return web.json_response({"ok": False, "error": "not found"}, status=404)
     ext = os.path.splitext(name)[1].lower().lstrip(".")
-    return web.FileResponse(path, headers={
-        "Content-Type": _IMG_EXT.get(ext, "application/octet-stream"),
-        "Cache-Control": "no-store",
-    })
+    ctype = _FILE_MIME.get(ext, "application/octet-stream")
+    headers = {"Content-Type": ctype, "Cache-Control": "no-store"}
+    # v71: video/audio must be seekable - FileResponse handles range
+    # requests natively, but only when the client is allowed to ask.
+    if ext in _VID_EXT or ext in _AUD_EXT:
+        headers["Accept-Ranges"] = "bytes"
+    return web.FileResponse(path, headers=headers)

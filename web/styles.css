@@ -2982,3 +2982,455 @@ button.hub-pin-back {
     font-size: 10px;
     margin-left: 2px;
 }
+
+/* ===========================================================================
+   v71: Paste Stack files & drag - per-kind cards (video/audio/file), card
+   action buttons ([->] media row, [download]), OS-drop highlight, the card
+   drag ghost, the Load-Image-node highlight box and the hub-mirror drop hot
+   state.
+   ======================================================================== */
+
+.hub-stack-acts {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    opacity: 0;
+    transition: opacity 0.12s;
+}
+
+.hub-stack-card:hover .hub-stack-acts { opacity: 1; }
+
+.hub-stack-acts .hub-stack-del { position: static; }
+
+.hub-stack-act {
+    width: 16px;
+    height: 16px;
+    line-height: 14px;
+    text-align: center;
+    background: #2a2a3e;
+    color: #9fb6d8;
+    border: 1px solid #44445e;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 10px;
+    padding: 0;
+    text-decoration: none;
+    display: block;
+}
+
+.hub-stack-act:hover { background: #24344d; color: #fff; border-color: #3d5a80; }
+
+.hub-stack-name {
+    color: #a8b3d8;
+    font-size: 10px;
+    max-width: 132px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hub-stack-media {
+    width: 100%;
+    height: 90px;
+    object-fit: contain;
+    background: #101020;
+    border-radius: 4px;
+}
+
+.hub-stack-audio {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #9fb6d8;
+    font-size: 15px;
+    padding: 2px 0;
+}
+
+.hub-stack-audio-el { flex: 1; height: 26px; min-width: 0; }
+
+.hub-stack-file {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 0;
+    color: #cfd6ee;
+    font-size: 11px;
+}
+
+.hub-stack-file-ico { font-size: 17px; }
+
+.hub-stack-file-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hub-stack-drag {
+    outline: 1px dashed #3d5a80;
+    outline-offset: -3px;
+}
+
+.hub-stack-ghost {
+    position: fixed;
+    z-index: 99995;
+    pointer-events: none;
+    width: 92px;
+    height: 68px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(22, 22, 42, 0.92);
+    border: 1px solid #3d5a80;
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 22px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+
+.hub-stack-ghost img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.hub-stack-targetbox {
+    position: fixed;
+    z-index: 99994;
+    display: none;
+    pointer-events: none;
+    border: 2px solid #58c470;
+    border-radius: 6px;
+    background: rgba(88, 196, 112, 0.08);
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+.hub-mirror-media.hub-stack-drop-hot {
+    outline: 2px solid #58c470;
+    outline-offset: 1px;
+}
+
+/* ===========================================================================
+   v72: Paste Stack snippet engine - toolbar (search + kind chips + tag
+   filter note), pin markers, tag chips, usage counter, the inline rename/tags
+   editor and the text-mirror drop highlight.
+   ======================================================================== */
+
+.hub-stack-tools {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 5px 0 5px;
+}
+
+.hub-stack-search {
+    flex: 1 1 40px;
+    min-width: 36px;
+    background: #14142a;
+    border: 1px solid #3a3a55;
+    border-radius: 4px;
+    color: #d5d9e8;
+    font-size: 10px;
+    padding: 2px 5px;
+    outline: none;
+}
+
+.hub-stack-search:focus { border-color: #3d5a80; }
+
+.hub-stack-kind,
+.hub-stack-tagnote {
+    background: #20203a;
+    border: 1px solid #3a3a55;
+    border-radius: 8px;
+    color: #8a8ab0;
+    font-size: 9px;
+    padding: 1px 6px;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.hub-stack-kind:hover,
+.hub-stack-tagnote:hover { color: #dfe6f5; border-color: #3d5a80; }
+
+.hub-stack-kind.hub-stack-kind-on {
+    background: #24344d;
+    color: #fff;
+    border-color: #3d5a80;
+}
+
+.hub-stack-tagnote {
+    background: #24344d;
+    color: #cfe0ff;
+    border-color: #3d5a80;
+}
+
+.hub-stack-card-pin { border-color: #6b5a2a; }
+
+.hub-stack-pinflag {
+    position: absolute;
+    left: 5px;
+    top: 2px;
+    font-size: 8px;
+    opacity: 0.85;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.hub-stack-act.hub-stack-pin-on {
+    color: #ffd76a;
+    border-color: #6b5a2a;
+}
+
+.hub-stack-tags {
+    display: inline-flex;
+    gap: 3px;
+    flex-wrap: wrap;
+}
+
+.hub-stack-tag {
+    background: #1c2c44;
+    border: 1px solid #2c4460;
+    color: #9fc0e8;
+    border-radius: 7px;
+    font-size: 8.5px;
+    padding: 0 5px;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.hub-stack-tag:hover { color: #dfeaff; border-color: #3d5a80; }
+
+.hub-stack-tag.hub-stack-tag-on {
+    background: #2c4460;
+    color: #fff;
+}
+
+.hub-stack-uses {
+    color: #7f8fae;
+    font-size: 9px;
+}
+
+.hub-stack-tagslot {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    min-width: 0;
+}
+
+.hub-stack-edit {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 2px;
+}
+
+.hub-stack-edit input {
+    background: #14142a;
+    border: 1px solid #3a3a55;
+    border-radius: 4px;
+    color: #d5d9e8;
+    font-size: 11px;
+    padding: 3px 6px;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.hub-stack-edit input:focus { border-color: #3d5a80; }
+
+.hub-stack-edit-btns {
+    display: flex;
+    gap: 4px;
+}
+
+.hub-stack-edit-btns .hub-stack-act {
+    width: 20px;
+    height: 18px;
+    line-height: 16px;
+    font-size: 11px;
+}
+
+input.hub-text-input.hub-stack-drop-hot-text,
+textarea.hub-text-area.hub-stack-drop-hot-text,
+input.hub-text-input.hub-stack-drop-hot-text:focus,
+textarea.hub-text-area.hub-stack-drop-hot-text:focus {
+    outline: 2px solid #58c470;
+    outline-offset: 1px;
+}
+
+/* ===========================================================================
+   v73: Image Compare - a floating A/B panel (wipe / fade / blink / pixel
+   diff x gain) fed from hub media rows, gallery thumbs and Stack image
+   cards via the "Add to Compare" context menu.
+   ======================================================================== */
+
+.hub-cmp-panel {
+    position: fixed;
+    display: flex;
+    flex-direction: column;
+    background: #16162a;
+    border: 1px solid #44445e;
+    border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+    font-family: "Inter", -apple-system, sans-serif;
+    min-width: 260px;
+    overflow: hidden;
+}
+
+.hub-cmp-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    background: #1c1c33;
+    border-bottom: 1px solid #33334e;
+    cursor: move;
+    user-select: none;
+}
+
+.hub-cmp-ico { font-size: 12px; }
+.hub-cmp-title { font-weight: 600; color: #fff; font-size: 12px; letter-spacing: 0.2px; }
+.hub-cmp-head .hub-btn {
+    margin-left: 0;
+    background: #2a2a3e;
+    color: #a66;
+    border: 1px solid #444;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 10px;
+    padding: 1px 6px;
+}
+
+.hub-cmp-head .hub-btn:hover { background: #3a3a4e; color: #fff; }
+
+.hub-cmp-stage {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 140px;
+    background: #0d0d18;
+    overflow: hidden;
+}
+
+.hub-cmp-stage.hub-cmp-blinkable { cursor: pointer; }
+
+.hub-cmp-slot {
+    position: absolute;
+    inset: 0;
+    display: none;
+}
+
+.hub-cmp-slot img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    user-select: none;
+}
+
+.hub-cmp-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: none;
+    background: #0d0d18;
+}
+
+.hub-cmp-divider {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 3px;
+    margin-left: -1px;
+    background: #58c470;
+    cursor: ew-resize;
+    display: none;
+    box-shadow: 0 0 6px rgba(88, 196, 112, 0.6);
+    z-index: 2;
+}
+
+.hub-cmp-divider::after {
+    content: "⇔";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #58c470;
+    color: #0d2a15;
+    border-radius: 8px;
+    font-size: 9px;
+    padding: 1px 4px;
+}
+
+.hub-cmp-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    color: #66668a;
+    font-size: 11px;
+    padding: 10px;
+    pointer-events: none;
+}
+
+.hub-cmp-slots {
+    display: flex;
+    gap: 10px;
+    padding: 5px 8px;
+    font-size: 10px;
+    color: #8a8ab0;
+    border-top: 1px solid #2a2a3e;
+    user-select: none;
+}
+
+.hub-cmp-slotlabel { display: inline-flex; align-items: center; gap: 4px; max-width: 46%; }
+.hub-cmp-slotlabel b { color: #58c470; }
+.hub-cmp-slotlabel[data-slot="B"] b { color: #5a9bd8; }
+.hub-cmp-lbltext { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-cmp-slot-on .hub-cmp-lbltext { color: #dfe6f5; }
+.hub-cmp-clear { background: none; border: none; color: #666; cursor: pointer; font-size: 9px; padding: 0; }
+.hub-cmp-clear:hover { color: #ff9c9c; }
+
+.hub-cmp-tools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px 6px 8px;
+    border-top: 1px solid #2a2a3e;
+    color: #8a8ab0;
+    font-size: 10px;
+}
+
+.hub-cmp-mode {
+    background: #14142a;
+    border: 1px solid #3a3a55;
+    color: #d5d9e8;
+    border-radius: 4px;
+    font-size: 10px;
+    padding: 2px 4px;
+    outline: none;
+}
+
+.hub-cmp-gain, .hub-cmp-fade { width: 90px; }
+
+.hub-cmp-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; text-align: right; color: #66668a; }
+
+.hub-cmp-grip {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 16px;
+    height: 16px;
+    cursor: nwse-resize;
+    background: linear-gradient(135deg, transparent 50%, #4a4a6e 50%);
+}
+
+.hub-cmp-menu { z-index: 100001; }

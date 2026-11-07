@@ -11,7 +11,7 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
-if (globalThis.__SettingsHubBuild !== "v70") {
+if (globalThis.__SettingsHubBuild !== "v73") {
     console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v70) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
@@ -56,7 +56,7 @@ import {
     presetExportAll, presetImportFromText,
 } from "./preset_manager.js";
 import { writeTargetValue, ensureHooksForItem, invokeTargetButton } from "./sync_manager.js";
-import { beginEdit, endEdit, registerStructural, registerValues, syncNode, refreshNodeValues } from "./sync.js";
+import { beginEdit, endEdit, registerStructural, registerValues, syncNode, refreshNodeValues, registerStackBridge } from "./sync.js";
 import { initDrag } from "./dnd_manager.js";
 import * as Portals from "./portal_manager.js";
 import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel,
@@ -107,6 +107,12 @@ const CHROME_H = 12;
 const DOM_SLOT_MARGIN = 20;
 
 const stateMap = new WeakMap();
+// v71: reverse registry for the Paste Stack bridge - a stack card dropped on
+// a hub row (or the "→ в строку" button) needs the OWNING node of a row,
+// and WeakMap cannot be enumerated; roots register here at build time and
+// dead ones are pruned lazily (see liveHubRoots).
+const hubRootOwner = new WeakMap(); // root/wrap element -> hub node
+const hubRootEls = new Set();       // every root ever built (lazy-pruned)
 
 function esc(s) {
     return String(s ?? "")
@@ -166,6 +172,9 @@ function ensureHubDom(node) {
 
     st = { root, wrap, widget };
     stateMap.set(node, st);
+    hubRootOwner.set(root, node);
+    hubRootOwner.set(wrap, node);
+    hubRootEls.add(root);
 
     // Content-follow: ResizeObserver on the inner content wrapper catches
     // in-hub textarea resizes (resize: vertical), tab-bar wraps, font loads.
@@ -4617,6 +4626,138 @@ function mediaPasteInto(hubNode, tn, item, files) {
     // toasts and repaints on its own.
     uploadMediaFiles(hubNode, item, files);
 }
+
+// ---------------------------------------------------------------------------
+// v71: Paste Stack bridge (registered into web/sync.js; consumed by
+// web/stack.js at event time). Two halves:
+//   * LAST-FOCUSED tracking - focusin for hub text mirrors ("→ в строку"
+//     writes into the field the user touched last) and pointerdown for media
+//     mirrors (file cards land in the row the user pointed at).
+//   * row actions - insert text into the focused mirror, upload a blob into
+//     a media row (by mirror element or by kind), find the first mirror of
+//     a kind across live hubs. Everything is best-effort and fail-closed:
+//     any error returns false and the stack shows its own toast.
+// ---------------------------------------------------------------------------
+
+let stackBridgeWired = false;
+let lastTextFocus = null;   // {node, control, rowEl, label, ts}
+let lastMediaFocus = null;  // {node, mirror, rowEl, label, ts}
+
+function liveHubRoots() {
+    for (const r of [...hubRootEls]) {
+        try { if (!r.isConnected) hubRootEls.delete(r); } catch (_) { hubRootEls.delete(r); }
+    }
+    return [...hubRootEls];
+}
+
+function rowLabelOf(row) {
+    try { return row.querySelector(".hub-item-label")?.textContent?.trim() || ""; }
+    catch (_) { return ""; }
+}
+
+function wireStackBridge() {
+    if (stackBridgeWired) return;
+    stackBridgeWired = true;
+    document.addEventListener("focusin", (e) => {
+        try {
+            const el = e.target;
+            if (!el?.matches?.(".hub-text-input, .hub-text-area")) return;
+            const row = el.closest?.("[data-hub-item]");
+            if (!row) return;
+            const root = el.closest?.(".settings-hub");
+            const node = root ? hubRootOwner.get(root) : null;
+            if (!node) return;
+            lastTextFocus = { node, control: el, rowEl: row, label: rowLabelOf(row), ts: Date.now() };
+        } catch (_) {}
+    }, true);
+    const trackMedia = (e) => {
+        try {
+            const mirror = e.target?.closest?.(".hub-mirror-media");
+            if (!mirror) return;
+            const row = mirror.closest("[data-hub-item]");
+            if (!row) return;
+            const root = mirror.closest(".settings-hub");
+            const node = root ? hubRootOwner.get(root) : null;
+            if (!node) return;
+            lastMediaFocus = { node, mirror, rowEl: row, label: rowLabelOf(row), ts: Date.now() };
+        } catch (_) {}
+    };
+    document.addEventListener("pointerdown", trackMedia, true);
+    document.addEventListener("focusin", trackMedia, true);
+}
+
+function stackInsertTextIntoLastFocused(text) {
+    try {
+        const rec = lastTextFocus;
+        if (!rec?.control?.isConnected) return false;
+        const v = String(text ?? "");
+        pushControlToTarget(rec.node, rec.control, v, true);
+        if (rec.control.value !== v) rec.control.value = v;
+        return true;
+    } catch (_) { return false; }
+}
+
+/** v72: write text into a SPECIFIC text mirror (a stack text card was
+ *  dropped straight onto it). Returns false when el is not a hub mirror. */
+function stackInsertTextIntoEl(el, text) {
+    try {
+        const control = el?.closest?.(".hub-text-input, .hub-text-area");
+        const row = control?.closest?.("[data-hub-item]");
+        if (!control || !row) return false;
+        const root = control.closest(".settings-hub");
+        const node = root ? hubRootOwner.get(root) : null;
+        if (!node) return false;
+        const v = String(text ?? "");
+        pushControlToTarget(node, control, v, true);
+        if (control.value !== v) control.value = v;
+        return true;
+    } catch (_) { return false; }
+}
+
+function stackSendBlobToMediaMirror(el, blob, name) {
+    try {
+        const mirror = el?.closest?.(".hub-mirror-media");
+        const row = mirror?.closest?.("[data-hub-item]");
+        if (!mirror || !row) return false;
+        const root = mirror.closest(".settings-hub");
+        const node = root ? hubRootOwner.get(root) : null;
+        if (!node) return false;
+        const item = getHubConfig(node).items.find((i) => i.id === row.dataset.hubItem);
+        if (!item || item.type !== "widget_binding" || item.widgetType !== "media") return false;
+        const safe = String(name || "stack_file").replace(/[\\/:*?"<>|]+/g, "_").trim() || "stack_file";
+        const file = new File([blob], safe, { type: blob?.type || "application/octet-stream" });
+        uploadMediaFiles(node, item, [file]);
+        return true;
+    } catch (_) { return false; }
+}
+
+function stackFindMediaMirror(kind) {
+    try {
+        const want = String(kind || "image");
+        const rec = lastMediaFocus;
+        if (rec?.mirror?.isConnected && (rec.mirror.dataset.mediaKind || "image") === want) return rec.mirror;
+        for (const root of liveHubRoots()) {
+            const m = [...root.querySelectorAll(".hub-mirror-media")]
+                .find((x) => (x.dataset.mediaKind || "image") === want);
+            if (m) return m;
+        }
+    } catch (_) {}
+    return null;
+}
+
+registerStackBridge({
+    insertTextIntoLastFocused: stackInsertTextIntoLastFocused,
+    insertTextIntoEl: stackInsertTextIntoEl,
+    sendBlobToMediaMirror: stackSendBlobToMediaMirror,
+    findMediaMirror: stackFindMediaMirror,
+    focusedTextInfo: () => (lastTextFocus?.control?.isConnected
+        ? { label: lastTextFocus.label || lastTextFocus.rowEl?.dataset?.hubItem || "field" }
+        : null),
+    focusedMediaInfo: () => (lastMediaFocus?.mirror?.isConnected
+        ? { label: lastMediaFocus.label || lastMediaFocus.rowEl?.dataset?.hubItem || "media", kind: lastMediaFocus.mirror.dataset.mediaKind || "image" }
+        : null),
+});
+wireStackBridge();
 
 function refreshValuesDom(node) {
     const st = stateMap.get(node);

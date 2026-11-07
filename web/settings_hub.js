@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v70 - PASTE STACK (standalone floating clipboard panel): a \ud83d\udccb panel that lives ALONGSIDE the hub (owner decision: separate from the hub, work with both at once) - click its paste area or press Ctrl+V over it to save text and images, click a card to copy it back, re-adding the same content moves the card to the top (server-side hash dedup), entries live IN THE COMFYUI PROCESS (user/settings_hub/stack/ index.json + items/ via the new py/stack_store.py routes) so the stack is PORTABLE - it travels with the ComfyUI folder and is shared by every browser/origin/profile, the panel evicts the oldest entries beyond the configurable max (gear popup -> Stack: On/Off + max + clear), drag/resize/minimize-to-chip are persisted in localStorage, a missing server degrades to a session-only stack with a visible note. Includes v69 (nav points pin the CURRENT canvas zoom on create), v68 (hotkey capture fix), v67 (per-point hotkeys), v66 (fail-open registration + degradation banner), v65 (top-left jump anchor), v64 (fresh-add mount invariant)");
+console.info("[SettingsHub] web build: v73 - IMAGE COMPARE: right-click a hub media row, a gallery thumbnail or a Paste Stack image card -> 'Add to Compare' and a floating A/B panel opens with four modes - WIPE (draggable divider or a stage click), FADE (crossfade slider), BLINK (every stage click flashes A<->B) and DIFF (pixel |A-B| x a 1..10 gain slider); the first add fills slot A, the second slot B, further adds shift the queue, there is an A/B swap and per-slot clears; the panel re-reads its SOURCE elements on every api 'executed' event, so a fresh queue run that replaced a loader file updates the comparison automatically; position/size/mode/gain/wipe/fade persist in localStorage. Includes v72 (Paste Stack snippets: pins/rename/tags/search/kind filters/usage counter/'into the string' insert), v71 (files & drag + OS-clipboard helper + drag-to-Load-Image), v70 (Paste Stack standalone floating panel with server-side storage), v69 (nav points pin the CURRENT canvas zoom on create), v68 (hotkey capture fix), v67 (per-point hotkeys), v66 (fail-open registration), v65 (top-left jump anchor), v64 (fresh-add mount invariant)");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v70 - PASTE STACK (standalone floating cl
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=70", import.meta.url).href;
+    link.href = new URL("styles.css?v=73", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -49,7 +49,7 @@ console.info("[SettingsHub] web build: v70 - PASTE STACK (standalone floating cl
 // silently removed every "Pin to Settings Hub" menu item and the sync hooks
 // (the user saw the menus vanish and had no idea why). The detector keeps its
 // diagnostic value but is NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v70";
+globalThis.__SettingsHubBuild = "v73";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -62,6 +62,7 @@ const FILES = [
     "./hub_ui_renderer.js", // DOM widget rendering
     "./sync_manager.js",    // target-widget callback hooks (reactive sync)
     "./stack.js",           // v70: Paste Stack - floating clipboard panel
+    "./compare.js",         // v73: Image Compare - A/B wipe/fade/blink/diff panel
     "./context_menu.js",    // "📌 Pin to Settings Hub" menus + batch picker
 ];
 
@@ -94,7 +95,7 @@ const FILES = [
     if (missing.length) {
         console.error("[SettingsHub] MIXED BUILD detected: STALE CACHED module(s) " +
             missing.map((k) => k + ".js").join(", ") +
-            " did not self-report as v70. The pack still registers what loaded (v67 fail-open), but a HARD REFRESH (Ctrl+F5) is required after updating the extension folder.");
+            " did not self-report as v73. The pack still registers what loaded (v67 fail-open), but a HARD REFRESH (Ctrl+F5) is required after updating the extension folder.");
     }
 
     // v66/v67 FAIL-OPEN registration, per module: menus first (the most visible
@@ -135,6 +136,21 @@ const FILES = [
         });
     } else {
         console.error("[SettingsHub] stack.js unavailable - the Paste Stack panel CANNOT register (see the failed list above if any).");
+    }
+
+    // v73: Image Compare installs its context-menu + executed listeners in
+    // extension setup; the panel itself is built lazily on the first
+    // "Add to Compare". Fail-open like the stack.
+    if (mods["./compare.js"]?.initCompare) {
+        app.registerExtension({
+            name: "Comfy.SettingsHub.compare",
+            setup() {
+                try { mods["./compare.js"].initCompare(); }
+                catch (err) { console.error("[SettingsHub] compare init failed:", err); }
+            },
+        });
+    } else {
+        console.error("[SettingsHub] compare.js unavailable - Image Compare CANNOT register (see the failed list above if any).");
     }
 
     // v66: the degradation is made VISIBLE - the field report proved an
