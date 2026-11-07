@@ -11,8 +11,8 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
-if (globalThis.__SettingsHubBuild !== "v69") {
-    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v69) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v70") {
+    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v70) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
 }
@@ -73,6 +73,10 @@ import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel,
          getNavMenuOn, setNavMenuOn,
          getNavHotkeysOn, setNavHotkeysOn } from "./global_settings.js";
 import { firstMediaSpec } from "./viewer_gallery.js";
+// v70: the Paste Stack panel (web/stack.js) - the gear popup hosts its
+// settings section (On/Off, max entries, clear). The panel itself mounts
+// from the entry's extension setup, independent of the hub renderer.
+import { isStackOn, setStackOn, getStackMax, setStackMax, STACK_MAX_CHOICES, stackClearAllFlow } from "./stack.js";
 import {
     isNavItem, normalizeNav, createNavItem, navJump, armAim,
     enterOwnerGraph, markersVersionBump, resolveNavTarget,
@@ -2127,7 +2131,27 @@ function openSettingsPopup(node, trigger) {
         `item adds a point at the clicked spot. Points themselves are created from the hub toolbar ` +
         `(＋🧭). Hotkeys: every point may carry a keyboard shortcut (assign it in the point popover, ` +
         `click the ⌨ chip) - pressing it jumps to the point from anywhere. This switch turns the ` +
-        `hotkey engine ON/OFF globally (assignments are kept). Global for every hub.</div>`;
+        `hotkey engine ON/OFF globally (assignments are kept). Global for every hub.</div>` +
+
+        `<div class="hub-set-section">Stack</div>` +
+        `<label class="hub-set-row"><span>Paste Stack panel</span>` +
+        `<select data-set-role="stackon">` +
+        `<option value="1">On (default)</option>` +
+        `<option value="0">Off</option>` +
+        `</select></label>` +
+        `<label class="hub-set-row"><span>Max saved entries</span>` +
+        `<select data-set-role="stackmax">` +
+        STACK_MAX_CHOICES.map((n) =>
+            `<option value="${n}">${n}${n === 100 ? " · default" : ""}</option>`).join("") +
+        `</select></label>` +
+        `<label class="hub-set-row"><span>Clear stack</span>` +
+        `<button type="button" class="hub-btn" data-set-role="stackclear">Clear…</button></label>` +
+        `<div class="hub-pop-hint">Floating clipboard panel (works alongside every hub): click its paste ` +
+        `area or press Ctrl+V over it to save text and images; click a card to copy it back; drag it by ` +
+        `the header, [–] minimizes to a chip. Entries live in ComfyUI's user folder ` +
+        `(user/settings_hub/stack/) - they survive page reloads, are shared by every browser and move ` +
+        `with the ComfyUI folder. Max = the panel drops the oldest entries beyond it (server hard caps ` +
+        `apply regardless). Clear wipes the whole stack (asks twice).</div>`;
     document.body.appendChild(pop);
 
     setPopState = { node, trigger, pop };
@@ -2247,6 +2271,44 @@ function openSettingsPopup(node, trigger) {
         setNavHotkeysOn(nkSel.value === "1");
         nkSel.value = getNavHotkeysOn() ? "1" : "0";
         flashBtn(trigger, "✓");
+    });
+
+    // --- Stack: panel On/Off + max entries + clear (v70) ---------------------
+    // The panel reads isStackOn()/getStackMax() at event/refresh time, so a
+    // flip here applies immediately (Off tears the panel down, On re-mounts
+    // it and re-reads the server index).
+    const stOnSel = pop.querySelector('[data-set-role="stackon"]');
+    stOnSel.value = isStackOn() ? "1" : "0";
+    stOnSel.addEventListener("change", () => {
+        setStackOn(stOnSel.value === "1");
+        stOnSel.value = isStackOn() ? "1" : "0";
+        flashBtn(trigger, "✓");
+    });
+
+    const stMaxSel = pop.querySelector('[data-set-role="stackmax"]');
+    stMaxSel.value = String(getStackMax());
+    stMaxSel.addEventListener("change", () => {
+        stMaxSel.value = String(setStackMax(stMaxSel.value));
+        flashBtn(trigger, "✓");
+    });
+
+    const stClearBtn = pop.querySelector('[data-set-role="stackclear"]');
+    stClearBtn.addEventListener("click", async () => {
+        if (stClearBtn.dataset.armed !== "1") {
+            stClearBtn.dataset.armed = "1";
+            stClearBtn.textContent = "Sure?";
+            setTimeout(() => {
+                if (stClearBtn.isConnected) {
+                    stClearBtn.dataset.armed = "0";
+                    stClearBtn.textContent = "Clear…";
+                }
+            }, 2500);
+            return;
+        }
+        stClearBtn.dataset.armed = "0";
+        stClearBtn.textContent = "Clear…";
+        const ok = await stackClearAllFlow();
+        if (ok) flashBtn(trigger, "✓");
     });
 
     positionNumPopup(pop, trigger);
