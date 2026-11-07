@@ -1518,7 +1518,10 @@ button.hub-pin-back {
 }
 
 /* Hidden row chrome. While a search is active the drag handles hide too:
-   reordering among filtered-out rows would corrupt the saved order. */
+   reordering among filtered-out rows would corrupt the saved order.
+   v74 (owner report 2026-11-08, AGENTS.md 5.1): the nav AUTHORING buttons
+   join the list - the eye exists to declutter a CONFIGURED interface, so
+   '+point' and 're-place' hide with the rest. */
 .settings-hub.hub-chrome-hidden .hub-drag-handle,
 .settings-hub.hub-chrome-hidden .hub-remove,
 .settings-hub.hub-chrome-hidden .hub-gear,
@@ -1528,6 +1531,8 @@ button.hub-pin-back {
 .settings-hub.hub-chrome-hidden .hub-inpreset,
 .settings-hub.hub-chrome-hidden .hub-mlt,
 .settings-hub.hub-chrome-hidden .hub-tab-del,
+.settings-hub.hub-chrome-hidden .hub-add-nav,
+.settings-hub.hub-chrome-hidden .hub-nav-move,
 .settings-hub.hub-searching .hub-drag-handle {
     display: none !important;
 }
@@ -2834,6 +2839,18 @@ button.hub-pin-back {
 
 .hub-stack-head .hub-btn:hover { background: #3a3a4e; color: #fff; }
 
+/* v74: the header clear button + its armed ("click again to confirm") state */
+.hub-stack-head .hub-stack-clear.hub-stack-clear-armed {
+    background: #7a2c2c;
+    border-color: #c0564f;
+    color: #ffd9d9;
+    animation: hub-stack-clear-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes hub-stack-clear-pulse {
+    50% { background: #a03a34; }
+}
+
 .hub-stack-note {
     padding: 5px 8px;
     background: #4a1f1f;
@@ -2846,11 +2863,39 @@ button.hub-pin-back {
 
 .hub-stack-list {
     flex: 1 1 auto;
-    overflow-y: auto;
-    padding: 5px;
+    /* v74: without min-height:0 a flex item refuses to shrink below its
+       content - the list grew past the panel, the panel (overflow:hidden)
+       clipped the tail and NO scrollbar ever appeared. THIS is the fix. */
+    min-height: 0;
+    overflow-y: scroll;
+    overscroll-behavior: contain;
+    padding: 6px;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 6px;
+    /* v74: an ALWAYS-VISIBLE, styled scrollbar - a dark UI with auto-width
+       system scrollbars made long stacks look like one merged blob. */
+    scrollbar-width: thin;
+    scrollbar-color: #3d5a80 #191930;
+}
+
+.hub-stack-list::-webkit-scrollbar {
+    width: 10px;
+}
+
+.hub-stack-list::-webkit-scrollbar-track {
+    background: #191930;
+    border-radius: 5px;
+}
+
+.hub-stack-list::-webkit-scrollbar-thumb {
+    background: #3d5a80;
+    border-radius: 5px;
+    border: 2px solid #191930;
+}
+
+.hub-stack-list::-webkit-scrollbar-thumb:hover {
+    background: #4d6da0;
 }
 
 .hub-stack-empty {
@@ -2869,6 +2914,9 @@ button.hub-pin-back {
     border-radius: 5px;
     cursor: pointer;
     overflow: hidden;
+    /* v74: keep the entries visually separate while scrolling */
+    flex: 0 0 auto;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
 }
 
 .hub-stack-card:hover { border-color: #3d5a80; background: #232342; }
@@ -3105,6 +3153,12 @@ button.hub-pin-back {
     border-radius: 6px;
     background: rgba(88, 196, 112, 0.08);
     box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+/* v74: TEXT-card drops on real nodes highlight the node in blue instead */
+.hub-stack-targetbox.hub-stack-targetbox-text {
+    border-color: #5a9de0;
+    background: rgba(90, 157, 224, 0.10);
 }
 
 .hub-mirror-media.hub-stack-drop-hot {

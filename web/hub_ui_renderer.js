@@ -11,8 +11,8 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
-if (globalThis.__SettingsHubBuild !== "v73") {
-    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v70) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v74") {
+    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v74) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
 }
@@ -76,7 +76,7 @@ import { firstMediaSpec } from "./viewer_gallery.js";
 // v70: the Paste Stack panel (web/stack.js) - the gear popup hosts its
 // settings section (On/Off, max entries, clear). The panel itself mounts
 // from the entry's extension setup, independent of the hub renderer.
-import { isStackOn, setStackOn, getStackMax, setStackMax, STACK_MAX_CHOICES, stackClearAllFlow } from "./stack.js";
+import { isStackOn, setStackOn, getStackMax, setStackMax, STACK_MAX_CHOICES } from "./stack.js";
 import {
     isNavItem, normalizeNav, createNavItem, navJump, armAim,
     enterOwnerGraph, markersVersionBump, resolveNavTarget,
@@ -2153,14 +2153,12 @@ function openSettingsPopup(node, trigger) {
         STACK_MAX_CHOICES.map((n) =>
             `<option value="${n}">${n}${n === 100 ? " · default" : ""}</option>`).join("") +
         `</select></label>` +
-        `<label class="hub-set-row"><span>Clear stack</span>` +
-        `<button type="button" class="hub-btn" data-set-role="stackclear">Clear…</button></label>` +
         `<div class="hub-pop-hint">Floating clipboard panel (works alongside every hub): click its paste ` +
         `area or press Ctrl+V over it to save text and images; click a card to copy it back; drag it by ` +
         `the header, [–] minimizes to a chip. Entries live in ComfyUI's user folder ` +
         `(user/settings_hub/stack/) - they survive page reloads, are shared by every browser and move ` +
         `with the ComfyUI folder. Max = the panel drops the oldest entries beyond it (server hard caps ` +
-        `apply regardless). Clear wipes the whole stack (asks twice).</div>`;
+        `apply regardless). The 🗑 button in the PANEL HEADER wipes the whole stack (asks twice).</div>`;
     document.body.appendChild(pop);
 
     setPopState = { node, trigger, pop };
@@ -2300,25 +2298,8 @@ function openSettingsPopup(node, trigger) {
         stMaxSel.value = String(setStackMax(stMaxSel.value));
         flashBtn(trigger, "✓");
     });
-
-    const stClearBtn = pop.querySelector('[data-set-role="stackclear"]');
-    stClearBtn.addEventListener("click", async () => {
-        if (stClearBtn.dataset.armed !== "1") {
-            stClearBtn.dataset.armed = "1";
-            stClearBtn.textContent = "Sure?";
-            setTimeout(() => {
-                if (stClearBtn.isConnected) {
-                    stClearBtn.dataset.armed = "0";
-                    stClearBtn.textContent = "Clear…";
-                }
-            }, 2500);
-            return;
-        }
-        stClearBtn.dataset.armed = "0";
-        stClearBtn.textContent = "Clear…";
-        const ok = await stackClearAllFlow();
-        if (ok) flashBtn(trigger, "✓");
-    });
+    // v74: the clear button lives in the STACK PANEL HEADER itself (owner:
+    // destructive controls belong to the thing they destroy, not to settings).
 
     positionNumPopup(pop, trigger);
     try { sel.focus(); } catch (_) {}

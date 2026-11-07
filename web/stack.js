@@ -1,15 +1,15 @@
 // ============================================================================
-// SettingsHub - Paste Stack (v71): standalone floating clipboard panel
+// SettingsHub - Paste Stack (v74): standalone floating clipboard panel
 // ----------------------------------------------------------------------------
-// v71 BUILD GUARD (must be the FIRST executable statement, before any work):
+// v71-v74 BUILD GUARD (must be the FIRST executable statement, before any work):
 // the loader entry stamps globalThis.__SettingsHubBuild before importing the
 // submodules; this module refuses to stay silent if it was loaded as part of
 // a MIXED build. See settings_hub.js for the field history.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["stack"] = true;
-if (globalThis.__SettingsHubBuild !== "v73") {
-    console.error("[SettingsHub] STALE BUILD: stack.js (v73) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v74") {
+    console.error("[SettingsHub] STALE BUILD: stack.js (v74) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5).");
 }
@@ -61,6 +61,26 @@ if (globalThis.__SettingsHubBuild !== "v73") {
 //   * UI: drag the header, resize from the bottom-right grip, [–] minimizes
 //     to a chip with a live count badge, [✕] hides the panel (gear popup
 //     "Stack" section brings it back). Position/size state in localStorage.
+//
+// v74 (owner QA round 2026-11-08):
+//   * 🗑 CLEAR moved INTO the panel header (the settings popup no longer
+//     carries it - destructive controls belong to the thing they destroy);
+//     double-click confirm (2.5s window), wipes server + session entries.
+//   * the list SCROLLS for real: .hub-stack-list gets min-height:0 (a flex
+//     item could not shrink below its content, so the panel clipped the tail
+//     with no scrollbar) + an always-visible styled scrollbar + clearer
+//     card separation.
+//   * card DRAG lands on REAL GRAPH NODES for every media kind: image ->
+//     combos named "image" / options.image_upload (LoadImage, masks...),
+//     video -> "video" / options.video_upload (native LoadVideo, VHS),
+//     audio -> "audio" / options.audio_upload (LoadAudio); upload always
+//     goes through /upload/image - ComfyUI has NO /upload/audio or
+//     /upload/video, LoadVideo/LoadAudio feed the same input dir. TEXT
+//     cards dropped on a node write the STRING/customtext widget under the
+//     cursor (fallback: the node's first text widget) - prompts included.
+//   * Enter commits the inline rename/tags editor (Esc cancels) and Ctrl+V
+//     with a panel input focused pastes INTO that input instead of being
+//     captured as a new entry.
 // ============================================================================
 
 import { app } from "../../scripts/app.js";
@@ -258,12 +278,33 @@ export function setStackMax(v) {
     return n;
 }
 
-/** Clears the whole stack on the server and locally. Used by the gear popup. */
+/** Clears the whole stack on the server and locally. v74: called from the
+ *  panel's own 🗑 header button (the gear popup no longer carries it). */
 export async function stackClearAllFlow() {
     const ok = await apiClear();
-    if (ok) { stackItems = []; renderAll(); localToast("Stack cleared"); }
+    if (ok) { stackItems = []; localBlobs.clear(); renderAll(); localToast("Stack cleared"); }
     else localToast("Stack clear failed - server unreachable");
     return ok;
+}
+
+// v74: the header 🗑 arms on the first click and wipes on a second click
+// within the window (same double-confirm contract the gear button had).
+const CLEAR_ARM_MS = 2500;
+
+function panelClearAll(btn) {
+    const now = Date.now();
+    if (now - clearArmTs > CLEAR_ARM_MS) {
+        clearArmTs = now;
+        try { btn.classList.add("hub-stack-clear-armed"); } catch (_) {}
+        localToast("Click 🗑 again to clear the WHOLE stack");
+        setTimeout(() => {
+            try { btn.classList.remove("hub-stack-clear-armed"); } catch (_) {}
+        }, CLEAR_ARM_MS);
+        return;
+    }
+    clearArmTs = 0;
+    try { btn.classList.remove("hub-stack-clear-armed"); } catch (_) {}
+    void stackClearAllFlow();
 }
 
 // ---------------------------------------------------------------------------
@@ -593,10 +634,12 @@ async function captureFromOsHelper() {
 }
 
 /** window paste event: capture when the cursor hovers the panel (or the
- *  event originates inside it) and no text field OUTSIDE the panel owns the
- *  focus - the user's normal Ctrl+V into editors is never disturbed. When
- *  the browser event carries nothing usable (files copied in Explorer fire
- *  an empty paste) the OS helper is asked before giving up. */
+ *  event originates inside it) and no text field owns the focus - INCLUDING
+ *  the panel's own search/editor inputs (v74): a Ctrl+V aimed at them pastes
+ *  INTO them instead of becoming a new entry. The user's normal Ctrl+V into
+ *  editors is never disturbed. When the browser event carries nothing usable
+ *  (files copied in Explorer fire an empty paste) the OS helper is asked
+ *  before giving up. */
 function onPasteEvent(e) {
     if (!mounted || !isStackOn()) return;
     const inPanel = (() => { try { return panel?.contains(e.target); } catch (_) { return false; } })();
@@ -605,10 +648,10 @@ function onPasteEvent(e) {
     const aeEditable = (() => {
         try {
             return !!ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" ||
-                ae.isContentEditable) && !panel.contains(ae);
+                ae.isContentEditable);
         } catch (_) { return false; }
     })();
-    if (aeEditable) return; // leave the focused editor alone
+    if (aeEditable) return; // the focused editor (hub OR panel) wins
     const cd = e.clipboardData;
     const data = { text: typeof cd?.getData === "function" ? cd.getData("text/plain") : undefined, files: cd?.files };
     e.preventDefault();
@@ -901,15 +944,54 @@ function elemFromPoint(x, y) {
     } catch (_) { return null; }
 }
 
-function imageWidgetOf(node) {
+// v74: kind-aware combo detection. Name matches cover the classic loaders
+// (LoadImage "image", VHS Load Video "video", LoadAudio "audio"); the
+// options flags cover the native LoadVideo, whose combo is just named
+// "file" but carries options.video_upload (same for audio_upload).
+function uploadWidgetOf(node, kind) {
     if (!node || node.flags?.collapsed) return null;
     try {
-        return node.widgets?.find((w) => w && w.name === "image" &&
-            (w.type === "combo" || w.options?.values)) || null;
+        const ws = Array.isArray(node.widgets) ? node.widgets : [];
+        for (const w of ws) {
+            if (!w) continue;
+            if (!(w.type === "combo" || w.options?.values || w.options?.upload)) continue;
+            const o = w.options || {};
+            if (kind === "image" && (o.image_upload || w.name === "image")) return w;
+            if (kind === "video" && (o.video_upload || w.name === "video" || w.name === "video_file")) return w;
+            if (kind === "audio" && (o.audio_upload || w.name === "audio")) return w;
+        }
+        return null;
     } catch (_) { return null; }
 }
 
-function nodeFromPoint(cx, cy) {
+function imageWidgetOf(node) { return uploadWidgetOf(node, "image"); }
+
+// v74: TEXT cards dropped on a real node write a string widget.
+function isTextWidget(w) {
+    if (!w || w.disabled) return false;
+    return w.type === "string" || w.type === "customtext" || w.type === "text" ||
+        !!(w.options && w.options.multiline);
+}
+
+function textWidgetsOf(node) {
+    if (!node || node.flags?.collapsed) return [];
+    try {
+        const ws = Array.isArray(node.widgets) ? node.widgets : [];
+        return ws.filter(isTextWidget);
+    } catch (_) { return []; }
+}
+
+/** The text widget under the cursor (LiteGraph hit-test), else the node's
+ *  first text widget (prompt nodes usually carry exactly one). */
+function textWidgetAt(node, gx, gy) {
+    try {
+        const w = app.canvas?.getWidgetOnPos?.(gx, gy);
+        if (w && isTextWidget(w)) return w;
+    } catch (_) {}
+    return textWidgetsOf(node)[0] || null;
+}
+
+function pointToGraph(cx, cy) {
     try {
         const c = app.canvas;
         if (!c?.canvas) return null;
@@ -919,11 +1001,14 @@ function nodeFromPoint(cx, cy) {
         const gx = (cx - rect.left) / (ds.scale || 1) - (ds.offset?.[0] || 0);
         const gy = (cy - rect.top) / (ds.scale || 1) - (ds.offset?.[1] || 0);
         const graph = app.graph ?? c.graph;
-        return graph?.getNodeOnPos?.(gx, gy, true) ?? null;
+        const node = graph?.getNodeOnPos?.(gx, gy, true) ?? null;
+        return node ? { node, gx, gy } : null;
     } catch (_) { return null; }
 }
 
-function showTargetBox(node) {
+function nodeFromPoint(cx, cy) { return pointToGraph(cx, cy)?.node ?? null; }
+
+function showTargetBox(node, wkind) {
     try {
         const c = app.canvas;
         if (!c?.canvas) return;
@@ -932,6 +1017,8 @@ function showTargetBox(node) {
             targetBox.className = "hub-stack-targetbox";
             document.body.appendChild(targetBox);
         }
+        // v74: a TEXT drop target gets its own (blue) highlight variant
+        targetBox.classList.toggle("hub-stack-targetbox-text", wkind === "text");
         const rect = c.canvas.getBoundingClientRect();
         const ds = c.ds || { scale: 1, offset: [0, 0] };
         const th = (window.LiteGraph?.NODE_TITLE_HEIGHT) ?? 30;
@@ -964,7 +1051,7 @@ function setDragTarget(target) {
         try { target.el.classList.add("hub-stack-drop-hot-text"); } catch (_) {}
         hideTargetBox();
     } else if (target?.kind === "node") {
-        showTargetBox(target.node);
+        showTargetBox(target.node, target.wkind);
     } else {
         hideTargetBox();
     }
@@ -1025,18 +1112,29 @@ function onCardDragMove(e) {
     }
     moveGhost(e);
     const el = elemFromPoint(e.clientX, e.clientY);
+    const t = dragCtx.item.type;
     let target = null;
-    const mirror = el?.closest?.(".hub-mirror-media");
-    if (mirror) {
-        target = { kind: "mirror", el: mirror };
-    } else {
-        // v72: text cards land on text mirrors
+    if (t === "text") {
+        // v72: text cards land on hub text mirrors ...
         const textEl = el?.closest?.(".hub-text-input, .hub-text-area");
-        if (textEl && dragCtx.item.type === "text") {
-            target = { kind: "text", el: textEl };
-        } else {
-            const node = nodeFromPoint(e.clientX, e.clientY);
-            if (node && imageWidgetOf(node)) target = { kind: "node", node };
+        if (textEl) target = { kind: "text", el: textEl };
+    } else {
+        // ... media cards land on hub media mirrors
+        const mirror = el?.closest?.(".hub-mirror-media");
+        if (mirror) target = { kind: "mirror", el: mirror };
+    }
+    if (!target) {
+        // v74: REAL GRAPH NODES as targets - image/video/audio cards need a
+        // kind-matched upload combo, text cards a string widget.
+        const g = pointToGraph(e.clientX, e.clientY);
+        if (g) {
+            if (t === "text") {
+                const w = textWidgetAt(g.node, g.gx, g.gy);
+                if (w) target = { kind: "node", node: g.node, widget: w, wkind: "text" };
+            } else if (t === "image" || t === "video" || t === "audio") {
+                const w = uploadWidgetOf(g.node, t);
+                if (w) target = { kind: "node", node: g.node, widget: w, wkind: t };
+            }
         }
     }
     setDragTarget(target);
@@ -1063,7 +1161,11 @@ function onCardDragUp(e) {
     justDragged = true;
     setTimeout(() => { justDragged = false; }, 80);
     const t = ctx.target;
-    if (t?.kind === "node") dropOnLoaderNode(ctx, t.node);
+    if (t?.kind === "node") {
+        // v74: the target carries the widget picked during the drag
+        if (t.wkind === "text") dropOnTextNode(ctx, t.node, t.widget);
+        else dropOnLoaderNode(ctx, t.node, t.widget);
+    }
     else if (t?.kind === "mirror") dropOnMirror(ctx, t.el);
     else if (t?.kind === "text") dropOnTextMirror(ctx, t.el);
 }
@@ -1073,9 +1175,11 @@ function onCardMouseDown(e) {
     if (e.target?.closest?.("button, a, input, textarea, video, audio")) return;
     const card = e.target?.closest?.(".hub-stack-card");
     if (!card) return;
-    // v71/v72: images drag onto loader nodes / media mirrors; TEXT cards drag
-    // onto hub text mirrors ("→ в строку" by direct drop).
-    if (card.dataset.type !== "image" && card.dataset.type !== "text") return;
+    // v71/v74: images drag onto loader nodes / media mirrors; TEXT cards drag
+    // onto hub text mirrors or REAL prompt nodes; video/audio onto matching
+    // loaders (VHS Load Video, LoadAudio) or media mirrors.
+    const kind = card.dataset.type;
+    if (kind !== "image" && kind !== "text" && kind !== "video" && kind !== "audio") return;
     const item = stackItems.find((x) => x.id === card.dataset.id);
     if (!item) return;
     e.preventDefault();
@@ -1105,8 +1209,9 @@ async function uploadToInput(blob, name) {
     return j?.subfolder ? `${j.subfolder}/${j.name}` : String(j?.name || "");
 }
 
-async function dropOnLoaderNode(ctx, node) {
-    const w = imageWidgetOf(node);
+async function dropOnLoaderNode(ctx, node, widget) {
+    // v74: the widget resolved during the drag; re-resolve as a fallback
+    const w = widget || uploadWidgetOf(node, ctx.item.type === "file" ? "image" : ctx.item.type);
     if (!w) return;
     try {
         if (!ctx.blob) ctx.blob = await getBlob(ctx.item);
@@ -1124,6 +1229,25 @@ async function dropOnLoaderNode(ctx, node) {
     } catch (err) {
         localToast("Upload failed - see F12 for details");
     }
+}
+
+/** v74: a TEXT card dropped on a REAL node writes its text into a string
+ *  widget (the row under the cursor, else the node's first text widget) -
+ *  the same route a manual edit takes, so preview refresh hooks fire. */
+async function dropOnTextNode(ctx, node, widget) {
+    const w = widget || textWidgetsOf(node)[0];
+    if (!w) { localToast("No text field on this node"); return; }
+    try {
+        const text = await itemText(ctx.item);
+        if (!text) { localToast("Entry has no text"); return; }
+        const old = w.value;
+        w.value = text;
+        try { w.callback?.(text, app.canvas, node); } catch (_) {}
+        try { node.onWidgetChanged?.(w.name, text, old, w); } catch (_) {}
+        try { app.canvas.setDirty?.(true, true); } catch (_) {}
+        localToast(`Text into ${node.title || node.type || "node"}`);
+        bumpUses(ctx.item);
+    } catch (_) { localToast("Drop failed"); }
 }
 
 async function dropOnMirror(ctx, el) {
@@ -1252,6 +1376,7 @@ function buildDom() {
         `<div class="hub-stack-head" title="Drag to move">` +
         `<span class="hub-stack-ico">📋</span><span class="hub-stack-title">Stack</span>` +
         `<span class="hub-stack-count">0</span>` +
+        `<button type="button" class="hub-btn hub-stack-clear" title="Clear ALL entries (click twice to confirm)">🗑</button>` +
         `<button type="button" class="hub-btn hub-stack-min" title="Minimize to chip">–</button>` +
         `<button type="button" class="hub-btn hub-stack-hide" title="Hide panel (⚙ Hub settings → Stack brings it back)">✕</button>` +
         `</div>` +
@@ -1293,6 +1418,7 @@ function buildDom() {
 
     // wiring
     pasteEl.addEventListener("click", () => captureFromRead());
+    panel.querySelector(".hub-stack-clear").addEventListener("click", (e) => panelClearAll(e.currentTarget));
     panel.querySelector(".hub-stack-min").addEventListener("click", () => setMinimized(true));
     panel.querySelector(".hub-stack-hide").addEventListener("click", () => { saveUi({ min: false }); setStackOn(false); });
     chip.addEventListener("click", () => setMinimized(false));
@@ -1354,6 +1480,23 @@ function buildDom() {
 
     // card interactions (event delegation)
     listEl.addEventListener("mousedown", onCardMouseDown);
+    // v74: the inline editor commits on Enter and cancels on Escape
+    listEl.addEventListener("keydown", (e) => {
+        const inEditor = e.target?.closest?.(".hub-stack-edit-name, .hub-stack-edit-tags");
+        if (!inEditor) return;
+        if (e.key === "Enter") {
+            e.preventDefault();
+            e.stopPropagation();
+            const card = inEditor.closest(".hub-stack-card");
+            const item = stackItems.find((x) => x.id === card?.getAttribute("data-id"));
+            if (item) saveEdit(card, item);
+        } else if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            editId = null;
+            renderAll();
+        }
+    });
     listEl.addEventListener("click", (e) => {
         const card = e.target.closest?.(".hub-stack-card");
         if (!card) return;
@@ -1492,7 +1635,13 @@ export function __stackTestHooks() {
         dropOnMirror,
         sendToMediaRow,
         nodeFromPoint,
+        pointToGraph,
         imageWidgetOf,
+        uploadWidgetOf,
+        textWidgetsOf,
+        textWidgetAt,
+        dropOnTextNode,
+        panelClearAll,
         elemFromPoint,
         items: () => stackItems.slice(),
         serverOk: () => serverOk,

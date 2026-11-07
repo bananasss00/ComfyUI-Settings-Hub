@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v73 - IMAGE COMPARE: right-click a hub media row, a gallery thumbnail or a Paste Stack image card -> 'Add to Compare' and a floating A/B panel opens with four modes - WIPE (draggable divider or a stage click), FADE (crossfade slider), BLINK (every stage click flashes A<->B) and DIFF (pixel |A-B| x a 1..10 gain slider); the first add fills slot A, the second slot B, further adds shift the queue, there is an A/B swap and per-slot clears; the panel re-reads its SOURCE elements on every api 'executed' event, so a fresh queue run that replaced a loader file updates the comparison automatically; position/size/mode/gain/wipe/fade persist in localStorage. Includes v72 (Paste Stack snippets: pins/rename/tags/search/kind filters/usage counter/'into the string' insert), v71 (files & drag + OS-clipboard helper + drag-to-Load-Image), v70 (Paste Stack standalone floating panel with server-side storage), v69 (nav points pin the CURRENT canvas zoom on create), v68 (hotkey capture fix), v67 (per-point hotkeys), v66 (fail-open registration), v65 (top-left jump anchor), v64 (fresh-add mount invariant)");
+console.info("[SettingsHub] web build: v74 - Paste Stack QA round: the list SCROLLS for real (min-height:0 + a styled always-visible scrollbar), a 🗑 CLEAR button lives in the panel header (double-click confirm; removed from the settings popup), stack cards drag onto REAL nodes for every kind (image -> LoadImage, video -> VHS/native LoadVideo via options.video_upload, audio -> LoadAudio via options.audio_upload, all uploaded through /upload/image - ComfyUI has no /upload/audio), TEXT cards drop onto prompt nodes and write the string widget under the cursor, the inline rename/tags editor commits on Enter (Esc cancels), and a focused input (even inside the panel) wins Ctrl+V over capture; the eye toggle now also hides the nav authoring buttons (AGENTS.md 5.1). Includes v73 (IMAGE COMPARE: right-click a media row/gallery thumbnail/stack image card -> Add to Compare, a floating A/B panel with WIPE/FADE/BLINK/DIFF modes + gain, A/B swap, auto-refresh on executed), v72 (Paste Stack snippets: pins/rename/tags/search/kind filters/usage counter/into-the-string insert), v71 (files & drag + OS-clipboard helper + drag-to-Load-Image), v70 (Paste Stack standalone floating panel with server-side storage), v69 (nav points pin the CURRENT canvas zoom on create), v68 (hotkey capture fix), v67 (per-point hotkeys), v66 (fail-open registration), v65 (top-left jump anchor), v64 (fresh-add mount invariant)");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v73 - IMAGE COMPARE: right-click a hub me
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=73", import.meta.url).href;
+    link.href = new URL("styles.css?v=74", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -49,7 +49,7 @@ console.info("[SettingsHub] web build: v73 - IMAGE COMPARE: right-click a hub me
 // silently removed every "Pin to Settings Hub" menu item and the sync hooks
 // (the user saw the menus vanish and had no idea why). The detector keeps its
 // diagnostic value but is NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v73";
+globalThis.__SettingsHubBuild = "v74";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -95,7 +95,7 @@ const FILES = [
     if (missing.length) {
         console.error("[SettingsHub] MIXED BUILD detected: STALE CACHED module(s) " +
             missing.map((k) => k + ".js").join(", ") +
-            " did not self-report as v73. The pack still registers what loaded (v67 fail-open), but a HARD REFRESH (Ctrl+F5) is required after updating the extension folder.");
+            " did not self-report as v74. The pack still registers what loaded (v67 fail-open), but a HARD REFRESH (Ctrl+F5) is required after updating the extension folder.");
     }
 
     // v66/v67 FAIL-OPEN registration, per module: menus first (the most visible
