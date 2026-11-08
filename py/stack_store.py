@@ -29,6 +29,15 @@ they can be rehydrated when the server store is empty (workflow moved to
 another machine, user folder wiped). Switching the scope never copies or
 moves entries - each scope keeps its own (AGENTS.md 5.1 rule 7).
 
+v80 adds REORDER (owner request: "a toggle button that enables a move mode -
+sort the order of the stack entries"): POST /settings_hub/stack/reorder
+takes {order: [id, ...]} - the FULL new order, top-first - and rewrites the
+index in that order. Entries NOT mentioned in the payload keep their
+relative order at the END (a stale client can never lose them), unknown
+ids are ignored, the blobs and every other field are untouched. Reordering
+is purely a re-arrangement - it NEVER deletes entries and does not touch
+created/pinned/tab metadata (AGENTS.md 5.1 rule 9/10). ?wf= scopes it.
+
 v79 adds TABS (owner request: "tabs to fill the stack for different tasks -
 grouping"): every entry may carry a `tab` display-group name (sanitized,
 <= 48 chars, purely metadata - it changes NO path, hash or cap). The view
@@ -68,6 +77,10 @@ exactly like the pre-v77 shared store, so older panels keep working.
 
 v71 also adds POST /settings_hub/stack/patch (rename/tags/pin/uses - the
 snippet engine of v72) in the same file below.
+
+v80 also adds POST /settings_hub/stack/reorder - the client's move mode
+sends the full new id order after a drag; the server reorders the index
+and answers with the rewritten list (the client mirrors that truth).
 
 Safety: names are validated against ^[A-Za-z0-9._-]{1,120}$ and resolved
 INSIDE the items directory (no traversal); writes are size-capped; the
@@ -353,7 +366,7 @@ async def stack_get(request):
 # (the web panel compares it against globalThis.__SettingsHubBuild and warns
 # about a half-updated install: web/ replaced while py/ stayed old, or the
 # page reloaded before ComfyUI restarted). AGENTS.md release checklist line.
-STACK_SERVER_VERSION = "v79"
+STACK_SERVER_VERSION = "v80"
 
 
 @PromptServer.instance.routes.get("/settings_hub/stack/health")
@@ -596,6 +609,47 @@ async def stack_patch(request):
             it["uses"] = min(1_000_000, int(it.get("uses", 0)) + 1)
         _write_index(items, wf)
     return web.json_response({"ok": True, "item": it})
+
+
+@PromptServer.instance.routes.post("/settings_hub/stack/reorder")
+async def stack_reorder(request):
+    """v80: store the client's manual ORDER (the move mode toggle in the
+    panel: drag cards to sort). Body: JSON {order: [id, ...]} - the FULL new
+    order, top-first. Only ids that exist in this store are applied, in the
+    payload's order; entries NOT mentioned keep their relative order at the
+    END (a stale/partial payload can never lose entries), and the blobs plus
+    every other field are untouched. An absent/empty order is an error -
+    a bad client must not wipe the order by accident. ?wf= scopes it."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    order = body.get("order") if isinstance(body, dict) else None
+    if not isinstance(order, list) or not order:
+        return web.json_response({"ok": False, "error": "bad order"}, status=400)
+    if len(order) > MAX_ITEMS * 4:
+        return web.json_response({"ok": False, "error": "order too large"}, status=413)
+    wf, err = _wf_from(request)
+    if err is not None:
+        return err
+    async with _lock:
+        items = _read_index(wf)
+        by_id = {it.get("id"): it for it in items}
+        seen = set()
+        new = []
+        for raw in order:
+            if not isinstance(raw, str) or raw in seen:
+                continue
+            it = by_id.get(raw)
+            if it is not None:
+                new.append(it)
+                seen.add(raw)
+        # never lose entries: whatever the payload did not mention keeps its
+        # relative order at the end (a stale client list is a subset at worst)
+        new.extend(it for it in items if it.get("id") not in seen)
+        _write_index(new, wf)
+        out = [dict(it) for it in new]
+    return web.json_response({"ok": True, "items": out})
 
 
 @PromptServer.instance.routes.delete("/settings_hub/stack/item/{item_id}")

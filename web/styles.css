@@ -3376,6 +3376,58 @@ button.hub-pin-back {
 }
 
 /* ===========================================================================
+   v80: Paste Stack MOVE MODE - the ⇅ toggle in the tools row turns every
+   card into a reorder handle. The panel root carries .hub-stack-move-mode:
+   cards get the grab cursor + the braille grip, the hovered landing card
+   shows a green insertion line (::after, top or bottom), the toggle lights
+   up while the mode is on.
+   ======================================================================== */
+
+.hub-stack-kind.hub-stack-move {
+    font-size: 11px;
+    line-height: 1;
+    padding: 1px 7px;
+}
+.hub-stack-kind.hub-stack-move.hub-stack-move-on {
+    background: #24523a;
+    border-color: #58b981;
+    color: #d8ffe8;
+}
+
+.hub-stack-move-mode .hub-stack-card { cursor: grab; }
+.hub-stack-move-mode .hub-stack-card:active { cursor: grabbing; }
+
+.hub-stack-handle {
+    position: absolute;
+    left: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    line-height: 1;
+    color: #7c86a8;
+    pointer-events: none;
+    user-select: none;
+}
+.hub-stack-card:hover .hub-stack-handle { color: #b9c2d8; }
+
+/* the green insertion line at the landing spot (no layout shift - ::after) */
+.hub-stack-card.hub-stack-ins-above::after,
+.hub-stack-card.hub-stack-ins-below::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    height: 3px;
+    border-radius: 2px;
+    background: #58c470;
+    box-shadow: 0 0 6px rgba(88, 196, 112, 0.7);
+    z-index: 3;
+    pointer-events: none;
+}
+.hub-stack-card.hub-stack-ins-above::after { top: 0; }
+.hub-stack-card.hub-stack-ins-below::after { bottom: 0; }
+
+/* ===========================================================================
    v72: Paste Stack snippet engine - toolbar (search + kind chips + tag
    filter note), pin markers, tag chips, usage counter, the inline rename/tags
    editor and the text-mirror drop highlight.

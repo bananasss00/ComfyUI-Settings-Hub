@@ -29,7 +29,7 @@
 // __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["compare"] = true;
-if (globalThis.__SettingsHubBuild !== "v79") {
+if (globalThis.__SettingsHubBuild !== "v80") {
     console.error("[SettingsHub] STALE BUILD: compare.js (v77) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5).");

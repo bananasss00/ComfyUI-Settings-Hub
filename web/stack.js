@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - Paste Stack (v79): standalone floating clipboard panel
+// SettingsHub - Paste Stack (v80): standalone floating clipboard panel
 // ----------------------------------------------------------------------------
 // v71-v77 BUILD GUARD (must be the FIRST executable statement, before any work):
 // the loader entry stamps globalThis.__SettingsHubBuild before importing the
@@ -8,8 +8,8 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["stack"] = true;
-if (globalThis.__SettingsHubBuild !== "v79") {
-    console.error("[SettingsHub] STALE BUILD: stack.js (v79) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v80") {
+    console.error("[SettingsHub] STALE BUILD: stack.js (v80) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5).");
 }
@@ -62,6 +62,33 @@ if (globalThis.__SettingsHubBuild !== "v79") {
 //     to a chip with a live count badge. There is NO close button (v75 owner
 //     request): the only way to remove the panel is the gear popup "Stack"
 //     section -> Off. Position/size state in localStorage.
+//
+// v80 (owner request 2026-11-09: "a toggle button that enables a move mode -
+//   sort the order of the stack entries"):
+//   * MOVE MODE - the ⇅ toggle in the TOOLS row (the header keeps exactly two
+//     buttons, 🗑 + [–], per the v75 owner contract). When ON: every card
+//     (including file cards, which have no ordinary drag) becomes a REORDER
+//     handle - dragging computes a drop SLOT from the list positions (drag
+//     down = the card lands under the hovered card, up = above it), a green
+//     insertion line shows the landing spot, and the ordinary drag targets
+//     (graph nodes, hub mirrors, tab chips) are OFF so sorting can never
+//     accidentally upload or regroup; a plain card click does nothing (the
+//     small action buttons keep working). The mode is a transient editing
+//     state - it always starts OFF after a reload.
+//   * ORDER SEMANTICS: one global order per store (the server index order).
+//     A drop splices the dragged item before/after the target in the FULL
+//     array, so inside a tab view exactly that pair moves - the relative
+//     order of every OTHER view is untouched.
+//   * PERSISTENCE: POST /settings_hub/stack/reorder {order:[ids]} (v80 py).
+//     The server applies the ids it knows IN THE PAYLOAD ORDER and appends
+//     entries the payload did not mention at the END (a stale client can
+//     never lose entries; AGENTS.md 5.1 rule 10) and answers with the
+//     rewritten list, which the client mirrors positionally (positions from
+//     the client, metadata from the server truth). An old py without the
+//     route keeps the new order for the session only - a single
+//     console.info, no scary note (the green mismatch note already says the
+//     pack is half-updated).
+//   * Long lists: dragging near the list's top/bottom edge autoscrolls.
 //
 // v79 (owner request 2026-11-08: "add tabs to the stack - entries are filled
 //   in for different tasks, there must be grouping" + "there is no way to see
@@ -351,6 +378,10 @@ let tabArm = null;
 let tabArmTs = 0;
 let viewerEl = null;     // v79: full-text viewer overlay (transient popup)
 let viewerSeq = 0;
+
+// v80: move mode (⇅ toggle) - a transient editing state for sorting the
+// stack by dragging cards. Never persisted: sorting is an action, not a view.
+let moveMode = false;
 
 // ---------------------------------------------------------------------------
 // Settings surface (gear popup "Stack" section, hub_ui_renderer.js)
@@ -663,7 +694,7 @@ function apiReady() {
 //                                            web build - half-updated install
 // ---------------------------------------------------------------------------
 
-const BUILD = globalThis.__SettingsHubBuild || "v79";
+const BUILD = globalThis.__SettingsHubBuild || "v80";
 
 // v78: the GREEN verdicts (legacy/mismatch - storage actually WORKS) are
 // status info, not failures, and the owner found the permanent green block
@@ -831,6 +862,24 @@ async function apiPatch(id, patch) {
     } catch (_) { return null; }
 }
 
+/** v80: persist the manual ORDER (move mode). Body: {order:[ids]} - the FULL
+ *  new order, top-first; the server answers with the rewritten list (or null
+ *  when the route/entry is unavailable - an old py simply keeps the new
+ *  order session-only). */
+async function apiReorder(ids) {
+    if (!apiReady()) return null;
+    try {
+        const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/reorder"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ order: ids }),
+        });
+        if (!r || !r.ok) return null;
+        const j = await r.json();
+        return Array.isArray(j?.items) ? j.items : null;
+    } catch (_) { return null; }
+}
+
 function applyPatched(item) {
     if (!item || !item.id) return;
     // v79: REPLACE the entry with the server truth instead of merging it over
@@ -845,6 +894,92 @@ function applyPatched(item) {
 function bumpUses(item) {
     if (!item || item.local || !apiReady()) return;
     apiPatch(item.id, { bumpUses: true }).then((it) => { if (it) applyPatched(it); }).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// v80: MOVE MODE - sort the stack by dragging cards (the ⇅ tools toggle)
+// ---------------------------------------------------------------------------
+// One global order per store: a drop splices the dragged item before/after
+// the target in the FULL stackItems array. Inside a filtered/tab view that
+// moves exactly the dragged/target pair - the relative order of every other
+// view is preserved (a subsequence of a moved pair changes only by the pair).
+
+/** Toggle the move mode (the ⇅ button in the tools row). A transient state:
+ *  never persisted, always OFF after a reload. */
+function setMoveMode(on) {
+    moveMode = !!on;
+    editId = null; // the inline editor must not fight the drag
+    renderAll();
+    localToast(moveMode
+        ? "Move mode ON - drag cards to sort (the order is saved)"
+        : "Move mode OFF");
+}
+
+/** The drop slot under the pointer during a reorder drag: the hovered card
+ *  becomes "the card the dragged one will land near". Position comes from
+ *  the LIST positions (no pixel math - jsdom- and zoom-safe): dragging DOWN
+ *  means the card lands UNDER the hovered card, dragging UP - above it.
+ *  Hovering the dragged card itself is no target. */
+function reorderTargetAt(el, draggedId) {
+    try {
+        const card = el?.closest?.(".hub-stack-card");
+        if (!card || !listEl || !listEl.contains(card)) return null;
+        const targetId = card.getAttribute("data-id");
+        if (!targetId || targetId === draggedId) return null;
+        const dragged = stackItems.find((x) => x.id === draggedId);
+        const target = stackItems.find((x) => x.id === targetId);
+        if (!dragged || !target) return null;
+        const from = stackItems.indexOf(dragged);
+        const to = stackItems.indexOf(target);
+        if (from < 0 || to < 0 || from === to) return null;
+        return { kind: "slot", el: card, item: target, pos: from < to ? "below" : "above" };
+    } catch (_) { return null; }
+}
+
+/** Apply a drop: splice the dragged item before/after the target in the FULL
+ *  array, re-render, then persist the new order to the server. */
+function commitReorder(dragged, target) {
+    if (!dragged || !target || dragged === target) return;
+    const from = stackItems.indexOf(dragged);
+    const to0 = stackItems.indexOf(target);
+    if (from < 0 || to0 < 0 || from === to0) return;
+    const below = from < to0; // dragging DOWN: the card lands under the target
+    stackItems.splice(from, 1);
+    const to = stackItems.indexOf(target);
+    stackItems.splice(below ? to + 1 : to, 0, dragged);
+    renderAll();
+    persistReorder();
+}
+
+/** Send the new order to the server and mirror the answer positionally:
+ *  positions stay the client's (locals keep their spots), metadata comes
+ *  from the server truth; entries the client did not know about are added at
+ *  the end. A failure (old py, network) keeps the local order for the
+ *  session - one console.info, no scary note. */
+function persistReorder() {
+    const ids = stackItems.filter((x) => !x.local).map((x) => x.id);
+    if (!ids.length) return; // a session-only stack has no server truth to update
+    apiReorder(ids).then((items) => {
+        if (Array.isArray(items)) {
+            const byId = new Map(items.map((x) => [x.id, x]));
+            const seen = new Set();
+            const out = [];
+            for (const it of stackItems) {
+                const srv = byId.get(it.id);
+                if (srv) { out.push({ ...srv }); seen.add(it.id); }
+                else if (it.local) out.push(it);
+            }
+            for (const srv of items) {
+                if (!seen.has(srv.id)) out.push({ ...srv });
+            }
+            stackItems = out;
+            renderAll();
+        } else {
+            try {
+                console.info("[SettingsHub] Paste Stack: the new order is kept for this session only - the server did not accept /stack/reorder (py predates v80? install the full pack).");
+            } catch (_) {}
+        }
+    }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -1223,9 +1358,13 @@ function cardHtml(item) {
     const mainTitle = item.type === "text" || item.type === "image"
         ? "Click: copy back to clipboard"
         : (item.type === "video" ? "Video entry (player controls below)" : "File entry");
+    // v80: in move mode every card shows its grab handle (the whole card drags)
+    const handle = moveMode && item.id !== editId
+        ? `<span class="hub-stack-handle" title="Drag to reorder">\u283F</span>`
+        : "";
     return `<div class="hub-stack-card${pinCls}" data-id="${esc(item.id)}" data-type="${item.type}" title="${esc(mainTitle)}">` +
         `${item.pinned ? '<span class="hub-stack-pinflag" title="Pinned">📌</span>' : ""}` +
-        `<div class="hub-stack-card-main">${preview}` +
+        `<div class="hub-stack-card-main">${handle}${preview}` +
         `<div class="hub-stack-meta">${nameHtml}<span class="hub-stack-tagslot">${tagsHtml}${usesHtml}</span><span>${esc(meta)}</span><span>${esc(fmtTime(item.created))}${item.local ? " · session" : ""}</span></div></div>` +
         `<div class="hub-stack-acts">${acts}<button type="button" class="hub-stack-del" title="Delete entry">✕</button></div>` +
         `</div>`;
@@ -1295,6 +1434,16 @@ function renderToolbar() {
         tagChip.style.display = viewFilter.tag ? "" : "none";
         tagChip.textContent = "#" + viewFilter.tag + " ✕";
     }
+    // v80: the move-mode toggle reflects its state (and the panel carries the
+    // mode class so the CSS can restyle the cards + show the grab handles)
+    const mv = toolsEl.querySelector(".hub-stack-move");
+    if (mv) {
+        mv.classList.toggle("hub-stack-move-on", moveMode);
+        mv.title = moveMode
+            ? "Move mode is ON - drag cards to sort; click again to finish"
+            : "Move mode: drag cards to sort the stack (the order is saved on the server)";
+    }
+    try { panel?.classList.toggle("hub-stack-move-mode", moveMode); } catch (_) {}
 }
 
 function renderBadge() {
@@ -1687,6 +1836,9 @@ function setDragTarget(target) {
     if (prev?.kind === "tab" && prev.el) {
         try { prev.el.classList.remove("hub-stack-tab-hot"); } catch (_) {}
     }
+    if (prev?.kind === "slot" && prev.el) {
+        try { prev.el.classList.remove("hub-stack-ins-above", "hub-stack-ins-below"); } catch (_) {}
+    }
     dragCtx.target = target || null;
     if (target?.kind === "mirror" && target.el) {
         try { target.el.classList.add("hub-stack-drop-hot"); } catch (_) {}
@@ -1697,6 +1849,12 @@ function setDragTarget(target) {
     } else if (target?.kind === "tab" && target.el) {
         // v79: the card hovers a tab chip - it will MOVE into that group
         try { target.el.classList.add("hub-stack-tab-hot"); } catch (_) {}
+        hideTargetBox();
+    } else if (target?.kind === "slot" && target.el) {
+        // v80: move mode - the green insertion line at the landing spot
+        try {
+            target.el.classList.add(target.pos === "below" ? "hub-stack-ins-below" : "hub-stack-ins-above");
+        } catch (_) {}
         hideTargetBox();
     } else if (target?.kind === "node") {
         showTargetBox(target.node, target.wkind);
@@ -1724,6 +1882,9 @@ function endDragSession(keepClickBlock) {
     }
     if (prev?.kind === "tab" && prev.el) {
         try { prev.el.classList.remove("hub-stack-tab-hot"); } catch (_) {}
+    }
+    if (prev?.kind === "slot" && prev.el) {
+        try { prev.el.classList.remove("hub-stack-ins-above", "hub-stack-ins-below"); } catch (_) {}
     }
     try { dragCtx?.ghost?.remove(); } catch (_) {}
     hideTargetBox();
@@ -1763,6 +1924,23 @@ function onCardDragMove(e) {
     }
     moveGhost(e);
     const el = elemFromPoint(e.clientX, e.clientY);
+    // v80: REORDER drag (move mode) - the only target is a drop SLOT between
+    // the visible cards; nodes/mirrors/tab chips are deliberately unreachable
+    // so sorting can never upload, insert or regroup by accident. The list
+    // autoscrolls when the pointer approaches its top/bottom edge.
+    if (dragCtx.reorder) {
+        setDragTarget(reorderTargetAt(el, dragCtx.item.id));
+        try {
+            if (listEl) {
+                const r = listEl.getBoundingClientRect();
+                if (r.height > 0) {
+                    if (e.clientY < r.top + 28) listEl.scrollTop -= 10;
+                    else if (e.clientY > r.bottom - 28) listEl.scrollTop += 10;
+                }
+            }
+        } catch (_) {}
+        return;
+    }
     const t = dragCtx.item.type;
     let target = null;
     // v79: a tab chip UNDER THE CARD wins over every other target - dropping
@@ -1814,11 +1992,19 @@ function onCardDragUp(e) {
     if (ctx.target?.kind === "tab" && ctx.target.el) {
         try { ctx.target.el.classList.remove("hub-stack-tab-hot"); } catch (_) {}
     }
+    if (ctx.target?.kind === "slot" && ctx.target.el) {
+        try { ctx.target.el.classList.remove("hub-stack-ins-above", "hub-stack-ins-below"); } catch (_) {}
+    }
     try { ctx.ghost?.remove(); } catch (_) {}
     hideTargetBox();
     if (!ctx.started) { dragCtx = null; return; }
     justDragged = true;
     setTimeout(() => { justDragged = false; }, 80);
+    // v80: a move-mode drop - sort the list (nodes/mirrors/tabs are off)
+    if (ctx.reorder) {
+        if (ctx.target?.kind === "slot") commitReorder(ctx.item, ctx.target.item);
+        return;
+    }
     const t = ctx.target;
     if (t?.kind === "tab") {
         // v79: the card was dropped on a tab chip - MOVE it into that group
@@ -1838,6 +2024,19 @@ function onCardMouseDown(e) {
     if (e.target?.closest?.("button, a, input, textarea, video, audio")) return;
     const card = e.target?.closest?.(".hub-stack-card");
     if (!card) return;
+    // v80: MOVE MODE - every card (including file cards, which have no
+    // ordinary drag) becomes a reorder handle; the session targets a SLOT
+    // between cards and nothing else.
+    if (moveMode) {
+        const item = stackItems.find((x) => x.id === card.dataset.id);
+        if (!item) return;
+        e.preventDefault();
+        dragCtx = { item, card, sx: e.clientX, sy: e.clientY, started: false, ghost: null, target: null, blob: null, reorder: true };
+        window.addEventListener("mousemove", onCardDragMove, true);
+        window.addEventListener("mouseup", onCardDragUp, true);
+        window.addEventListener("keydown", onCardDragKey, true);
+        return;
+    }
     // v71/v74: images drag onto loader nodes / media mirrors; TEXT cards drag
     // onto hub text mirrors or REAL prompt nodes; video/audio onto matching
     // loaders (VHS Load Video, LoadAudio) or media mirrors.
@@ -1846,7 +2045,7 @@ function onCardMouseDown(e) {
     const item = stackItems.find((x) => x.id === card.dataset.id);
     if (!item) return;
     e.preventDefault();
-    dragCtx = { item, card, sx: e.clientX, sy: e.clientY, started: false, ghost: null, target: null, blob: null };
+    dragCtx = { item, card, sx: e.clientX, sy: e.clientY, started: false, ghost: null, target: null, blob: null, reorder: false };
     window.addEventListener("mousemove", onCardDragMove, true);
     window.addEventListener("mouseup", onCardDragUp, true);
     window.addEventListener("keydown", onCardDragKey, true);
@@ -2092,6 +2291,7 @@ function teardown() {
     editId = null;
     tabEdit = null;
     tabArm = null;
+    moveMode = false; // v80: a fresh panel always starts with sorting OFF
     mounted = false;
     try { window.removeEventListener("paste", onPasteEvent, true); } catch (_) {}
 }
@@ -2119,6 +2319,8 @@ function buildDom() {
         `<button type="button" class="hub-stack-kind" data-kind="image" title="Images">Img</button>` +
         `<button type="button" class="hub-stack-kind" data-kind="file" title="Video / audio / files">Files</button>` +
         `<button type="button" class="hub-stack-tagnote" style="display:none" title="Clear the tag filter"></button>` +
+        // v80: the move-mode toggle (the header stays two-button per v75)
+        `<button type="button" class="hub-stack-kind hub-stack-move" title="Move mode: drag cards to sort the stack (the order is saved on the server)">⇅</button>` +
         `</div>` +
         `<div class="hub-stack-list"></div>` +
         `<div class="hub-stack-paste" tabindex="0" title="Click: read the clipboard. Or press Ctrl+V while hovering the panel.">＋ Click or Ctrl+V to add from clipboard</div>` +
@@ -2348,6 +2550,9 @@ function buildDom() {
         }
         if (e.target.closest?.("video, audio, a")) return; // native controls
         if (justDragged) return; // the click that trails a card drag
+        // v80: in move mode a plain card click is a no-op - the mode is for
+        // sorting; copy-back on release would fight the drag gesture
+        if (moveMode) return;
         copyBack(item);
     });
 
@@ -2374,6 +2579,8 @@ function buildDom() {
             renderAll();
         });
     }
+    // v80: the move-mode toggle
+    toolsEl.querySelector(".hub-stack-move").addEventListener("click", () => setMoveMode(!moveMode));
     toolsEl.querySelector(".hub-stack-tagnote").addEventListener("click", () => {
         viewFilter.tag = null;
         saveFilter();
@@ -2563,6 +2770,11 @@ export function __stackTestHooks() {
         viewerEl: () => viewerEl,
         openViewer,
         closeViewer,
+        // v80: move-mode introspection for the smoke tests
+        moveMode: () => moveMode,
+        setMoveMode,
+        commitReorder,
+        reorderTargetAt,
         panelEl: () => panel,
         chipEl: () => chip,
         listEl: () => listEl,
