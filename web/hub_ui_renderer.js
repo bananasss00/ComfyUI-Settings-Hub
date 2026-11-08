@@ -10,12 +10,7 @@
 // SUBMODULES are fresh.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
-if (globalThis.__SettingsHubBuild !== "v80") {
-    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v77) was loaded under entry build [" +
-        (globalThis.__SettingsHubBuild ?? "unknown") +
-        "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
-}
+globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v77";
 
 // The whole hub interface lives inside a single LiteGraph DOM widget
 // (node.addDOMWidget), so the CSS in styles.css actually applies:

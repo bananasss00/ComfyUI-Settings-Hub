@@ -7,14 +7,13 @@ import {
     createNodeUIBinding,
 } from "./core.js";
 
-// v67 BUILD GUARD (see settings_hub.js): every submodule self-reports
-// under __SettingsHubLoaded so the entry can NAME stale cached files.
+// v82 SELF-REPORT (docs/plan-versions.md): the value is the version of
+// this file's LAST FUNCTIONAL change - NOT the pack release. The entry
+// verifies it against its EXPECTED manifest after the imports, so a
+// browser-cached stale file is still NAMED in F12 while per-file build
+// guards are gone (owner: a release must not rewrite every file).
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["context_menu"] = true;
-if (globalThis.__SettingsHubBuild !== "v80") {
-    console.error("[SettingsHub] STALE BUILD: context_menu.js (v77) was loaded under entry build [" +
-        (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
-}
+globalThis.__SettingsHubLoaded["context_menu"] = "v70";
 
 // ============================================================================
 // 1) Standard node menu hook (canvas widgets)

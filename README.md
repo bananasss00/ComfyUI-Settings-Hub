@@ -1,7 +1,7 @@
 # Settings Hub для ComfyUI
 
-[![build](https://img.shields.io/badge/web%20build-v80-3d5a80)](#как-это-работает)
-[![tests](https://img.shields.io/badge/tests-667%20passing-2b6b3f)](#разработка-и-тесты)
+[![build](https://img.shields.io/badge/web%20build-v82-3d5a80)](#как-это-работает)
+[![tests](https://img.shields.io/badge/tests-556%20passing-2b6b3f)](#разработка-и-тесты)
 [![python](https://img.shields.io/badge/python-stub-lightgrey)](#как-это-работает)
 [![frontend](https://img.shields.io/badge/ComfyUI-frontend%20extension-3d5a80)](#установка)
 
@@ -405,10 +405,10 @@ ComfyUI и гоняют настоящие модули (Node ESM + jsdom).
 
 ```bash
 npm i jsdom          # единственная jsdom-зависимость
-node tests/smoke_nav.mjs    # движок точек навигации, камера, хоткеи, UI-путь, stack-bridge, глаз-скрытие (239 проверок)
-node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке/без-крестика/self-check/тихие-зелёные-заметки/вкладки+вьюер/scope-режимы/move-mode-сортировка + Image Compare (308)
+node tests/smoke_nav.mjs    # движок точек навигации, камера, хоткеи, UI-путь, stack-bridge, глаз-скрытие (240 проверок)
+node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке/без-крестика/self-check/тихие-зелёные-заметки/вкладки+вьюер/scope-режимы/move-mode-сортировка + Image Compare (223)
 node tests/smoke_menu.mjs   # регистрация меню, fail-open, баннер деградации (24)
-python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файловый/patch/health/reorder-роуты стека + per-workflow scope + вкладки (96)
+python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файловый/patch/health/reorder-роуты стека + per-workflow scope + вкладки (69)
 ```
 
 Структура:
@@ -419,7 +419,7 @@ py/settings_hub.py     заглушка ноды (без OUTPUT_NODE)
 py/media_list.py       эндпоинт /settings_hub/list_media
 py/stack_store.py      роуты /settings_hub/stack* (хранилище Paste Stack, /health - самодиагностика v76, ?wf= - per-workflow scope v77)
 py/clipboard_helper.py роут /settings_hub/clipboard (чтение буфера ОС, loopback+заголовок)
-web/settings_hub.js    загрузчик: баннер, guard, fail-open регистрация
+web/settings_hub.js    загрузчик: баннер, EXPECTED-манифест версий, fail-open регистрация
 web/stack.js           Paste Stack: панель, захват, drag, сниппеты
 web/compare.js         Image Compare: A/B wipe/fade/blink/diff
 web/core.js            конфиг, классификация виджетов, резолверы, слайдер-override
@@ -435,9 +435,22 @@ web/global_settings.js глобальные настройки (localStorage)
 web/dnd_manager.js     drag&drop строк
 web/pins.js            счётчик пинов для бейджа
 web/styles.css         тёмная тема (*.hub-*)
+tools/                 version.py (релизный бамп + --check аудит версий), compare.py (сверка установленной копии с zip)
 tests/                 смоуки (jsdom)
 docs/screenshots/      скриншоты для этого README
 ```
+
+**Версии одним источником (v82):** штамп версии живёт только в
+`web/settings_hub.js` (+ `STACK_SERVER_VERSION` в py + бейдж README) —
+версий в каждом модуле больше НЕТ, поэтому релиз меняет только реально
+изменённые файлы. Каждый модуль помечает версию своего последнего
+функционального изменения (`__SettingsHubLoaded`), entry-манифест EXPECTED
+сверяет таблицу при загрузке и называет устаревший кэш браузера в F12 с
+обеими версиями. Релиз: `python3 tools/version.py vNN` →
+`python3 tools/version.py --check`. Сверка установки:
+`python3 tools/compare.py --installed "<путь>/custom_nodes/ComfyUI-Settings-Hub"`
+— пофайловый отчёт SAME/DIFFERS/NEW/EXTRA + советы (RESTART ComfyUI при
+изменении py, Ctrl+F5 при изменении web).
 
 Скриншоты в этом README сняты с **настоящего веб-пака** расширения,
 запущенного в headless-Chromium с заглушкой окружения ComfyUI (граф отрисован

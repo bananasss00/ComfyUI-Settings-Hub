@@ -7,12 +7,7 @@
 // a MIXED build. See settings_hub.js for the field history.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = true;
-if (globalThis.__SettingsHubBuild !== "v80") {
-    console.error("[SettingsHub] STALE BUILD: stack.js (v80) was loaded under entry build [" +
-        (globalThis.__SettingsHubBuild ?? "unknown") +
-        "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5).");
-}
+globalThis.__SettingsHubLoaded["stack"] = "v80";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -694,7 +689,9 @@ function apiReady() {
 //                                            web build - half-updated install
 // ---------------------------------------------------------------------------
 
-const BUILD = globalThis.__SettingsHubBuild || "v80";
+// v82: no per-file version fallback - the entry ALWAYS stamps first;
+// an empty string only ever happens outside the loader and reads as "unknown"
+const BUILD = globalThis.__SettingsHubBuild || "";
 
 // v78: the GREEN verdicts (legacy/mismatch - storage actually WORKS) are
 // status info, not failures, and the owner found the permanent green block

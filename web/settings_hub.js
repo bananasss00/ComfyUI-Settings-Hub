@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v80 - PASTE STACK MOVE MODE (owner: 'a toggle button that enables a move mode - sort the order of the stack entries'): the tools row gains a ⇅ TOGGLE - when ON every card (including file cards) becomes a REORDER handle: dragging computes a drop SLOT from the list positions (down = under the hovered card, up = above), a green insertion line shows the landing spot, the ordinary drag targets (nodes/mirrors/tab chips) are OFF while sorting and a plain card click does nothing (small action buttons keep working); the drop splices the pair in the GLOBAL order (inside a tab view exactly that pair moves, other views keep their relative order) and persists via the new POST /settings_hub/stack/reorder {order:[ids]} - the server applies the known ids in the payload order, appends unmentioned entries at the END (a stale client never loses entries) and answers with the rewritten list, which the client mirrors positionally; an old py keeps the new order session-only (one console.info, no scary note); the list autoscrolls near its edges; the mode is transient - always OFF after a reload. Includes v79 (PASTE STACK TABS + FULL-TEXT VIEWER (owner: 'add tabs to the stack - entries are filled in for different tasks, there must be grouping' + 'no way to see the FULL content of a cell - long prompts start identically and look like duplicates'): a TAB BAR under the header - [All (total)] [Task A (n)] [+] - All is the default pre-v79 view, tab order = creation order remembered PER SCOPE (localStorage settingshub.stack.tabs), an empty tab is fine; CAPTURE lands in the OPEN tab (Ctrl+V / paste click / OS files); cards MOVE by dragging onto a tab chip (dropping on All ungroups) or the new tab field in the card editor; double-click a chip RENAMES (re-patches every entry, renaming onto an existing name merges), the chip x REMOVES (armed like the trash - entries fall back to All, never deleted - AGENTS.md 5.1 rule 9); the trash clears the ACTIVE view (a tab -> server clear?tab= wipes only that tab; All -> the whole store as before); text cards gained a 🔍 FULL-TEXT VIEWER - a centered overlay with the COMPLETE text, copy and insert buttons, closed by Esc/x/backdrop - no more identical-looking truncated prompts; the workflow embed carries each snippet's tab). Includes v78 (QUIET GREEN NOTES (owner: the green 'storage works / py predates v76' self-diagnosis note popped up on EVERY page reload and got annoying): the GREEN verdicts (legacy / mismatch - storage actually WORKS, nothing is broken) now show ONCE per state and self-retire - the seen flag lives in localStorage (settingshub.stack.noteSeen), a \u2715 dismiss button hides the current one immediately, and afterwards a single console.info carries the details instead of the panel block; the RED states (missing/network/http/nowrite) always stay visible because something IS broken. The legacy note now also spells out the actual fix: RESTART ComfyUI after a full-pack update (py/ loads only at server startup). Includes v77 (Paste Stack SCOPE MODES (owner request: the stack followed him across workflows and neither shared-only nor workflow-only is right - make it a switch): ⚙ Hub settings → Stack → 'Stack scope' = Shared (default, one stack for every workflow, as always) or Per-workflow (every workflow keeps its OWN stack: the binding id lives in the workflow file's extra_data.settingshubStackId - the stack is literally saved into the workflow - entries are stored server-side under user/settings_hub/stack/workflows/<id>/ via the new ?wf= parameter on every stack route, the header shows an @workflow badge, and 🗑 clears only the active scope). Text snippets are ALSO mirrored into the workflow file (extra_data.settingshubStack, inline texts only, 200KB budget) and are auto-restored when that workflow's server store comes up empty - prompts survive moving the workflow to another machine or wiping the user folder; a workflow switch (graph onConfigure/onClear) re-reads THAT workflow's store in per-workflow mode. Switching the scope NEVER migrates entries - each scope keeps its own (AGENTS.md 5.1 rule 7). Also fixed here: the window-focus re-sync carried no sequence id and has been a silent no-op since v70. Includes v76 (Paste Stack STORAGE SELF-DIAGNOSIS (owner report: 'storage unreachable' on every page reload, even after restarts): the panel now probes the new GET /settings_hub/stack/health py route ({ok, version, dir, writable, items}) and the degraded note names the EXACT cause and fix - py routes missing (old py/, typically only web/ was replaced during an update -> reinstall the FULL zip), no connection, HTTP <status>, storage folder not writable, legacy server (v70-v75 py: storage WORKS, green note), or a web-vs-py VERSION MISMATCH (half-updated install -> restart/reinstall) - plus a [check again] button that re-probes and re-syncs without a page reload). Includes v75 (Paste Stack header cleanup: the [✕] close button REMOVED - only [–] minimize-to-chip and 🗑 clear remain; the panel is disabled ONLY via ⚙ Hub settings → Stack → Off), v74 (the list SCROLLS for real (min-height:0 + a styled always-visible scrollbar), a 🗑 CLEAR button lives in the panel header (double-click confirm; removed from the settings popup), stack cards drag onto REAL nodes for every kind (image -> LoadImage, video -> VHS/native LoadVideo via options.video_upload, audio -> LoadAudio via options.audio_upload, all uploaded through /upload/image - ComfyUI has no /upload/audio), TEXT cards drop onto prompt nodes and write the string widget under the cursor, the inline rename/tags editor commits on Enter (Esc cancels), and a focused input (even inside the panel) wins Ctrl+V over capture; the eye toggle now also hides the nav authoring buttons (AGENTS.md 5.1)), v73 (IMAGE COMPARE: right-click a media row/gallery thumbnail/stack image card -> Add to Compare, a floating A/B panel with WIPE/FADE/BLINK/DIFF modes + gain, A/B swap, auto-refresh on executed), v72 (Paste Stack snippets: pins/rename/tags/search/kind filters/usage counter/into-the-string insert), v71 (files & drag + OS-clipboard helper + drag-to-Load-Image), v70 (Paste Stack standalone floating panel with server-side storage), v69 (nav points pin the CURRENT canvas zoom on create), v68 (hotkey capture fix), v67 (per-point hotkeys), v66 (fail-open registration), v65 (top-left jump anchor), v64 (fresh-add mount invariant)");
+console.info("[SettingsHub] web build: v82 - SINGLE-SOURCE VERSION (owner: 'with every update ALL project files change because of the version number' - the vNN stamp lived in EVERY web module and every release rewrote all of them, and the v78 tree even shipped guards whose error text said v77 while the stamp said v78): the version literal now lives ONLY in this entry (+ STACK_SERVER_VERSION in py/stack_store.py + the README badge), each submodule self-reports the version of its LAST FUNCTIONAL CHANGE under __SettingsHubLoaded (sync v71, pins v70, nav_points v69, hub_node v67, hub_ui_renderer v77, sync_manager v70, stack v80, compare v73, context_menu v70, core v70) and the entry EXPECTED manifest verifies the table after the imports - a browser-cached stale file is still NAMED in F12 with BOTH versions (the visible degradation banner too), while a release diff now touches only the files that actually changed. tools/version.py does the mechanical bump and audits the convention (--check), tools/compare.py diffs the installed custom_nodes folder against a new zip per-file with advice (RESTART on py change, Ctrl+F5 on web change). ONE-TIME MIGRATION COST: this v82 release touched every module file for the last time (self-report lines replaced the per-file guards). Includes v80 (PASTE STACK MOVE MODE (owner: 'a toggle button that enables a move mode - sort the order of the stack entries'): the tools row gains a ⇅ TOGGLE - when ON every card (including file cards) becomes a REORDER handle: dragging computes a drop SLOT from the list positions (down = under the hovered card, up = above), a green insertion line shows the landing spot, the ordinary drag targets (nodes/mirrors/tab chips) are OFF while sorting and a plain card click does nothing (small action buttons keep working); the drop splices the pair in the GLOBAL order (inside a tab view exactly that pair moves, other views keep their relative order) and persists via the new POST /settings_hub/stack/reorder {order:[ids]} - the server applies the known ids in the payload order, appends unmentioned entries at the END (a stale client never loses entries) and answers with the rewritten list, which the client mirrors positionally; an old py keeps the new order session-only (one console.info, no scary note); the list autoscrolls near its edges; the mode is transient - always OFF after a reload.), Includes v79 (PASTE STACK TABS + FULL-TEXT VIEWER (owner: 'add tabs to the stack - entries are filled in for different tasks, there must be grouping' + 'no way to see the FULL content of a cell - long prompts start identically and look like duplicates'): a TAB BAR under the header - [All (total)] [Task A (n)] [+] - All is the default pre-v79 view, tab order = creation order remembered PER SCOPE (localStorage settingshub.stack.tabs), an empty tab is fine; CAPTURE lands in the OPEN tab (Ctrl+V / paste click / OS files); cards MOVE by dragging onto a tab chip (dropping on All ungroups) or the new tab field in the card editor; double-click a chip RENAMES (re-patches every entry, renaming onto an existing name merges), the chip x REMOVES (armed like the trash - entries fall back to All, never deleted - AGENTS.md 5.1 rule 9); the trash clears the ACTIVE view (a tab -> server clear?tab= wipes only that tab; All -> the whole store as before); text cards gained a 🔍 FULL-TEXT VIEWER - a centered overlay with the COMPLETE text, copy and insert buttons, closed by Esc/x/backdrop - no more identical-looking truncated prompts; the workflow embed carries each snippet's tab). Includes v78 (QUIET GREEN NOTES (owner: the green 'storage works / py predates v76' self-diagnosis note popped up on EVERY page reload and got annoying): the GREEN verdicts (legacy / mismatch - storage actually WORKS, nothing is broken) now show ONCE per state and self-retire - the seen flag lives in localStorage (settingshub.stack.noteSeen), a \u2715 dismiss button hides the current one immediately, and afterwards a single console.info carries the details instead of the panel block; the RED states (missing/network/http/nowrite) always stay visible because something IS broken. The legacy note now also spells out the actual fix: RESTART ComfyUI after a full-pack update (py/ loads only at server startup). Includes v77 (Paste Stack SCOPE MODES (owner request: the stack followed him across workflows and neither shared-only nor workflow-only is right - make it a switch): ⚙ Hub settings → Stack → 'Stack scope' = Shared (default, one stack for every workflow, as always) or Per-workflow (every workflow keeps its OWN stack: the binding id lives in the workflow file's extra_data.settingshubStackId - the stack is literally saved into the workflow - entries are stored server-side under user/settings_hub/stack/workflows/<id>/ via the new ?wf= parameter on every stack route, the header shows an @workflow badge, and 🗑 clears only the active scope). Text snippets are ALSO mirrored into the workflow file (extra_data.settingshubStack, inline texts only, 200KB budget) and are auto-restored when that workflow's server store comes up empty - prompts survive moving the workflow to another machine or wiping the user folder; a workflow switch (graph onConfigure/onClear) re-reads THAT workflow's store in per-workflow mode. Switching the scope NEVER migrates entries - each scope keeps its own (AGENTS.md 5.1 rule 7). Also fixed here: the window-focus re-sync carried no sequence id and has been a silent no-op since v70. Includes v76 (Paste Stack STORAGE SELF-DIAGNOSIS (owner report: 'storage unreachable' on every page reload, even after restarts): the panel now probes the new GET /settings_hub/stack/health py route ({ok, version, dir, writable, items}) and the degraded note names the EXACT cause and fix - py routes missing (old py/, typically only web/ was replaced during an update -> reinstall the FULL zip), no connection, HTTP <status>, storage folder not writable, legacy server (v70-v75 py: storage WORKS, green note), or a web-vs-py VERSION MISMATCH (half-updated install -> restart/reinstall) - plus a [check again] button that re-probes and re-syncs without a page reload). Includes v75 (Paste Stack header cleanup: the [✕] close button REMOVED - only [–] minimize-to-chip and 🗑 clear remain; the panel is disabled ONLY via ⚙ Hub settings → Stack → Off), v74 (the list SCROLLS for real (min-height:0 + a styled always-visible scrollbar), a 🗑 CLEAR button lives in the panel header (double-click confirm; removed from the settings popup), stack cards drag onto REAL nodes for every kind (image -> LoadImage, video -> VHS/native LoadVideo via options.video_upload, audio -> LoadAudio via options.audio_upload, all uploaded through /upload/image - ComfyUI has no /upload/audio), TEXT cards drop onto prompt nodes and write the string widget under the cursor, the inline rename/tags editor commits on Enter (Esc cancels), and a focused input (even inside the panel) wins Ctrl+V over capture; the eye toggle now also hides the nav authoring buttons (AGENTS.md 5.1)), v73 (IMAGE COMPARE: right-click a media row/gallery thumbnail/stack image card -> Add to Compare, a floating A/B panel with WIPE/FADE/BLINK/DIFF modes + gain, A/B swap, auto-refresh on executed), v72 (Paste Stack snippets: pins/rename/tags/search/kind filters/usage counter/into-the-string insert), v71 (files & drag + OS-clipboard helper + drag-to-Load-Image), v70 (Paste Stack standalone floating panel with server-side storage), v69 (nav points pin the CURRENT canvas zoom on create), v68 (hotkey capture fix), v67 (per-point hotkeys), v66 (fail-open registration), v65 (top-left jump anchor), v64 (fresh-add mount invariant)");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,24 +32,26 @@ console.info("[SettingsHub] web build: v80 - PASTE STACK MOVE MODE (owner: 'a to
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=80", import.meta.url).href;
+    link.href = new URL("styles.css?v=82", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
-// v67 BUILD GUARD: stamped BEFORE any submodule import. Every submodule
-// self-reports under globalThis.__SettingsHubLoaded[module] and verifies this
-// stamp at load time, so a half-updated module set (the browser serving a
-// cached v62/v63 file next to fresh ones) announces itself in F12 - with the
-// stale files NAMED - instead of silently reproducing bugs that no longer
-// exist in the source tree. Field lesson from the v63 rollout: "the fix did
-// not work" was indistinguishable from "the fix never loaded" - the banner
-// alone cannot prove the SUBMODULES are fresh.
-// v66 FIELD LESSON: the v64 gate treated the mixed-build report as FATAL and
-// skipped the registration entirely - after an update, ONE stale cached file
-// silently removed every "Pin to Settings Hub" menu item and the sync hooks
-// (the user saw the menus vanish and had no idea why). The detector keeps its
-// diagnostic value but is NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v80";
+// v82 SINGLE-SOURCE VERSION (docs/plan-versions.md): the stamp is set here,
+// BEFORE any submodule import, and lives ONLY in this file (+ py + README
+// badge). Submodules carry NO version literal - each self-reports the
+// version of its LAST FUNCTIONAL CHANGE under globalThis.__SettingsHubLoaded
+// and the EXPECTED manifest below verifies the table after the imports, so
+// a half-updated module set (the browser serving a cached file next to fresh
+// ones) still announces itself in F12 - with the stale files NAMED and both
+// versions shown. Field lesson from the v63 rollout: "the fix did not work"
+// was indistinguishable from "the fix never loaded" - the banner alone
+// cannot prove the SUBMODULES are fresh.
+// v66 FIELD LESSON (still in force): the v64 gate treated the mixed-build
+// report as FATAL and skipped the registration entirely - after an update,
+// ONE stale cached file silently removed every "Pin to Settings Hub" menu
+// item and the sync hooks. The detector keeps its diagnostic value but is
+// NO LONGER allowed to disable the pack.
+globalThis.__SettingsHubBuild = "v82";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -83,19 +85,32 @@ const FILES = [
         }
     }
 
-    // v64 diagnostic, v66 NON-FATAL: a LOADED module that did not self-report
-    // is a stale cached file (its old code has no flag line). We still name
-    // the files, but the pack registers whatever actually loaded - a cache
-    // detector must not take working menus hostage.
-    const keyOf = (f) => f.replace(/^\.\//, "").replace(/\.js$/, "");
-    const missing = FILES
-        .filter((f) => mods[f])
-        .map(keyOf)
-        .filter((k) => !globalThis.__SettingsHubLoaded?.[k]);
-    if (missing.length) {
+    // v82 MIXED-BUILD CHECK (replaces the v67 missing-self-report scan): a
+    // module that loaded but reports a DIFFERENT version than EXPECTED is a
+    // browser-cached stale file; both sides are named. NON-FATAL (v67
+    // fail-open): the pack registers whatever actually loaded.
+    const EXPECTED = {
+        "sync": "v71",            // internal bus
+        "pins": "v70",            // badge counter cache
+        "nav_points": "v69",      // nav points (zoom pinning)
+        "hub_node": "v67",        // node registration + badge painter
+        "hub_ui_renderer": "v77", // DOM widget rendering (scope badge)
+        "sync_manager": "v70",    // reactive sync hooks
+        "stack": "v80",           // Paste Stack (tabs + move mode)
+        "compare": "v73",         // Image Compare A/B panel
+        "context_menu": "v70",    // "Pin to Settings Hub" menus
+    };
+    const stale = [];
+    for (const k of Object.keys(EXPECTED)) {
+        if (!mods["./" + k + ".js"]) continue; // load failure - already reported above
+        const got = globalThis.__SettingsHubLoaded?.[k];
+        if (!got) stale.push(k + ".js (no self-report - pre-v67 stale cache)");
+        else if (got !== EXPECTED[k]) stale.push(k + ".js (is " + got + ", pack expects " + EXPECTED[k] + ")");
+    }
+    if (stale.length) {
         console.error("[SettingsHub] MIXED BUILD detected: STALE CACHED module(s) " +
-            missing.map((k) => k + ".js").join(", ") +
-            " did not self-report as v74. The pack still registers what loaded (v67 fail-open), but a HARD REFRESH (Ctrl+F5) is required after updating the extension folder.");
+            stale.join(", ") +
+            ". The pack still registers what loaded (fail-open), but a HARD REFRESH (Ctrl+F5) is required after updating the extension folder.");
     }
 
     // v66/v67 FAIL-OPEN registration, per module: menus first (the most visible
@@ -156,14 +171,14 @@ const FILES = [
     // v66: the degradation is made VISIBLE - the field report proved an
     // F12-only error never gets seen ("the menus just disappeared"). Inline
     // styles only: styles.css itself may be the stale file here.
-    if (failed.length || missing.length) {
+    if (failed.length || stale.length) {
         try {
             const parts = [];
             if (failed.length) {
                 parts.push("failed to load: " + failed.map((f) => f.replace(/^\.\//, "")).join(", "));
             }
-            if (missing.length) {
-                parts.push("stale cached: " + missing.map((k) => k + ".js").join(", "));
+            if (stale.length) {
+                parts.push("stale cached: " + stale.join(", "));
             }
             const el = document.createElement("div");
             el.textContent = "⚠ SettingsHub build degraded - " + parts.join(" · ") +
