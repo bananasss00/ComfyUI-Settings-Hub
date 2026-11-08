@@ -1,7 +1,7 @@
 # Settings Hub для ComfyUI
 
-[![build](https://img.shields.io/badge/web%20build-v83-3d5a80)](#как-это-работает)
-[![tests](https://img.shields.io/badge/tests-598%20passing-2b6b3f)](#разработка-и-тесты)
+[![build](https://img.shields.io/badge/web%20build-v84-3d5a80)](#как-это-работает)
+[![tests](https://img.shields.io/badge/tests-628%20passing-2b6b3f)](#разработка-и-тесты)
 [![python](https://img.shields.io/badge/python-stub-lightgrey)](#как-это-работает)
 [![frontend](https://img.shields.io/badge/ComfyUI-frontend%20extension-3d5a80)](#установка)
 
@@ -356,6 +356,23 @@ site-data. Лимиты настраиваются в ⚙ → Stack (по умо
 перезапуска ComfyUI) — панель работает в режиме сессии и честно об этом
 пишет.
 
+**Свой путь хранения (v84):** папка по умолчанию остаётся
+`user/settings_hub/stack`, но теперь её можно переназначить: ⚙ → Stack →
+«Storage folder» — введите **абсолютный** путь (например `D:\gen\stack` или
+`/home/me/comfy_stack`) и нажмите Enter; чип `default` возвращает папку по
+умолчанию. Сервер ДО переключения создаёт папку и проверяет запись
+(относительные пути и папки без записи отвергаются — хранилище никогда не
+остаётся «наполовину переехавшим»), затем помнит выбор между перезапусками:
+он хранится в `user/settings_hub/stack_root.json` — всегда в стандартной
+папке user, поэтому даже сломанный кастомный путь не может спрятать дорогу
+назад. Все роуты стека следуют активному корню — общий стек, per-workflow
+сторы (`workflows/<id>/`), health, раздача файлов; у `GET
+/settings_hub/stack/health` появилось поле `custom`. Смена папки **никогда
+не переносит записи**: новое место начинается пустым, старое хранит свои
+файлы (при необходимости скопируйте/перенесите их сами при остановленном
+ComfyUI). Под полем настроек строка показывает, какая папка активна прямо
+сейчас; отказ сервера (относительный путь / нет записи) показывается там же.
+
 > ⚠ Clipboard API браузера доступен только на localhost/https — на LAN-http
 > работают Ctrl+V, drag&drop и OS-хелпер (клик по зоне paste тоже сработает —
 > через хелпер).
@@ -437,9 +454,9 @@ ComfyUI и гоняют настоящие модули (Node ESM + jsdom).
 ```bash
 npm i jsdom          # единственная jsdom-зависимость
 node tests/smoke_nav.mjs    # движок точек навигации, камера, хоткеи, UI-путь, stack-bridge, глаз-скрытие (240 проверок)
-node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке/без-крестика/self-check/тихие-зелёные-заметки/вкладки+вьюер/scope-режимы/move-mode-сортировка/большой-просмотр-медиа + Image Compare (265)
+node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке/без-крестика/self-check/тихие-зелёные-заметки/вкладки+вьюер/scope-режимы/move-mode-сортировка/большой-просмотр-медиа + Image Compare (267)
 node tests/smoke_menu.mjs   # регистрация меню, fail-open, баннер деградации (24)
-python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файловый/patch/health/reorder-роуты стека + per-workflow scope + вкладки (69)
+python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файловый/patch/health/reorder-роуты стека + per-workflow scope + вкладки + кастомный корень v84 (97)
 ```
 
 Структура:
@@ -448,7 +465,7 @@ python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файло
 __init__.py            регистрация ноды + WEB_DIRECTORY
 py/settings_hub.py     заглушка ноды (без OUTPUT_NODE)
 py/media_list.py       эндпоинт /settings_hub/list_media
-py/stack_store.py      роуты /settings_hub/stack* (хранилище Paste Stack, /health - самодиагностика v76, ?wf= - per-workflow scope v77)
+py/stack_store.py      роуты /settings_hub/stack* (хранилище Paste Stack, /health - самодиагностика v76, ?wf= - per-workflow scope v77, GET/POST /root - кастомный абсолютный корень v84)
 py/clipboard_helper.py роут /settings_hub/clipboard (чтение буфера ОС, loopback+заголовок)
 web/settings_hub.js    загрузчик: баннер, EXPECTED-манифест версий, fail-open регистрация
 web/stack.js           Paste Stack: панель, захват, drag, сниппеты

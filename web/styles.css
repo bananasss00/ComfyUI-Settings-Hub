@@ -1964,6 +1964,65 @@ button.hub-pin-back {
     border-color: #5a5a9e;
 }
 
+/* v84: custom stack storage folder - a text path input + "default" chip
+   inside the ⚙ settings popup Stack section, plus the status line under
+   the row (mirrors the server's effective root; break-all because absolute
+   Windows/Linux paths are long). */
+.hub-set-row .hub-set-pathbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.hub-set-row input.hub-set-path {
+    background: #10101e;
+    color: #e8e8ff;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font-size: 11px;
+    padding: 2px 4px;
+    outline: none;
+    width: 148px;
+}
+
+.hub-set-row input.hub-set-path:focus {
+    border-color: #5a5a9e;
+}
+
+.hub-set-row input.hub-set-path::placeholder {
+    color: #55557a;
+}
+
+.hub-set-path-def {
+    background: #1a1a2e;
+    color: #9a9ac0;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font-size: 10px;
+    line-height: 1.4;
+    padding: 2px 6px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.hub-set-path-def:hover {
+    color: #e8e8ff;
+    border-color: #5a5a9e;
+}
+
+.hub-set-pathinfo {
+    margin: -2px 2px 6px;
+    font-size: 10px;
+    line-height: 1.4;
+    color: #7f7fa8;
+    word-break: break-all;
+    white-space: normal;
+}
+
+.hub-set-pathinfo.hub-set-patherr {
+    color: #ff9d9d;
+}
+
 /* ⚙ in the preset row: quiet by default, accent when any non-default rate
    is active (the poller is running). */
 .hub-btn.hub-settings.hub-settings-on {

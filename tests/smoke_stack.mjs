@@ -92,6 +92,15 @@ const WEB = path.join(ROOT, "web");
 // docs/plan-versions.md).
 const ENTRY_SRC = fs.readFileSync(path.join(WEB, "settings_hub.js"), "utf8");
 const PACK_VERSION = (ENTRY_SRC.match(/__SettingsHubBuild\s*=\s*"(v\d+)"/) || [])[1] || "v0";
+// v84: the suite never carries release-version literals - the expected
+// self-report of a module is read from the entry's EXPECTED manifest
+// (single-source version rule, docs/plan-versions.md).
+const EXPECTED_MANIFEST = (() => {
+    const m = ENTRY_SRC.match(/const EXPECTED = \{([\s\S]*?)\};/);
+    const out = {};
+    if (m) for (const mm of m[1].matchAll(/"(\w+)":\s*"(v\d+)"/g)) out[mm[1]] = mm[2];
+    return out;
+})();
 
 // ---------------------------------------------------------------------------
 // DOM globals BEFORE any web module evaluates
@@ -423,7 +432,9 @@ phase("SA mount — panel + chip built, server index rendered");
 {
     check("boot: no console.error during entry import", bootErrors.length === 0, bootErrors.join(" | "));
     check("boot: stack extension registered", !!extStack);
-    check("boot: stack.js self-reported v83 (last functional change)", globalThis.__SettingsHubLoaded?.stack === "v83");
+    check("boot: stack.js self-reports the version the entry EXPECTS (last functional change)",
+        !!EXPECTED_MANIFEST.stack && globalThis.__SettingsHubLoaded?.stack === EXPECTED_MANIFEST.stack,
+        String(globalThis.__SettingsHubLoaded?.stack) + " vs " + String(EXPECTED_MANIFEST.stack));
 
     extStack.setup();
     await settle();
@@ -759,6 +770,11 @@ phase("SJ gear popup — Stack section wired in the renderer");
         src.includes("There is NO close button on the panel (v75)"));
     check("SJ: v77 - the Stack scope select is wired",
         src.includes('data-set-role="stackscope"') && src.includes("setStackScope("));
+    check("SJ: v84 - the storage-folder row is wired (input + default chip + status line)",
+        src.includes('data-set-role="stackroot"') &&
+        src.includes('data-set-role="stackroot-def"') &&
+        src.includes('data-set-role="stackroot-info"') &&
+        src.includes("setStackRootPath(") && src.includes("getStackRootInfo("));
     check("SJ: renderer imports the stack module", src.includes('from "./stack.js"'));
     const ssrc = fs.readFileSync(path.join(ROOT, "web", "stack.js"), "utf8");
     check("SJ: v74 - the clear button lives in the PANEL HEADER",
@@ -772,6 +788,10 @@ phase("SJ gear popup — Stack section wired in the renderer");
     check("SJ: v78 - green verdicts show once (seen flag helpers exist)",
         ssrc.includes("noteSeenMatches") && ssrc.includes("settingshub.stack.noteSeen"));
     check("SJ: v78 - green notes carry a dismiss button", ssrc.includes("hub-stack-note-x"));
+    check("SJ: v84 - stack.js carries the storage-root API (server answer, never throws)",
+        ssrc.includes("export async function getStackRootInfo") &&
+        ssrc.includes("export async function setStackRootPath") &&
+        ssrc.includes("/settings_hub/stack/root"));
 }
 
 // ===========================================================================
@@ -1180,7 +1200,9 @@ phase("SU compare — context menu on media rows fills slots A then B");
 
     const extCompare = appStub.__extensions.find((e) => e?.name === "Comfy.SettingsHub.compare");
     check("SU: compare extension registered", !!extCompare);
-    check("SU: compare.js self-reported v83 (last functional change)", globalThis.__SettingsHubLoaded?.compare === "v83");
+    check("SU: compare.js self-reports the version the entry EXPECTS (last functional change)",
+        !!EXPECTED_MANIFEST.compare && globalThis.__SettingsHubLoaded?.compare === EXPECTED_MANIFEST.compare,
+        String(globalThis.__SettingsHubLoaded?.compare) + " vs " + String(EXPECTED_MANIFEST.compare));
     extCompare.setup();
 
     const mkHost = (src, label) => {

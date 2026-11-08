@@ -49,18 +49,48 @@ capture lands straight in the open tab), PATCH sets/clears it (rename and
 ungrouped entries stay. Removing/renaming a tab NEVER deletes entries
 (AGENTS.md 5.1 rule 9).
 
+v84 adds a CUSTOM STORAGE ROOT (owner request: "the default stays
+user\\settings_hub\\stack but the settings must let me re-point it to my
+own - any absolute path"): the root defaults to <user>/settings_hub/stack
+exactly as before, and the ⚙ Hub settings -> Stack -> "Storage folder"
+field can re-point EVERY stack route to any ABSOLUTE folder. The choice is
+verified (the folder is created and probed writable BEFORE the switch) and
+persisted SERVER-side in <user>/settings_hub/stack_root.json - always in
+the DEFAULT user dir, never inside the custom root, so a broken custom
+path can never hide the way back. New routes:
+
+    GET  /settings_hub/stack/root -> {ok, root, custom, default, writable}
+    POST /settings_hub/stack/root -> JSON {path: "D:\\gen\\stack" | ""}
+          ("" / whitespace = back to the default; ~ is expanded, pasted
+          quotes are stripped, relative paths are REFUSED)
+
+Every existing route follows the active root through _stack_root(): the
+shared store, the per-workflow ?wf= stores, health, eviction and blob
+serving all live under whichever root is active. Changing the root NEVER
+moves or copies entries (same contract as the v77 scope switch, AGENTS.md
+5.1 rule 7): the new location starts empty, the old one keeps its files.
+health answers `custom` (v84) next to `dir` (the effective root) so the
+panel can show where storage really lives.
+
 Routes (registered at import, PromptServer aiohttp, same style as
 media_list.py; the SettingsHub node class itself stays a stub and these
 routes never run during a queue):
 
     GET    /settings_hub/stack             -> {ok, items}      ?wf=<id> = scope
-    GET    /settings_hub/stack/health      -> {ok, version, dir, writable,
-                                              items, workflows} (v76: the panel
-                                              probes this FIRST and tells the
-                                              user exactly why storage is down:
-                                              routes missing / not writable /
-                                              web-vs-py version mismatch; v77
-                                              adds the workflows store count)
+    GET    /settings_hub/stack/health      -> {ok, version, dir, custom,
+                                              writable, items, workflows}
+                                              (v76: the panel probes this FIRST
+                                              and tells the user exactly why
+                                              storage is down: routes missing /
+                                              not writable / web-vs-py version
+                                              mismatch; v77 adds the workflows
+                                              store count; v84 adds `custom` -
+                                              the active custom root or null)
+    GET    /settings_hub/stack/root        -> {ok, root, custom, default,
+                                              writable} (v84: what the settings
+                                              UI shows)
+    POST   /settings_hub/stack/root        -> JSON {path} (v84: re-point the
+                                              storage; "" = back to default)
     POST   /settings_hub/stack/item        -> JSON {type:"text", text, name?, tab?}  add text
     POST   /settings_hub/stack/image       -> raw bytes, ?ext=png|jpg|...&tab=  add image
     POST   /settings_hub/stack/file        -> raw bytes, ?ext=&name=&tab=       add ANY
@@ -167,12 +197,9 @@ _lock = asyncio.Lock()
 # Paths
 # ---------------------------------------------------------------------------
 
-def _stack_root(wf=None):
-    """<user-dir>/settings_hub/stack - or, with a workflow scope (v77),
-    <user-dir>/settings_hub/stack/workflows/<id>. folder_paths
-    .get_user_directory() is the canonical user dir (default <ComfyUI>/user);
-    never hardcode a path. `wf` MUST be validated with _WF_RE by the caller
-    (_wf_from) - the charset alone already rules out traversal."""
+def _user_dir():
+    """The canonical ComfyUI user directory (default <ComfyUI>/user) via
+    folder_paths.get_user_directory(); never hardcode a path."""
     base = None
     if folder_paths is not None:
         fn = getattr(folder_paths, "get_user_directory", None)
@@ -183,10 +210,109 @@ def _stack_root(wf=None):
                 base = None
     if not isinstance(base, str) or not base:
         base = os.path.join(os.getcwd(), "user")
-    root = os.path.join(base, "settings_hub", "stack")
+    return base
+
+
+# ---------------------------------------------------------------------------
+# v84: custom storage root. The override lives in a small JSON file in the
+# DEFAULT user dir (NOT inside the custom root - a broken custom path must
+# never hide the way back) and is loaded once at import; every
+# _stack_root() call below honours it, so ALL routes switch together.
+# Changing the root never moves entries - each location keeps its own store
+# (AGENTS.md 5.1 rule 7, the same contract as the v77 scope switch).
+# ---------------------------------------------------------------------------
+
+_ROOT_OVERRIDE_NAME = "stack_root.json"
+_root_custom = None  # str | None - normalized absolute custom root
+
+
+def _root_override_path():
+    return os.path.join(_user_dir(), "settings_hub", _ROOT_OVERRIDE_NAME)
+
+
+def _load_root_override():
+    """Boot-time read of the persisted override. A missing/corrupt file or a
+    non-absolute value reads as "no override" - the default root stands and
+    the routes never block on it."""
+    global _root_custom
+    try:
+        with open(_root_override_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        p = data.get("custom") if isinstance(data, dict) else None
+        if isinstance(p, str) and p and os.path.isabs(p):
+            _root_custom = os.path.normpath(p)
+            return _root_custom
+    except Exception:
+        pass
+    _root_custom = None
+    return None
+
+
+def _save_root_override():
+    """Persist (or clear) the override atomically. Best-effort: the caller
+    reports `saved: false` when the file could not be written."""
+    try:
+        os.makedirs(os.path.dirname(_root_override_path()), exist_ok=True)
+        tmp = _root_override_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"custom": _root_custom, "saved": int(time.time())}, f)
+        os.replace(tmp, _root_override_path())
+        return True
+    except Exception:
+        return False
+
+
+def _clean_root_candidate(raw):
+    """Validate a candidate root from the settings UI. Whitespace and pasted
+    surrounding quotes are stripped, ~ is expanded, the result MUST be an
+    ABSOLUTE path (owner request: "any, by absolute path" - a relative path
+    would silently depend on the server's cwd). Returns (path, None) with
+    path == "" meaning "back to the default", or (None, error)."""
+    if raw is None:
+        return "", None
+    if not isinstance(raw, str):
+        return None, "path must be a string"
+    p = raw.strip()
+    while p[:1] in ('"', "'") and p.endswith(p[0]):
+        p = p[1:-1].strip()
+    if not p:
+        return "", None
+    try:
+        p = os.path.expanduser(p)
+    except Exception:
+        pass
+    if not os.path.isabs(p):
+        return None, "not an absolute path: " + p
+    return os.path.normpath(p), None
+
+
+def _probe_writable(root):
+    """True when <root>/items can be created and a probe file written+deleted
+    there (the same check health performs on the effective root)."""
+    try:
+        os.makedirs(os.path.join(root, "items"), exist_ok=True)
+        probe = os.path.join(root, "items", ".root_probe")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.unlink(probe)
+        return True
+    except Exception:
+        return False
+
+
+def _stack_root(wf=None):
+    """v84: the ACTIVE storage root - <user-dir>/settings_hub/stack by
+    default or the custom absolute root from the settings UI - or, with a
+    workflow scope (v77), <active-root>/workflows/<id>. `wf` MUST be
+    validated with _WF_RE by the caller (_wf_from) - the charset alone
+    already rules out traversal."""
+    base = _root_custom or os.path.join(_user_dir(), "settings_hub", "stack")
     if wf:
-        root = os.path.join(root, "workflows", wf)
-    return root
+        base = os.path.join(base, "workflows", wf)
+    return base
+
+
+_load_root_override()
 
 
 def _items_dir(wf=None):
@@ -366,7 +492,7 @@ async def stack_get(request):
 # (the web panel compares it against globalThis.__SettingsHubBuild and warns
 # about a half-updated install: web/ replaced while py/ stayed old, or the
 # page reloaded before ComfyUI restarted). AGENTS.md release checklist line.
-STACK_SERVER_VERSION = "v83"
+STACK_SERVER_VERSION = "v84"
 
 
 @PromptServer.instance.routes.get("/settings_hub/stack/health")
@@ -375,8 +501,9 @@ async def stack_health(request):
     Python routes are alive, reports where the storage lives, whether it is
     WRITABLE (a probe file is written+deleted inside items/) and how many
     entries the index currently holds. v77 adds `workflows` - the number of
-    per-workflow stores. Never throws: every check degrades to a false/empty
-    field."""
+    per-workflow stores. v84 adds `custom` - the active custom root (or
+    null; `dir` stays the EFFECTIVE root either way). Never throws: every
+    check degrades to a false/empty field."""
     _ensure_dirs()
     writable = False
     try:
@@ -395,9 +522,71 @@ async def stack_health(request):
         "ok": True,
         "version": STACK_SERVER_VERSION,
         "dir": _stack_root(),
+        "custom": _root_custom,
         "writable": writable,
         "items": n_items,
         "workflows": _workflow_count(),
+    })
+
+
+# ---------------------------------------------------------------------------
+# v84: storage-root routes for the settings UI (⚙ Hub settings -> Stack ->
+# "Storage folder"). GET = what to display; POST = verify + switch. The
+# swap happens under _lock so an in-flight index write cannot straddle two
+# roots, and the folder is probed writable BEFORE the switch - a rejected
+# path never leaves the storage half-moved.
+# ---------------------------------------------------------------------------
+
+@PromptServer.instance.routes.get("/settings_hub/stack/root")
+async def stack_root_get(request):
+    return web.json_response({
+        "ok": True,
+        "root": _stack_root(),
+        "custom": _root_custom,
+        "default": os.path.join(_user_dir(), "settings_hub", "stack"),
+        "writable": _probe_writable(_stack_root()),
+    })
+
+
+@PromptServer.instance.routes.post("/settings_hub/stack/root")
+async def stack_root_set(request):
+    """Re-point the storage root. Body JSON {path}: an empty string or
+    whitespace = back to the default; otherwise an ABSOLUTE folder path
+    (~ expanded, pasted quotes stripped). The folder is created and probed
+    writable BEFORE the switch. Entries are NEVER moved: the new root
+    starts empty, the old one keeps its files (AGENTS.md 5.1 rule 7)."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    # The "path" key must be EXPLICIT (same philosophy as the clear route's
+    # present-but-empty ?tab= error): an accidental/blank body must not reset
+    # the root by hiding behind a missing value.
+    raw = body.get("path") if isinstance(body, dict) else None
+    if not isinstance(raw, str):
+        return web.json_response({"ok": False, "error": "path must be a string"}, status=400)
+    path, err = _clean_root_candidate(raw)
+    if err:
+        return web.json_response({"ok": False, "error": err}, status=400)
+    global _root_custom
+    async with _lock:
+        if path:
+            if not _probe_writable(path):
+                return web.json_response(
+                    {"ok": False, "error": "folder is not writable: " + path},
+                    status=400)
+            _root_custom = path
+        else:
+            _root_custom = None
+        saved = _save_root_override()
+    root = _stack_root()
+    return web.json_response({
+        "ok": True,
+        "saved": saved,
+        "root": root,
+        "custom": _root_custom,
+        "default": os.path.join(_user_dir(), "settings_hub", "stack"),
+        "writable": _probe_writable(root),
     })
 
 

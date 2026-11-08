@@ -20,10 +20,10 @@
 //   stays the 🔍 of text cards; teardown() removes the overlay with the
 //   panel (same viewerEl channel).
 // ============================================================================
-// v83 self-report (single-source version, docs/plan-versions.md): the
+// v84 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v83";
+globalThis.__SettingsHubLoaded["stack"] = "v84";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -458,6 +458,66 @@ export function setStackScope(v) {
             : "Stack scope: SHARED. Every workflow sees the shared stack; per-workflow entries stay in their workflows.");
     }
     return mode;
+}
+
+// ---------------------------------------------------------------------------
+// v84: CUSTOM STORAGE ROOT - ⚙ Hub settings -> Stack -> "Storage folder".
+// The default stays <ComfyUI>/user/settings_hub/stack exactly as always; an
+// ABSOLUTE folder path re-points the SERVER-side store (py/stack_store.py
+// v84 validates + probes it and persists the choice in
+// user/settings_hub/stack_root.json - in the DEFAULT user dir, so a broken
+// custom path can never hide the way back). Every stack route (shared AND
+// ?wf= per-workflow stores, health, blob serving) follows the active root.
+// Changing the root NEVER moves entries (AGENTS.md 5.1 rule 7 - same
+// contract as the scope switch): the new location starts empty, the old one
+// keeps its files. An old py without the route answers 404 - the setter
+// resolves {ok:false, stale:true} and the settings row says RESTART.
+// ---------------------------------------------------------------------------
+
+/** Current storage-root info from the server: {ok, root, custom, default,
+ *  writable} - or null when the server predates v84 (no route) or is
+ *  unreachable. Never throws. */
+export async function getStackRootInfo() {
+    if (!apiReady()) return null;
+    try {
+        const r = await app.api.fetchApi("/settings_hub/stack/root");
+        if (!r || !r.ok) return null;
+        const j = await r.json();
+        return j && j.ok ? j : null;
+    } catch (_) { return null; }
+}
+
+/** Set the storage root ("" / whitespace = back to the default). Resolves
+ *  with the server answer - {ok:true, root, custom, default} on success,
+ *  {ok:false, error, stale?} on a refusal (never throws). On success the
+ *  panel fully re-mounts: re-probes health and loads the store of the NEW
+ *  root (setStackScope precedent - a full initStack(), not a partial render). */
+export async function setStackRootPath(raw) {
+    let out = { ok: false, error: "server unreachable" };
+    if (!apiReady()) return out;
+    try {
+        const r = await app.api.fetchApi("/settings_hub/stack/root", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: String(raw ?? "") }),
+        });
+        const j = r ? await r.json().catch(() => null) : null;
+        if (r && r.ok && j && j.ok) out = { ok: true, ...j };
+        else out = {
+            ok: false,
+            stale: !!(r && r.status === 404),
+            error: (j && j.error) || ("HTTP " + (r ? r.status : "?")),
+        };
+    } catch (e) {
+        out = { ok: false, error: String((e && e.message) || e) };
+    }
+    if (out.ok) {
+        if (mounted) initStack(); // re-probe + load the store of the NEW root
+        localToast(out.custom
+            ? "Stack storage moved to: " + out.custom
+            : "Stack storage back to the default (user/settings_hub/stack)");
+    }
+    return out;
 }
 
 /** The current workflow's stack id - resolved FRESH at every call so a

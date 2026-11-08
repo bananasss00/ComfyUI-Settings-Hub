@@ -543,6 +543,136 @@ r = call(("POST", "/settings_hub/stack/clear"), FakeRequest())
 check("clear: ok", r.json().get("ok") is True)
 check("clear: index empty", get_items() == [])
 
+# ===========================================================================
+# v84: custom storage root (GET/POST /settings_hub/stack/root) - the ⚙
+# settings row re-points the storage to any ABSOLUTE folder; the default
+# user/settings_hub/stack stays; entries are never moved.
+# ===========================================================================
+
+print("== stack_store: custom storage root (v84) ==")
+
+check("root: GET route registered", ("GET", "/settings_hub/stack/root") in routes)
+check("root: POST route registered", ("POST", "/settings_hub/stack/root") in routes)
+
+ROOT_DEFAULT = os.path.join(_USER_DIR, "settings_hub", "stack")
+ROOT_CUSTOM = os.path.join(_USER_DIR, "custom-stack-root")
+ROOT_FILE = os.path.join(_USER_DIR, "settings_hub", "stack_root.json")
+
+
+def read_json_file(p):
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def same_path(a, b):
+    return os.path.abspath(str(a)) == os.path.abspath(str(b))
+
+
+r = call(("GET", "/settings_hub/stack/root"), FakeRequest(method="GET"))
+j = r.json()
+check("root: GET ok", r.status == 200 and j.get("ok") is True, str(j)[:120])
+check("root: default reported",
+      str(j.get("default", "")).replace("\\", "/").endswith("settings_hub/stack"),
+      str(j.get("default")))
+check("root: no custom at boot", j.get("custom") is None, str(j.get("custom")))
+check("root: effective root == default", same_path(j.get("root"), ROOT_DEFAULT),
+      str(j.get("root")))
+check("root: writable", j.get("writable") is True, str(j.get("writable")))
+
+# a relative path is REFUSED (owner contract: "any, by ABSOLUTE path")
+r = call(("POST", "/settings_hub/stack/root"),
+         FakeRequest(json_body={"path": "my/relative/stack"}))
+check("root: relative path -> 400",
+      r.status == 400 and r.json().get("ok") is False, str(r.status))
+check("root: refusal names the path",
+      "absolute" in str(r.json().get("error", "")), str(r.json().get("error")))
+
+# a missing/non-string "path" key is an error (an accidental blank body must
+# not reset the root - same philosophy as the clear route's empty ?tab=)
+r = call(("POST", "/settings_hub/stack/root"), FakeRequest(json_body={}))
+check("root: missing path key -> 400", r.status == 400, str(r.status))
+r = call(("POST", "/settings_hub/stack/root"), FakeRequest(json_body={"path": 42}))
+check("root: non-string path -> 400", r.status == 400, str(r.status))
+
+# pasted quotes + surrounding spaces are stripped, the custom root applies
+r = call(("POST", "/settings_hub/stack/root"),
+         FakeRequest(json_body={"path": '  "' + ROOT_CUSTOM + '"  '}))
+j = r.json()
+check("root: quoted+spaces applied", r.status == 200 and j.get("ok") is True and
+      same_path(j.get("root"), ROOT_CUSTOM), str(j.get("root")))
+check("root: custom echoes back",
+      j.get("custom") and same_path(j["custom"], ROOT_CUSTOM), str(j.get("custom")))
+
+# the choice persists in the DEFAULT user dir (never inside the custom root)
+check("root: override saved to the default user dir", os.path.isfile(ROOT_FILE),
+      ROOT_FILE)
+_saved = read_json_file(ROOT_FILE) or {}
+check("root: saved json carries the custom path",
+      isinstance(_saved.get("custom"), str) and same_path(_saved["custom"], ROOT_CUSTOM),
+      str(_saved))
+
+# the whole store follows: a new entry lands in the CUSTOM root only
+r = call(("POST", "/settings_hub/stack/item"),
+         FakeRequest(json_body={"text": "custom root entry"}))
+check("root: item add ok", r.status == 200 and r.json().get("ok") is True,
+      str(r.status))
+check("root: index.json lives in the custom root",
+      os.path.isfile(os.path.join(ROOT_CUSTOM, "index.json")), ROOT_CUSTOM)
+_default_items = read_json_file(os.path.join(ROOT_DEFAULT, "index.json")) or []
+check("root: default store untouched by the new entry",
+      all(x.get("text") != "custom root entry" for x in _default_items),
+      str(len(_default_items)) + " default entries")
+
+# health answers custom + the effective dir
+j = call(("GET", "/settings_hub/stack/health"), FakeRequest(method="GET")).json()
+check("root: health carries custom",
+      j.get("custom") and same_path(j["custom"], ROOT_CUSTOM), str(j.get("custom")))
+check("root: health dir == custom root", same_path(j.get("dir"), ROOT_CUSTOM),
+      str(j.get("dir")))
+
+# per-workflow scopes live under the custom root too
+r = call(("POST", "/settings_hub/stack/item"),
+         FakeRequest(json_body={"text": "wf on custom root"}, query={"wf": "wfcustom1"}))
+check("root: wf item ok", r.status == 200 and r.json().get("ok") is True, str(r.status))
+check("root: wf store under the custom root",
+      os.path.isfile(os.path.join(ROOT_CUSTOM, "workflows", "wfcustom1", "index.json")),
+      str(os.path.join(ROOT_CUSTOM, "workflows", "wfcustom1")))
+
+# an unwritable folder is refused and the previous root survives
+if os.name == "posix":
+    ROOT_RO = os.path.join(_USER_DIR, "readonly-root")
+    os.makedirs(ROOT_RO, exist_ok=True)
+    os.chmod(ROOT_RO, 0o500)
+    try:
+        r = call(("POST", "/settings_hub/stack/root"),
+                 FakeRequest(json_body={"path": ROOT_RO}))
+        check("root: unwritable folder -> 400",
+              r.status == 400 and "writable" in str(r.json().get("error", "")),
+              str(r.status))
+    finally:
+        os.chmod(ROOT_RO, 0o700)
+    check("root: refusal keeps the previous root",
+          same_path(call(("GET", "/settings_hub/stack/root"),
+                         FakeRequest(method="GET")).json().get("root"), ROOT_CUSTOM), "")
+
+# back to the default: explicit empty string
+r = call(("POST", "/settings_hub/stack/root"), FakeRequest(json_body={"path": "   "}))
+j = r.json()
+check("root: empty path -> back to default",
+      r.status == 200 and j.get("ok") is True and j.get("custom") is None and
+      same_path(j.get("root"), ROOT_DEFAULT), str(j.get("root")))
+_saved = read_json_file(ROOT_FILE) or {}
+check("root: cleared override persisted", _saved.get("custom") is None, str(_saved))
+check("root: health custom null again",
+      call(("GET", "/settings_hub/stack/health"),
+           FakeRequest(method="GET")).json().get("custom") is None, "")
+# the custom store keeps its files after the switch back (never deleted)
+check("root: old custom store keeps its files",
+      os.path.isfile(os.path.join(ROOT_CUSTOM, "index.json")), ROOT_CUSTOM)
+
 # ---------------------------------------------------------------------------
 
 print(f"\npy_test_clipboard: {PASS} passed, {FAIL} failed")

@@ -10,7 +10,7 @@
 // SUBMODULES are fresh.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v77";
+globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v84";
 
 // The whole hub interface lives inside a single LiteGraph DOM widget
 // (node.addDOMWidget), so the CSS in styles.css actually applies:
@@ -71,7 +71,7 @@ import { firstMediaSpec } from "./viewer_gallery.js";
 // v70: the Paste Stack panel (web/stack.js) - the gear popup hosts its
 // settings section (On/Off, max entries, clear). The panel itself mounts
 // from the entry's extension setup, independent of the hub renderer.
-import { isStackOn, setStackOn, getStackMax, setStackMax, getStackScope, setStackScope, STACK_MAX_CHOICES } from "./stack.js";
+import { isStackOn, setStackOn, getStackMax, setStackMax, getStackScope, setStackScope, getStackRootInfo, setStackRootPath, STACK_MAX_CHOICES } from "./stack.js";
 import {
     isNavItem, normalizeNav, createNavItem, navJump, armAim,
     enterOwnerGraph, markersVersionBump, resolveNavTarget,
@@ -2153,6 +2153,15 @@ function openSettingsPopup(node, trigger) {
         `<option value="global">Shared - all workflows (default)</option>` +
         `<option value="workflow">Per-workflow</option>` +
         `</select></label>` +
+        `<label class="hub-set-row"><span>Storage folder (v84)</span>` +
+        `<span class="hub-set-pathbox">` +
+        `<input type="text" class="hub-set-path" data-set-role="stackroot" ` +
+        `placeholder="default: user/settings_hub/stack" spellcheck="false" ` +
+        `autocomplete="off">` +
+        `<button type="button" class="hub-set-path-def" data-set-role="stackroot-def" ` +
+        `title="Back to the default folder (user/settings_hub/stack)">default</button>` +
+        `</span></label>` +
+        `<div class="hub-set-pathinfo" data-set-role="stackroot-info"></div>` +
         `<div class="hub-pop-hint">Floating clipboard panel (works alongside every hub): click its paste ` +
         `area or press Ctrl+V over it to save text and images; click a card to copy it back; drag it by ` +
         `the header, [–] minimizes to a chip. There is NO close button on the panel (v75) - this ` +
@@ -2166,7 +2175,14 @@ function openSettingsPopup(node, trigger) {
         `user/settings_hub/stack/workflows/<id>/; text snippets are also mirrored into the workflow ` +
         `file, so they come back on another machine even if the server store is empty. The panel ` +
         `header shows an @workflow badge in this mode; switching the scope never moves entries - ` +
-        `each scope keeps its own.</div>`;
+        `each scope keeps its own. Storage folder (v84): by default the entries live in ` +
+        `user/settings_hub/stack - type another ABSOLUTE folder (e.g. D:\\gen\\stack or ` +
+        `/home/me/comfy_stack) and press Enter to move the storage there (the server creates the ` +
+        `folder and checks writability first, then remembers the choice across restarts in ` +
+        `user/settings_hub/stack_root.json); the 'default' chip returns the built-in folder. ` +
+        `Changing the folder NEVER moves entries: the new location starts empty, the old one ` +
+        `keeps its files (copy or move them yourself while ComfyUI is stopped, if needed). ` +
+        `The line under the input shows the folder that is active right now.</div>`;
     document.body.appendChild(pop);
 
     setPopState = { node, trigger, pop };
@@ -2316,6 +2332,57 @@ function openSettingsPopup(node, trigger) {
         stScopeSel.value = setStackScope(stScopeSel.value);
         flashBtn(trigger, "✓");
     });
+
+    // v84: custom storage folder. Enter applies (inline-editor contract,
+    // AGENTS.md 5.1 rule 4), Esc reverts to the applied value, the
+    // "default" chip applies the empty path (back to user/settings_hub/stack)
+    // immediately. The status line mirrors the SERVER truth (root + custom
+    // marker) once GET /settings_hub/stack/root answers; on an old py it
+    // stays quiet (v78 philosophy - the panel health note already names the
+    // half-updated install). The server refusal (relative path / not
+    // writable) is shown in the same line - the field keeps the typed text
+    // so it can be fixed in place.
+    const stRootInput = pop.querySelector('[data-set-role="stackroot"]');
+    const stRootDef = pop.querySelector('[data-set-role="stackroot-def"]');
+    const stRootInfo = pop.querySelector('[data-set-role="stackroot-info"]');
+    const stRootApply = async () => {
+        const res = await setStackRootPath(stRootInput.value);
+        if (res.ok) {
+            stRootInput.value = res.custom || "";
+            stRootInput.dataset.cur = res.custom || "";
+            stRootInfo.classList.remove("hub-set-patherr");
+            stRootInfo.textContent = "Now: " + (res.root || "") +
+                (res.custom ? " (custom)" : " (default)") +
+                (res.saved === false ? " - could not save stack_root.json (folder works for this session only)" : "");
+            flashBtn(trigger, "✓");
+        } else {
+            stRootInfo.classList.add("hub-set-patherr");
+            stRootInfo.textContent = "Not applied: " + (res.error || "error") +
+                (res.stale ? " - the server has no /stack/root route (old py): update the FULL pack and RESTART ComfyUI." : "");
+        }
+    };
+    stRootInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            stRootApply();
+        } else if (e.key === "Escape") {
+            stRootInput.value = stRootInput.dataset.cur || "";
+            stRootInput.blur();
+        }
+    });
+    stRootDef.addEventListener("click", () => {
+        stRootInput.value = "";
+        stRootApply();
+    });
+    getStackRootInfo().then((info) => {
+        if (!info || !stRootInfo.isConnected) return; // popup closed / old py
+        stRootInput.dataset.cur = info.custom || "";
+        if (!stRootInput.value) stRootInput.value = info.custom || "";
+        stRootInfo.classList.remove("hub-set-patherr");
+        stRootInfo.textContent = "Now: " + (info.root || "") +
+            (info.custom ? " (custom)" : " (default)") +
+            (info.writable === false ? " - NOT writable" : "");
+    }).catch(() => {});
     // v74: the clear button lives in the STACK PANEL HEADER itself (owner:
     // destructive controls belong to the thing they destroy, not to settings).
 
