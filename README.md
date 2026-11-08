@@ -1,7 +1,7 @@
 # Settings Hub для ComfyUI
 
-[![build](https://img.shields.io/badge/web%20build-v76-3d5a80)](#как-это-работает)
-[![tests](https://img.shields.io/badge/tests-494%20passing-2b6b3f)](#разработка-и-тесты)
+[![build](https://img.shields.io/badge/web%20build-v77-3d5a80)](#как-это-работает)
+[![tests](https://img.shields.io/badge/tests-542%20passing-2b6b3f)](#разработка-и-тесты)
 [![python](https://img.shields.io/badge/python-stub-lightgrey)](#как-это-работает)
 [![frontend](https://img.shields.io/badge/ComfyUI-frontend%20extension-3d5a80)](#установка)
 
@@ -267,6 +267,21 @@ py/ — обновите ВЕСЬ пак и перезапустите ComfyUI),
 зелёная заметка «storage works». Кнопка **[↻ check again]** повторяет
 пробу и ресинк без перезагрузки страницы.
 
+**Scope стека (v77) — общий или на каждый воркфлоу:** ⚙ → Stack →
+«Stack scope»:
+
+- **Shared (по умолчанию)** — один стек для всех воркфлоу, как было всегда;
+- **Per-workflow** — у каждого воркфлоу свой стек: идентификатор привязки
+  хранится В САМОМ ФАЙЛЕ воркфлоу (`extra_data.settingshubStackId` —
+  «стек сохраняется в воркфлоу»), записи лежат на сервере в
+  `user/settings_hub/stack/workflows/<id>/`, шапка панели показывает
+  бейдж `@workflow`, а 🗑 чистит только активный scope. Текстовые
+  сниппеты дополнительно зеркалируются в файл воркфлоу и
+  **восстанавливаются автоматически**, если серверное хранилище этого
+  воркфлоу пусто (воркфлоу перенесли на другую машину / почистили папку
+  user). Переключение режима НИКОГДА не переносит записи — каждый scope
+  хранит свои.
+
 **Хранение — на сервере ComfyUI** (`user/default/settings_hub/stack/`,
 index.json + items/): стек портабелен (переезжает вместе с папкой ComfyUI),
 общий для localhost/127.0.0.1/LAN и любых браузеров, переживает очистку
@@ -345,9 +360,9 @@ ComfyUI и гоняют настоящие модули (Node ESM + jsdom).
 ```bash
 npm i jsdom          # единственная jsdom-зависимость
 node tests/smoke_nav.mjs    # движок точек навигации, камера, хоткеи, UI-путь, stack-bridge, глаз-скрытие (239 проверок)
-node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке/без-крестика/self-check + Image Compare (181)
+node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке/без-крестика/self-check/scope-режимы + Image Compare (210)
 node tests/smoke_menu.mjs   # регистрация меню, fail-open, баннер деградации (24)
-python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файловый/patch/health-роуты стека (50)
+python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файловый/patch/health-роуты стека + per-workflow scope (69)
 ```
 
 Структура:
@@ -356,7 +371,7 @@ python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файло
 __init__.py            регистрация ноды + WEB_DIRECTORY
 py/settings_hub.py     заглушка ноды (без OUTPUT_NODE)
 py/media_list.py       эндпоинт /settings_hub/list_media
-py/stack_store.py      роуты /settings_hub/stack* (хранилище Paste Stack, /health - самодиагностика v76)
+py/stack_store.py      роуты /settings_hub/stack* (хранилище Paste Stack, /health - самодиагностика v76, ?wf= - per-workflow scope v77)
 py/clipboard_helper.py роут /settings_hub/clipboard (чтение буфера ОС, loopback+заголовок)
 web/settings_hub.js    загрузчик: баннер, guard, fail-open регистрация
 web/stack.js           Paste Stack: панель, захват, drag, сниппеты

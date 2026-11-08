@@ -1,15 +1,15 @@
 // ============================================================================
-// SettingsHub - Paste Stack (v76): standalone floating clipboard panel
+// SettingsHub - Paste Stack (v77): standalone floating clipboard panel
 // ----------------------------------------------------------------------------
-// v71-v76 BUILD GUARD (must be the FIRST executable statement, before any work):
+// v71-v77 BUILD GUARD (must be the FIRST executable statement, before any work):
 // the loader entry stamps globalThis.__SettingsHubBuild before importing the
 // submodules; this module refuses to stay silent if it was loaded as part of
 // a MIXED build. See settings_hub.js for the field history.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["stack"] = true;
-if (globalThis.__SettingsHubBuild !== "v76") {
-    console.error("[SettingsHub] STALE BUILD: stack.js (v76) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v77") {
+    console.error("[SettingsHub] STALE BUILD: stack.js (v77) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5).");
 }
@@ -63,6 +63,42 @@ if (globalThis.__SettingsHubBuild !== "v76") {
 //     request): the only way to remove the panel is the gear popup "Stack"
 //     section -> Off. Position/size state in localStorage.
 //
+// v77 (owner request 2026-11-08: the stack followed him across workflows -
+//   "initially I planned the stack to be workflow-dependent, but a shared
+//   stack is not quite it either - make a switchable option and reconcile it
+//   with the earlier 'save the stack into the workflow' requirement"):
+//   * SCOPE MODES. ⚙ Hub settings -> Stack -> "Stack scope":
+//       - Shared (default): one stack for every workflow - the pre-v77
+//         behavior, stored in user/settings_hub/stack/.
+//       - Per-workflow: EVERY workflow keeps its own stack, stored server-side
+//         in user/settings_hub/stack/workflows/<id>/ (new ?wf= parameter on
+//         every stack route - py/stack_store.py v77).
+//   * The per-workflow IDENTITY lives in the workflow file:
+//     app.graph.extra.settingshubStackId (LiteGraph serializes graph.extra
+//     into extra_data) - the stack is literally "saved into the workflow":
+//     the binding travels with the file, the payloads stay server-side. The
+//     id is generated on first use and survives save/load; a workflow moved
+//     to another machine still points at ITS OWN store id (empty until the
+//     payloads exist there - see the text backup below).
+//   * TEXT BACKUP inside the workflow file: every mutation mirrors the
+//     current TEXT entries (inline texts only, 200KB budget, newest-first)
+//     into app.graph.extra.settingshubStack. When a per-workflow server store
+//     comes up EMPTY and the workflow carries embedded texts, they are
+//     re-added automatically (rehydration) - prompts survive moving the
+//     workflow to another machine or wiping the user folder. Blob entries
+//     (images/video/audio) are NOT embedded (a workflow file must not carry
+//     megabytes of base64); they live only in the server store.
+//   * Workflow SWITCH detection: app.graph.onConfigure / onClear are wrapped
+//     (LiteGraph fires both when a workflow loads / the canvas clears). In
+//     per-workflow mode a switch re-reads THAT workflow's store; session-only
+//     entries of the previous workflow are dropped (they belong to it, not to
+//     the new one). All API urls resolve the scope id FRESH at call time, so
+//     even an undetected switch cannot cross-contaminate stores.
+//   * Switching the scope NEVER copies or moves entries (AGENTS.md 5.1 rule
+//     7): the shared stack keeps the shared entries, each workflow keeps its
+//     own. The header shows an "@workflow" badge while the per-workflow scope
+//     is active, and 🗑 clears only the ACTIVE scope's store.
+//
 // v76 (owner report 2026-11-08: "every page reload shows 'server storage
 //   unreachable' even after many restarts"):
 //   * the note is no longer a one-liner guess - a PROBE classifies the
@@ -115,6 +151,7 @@ import { stackBridge } from "./sync.js";
 const LS_UI = "settingshub.stack.ui";      // {x,y,w,h,min,chipX,chipY}
 const LS_ON = "settingshub.stack.on";      // "1"/"0" - panel enabled
 const LS_MAX = "settingshub.stack.max";    // client eviction threshold
+const LS_SCOPE = "settingshub.stack.scope"; // v77: "global" | "workflow"
 
 export const STACK_MAX_CHOICES = [25, 50, 100, 200, 500];
 const STACK_MAX_DEFAULT = 100;
@@ -188,7 +225,7 @@ function fmtBytes(n) {
 }
 
 function fileUrl(name) {
-    const p = "/settings_hub/stack/file/" + encodeURIComponent(name || "");
+    const p = scopeUrl("/settings_hub/stack/file/" + encodeURIComponent(name || ""));
     try { return app.api?.apiURL ? app.api.apiURL(p) : p; } catch (_) { return p; }
 }
 
@@ -262,6 +299,7 @@ let pasteHover = false;  // cursor over the panel (paste-event gate)
 let clearArmTs = 0;      // clear-button double-confirm window
 let initSeq = 0;         // guards against stale async fetches across re-init
 let localSeq = 0;        // ids for session-only entries when the server is down
+let lastMountScope = null; // v77: the scope of the previous mount (reset the list only on a scope change)
 let justDragged = false; // a card drag just ended - swallow the trailing click
 const localBlobs = new Map(); // id -> Blob for session-only entries
 
@@ -299,6 +337,63 @@ export function setStackMax(v) {
     try { localStorage.setItem(LS_MAX, String(n)); } catch (_) {}
     enforceMax();
     return n;
+}
+
+// ---------------------------------------------------------------------------
+// v77: stack scope - shared (one stack for every workflow, the pre-v77
+// behavior and the default) vs per-workflow (every workflow keeps its own
+// entries). The mode is a client setting; switching it NEVER migrates data
+// (AGENTS.md 5.1 rule 7) - each scope keeps its own store.
+// ---------------------------------------------------------------------------
+
+const WF_ID_KEY = "settingshubStackId";   // in app.graph.extra (workflow file)
+const WF_EMBED_KEY = "settingshubStack";  // in app.graph.extra (text backup)
+const WF_ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
+const WF_EMBED_BUDGET = 200_000;          // max embedded text chars per file
+const WF_EMBED_MAX = 50;                  // max embedded text entries
+
+export function getStackScope() {
+    try { return localStorage.getItem(LS_SCOPE) === "workflow" ? "workflow" : "global"; }
+    catch (_) { return "global"; }
+}
+
+export function setStackScope(v) {
+    const mode = v === "workflow" ? "workflow" : "global";
+    const prev = getStackScope();
+    try { localStorage.setItem(LS_SCOPE, mode); } catch (_) {}
+    if (mode !== prev) {
+        if (mounted) initStack(); // full re-mount: right store, badge, empty state
+        localToast(mode === "workflow"
+            ? "Stack scope: PER-WORKFLOW. This workflow now keeps its own entries; the shared stack keeps the shared ones."
+            : "Stack scope: SHARED. Every workflow sees the shared stack; per-workflow entries stay in their workflows.");
+    }
+    return mode;
+}
+
+/** The current workflow's stack id - resolved FRESH at every call so a
+ *  switch can never be missed by the data path: the id lives in
+ *  app.graph.extra (LiteGraph serializes it into extra_data, i.e. INTO the
+ *  workflow file - the owner's "save the stack into the workflow" contract).
+ *  A missing/invalid id is generated once and written back into the graph. */
+function workflowStackId() {
+    try {
+        const g = app?.graph;
+        if (!g) return "wf-default";
+        const extra = g.extra || (g.extra = {});
+        let id = extra[WF_ID_KEY];
+        if (typeof id !== "string" || !WF_ID_RE.test(id)) {
+            id = "wf-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+            extra[WF_ID_KEY] = id;
+        }
+        return id;
+    } catch (_) { return "wf-default"; }
+}
+
+/** Route a stack path through the ACTIVE scope: untouched in shared mode,
+ *  ?wf=<id> in per-workflow mode (py/stack_store.py v77 routes by it). */
+function scopeUrl(path) {
+    if (getStackScope() !== "workflow") return path;
+    return path + (path.includes("?") ? "&" : "?") + "wf=" + encodeURIComponent(workflowStackId());
 }
 
 /** Clears the whole stack on the server and locally. v74: called from the
@@ -365,7 +460,7 @@ function apiReady() {
 //                                            web build - half-updated install
 // ---------------------------------------------------------------------------
 
-const BUILD = globalThis.__SettingsHubBuild || "v76";
+const BUILD = globalThis.__SettingsHubBuild || "v77";
 
 function setDegraded(seq, d) {
     if (seq !== initSeq) return;
@@ -417,7 +512,7 @@ async function probeServer(seq) {
 async function apiGet() {
     if (!apiReady()) return null;
     try {
-        const r = await app.api.fetchApi("/settings_hub/stack");
+        const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack"));
         if (!r || !r.ok) return null;
         const j = await r.json();
         return Array.isArray(j?.items) ? j.items.filter((x) => x && x.id) : [];
@@ -428,7 +523,7 @@ async function apiAddText(text, name) {
     try {
         const body = { text };
         if (name) body.name = String(name);
-        const r = await app.api.fetchApi("/settings_hub/stack/item", {
+        const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/item"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
@@ -442,7 +537,7 @@ async function apiAddImage(blob, ext, name) {
     try {
         const q = new URLSearchParams({ ext });
         if (name) q.set("name", String(name));
-        const r = await app.api.fetchApi("/settings_hub/stack/image?" + q.toString(), {
+        const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/image?" + q.toString()), {
             method: "POST",
             headers: { "Content-Type": "application/octet-stream" },
             body: blob,
@@ -455,7 +550,7 @@ async function apiAddImage(blob, ext, name) {
 async function apiAddFile(blob, ext, name) {
     try {
         const q = new URLSearchParams({ ext, name: name || "" });
-        const r = await app.api.fetchApi("/settings_hub/stack/file?" + q.toString(), {
+        const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/file?" + q.toString()), {
             method: "POST",
             headers: { "Content-Type": "application/octet-stream" },
             body: blob,
@@ -468,7 +563,7 @@ async function apiAddFile(blob, ext, name) {
 async function apiDelete(id) {
     if (!apiReady()) return false;
     try {
-        const r = await app.api.fetchApi("/settings_hub/stack/item/" + encodeURIComponent(id), { method: "DELETE" });
+        const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/item/" + encodeURIComponent(id)), { method: "DELETE" });
         return !!(r && r.ok);
     } catch (_) { return false; }
 }
@@ -476,7 +571,10 @@ async function apiDelete(id) {
 async function apiClear() {
     if (!apiReady()) return false;
     try {
-        const r = await app.api.fetchApi("/settings_hub/stack/clear", { method: "POST" });
+        // v77: in per-workflow mode this clears ONLY the active workflow's
+        // store (?wf= is appended by scopeUrl) - the shared stack and the
+        // other workflows keep their entries.
+        const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/clear"), { method: "POST" });
         return !!(r && r.ok);
     } catch (_) { return false; }
 }
@@ -486,7 +584,7 @@ async function apiClear() {
 async function apiPatch(id, patch) {
     if (!apiReady()) return null;
     try {
-        const r = await app.api.fetchApi("/settings_hub/stack/patch", {
+        const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/patch"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ id, ...patch }),
@@ -801,7 +899,7 @@ async function copyBack(item) {
 async function fetchTextFile(name) {
     try {
         const r = apiReady()
-            ? await app.api.fetchApi("/settings_hub/stack/file/" + encodeURIComponent(name || ""))
+            ? await app.api.fetchApi(scopeUrl("/settings_hub/stack/file/" + encodeURIComponent(name || "")))
             : await fetch(fileUrl(name));
         return r && r.ok ? await r.text() : "";
     } catch (_) { return ""; }
@@ -817,7 +915,7 @@ async function getBlob(item) {
             if (b && b.size) return b;
         }
         if (item?.file) {
-            const b = await fetchBlob("/settings_hub/stack/file/" + encodeURIComponent(item.file));
+            const b = await fetchBlob(scopeUrl("/settings_hub/stack/file/" + encodeURIComponent(item.file)));
             if (b && b.size) return b;
         }
     } catch (_) {}
@@ -915,7 +1013,9 @@ function passesFilter(it) {
 function renderList() {
     if (!listEl) return;
     if (!stackItems.length) {
-        listEl.innerHTML = `<div class="hub-stack-empty">Stack is empty - copy something,<br>then click the paste area (or Ctrl+V over the panel),<br>or drop a file here.</div>`;
+        listEl.innerHTML = getStackScope() === "workflow"
+            ? `<div class="hub-stack-empty">Stack is empty for THIS workflow - copy something,<br>then click the paste area (or Ctrl+V over the panel).<br>Per-workflow entries are saved with the workflow.</div>`
+            : `<div class="hub-stack-empty">Stack is empty - copy something,<br>then click the paste area (or Ctrl+V over the panel),<br>or drop a file here.</div>`;
         return;
     }
     const visible = stackItems.filter(passesFilter);
@@ -948,6 +1048,21 @@ function renderBadge() {
     const n = String(stackItems.length);
     if (headEl) headEl.querySelector(".hub-stack-count").textContent = n;
     if (chip) chip.querySelector(".hub-stack-chip-count").textContent = n;
+}
+
+/** v77: the header scope badge - visible only in per-workflow mode, so the
+ *  active scope is never a hidden dimension. */
+function renderScope() {
+    const el = headEl?.querySelector(".hub-stack-scope");
+    if (!el) return;
+    if (getStackScope() === "workflow") {
+        el.style.display = "";
+        el.textContent = "@workflow";
+        el.title = "Per-workflow stack: THIS workflow keeps its own entries (the binding id is saved inside the workflow file)";
+    } else {
+        el.style.display = "none";
+        el.textContent = "";
+    }
 }
 
 function renderNote() {
@@ -992,7 +1107,79 @@ function renderNote() {
     noteEl.append(head, why, retry);
 }
 
-function renderAll() { renderList(); renderBadge(); renderNote(); renderToolbar(); }
+function renderAll() {
+    renderList();
+    renderBadge();
+    renderNote();
+    renderToolbar();
+    renderScope();
+    syncWorkflowEmbed();
+}
+
+// ---------------------------------------------------------------------------
+// v77: workflow file backup (per-workflow scope)
+// ---------------------------------------------------------------------------
+// Every render mirrors the current TEXT entries into
+// app.graph.extra.settingshubStack (inline texts only - blobs would bloat the
+// workflow file with base64). When that workflow's SERVER store is empty
+// while the embedded copy exists (workflow moved to another machine, user
+// folder wiped, ComfyUI reinstalled), refreshFromServer re-adds the embedded
+// texts automatically. Deletions/clears propagate the same way: the embed is
+// rewritten from the live list, so a cleared workflow stays cleared.
+
+function syncWorkflowEmbed() {
+    try {
+        if (getStackScope() !== "workflow") return;
+        const g = app?.graph;
+        if (!g) return;
+        // Sync only when the list is a KNOWN truth: a working server (the
+        // list may legitimately be empty - the user cleared it) or any local
+        // content. An unknown/dead server with an empty list must not wipe
+        // the file's backup before the first refresh answers.
+        if (!stackItems.length && serverOk !== true) return;
+        const extra = g.extra || (g.extra = {});
+        const out = [];
+        let budget = WF_EMBED_BUDGET;
+        for (const it of stackItems) {
+            if (out.length >= WF_EMBED_MAX || budget <= 0) break;
+            if (it.type !== "text" || typeof it.text !== "string" || !it.text.trim()) continue;
+            const e = { t: "text", text: it.text };
+            if (it.name) e.name = String(it.name).slice(0, 120);
+            if (Array.isArray(it.tags) && it.tags.length) e.tags = it.tags.slice(0, 8);
+            if (it.pinned) e.pinned = true;
+            out.push(e);
+            budget -= it.text.length;
+        }
+        extra[WF_EMBED_KEY] = out;
+    } catch (_) {}
+}
+
+/** Re-add the workflow-file text backup when the server store is empty.
+ *  Returns the number of restored entries (0 = nothing to do). The server
+ *  dedups by content, so a restore can never duplicate surviving entries. */
+async function rehydrateWorkflowTexts() {
+    try {
+        if (getStackScope() !== "workflow") return 0;
+        const arr = app?.graph?.extra?.[WF_EMBED_KEY];
+        if (!Array.isArray(arr) || !arr.length) return 0;
+        let n = 0;
+        for (const e of arr.slice(0, WF_EMBED_MAX)) {
+            if (!e || e.t !== "text" || typeof e.text !== "string" || !e.text.trim()) continue;
+            const res = await apiAddText(e.text, e.name);
+            if (res?.ok) {
+                n++;
+                if (Array.isArray(e.tags) && e.tags.length) {
+                    await apiPatch(res.item?.id, { tags: e.tags.slice(0, 8) }).catch(() => {});
+                }
+                if (e.pinned && res.item?.id) {
+                    await apiPatch(res.item.id, { pinned: true }).catch(() => {});
+                }
+            }
+        }
+        if (n) localToast("Restored " + n + " text snippet(s) saved in this workflow");
+        return n;
+    } catch (_) { return 0; }
+}
 
 // ---------------------------------------------------------------------------
 // Drag / resize / minimize (mouse events - jsdom- and touchscreen-safe)
@@ -1509,6 +1696,7 @@ function buildDom() {
     panel.innerHTML =
         `<div class="hub-stack-head" title="Drag to move">` +
         `<span class="hub-stack-ico">📋</span><span class="hub-stack-title">Stack</span>` +
+        `<span class="hub-stack-scope" style="display:none"></span>` +
         `<span class="hub-stack-count">0</span>` +
         `<button type="button" class="hub-btn hub-stack-clear" title="Clear ALL entries (click twice to confirm)">🗑</button>` +
         `<button type="button" class="hub-btn hub-stack-min" title="Minimize to chip">–</button>` +
@@ -1715,11 +1903,13 @@ function buildDom() {
     window.addEventListener("paste", onPasteEvent, true);
 
     // re-sync when the tab regains focus (another tab/browser may have changed
-    // the shared server stack); debounced + sequence-guarded.
+    // the shared server stack); debounced + sequence-guarded. v77 fix: the
+    // refresh MUST carry the current sequence - a bare refreshFromServer()
+    // failed the seq guard and has been a silent no-op since v70.
     let focusTimer = 0;
     window.addEventListener("focus", () => {
         clearTimeout(focusTimer);
-        focusTimer = setTimeout(() => refreshFromServer(), 800);
+        focusTimer = setTimeout(() => refreshFromServer(initSeq), 800);
     });
 }
 
@@ -1734,7 +1924,7 @@ async function deleteOne(item) {
 }
 
 async function refreshFromServer(seq) {
-    const remote = await apiGet();
+    let remote = await apiGet();
     if (seq !== initSeq) return; // a newer init/refresh superseded this fetch
     if (remote === null) {
         if (serverOk !== false) { serverOk = false; }
@@ -1754,6 +1944,19 @@ async function refreshFromServer(seq) {
     if (degraded && (degraded.code === "network" || degraded.code === "missing")) {
         degraded = null;
     }
+    // v77: per-workflow scope - an EMPTY workflow store while the workflow
+    // FILE carries a text backup means the payloads are gone server-side
+    // (workflow moved to another machine, user folder wiped): re-add the
+    // embedded texts once, then re-read the store.
+    if (getStackScope() === "workflow" && remote.length === 0) {
+        const restored = await rehydrateWorkflowTexts();
+        if (seq !== initSeq) return;
+        if (restored > 0) {
+            remote = await apiGet();
+            if (seq !== initSeq) return;
+            if (remote === null) remote = [];
+        }
+    }
     // Keep session-only entries (if any) on top of the server truth.
     const locals = stackItems.filter((x) => x.local);
     stackItems = [...locals, ...remote.filter((x) => !locals.some((l) => l.id === x.id))];
@@ -1764,13 +1967,71 @@ async function refreshFromServer(seq) {
 // Public init (entry calls this from extension setup; idempotent)
 // ---------------------------------------------------------------------------
 
+/** v77: LiteGraph fires onConfigure when a workflow finished loading (its
+ *  extra - with the stack id and the text backup - is already in place) and
+ *  onClear when the canvas is wiped ("New"). Both mean: the workflow
+ *  changed. In per-workflow mode the panel re-reads THAT workflow's store;
+ *  in shared mode nothing changes (one stack for all). The wrapper is
+ *  installed once per graph instance and always calls the original hook. */
+function hookWorkflowSwitch() {
+    try {
+        const g = app?.graph;
+        if (!g || g.__shStackWfHook) return;
+        g.__shStackWfHook = true;
+        const fire = () => {
+            try {
+                if (!mounted) return;
+                if (getStackScope() !== "workflow") return;
+                const seq = ++initSeq;
+                stackItems = [];        // session-only entries belong to the PREVIOUS workflow
+                localBlobs.clear();
+                editId = null;
+                // renderList/badge ONLY - renderAll would syncWorkflowEmbed()
+                // the still-empty list into the NEW workflow's extra and wipe
+                // its text backup before refreshFromServer can rehydrate it.
+                renderList();
+                renderBadge();
+                void refreshFromServer(seq);
+            } catch (_) {}
+        };
+        const oc = g.onConfigure;
+        g.onConfigure = function () {
+            try { if (typeof oc === "function") oc.apply(this, arguments); } finally { fire(); }
+        };
+        const ocl = g.onClear;
+        g.onClear = function () {
+            try { if (typeof ocl === "function") ocl.apply(this, arguments); } finally { fire(); }
+        };
+    } catch (_) {}
+}
+
 export function initStack() {
     if (!isStackOn()) return;
     const seq = ++initSeq;
     teardown();
+    // v77: a fresh context - the list must never leak ACROSS scopes. In
+    // per-workflow mode a stale list (e.g. the shared store's entries right
+    // after a scope switch) would be embedded into the WRONG workflow file
+    // by the first renderAll, and the server would then "restore" it into
+    // the new store - a silent migration, exactly what rule 7 forbids.
+    // Within ONE scope a remount keeps the list: session-only entries must
+    // survive a settings Off/On toggle (the SH recovery contract).
+    const scopeNow = getStackScope();
+    if (scopeNow !== lastMountScope) {
+        stackItems = [];
+        localBlobs.clear();
+    }
+    lastMountScope = scopeNow;
+    degraded = null;
+    serverOk = null; // v77: unknown until the probe answers - the embed guard needs this
     buildDom();
     mounted = true;
     renderAll();
+    hookWorkflowSwitch();
+    // v77: in per-workflow mode mark the workflow with its stack id right
+    // away (idempotent) so the binding is in the file even before the first
+    // capture.
+    if (getStackScope() === "workflow") workflowStackId();
     // v76: probe FIRST (classifies the server), then sync the data.
     void (async () => {
         await probeServer(seq);
@@ -1820,6 +2081,12 @@ export function __stackTestHooks() {
         isJustDragged: () => justDragged,
         refresh: () => refreshFromServer(initSeq),
         mount: initStack,
+        // v77: scope introspection for the smoke tests
+        scope: () => getStackScope(),
+        workflowId: () => workflowStackId(),
+        fireWorkflowSwitch: () => {
+            try { app?.graph?.onConfigure?.(); } catch (_) {}
+        },
     };
 }
 

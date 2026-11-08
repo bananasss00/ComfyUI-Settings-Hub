@@ -11,8 +11,8 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
-if (globalThis.__SettingsHubBuild !== "v76") {
-    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v76) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v77") {
+    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v77) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
 }
@@ -76,7 +76,7 @@ import { firstMediaSpec } from "./viewer_gallery.js";
 // v70: the Paste Stack panel (web/stack.js) - the gear popup hosts its
 // settings section (On/Off, max entries, clear). The panel itself mounts
 // from the entry's extension setup, independent of the hub renderer.
-import { isStackOn, setStackOn, getStackMax, setStackMax, STACK_MAX_CHOICES } from "./stack.js";
+import { isStackOn, setStackOn, getStackMax, setStackMax, getStackScope, setStackScope, STACK_MAX_CHOICES } from "./stack.js";
 import {
     isNavItem, normalizeNav, createNavItem, navJump, armAim,
     enterOwnerGraph, markersVersionBump, resolveNavTarget,
@@ -2153,13 +2153,25 @@ function openSettingsPopup(node, trigger) {
         STACK_MAX_CHOICES.map((n) =>
             `<option value="${n}">${n}${n === 100 ? " · default" : ""}</option>`).join("") +
         `</select></label>` +
+        `<label class="hub-set-row"><span>Stack scope (v77)</span>` +
+        `<select data-set-role="stackscope">` +
+        `<option value="global">Shared - all workflows (default)</option>` +
+        `<option value="workflow">Per-workflow</option>` +
+        `</select></label>` +
         `<div class="hub-pop-hint">Floating clipboard panel (works alongside every hub): click its paste ` +
         `area or press Ctrl+V over it to save text and images; click a card to copy it back; drag it by ` +
         `the header, [–] minimizes to a chip. There is NO close button on the panel (v75) - this ` +
         `On/Off switch is the only way to remove it. Entries live in ComfyUI's user folder ` +
         `(user/settings_hub/stack/) - they survive page reloads, are shared by every browser and move ` +
         `with the ComfyUI folder. Max = the panel drops the oldest entries beyond it (server hard caps ` +
-        `apply regardless). The 🗑 button in the PANEL HEADER wipes the whole stack (asks twice).</div>`;
+        `apply regardless). The 🗑 button in the PANEL HEADER wipes the whole stack (asks twice). ` +
+        `Scope: Shared = one stack for every workflow (as it always was). Per-workflow = every ` +
+        `workflow keeps its OWN stack: the binding id is saved INTO the workflow file ` +
+        `(extra_data.settingshubStackId) and the entries live in ` +
+        `user/settings_hub/stack/workflows/<id>/; text snippets are also mirrored into the workflow ` +
+        `file, so they come back on another machine even if the server store is empty. The panel ` +
+        `header shows an @workflow badge in this mode; switching the scope never moves entries - ` +
+        `each scope keeps its own.</div>`;
     document.body.appendChild(pop);
 
     setPopState = { node, trigger, pop };
@@ -2297,6 +2309,16 @@ function openSettingsPopup(node, trigger) {
     stMaxSel.value = String(getStackMax());
     stMaxSel.addEventListener("change", () => {
         stMaxSel.value = String(setStackMax(stMaxSel.value));
+        flashBtn(trigger, "✓");
+    });
+
+    // v77: stack scope - shared vs per-workflow. A flip re-mounts the panel
+    // (the right store is loaded, the @workflow badge appears/disappears);
+    // entries are NEVER migrated - each scope keeps its own.
+    const stScopeSel = pop.querySelector('[data-set-role="stackscope"]');
+    stScopeSel.value = getStackScope();
+    stScopeSel.addEventListener("change", () => {
+        stScopeSel.value = setStackScope(stScopeSel.value);
         flashBtn(trigger, "✓");
     });
     // v74: the clear button lives in the STACK PANEL HEADER itself (owner:

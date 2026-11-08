@@ -2816,6 +2816,19 @@ button.hub-pin-back {
 .hub-stack-ico { font-size: 12px; }
 .hub-stack-title { font-weight: 600; color: #fff; letter-spacing: 0.2px; }
 
+/* v77: per-workflow scope badge - sits between the title and the count. */
+.hub-stack-scope {
+    background: #6a4d2e;
+    color: #ffd9a0;
+    border: 1px solid #8a6a3e;
+    border-radius: 8px;
+    padding: 0 6px;
+    font-size: 9px;
+    line-height: 14px;
+    margin-left: 6px;
+    white-space: nowrap;
+}
+
 .hub-stack-count {
     background: #3d5a80;
     color: #fff;
