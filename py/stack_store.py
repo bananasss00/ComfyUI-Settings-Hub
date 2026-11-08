@@ -29,6 +29,17 @@ they can be rehydrated when the server store is empty (workflow moved to
 another machine, user folder wiped). Switching the scope never copies or
 moves entries - each scope keeps its own (AGENTS.md 5.1 rule 7).
 
+v79 adds TABS (owner request: "tabs to fill the stack for different tasks -
+grouping"): every entry may carry a `tab` display-group name (sanitized,
+<= 48 chars, purely metadata - it changes NO path, hash or cap). The view
+side (All + one view per tab) lives in web/stack.js; the server only stores
+and patches the field. POST item/image/file accept it at creation (the
+capture lands straight in the open tab), PATCH sets/clears it (rename and
+"move back to All" are client loops over this), and POST clear accepts
+?tab=<name> to wipe ONLY that tab's entries - the other tabs and the
+ungrouped entries stay. Removing/renaming a tab NEVER deletes entries
+(AGENTS.md 5.1 rule 9).
+
 Routes (registered at import, PromptServer aiohttp, same style as
 media_list.py; the SettingsHub node class itself stays a stub and these
 routes never run during a queue):
@@ -41,14 +52,15 @@ routes never run during a queue):
                                               routes missing / not writable /
                                               web-vs-py version mismatch; v77
                                               adds the workflows store count)
-    POST   /settings_hub/stack/item        -> JSON {type:"text", text, name?} add text
-    POST   /settings_hub/stack/image       -> raw bytes, ?ext=png|jpg|...  add image
-    POST   /settings_hub/stack/file        -> raw bytes, ?ext=&name=        add ANY
+    POST   /settings_hub/stack/item        -> JSON {type:"text", text, name?, tab?}  add text
+    POST   /settings_hub/stack/image       -> raw bytes, ?ext=png|jpg|...&tab=  add image
+    POST   /settings_hub/stack/file        -> raw bytes, ?ext=&name=&tab=       add ANY
                                             file (v71: video/audio/text/
                                             binary cards from drag&drop or
                                             the OS-clipboard helper)
     DELETE /settings_hub/stack/item/{id}   -> remove one entry (+ blob)
-    POST   /settings_hub/stack/clear       -> wipe entries + blobs
+    POST   /settings_hub/stack/clear       -> wipe entries + blobs (?tab=<name>
+                                            v79: only that tab's entries)
     GET    /settings_hub/stack/file/{name} -> serve a stored blob   ?wf=<id>
 
 All mutating/listing routes honour ?wf= (v77); without it they behave
@@ -100,6 +112,7 @@ TEXT_INLINE_LIMIT = 100 * 1024  # larger texts become files too
 MAX_NAME_CHARS = 120            # display name of an entry (v71)
 MAX_TAGS = 8                    # v72: per-entry tag cap
 MAX_TAG_CHARS = 24              # v72: per-tag cap
+MAX_TAB_CHARS = 48              # v79: display-group (tab) name cap
 
 _IMG_EXT = {
     "png": "image/png",
@@ -289,6 +302,19 @@ def _sanitize_name(raw):
     return cleaned[:MAX_NAME_CHARS]
 
 
+def _sanitize_tab(raw):
+    """v79: the display-group (tab) name of an entry - metadata only, never a
+    path; the ?tab= clear parameter is URL-encoded by the client, so any
+    printable text is fine. Control characters are stripped, the result is
+    trimmed and capped. Empty input -> None (= ungrouped / "All")."""
+    if not isinstance(raw, str):
+        return None
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", raw).strip()
+    if not cleaned:
+        return None
+    return cleaned[:MAX_TAB_CHARS]
+
+
 def _blob_type_for(ext):
     """v71: index `type` for a stored blob extension."""
     if ext in _IMG_EXT:
@@ -327,7 +353,7 @@ async def stack_get(request):
 # (the web panel compares it against globalThis.__SettingsHubBuild and warns
 # about a half-updated install: web/ replaced while py/ stayed old, or the
 # page reloaded before ComfyUI restarted). AGENTS.md release checklist line.
-STACK_SERVER_VERSION = "v78"
+STACK_SERVER_VERSION = "v79"
 
 
 @PromptServer.instance.routes.get("/settings_hub/stack/health")
@@ -376,6 +402,7 @@ async def stack_add_text(request):
     if len(text) > MAX_TEXT_CHARS:
         return web.json_response({"ok": False, "error": "text too large"}, status=413)
     name = _sanitize_name(body.get("name")) if isinstance(body, dict) else None
+    tab = _sanitize_tab(body.get("tab")) if isinstance(body, dict) else None
     wf, err = _wf_from(request)
     if err is not None:
         return err
@@ -389,11 +416,18 @@ async def stack_add_text(request):
             if name and not dup[0].get("name"):
                 dup[0]["name"] = name
                 _write_index(items, wf)
+            # v79: re-adding into a tab groups the existing entry too - but a
+            # tab already on the entry is NEVER overridden by a re-capture.
+            if tab and not dup[0].get("tab"):
+                dup[0]["tab"] = tab
+                _write_index(items, wf)
             return web.json_response({"ok": True, "item": dup[0], "moved": True})
         item = {"id": uuid.uuid4().hex[:12], "type": "text", "hash": h,
                 "text": text, "size": size}
         if name:
             item["name"] = name
+        if tab:
+            item["tab"] = tab
         if size > TEXT_INLINE_LIMIT:
             _ensure_dirs(wf)
             blob_name = item["id"] + ".txt"
@@ -418,6 +452,7 @@ async def stack_add_image(request):
     if ext not in _IMG_EXT:
         return web.json_response({"ok": False, "error": "bad ext"}, status=400)
     name = _sanitize_name(request.query.get("name"))
+    tab = _sanitize_tab(request.query.get("tab"))
     wf, err = _wf_from(request)
     if err is not None:
         return err
@@ -444,6 +479,8 @@ async def stack_add_image(request):
                 "file": name2, "size": len(payload), "created": int(time.time())}
         if name:
             item["name"] = name
+        if tab:
+            item["tab"] = tab
         items.insert(0, item)
         _evict(items, wf)
         _write_index(items, wf)
@@ -460,6 +497,7 @@ async def stack_add_file(request):
     if ext not in _ALL_BLOB_EXT:
         return web.json_response({"ok": False, "error": "bad ext"}, status=400)
     name = _sanitize_name(request.query.get("name"))
+    tab = _sanitize_tab(request.query.get("tab"))
     wf, err = _wf_from(request)
     if err is not None:
         return err
@@ -487,6 +525,8 @@ async def stack_add_file(request):
                 "created": int(time.time())}
         if name:
             item["name"] = name
+        if tab:
+            item["tab"] = tab
         items.insert(0, item)
         _evict(items, wf)
         _write_index(items, wf)
@@ -496,9 +536,10 @@ async def stack_add_file(request):
 @PromptServer.instance.routes.post("/settings_hub/stack/patch")
 async def stack_patch(request):
     """v72: edit ONE entry's metadata: rename, tags, pin, usage counter.
-    Body: JSON {id, name?, tags?, pinned?, uses?, bumpUses?}. Missing keys
-    leave the entry untouched. The response carries the updated entry so the
-    client can mirror the server truth instead of guessing."""
+    Body: JSON {id, name?, tags?, pinned?, uses?, bumpUses?, tab?} (v79 adds
+    tab: set/clear the display group). Missing keys leave the entry
+    untouched. The response carries the updated entry so the client can
+    mirror the server truth instead of guessing."""
     try:
         body = await request.json()
     except Exception:
@@ -540,6 +581,12 @@ async def stack_patch(request):
                 it.pop("tags", None)
         if "pinned" in body:
             it["pinned"] = bool(body.get("pinned"))
+        if "tab" in body:
+            tb = _sanitize_tab(body.get("tab"))
+            if tb:
+                it["tab"] = tb
+            else:
+                it.pop("tab", None)  # v79: empty string = back to "All"
         if "uses" in body:
             try:
                 it["uses"] = max(0, min(1_000_000, int(body.get("uses"))))
@@ -573,16 +620,32 @@ async def stack_delete(request):
 @PromptServer.instance.routes.post("/settings_hub/stack/clear")
 async def stack_clear(request):
     """v77: clears ONE store - the shared one, or the ?wf= workflow's own.
-    It never touches the other scopes (each scope's entries stay in it)."""
+    It never touches the other scopes (each scope's entries stay in it).
+    v79: with ?tab=<name> only THAT tab's entries are wiped - the other tabs
+    and the ungrouped entries stay. A present-but-empty ?tab= is an error
+    (an accidental whole-store wipe must not hide behind an empty value)."""
     wf, err = _wf_from(request)
     if err is not None:
         return err
+    has_tab = "tab" in request.query
+    tab = _sanitize_tab(request.query.get("tab")) if has_tab else None
+    if has_tab and not tab:
+        return web.json_response({"ok": False, "error": "bad tab"}, status=400)
     async with _lock:
         items = _read_index(wf)
-        for it in items:
-            _unlink_blob(it.get("file"), wf)
-        _write_index([], wf)
-    return web.json_response({"ok": True})
+        if has_tab:
+            killed = [it for it in items if it.get("tab") == tab]
+            items = [it for it in items if it.get("tab") != tab]
+            for it in killed:
+                _unlink_blob(it.get("file"), wf)
+            removed = len(killed)
+        else:
+            removed = len(items)
+            for it in items:
+                _unlink_blob(it.get("file"), wf)
+            items = []
+        _write_index(items, wf)
+    return web.json_response({"ok": True, "removed": removed, "tab": tab})
 
 
 @PromptServer.instance.routes.get("/settings_hub/stack/file/{name}")

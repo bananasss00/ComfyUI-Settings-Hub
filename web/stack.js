@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - Paste Stack (v77): standalone floating clipboard panel
+// SettingsHub - Paste Stack (v79): standalone floating clipboard panel
 // ----------------------------------------------------------------------------
 // v71-v77 BUILD GUARD (must be the FIRST executable statement, before any work):
 // the loader entry stamps globalThis.__SettingsHubBuild before importing the
@@ -8,8 +8,8 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["stack"] = true;
-if (globalThis.__SettingsHubBuild !== "v78") {
-    console.error("[SettingsHub] STALE BUILD: stack.js (v77) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v79") {
+    console.error("[SettingsHub] STALE BUILD: stack.js (v79) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5).");
 }
@@ -62,6 +62,36 @@ if (globalThis.__SettingsHubBuild !== "v78") {
 //     to a chip with a live count badge. There is NO close button (v75 owner
 //     request): the only way to remove the panel is the gear popup "Stack"
 //     section -> Off. Position/size state in localStorage.
+//
+// v79 (owner request 2026-11-08: "add tabs to the stack - entries are filled
+//   in for different tasks, there must be grouping" + "there is no way to see
+//   the FULL content of a cell - long prompts start identically and look like
+//   duplicates"):
+//   * TABS - display groups INSIDE the active scope. The tab bar lives under
+//     the header: [All (total)] [Task A (n)] [Task B (n)] [+]. "All" is the
+//     first view and shows everything (the pre-v79 behavior - the default).
+//     Tab order = creation order, remembered per scope in localStorage
+//     (settingshub.stack.tabs = {global:{order,active}, workflow:{...}});
+//     a tab may exist with zero entries (created ahead of the work).
+//   * CAPTURE lands in the OPEN tab: Ctrl+V / paste-area click / OS files
+//     carry the tab name at creation (py stores it on the entry). Captures
+//     on "All" stay ungrouped (owner's answer: new entries go to the open
+//     tab, and "All" is not a tab).
+//   * MOVE = drag the card onto a tab chip (the drag pipeline gets a new
+//     target kind - dropping onto "All" ungroups) OR the "tab" field in the
+//     card's inline editor (empty = ungroup). Owner's answer: both.
+//   * RENAME (double-click a chip) re-patches every entry of the tab;
+//     renaming onto an EXISTING name merges the two tabs. REMOVE (the chip's
+//     small ✕, armed like 🗑) never deletes entries - they fall back to
+//     "All" (AGENTS.md 5.1 rule 9: tab operations are metadata-only).
+//   * 🗑 clears the ACTIVE VIEW (owner's answer): on a tab - only that tab's
+//     entries (server clear?tab=), on "All" - the whole store as before.
+//   * FULL-TEXT VIEWER: text cards carry a 🔍 button - a centered overlay
+//     with the COMPLETE text (pre-wrap, scrollable), 📋 copy and →📝 insert
+//     (the v72 bridge) and Esc / ✕ / backdrop-click to close. Long prompts
+//     that share their first 260 chars are no longer indistinguishable.
+//   * The v77 workflow-file embed carries the tab of each text snippet, so a
+//     rehydrated workflow restores its grouping too.
 //
 // v77 (owner request 2026-11-08: the stack followed him across workflows -
 //   "initially I planned the stack to be workflow-dependent, but a shared
@@ -153,12 +183,15 @@ const LS_ON = "settingshub.stack.on";      // "1"/"0" - panel enabled
 const LS_MAX = "settingshub.stack.max";    // client eviction threshold
 const LS_SCOPE = "settingshub.stack.scope"; // v77: "global" | "workflow"
 const LS_NOTE = "settingshub.stack.noteSeen"; // v78: {code,key} - green self-diagnosis notes show ONCE per state
+const LS_TABS = "settingshub.stack.tabs";   // v79: {global:{order:[],active},workflow:{...}}
 
 export const STACK_MAX_CHOICES = [25, 50, 100, 200, 500];
 const STACK_MAX_DEFAULT = 100;
 const MAX_TEXT_CHARS = 1_000_000;      // mirrors py/stack_store.py
 const MAX_BLOB_BYTES = 25 * 1024 * 1024;
 const TEXT_EXCERPT = 260;
+const MAX_TAB_CHARS = 48;              // v79: mirrors py/stack_store.py MAX_TAB_CHARS
+const TAB_ARM_MS = 2500;               // v79: the tab-remove ✕ double-confirm window
 const IMG_EXT_OK = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
 const VID_EXT_OK = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v", "ogv"]);
 const AUD_EXT_OK = new Set(["mp3", "wav", "ogg", "flac", "aac", "m4a", "opus"]);
@@ -289,6 +322,7 @@ async function fetchBlob(url) {
 let panel = null;        // .hub-stack-panel root
 let headEl = null, listEl = null, pasteEl = null, noteEl = null;
 let toolsEl = null;      // v72: search + kind filter row
+let tabEl = null;        // v79: tab bar (All + groups + [+])
 let chip = null;         // minimized chip
 let grip = null;         // resize handle
 
@@ -307,6 +341,16 @@ const localBlobs = new Map(); // id -> Blob for session-only entries
 // v72: snippet view state (persisted with the rest of the panel UI state)
 let viewFilter = { q: "", kind: "all", tag: null }; // kind: all|text|image|file
 let editId = null;       // id of the card currently in the inline editor
+
+// v79: tab state. activeTab "" = the "All" view (everything), otherwise a
+// tab name. tabEdit drives the inline create/rename input in the tab bar;
+// tabArm/tabArmTs arm the chip's ✕ (same double-confirm contract as 🗑).
+let activeTab = "";
+let tabEdit = null;      // {mode:"create"} | {mode:"rename", name}
+let tabArm = null;
+let tabArmTs = 0;
+let viewerEl = null;     // v79: full-text viewer overlay (transient popup)
+let viewerSeq = 0;
 
 // ---------------------------------------------------------------------------
 // Settings surface (gear popup "Stack" section, hub_ui_renderer.js)
@@ -397,12 +441,168 @@ function scopeUrl(path) {
     return path + (path.includes("?") ? "&" : "?") + "wf=" + encodeURIComponent(workflowStackId());
 }
 
+// ---------------------------------------------------------------------------
+// v79: tabs - display groups INSIDE the active scope. Entries carry a `tab`
+// name (sanitized, mirrors py/stack_store.py); "All" is the first view and
+// shows everything. Order = creation order (per scope, localStorage); a tab
+// may exist with zero entries. Tab operations are METADATA-ONLY: removing or
+// renaming a tab never deletes entries (AGENTS.md 5.1 rule 9).
+// ---------------------------------------------------------------------------
+
+function cleanTabName(raw) {
+    try {
+        const t = String(raw ?? "").replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, MAX_TAB_CHARS);
+        return t;
+    } catch (_) { return ""; }
+}
+
+function tabOf(it) {
+    return it && typeof it.tab === "string" && it.tab ? it.tab : "";
+}
+
+function tabsBranch() {
+    try {
+        const j = JSON.parse(localStorage.getItem(LS_TABS) || "{}");
+        const b = j && typeof j === "object" ? j[getStackScope()] : null;
+        if (b && typeof b === "object") {
+            return {
+                order: Array.isArray(b.order) ? b.order.filter((x) => typeof x === "string" && x) : [],
+                active: typeof b.active === "string" ? b.active : "",
+            };
+        }
+    } catch (_) {}
+    return { order: [], active: "" };
+}
+
+function saveTabsBranch(branch) {
+    try {
+        const j = JSON.parse(localStorage.getItem(LS_TABS) || "{}");
+        j[getStackScope()] = { order: branch.order.filter(Boolean), active: branch.active || "" };
+        localStorage.setItem(LS_TABS, JSON.stringify(j));
+    } catch (_) {}
+}
+
+/** Every tab of the ACTIVE scope: the remembered (creation) order first,
+ *  then tabs discovered on the entries themselves - a tab's birth moment is
+ *  its first entry, so discovery walks the list OLDEST-first. */
+function knownTabs() {
+    const out = tabsBranch().order.filter(Boolean);
+    for (let i = stackItems.length - 1; i >= 0; i--) {
+        const t = tabOf(stackItems[i]);
+        if (t && !out.includes(t)) out.push(t);
+    }
+    return out;
+}
+
+function inView(it) {
+    return !activeTab || tabOf(it) === activeTab;
+}
+
+function setActiveTab(name) {
+    activeTab = cleanTabName(name);
+    const b = tabsBranch();
+    b.active = activeTab;
+    saveTabsBranch(b);
+    editId = null; // the inline editor may belong to another view
+    renderAll();
+}
+
+/** v79: move ONE entry into a tab ("" = back to the ungrouped "All").
+ *  Shared by the drag-to-chip drop and the editor's tab field. */
+async function moveToTab(item, tabName) {
+    if (!item) return;
+    const tab = cleanTabName(tabName);
+    if (item.local) {
+        if (tab) item.tab = tab; else delete item.tab;
+        renderAll();
+        localToast(tab ? `Moved to "${tab}"` : "Moved out of the tab (back in All)");
+        return;
+    }
+    const it = await apiPatch(item.id, { tab });
+    if (it) {
+        applyPatched(it);
+        localToast(tab ? `Moved to "${tab}"` : "Moved out of the tab (back in All)");
+    } else localToast("Move failed - server unreachable");
+}
+
+/** v79: create a tab (zero entries is fine) and switch to it. */
+function createTab(rawName) {
+    const tab = cleanTabName(rawName);
+    tabEdit = null;
+    if (!tab) { renderTabs(); return; }
+    const b = tabsBranch();
+    if (!b.order.includes(tab)) b.order.push(tab);
+    b.active = tab;
+    saveTabsBranch(b);
+    activeTab = tab;
+    renderAll();
+}
+
+/** v79: rename a tab - re-patches every entry of the tab; renaming onto an
+ *  EXISTING name MERGES the two tabs (position of the target is kept). */
+async function renameTab(oldName, rawNew) {
+    const newName = cleanTabName(rawNew);
+    tabEdit = null;
+    if (!newName || newName === oldName || !knownTabs().includes(oldName)) { renderTabs(); return; }
+    const b = tabsBranch();
+    b.order = [...new Set(b.order.map((n) => (n === oldName ? newName : n)))];
+    saveTabsBranch(b);
+    const targets = stackItems.filter((x) => tabOf(x) === oldName);
+    for (const x of targets) {
+        if (x.local) { x.tab = newName; continue; }
+        const it = await apiPatch(x.id, { tab: newName });
+        if (it) {
+            const i = stackItems.findIndex((y) => y.id === it.id);
+            if (i >= 0) stackItems[i] = { ...it }; // v79: full replace - server truth
+        }
+    }
+    if (activeTab === oldName) activeTab = newName;
+    const b2 = tabsBranch();
+    b2.active = activeTab;
+    saveTabsBranch(b2);
+    renderAll();
+    localToast(`Tab renamed to "${newName}" - ${targets.length} entr${targets.length === 1 ? "y" : "ies"} updated`);
+}
+
+/** v79: remove a tab - the ENTRIES NEVER DIE, their tab field is cleared and
+ *  they resurface in "All" (AGENTS.md 5.1 rule 9). */
+async function deleteTab(name) {
+    tabArm = null;
+    const targets = stackItems.filter((x) => tabOf(x) === name);
+    for (const x of targets) {
+        if (x.local) { delete x.tab; continue; }
+        const it = await apiPatch(x.id, { tab: "" });
+        if (it) {
+            const i = stackItems.findIndex((y) => y.id === it.id);
+            if (i >= 0) stackItems[i] = { ...it }; // v79: full replace - server truth
+        }
+    }
+    const b = tabsBranch();
+    b.order = b.order.filter((n) => n !== name);
+    if (activeTab === name) activeTab = "";
+    b.active = activeTab;
+    saveTabsBranch(b);
+    renderAll();
+    localToast(`Tab "${name}" removed - ${targets.length} entr${targets.length === 1 ? "y" : "ies"} back in All`);
+}
+
 /** Clears the whole stack on the server and locally. v74: called from the
  *  panel's own 🗑 header button (the gear popup no longer carries it). */
 export async function stackClearAllFlow() {
     const ok = await apiClear();
     if (ok) { stackItems = []; localBlobs.clear(); renderAll(); localToast("Stack cleared"); }
     else localToast("Stack clear failed - server unreachable");
+    return ok;
+}
+
+/** v79: clear ONLY the active tab's entries (🗑 while a tab is open). */
+export async function stackClearTabFlow(name) {
+    const ok = await apiClear(name);
+    if (ok) {
+        stackItems = stackItems.filter((x) => tabOf(x) !== name);
+        renderAll();
+        localToast(`Tab "${name}" cleared`);
+    } else localToast("Clear failed - server unreachable");
     return ok;
 }
 
@@ -415,7 +615,9 @@ function panelClearAll(btn) {
     if (now - clearArmTs > CLEAR_ARM_MS) {
         clearArmTs = now;
         try { btn.classList.add("hub-stack-clear-armed"); } catch (_) {}
-        localToast("Click 🗑 again to clear the WHOLE stack");
+        localToast(activeTab
+            ? `Click 🗑 again to clear the TAB "${activeTab}" (other tabs stay)`
+            : "Click 🗑 again to clear the WHOLE stack");
         setTimeout(() => {
             try { btn.classList.remove("hub-stack-clear-armed"); } catch (_) {}
         }, CLEAR_ARM_MS);
@@ -423,7 +625,7 @@ function panelClearAll(btn) {
     }
     clearArmTs = 0;
     try { btn.classList.remove("hub-stack-clear-armed"); } catch (_) {}
-    void stackClearAllFlow();
+    void (activeTab ? stackClearTabFlow(activeTab) : stackClearAllFlow());
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +663,7 @@ function apiReady() {
 //                                            web build - half-updated install
 // ---------------------------------------------------------------------------
 
-const BUILD = globalThis.__SettingsHubBuild || "v78";
+const BUILD = globalThis.__SettingsHubBuild || "v79";
 
 // v78: the GREEN verdicts (legacy/mismatch - storage actually WORKS) are
 // status info, not failures, and the owner found the permanent green block
@@ -546,10 +748,11 @@ async function apiGet() {
     } catch (_) { return null; }
 }
 
-async function apiAddText(text, name) {
+async function apiAddText(text, name, tab) {
     try {
         const body = { text };
         if (name) body.name = String(name);
+        if (tab) body.tab = String(tab);
         const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/item"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -560,10 +763,11 @@ async function apiAddText(text, name) {
     } catch (_) { return { ok: false }; }
 }
 
-async function apiAddImage(blob, ext, name) {
+async function apiAddImage(blob, ext, name, tab) {
     try {
         const q = new URLSearchParams({ ext });
         if (name) q.set("name", String(name));
+        if (tab) q.set("tab", String(tab));
         const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/image?" + q.toString()), {
             method: "POST",
             headers: { "Content-Type": "application/octet-stream" },
@@ -574,9 +778,10 @@ async function apiAddImage(blob, ext, name) {
     } catch (_) { return { ok: false }; }
 }
 
-async function apiAddFile(blob, ext, name) {
+async function apiAddFile(blob, ext, name, tab) {
     try {
         const q = new URLSearchParams({ ext, name: name || "" });
+        if (tab) q.set("tab", String(tab));
         const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/file?" + q.toString()), {
             method: "POST",
             headers: { "Content-Type": "application/octet-stream" },
@@ -595,13 +800,17 @@ async function apiDelete(id) {
     } catch (_) { return false; }
 }
 
-async function apiClear() {
+async function apiClear(tabName) {
     if (!apiReady()) return false;
     try {
         // v77: in per-workflow mode this clears ONLY the active workflow's
         // store (?wf= is appended by scopeUrl) - the shared stack and the
-        // other workflows keep their entries.
-        const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/clear"), { method: "POST" });
+        // other workflows keep their entries. v79: with a tab name ONLY that
+        // tab's entries are wiped (?tab=) - the other tabs stay.
+        const path = tabName
+            ? "/settings_hub/stack/clear?tab=" + encodeURIComponent(tabName)
+            : "/settings_hub/stack/clear";
+        const r = await app.api.fetchApi(scopeUrl(path), { method: "POST" });
         return !!(r && r.ok);
     } catch (_) { return false; }
 }
@@ -624,7 +833,11 @@ async function apiPatch(id, patch) {
 
 function applyPatched(item) {
     if (!item || !item.id) return;
-    stackItems = stackItems.map((x) => (x.id === item.id ? { ...x, ...item } : x));
+    // v79: REPLACE the entry with the server truth instead of merging it over
+    // the old one - the server DELETES cleared fields (name/tags/tab), and a
+    // spread-merge kept the stale value (a cleared tab resurrected on the
+    // client while the server had already dropped it).
+    stackItems = stackItems.map((x) => (x.id === item.id ? { ...item } : x));
     renderAll();
 }
 
@@ -722,7 +935,10 @@ async function addText(text, name) {
     const t = String(text ?? "");
     if (!t.trim()) return false;
     if (t.length > MAX_TEXT_CHARS) { localToast("Text too large (1M char limit)"); return false; }
-    applyServerAdd(await apiAddText(t, name), localTextItem(t, name));
+    // v79: a capture lands in the OPEN tab ("" on All = ungrouped)
+    const fallback = localTextItem(t, name);
+    if (activeTab) fallback.tab = activeTab;
+    applyServerAdd(await apiAddText(t, name, activeTab), fallback);
     if (serverOk === false) localToast("Stack not persisted - restart ComfyUI to enable storage");
     return true;
 }
@@ -734,7 +950,8 @@ async function addImageBlob(blob, name) {
     if (!IMG_EXT_OK.has(ext)) ext = blob.type === "image/jpeg" ? "jpg" : "png";
     const url = URL.createObjectURL(blob);
     const fallback = localImageItem(url, ext, name);
-    const res = await apiAddImage(blob, ext, name);
+    if (activeTab) fallback.tab = activeTab; // v79: capture into the open tab
+    const res = await apiAddImage(blob, ext, name, activeTab);
     applyServerAdd(res, fallback);
     if (!res || !res.ok) localBlobs.set(fallback.id, blob); // session mode keeps the payload
     if (serverOk === false) localToast("Stack not persisted - restart ComfyUI to enable storage");
@@ -751,7 +968,8 @@ async function addFileBlob(blob, name, forcedKind) {
     }
     const url = URL.createObjectURL(blob);
     const fallback = localFileItem(url, kind, ext, name);
-    const res = await apiAddFile(blob, ext, name);
+    if (activeTab) fallback.tab = activeTab; // v79: capture into the open tab
+    const res = await apiAddFile(blob, ext, name, activeTab);
     applyServerAdd(res, fallback);
     if (!res || !res.ok) localBlobs.set(fallback.id, blob); // session mode keeps the payload
     if (serverOk === false) localToast("Stack not persisted - restart ComfyUI to enable storage");
@@ -986,11 +1204,12 @@ function cardHtml(item) {
         acts = `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
             `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + acts;
     } else if (item.id === editId) {
-        // v72: inline snippet editor (rename + tags)
+        // v72: inline snippet editor (rename + tags); v79 adds the tab field
         return `<div class="hub-stack-card hub-stack-card-edit" data-id="${esc(item.id)}" data-type="${item.type}">` +
             `<div class="hub-stack-edit">` +
             `<input class="hub-stack-edit-name" data-hub-focus value="${esc(item.name || "")}" placeholder="Name (optional)">` +
             `<input class="hub-stack-edit-tags" data-hub-focus value="${esc((item.tags || []).join(", "))}" placeholder="tags, comma separated">` +
+            `<input class="hub-stack-edit-tab" data-hub-focus value="${esc(item.tab || "")}" placeholder="tab (empty = All)" list="hub-stack-tab-list">` +
             `<div class="hub-stack-edit-btns">` +
             `<button type="button" class="hub-stack-act" data-act="edit-save" title="Save">✓</button>` +
             `<button type="button" class="hub-stack-act" data-act="edit-cancel" title="Cancel">✕</button>` +
@@ -998,7 +1217,8 @@ function cardHtml(item) {
     } else {
         preview = `<div class="hub-stack-text">${esc(excerptOf(item))}</div>`;
         meta = `${(item.text != null ? item.text.length : item.size || 0).toLocaleString()} chars`;
-        acts = `<button type="button" class="hub-stack-act" data-act="ins" title="Insert into the last focused hub text field">→📝</button>` + acts;
+        acts = `<button type="button" class="hub-stack-act" data-act="view" title="Full text view - long prompts start alike, this shows EVERYTHING">🔍</button>` +
+            `<button type="button" class="hub-stack-act" data-act="ins" title="Insert into the last focused hub text field">→📝</button>` + acts;
     }
     const mainTitle = item.type === "text" || item.type === "image"
         ? "Click: copy back to clipboard"
@@ -1045,9 +1265,15 @@ function renderList() {
             : `<div class="hub-stack-empty">Stack is empty - copy something,<br>then click the paste area (or Ctrl+V over the panel),<br>or drop a file here.</div>`;
         return;
     }
-    const visible = stackItems.filter(passesFilter);
+    // v79: the tab view filters FIRST (All shows everything), then the
+    // search / kind / tag filters run INSIDE the view.
+    const visible = stackItems.filter((it) => inView(it) && passesFilter(it));
     if (!visible.length) {
-        listEl.innerHTML = `<div class="hub-stack-empty">No entries match the filter.<br>Clear the search / tag / kind filter above.</div>`;
+        if (activeTab && !stackItems.some((it) => tabOf(it) === activeTab)) {
+            listEl.innerHTML = `<div class="hub-stack-empty">Tab "${esc(activeTab)}" is empty.<br>Copy something - it lands in this tab<br>(Ctrl+V over the panel or the paste area).</div>`;
+        } else {
+            listEl.innerHTML = `<div class="hub-stack-empty">No entries match the filter.<br>Clear the search / tag / kind filter above.</div>`;
+        }
         return;
     }
     listEl.innerHTML = visible.map(cardHtml).join("");
@@ -1072,9 +1298,11 @@ function renderToolbar() {
 }
 
 function renderBadge() {
-    const n = String(stackItems.length);
+    // v79: the header badge counts the ACTIVE view (what you see), the chip
+    // counts the whole store (what exists).
+    const n = String(stackItems.filter(inView).length);
     if (headEl) headEl.querySelector(".hub-stack-count").textContent = n;
-    if (chip) chip.querySelector(".hub-stack-chip-count").textContent = n;
+    if (chip) chip.querySelector(".hub-stack-chip-count").textContent = String(stackItems.length);
 }
 
 /** v77: the header scope badge - visible only in per-workflow mode, so the
@@ -1169,12 +1397,41 @@ function renderNote() {
     noteEl.append(head, why, retry, x);
 }
 
+/** v79: the tab bar - [All (total)] [Task A (n)] ... [+]. A tab chip opens
+ *  the view (click), renames (double-click) or removes (its small ✕, armed
+ *  like 🗑 - removal never deletes entries, they fall back to All). */
+function renderTabs() {
+    if (!tabEl) return;
+    const tabs = knownTabs();
+    if (activeTab && !tabs.includes(activeTab)) activeTab = ""; // stale view
+    let html = `<button type="button" class="hub-stack-tab${activeTab === "" ? " hub-stack-tab-on" : ""} hub-stack-tab-all" data-tab="" title="Every entry - grouped and ungrouped (the pre-v79 view)">All <span class="hub-stack-tab-n">${stackItems.length}</span></button>`;
+    for (const t of tabs) {
+        const armed = tabArm === t;
+        const n = stackItems.filter((x) => tabOf(x) === t).length;
+        html += `<button type="button" class="hub-stack-tab${activeTab === t ? " hub-stack-tab-on" : ""}${armed ? " hub-stack-tab-arm" : ""}" data-tab="${esc(t)}" title="${armed ? "Click \u2715 again to remove this tab (entries stay in All)" : esc(t) + " - click to open, double-click to rename"}">` +
+            `<span class="hub-stack-tab-name">${esc(t)}</span><span class="hub-stack-tab-n">${n}</span>` +
+            `<span class="hub-stack-tab-x" title="Remove the tab (entries stay in All)\">\u2715</span></button>`;
+    }
+    if (tabEdit) {
+        html += `<input type="text" class="hub-stack-tab-input" data-hub-focus spellcheck="false" value="${esc(tabEdit.mode === "rename" ? tabEdit.name : "")}" placeholder="${tabEdit.mode === "rename" ? "Rename tab (Enter = save, Esc = cancel)" : "New tab name (Enter = create, Esc = cancel)"}">`;
+    } else {
+        html += `<button type="button" class="hub-stack-tab-add" title="New tab - captures land in the OPEN tab">\uff0b</button>`;
+    }
+    tabEl.innerHTML = html;
+}
+
 function renderAll() {
     renderList();
     renderBadge();
     renderNote();
     renderToolbar();
     renderScope();
+    renderTabs();
+    // v79: the 🗑 tooltip follows the active view (tab vs whole stack)
+    const cb = panel?.querySelector(".hub-stack-clear");
+    if (cb) cb.title = activeTab
+        ? `Clear the TAB "${activeTab}" (click twice to confirm; other tabs stay)`
+        : "Clear ALL entries (click twice to confirm)";
     syncWorkflowEmbed();
 }
 
@@ -1208,6 +1465,7 @@ function syncWorkflowEmbed() {
             const e = { t: "text", text: it.text };
             if (it.name) e.name = String(it.name).slice(0, 120);
             if (Array.isArray(it.tags) && it.tags.length) e.tags = it.tags.slice(0, 8);
+            if (it.tab) e.tab = String(it.tab).slice(0, MAX_TAB_CHARS); // v79: the grouping travels too
             if (it.pinned) e.pinned = true;
             out.push(e);
             budget -= it.text.length;
@@ -1227,7 +1485,7 @@ async function rehydrateWorkflowTexts() {
         let n = 0;
         for (const e of arr.slice(0, WF_EMBED_MAX)) {
             if (!e || e.t !== "text" || typeof e.text !== "string" || !e.text.trim()) continue;
-            const res = await apiAddText(e.text, e.name);
+            const res = await apiAddText(e.text, e.name, typeof e.tab === "string" ? e.tab : ""); // v79: tab restores too
             if (res?.ok) {
                 n++;
                 if (Array.isArray(e.tags) && e.tags.length) {
@@ -1426,12 +1684,19 @@ function setDragTarget(target) {
     if (prev?.kind === "text" && prev.el) {
         try { prev.el.classList.remove("hub-stack-drop-hot-text"); } catch (_) {}
     }
+    if (prev?.kind === "tab" && prev.el) {
+        try { prev.el.classList.remove("hub-stack-tab-hot"); } catch (_) {}
+    }
     dragCtx.target = target || null;
     if (target?.kind === "mirror" && target.el) {
         try { target.el.classList.add("hub-stack-drop-hot"); } catch (_) {}
         hideTargetBox();
     } else if (target?.kind === "text" && target.el) {
         try { target.el.classList.add("hub-stack-drop-hot-text"); } catch (_) {}
+        hideTargetBox();
+    } else if (target?.kind === "tab" && target.el) {
+        // v79: the card hovers a tab chip - it will MOVE into that group
+        try { target.el.classList.add("hub-stack-tab-hot"); } catch (_) {}
         hideTargetBox();
     } else if (target?.kind === "node") {
         showTargetBox(target.node, target.wkind);
@@ -1456,6 +1721,9 @@ function endDragSession(keepClickBlock) {
     }
     if (prev?.kind === "text" && prev.el) {
         try { prev.el.classList.remove("hub-stack-drop-hot-text"); } catch (_) {}
+    }
+    if (prev?.kind === "tab" && prev.el) {
+        try { prev.el.classList.remove("hub-stack-tab-hot"); } catch (_) {}
     }
     try { dragCtx?.ghost?.remove(); } catch (_) {}
     hideTargetBox();
@@ -1497,11 +1765,16 @@ function onCardDragMove(e) {
     const el = elemFromPoint(e.clientX, e.clientY);
     const t = dragCtx.item.type;
     let target = null;
-    if (t === "text") {
+    // v79: a tab chip UNDER THE CARD wins over every other target - dropping
+    // here MOVES the entry into that group (the "All" chip ungroups). Checked
+    // first so the graph/mirror logic never eats the drop.
+    const tabChip = el?.closest?.(".hub-stack-tab[data-tab]");
+    if (tabChip) target = { kind: "tab", el: tabChip, tab: tabChip.dataset.tab || "" };
+    if (!target && t === "text") {
         // v72: text cards land on hub text mirrors ...
         const textEl = el?.closest?.(".hub-text-input, .hub-text-area");
         if (textEl) target = { kind: "text", el: textEl };
-    } else {
+    } else if (!target) {
         // ... media cards land on hub media mirrors
         const mirror = el?.closest?.(".hub-mirror-media");
         if (mirror) target = { kind: "mirror", el: mirror };
@@ -1538,13 +1811,20 @@ function onCardDragUp(e) {
     if (ctx.target?.kind === "text" && ctx.target.el) {
         try { ctx.target.el.classList.remove("hub-stack-drop-hot-text"); } catch (_) {}
     }
+    if (ctx.target?.kind === "tab" && ctx.target.el) {
+        try { ctx.target.el.classList.remove("hub-stack-tab-hot"); } catch (_) {}
+    }
     try { ctx.ghost?.remove(); } catch (_) {}
     hideTargetBox();
     if (!ctx.started) { dragCtx = null; return; }
     justDragged = true;
     setTimeout(() => { justDragged = false; }, 80);
     const t = ctx.target;
-    if (t?.kind === "node") {
+    if (t?.kind === "tab") {
+        // v79: the card was dropped on a tab chip - MOVE it into that group
+        void moveToTab(ctx.item, t.tab);
+    }
+    else if (t?.kind === "node") {
         // v74: the target carries the widget picked during the drag
         if (t.wkind === "text") dropOnTextNode(ctx, t.node, t.widget);
         else dropOnLoaderNode(ctx, t.node, t.widget);
@@ -1682,18 +1962,21 @@ async function togglePin(item) {
 async function saveEdit(card, item) {
     const nameInput = card.querySelector(".hub-stack-edit-name");
     const tagsInput = card.querySelector(".hub-stack-edit-tags");
+    const tabInput = card.querySelector(".hub-stack-edit-tab");
     const name = nameInput ? nameInput.value.trim() : "";
     const tags = tagsInput
         ? tagsInput.value.split(",").map((t) => t.trim()).filter(Boolean).slice(0, 8)
         : [];
+    const tab = tabInput ? cleanTabName(tabInput.value) : "";
     editId = null;
     if (item.local) {
         item.name = name || undefined;
         item.tags = tags.length ? tags : undefined;
+        if (tab) item.tab = tab; else delete item.tab;
         renderAll();
         return;
     }
-    const it = await apiPatch(item.id, { name, tags });
+    const it = await apiPatch(item.id, { name, tags, tab });
     if (it) applyPatched(it);
     else localToast("Save failed - server unreachable");
 }
@@ -1739,14 +2022,76 @@ async function dropOnTextMirror(ctx, el) {
 }
 
 // ---------------------------------------------------------------------------
+// v79: full-text viewer - a transient overlay with the COMPLETE text of a
+// text entry (owner report: long prompts share their first 260 chars and the
+// cards look like duplicates; the 🔍 button on a text card opens the whole
+// content). Copy / insert act on the full text; Esc / ✕ / backdrop close it.
+// ---------------------------------------------------------------------------
+
+function onViewerKey(e) {
+    if (e.key === "Escape" && viewerEl) {
+        e.preventDefault();
+        e.stopPropagation();
+        closeViewer();
+    }
+}
+
+function closeViewer() {
+    try { viewerEl?.remove(); } catch (_) {}
+    viewerEl = null;
+    try { window.removeEventListener("keydown", onViewerKey, true); } catch (_) {}
+}
+
+async function openViewer(item) {
+    if (!item) return null;
+    const seq = ++viewerSeq;
+    closeViewer();
+    const text = await itemText(item);
+    if (seq !== viewerSeq) return null; // a newer open superseded this one
+    const v = document.createElement("div");
+    v.className = "hub-stack-viewer";
+    v.innerHTML =
+        `<div class="hub-stack-viewer-card">` +
+        `<div class="hub-stack-viewer-head">` +
+        `<span class="hub-stack-viewer-ico">📄</span>` +
+        `<span class="hub-stack-viewer-title" title="${esc(item.name || "")}">${esc(item.name || "Text entry")}</span>` +
+        `<span class="hub-stack-viewer-n">${text.length.toLocaleString()} chars${item.tab ? " · " + esc(item.tab) : ""}</span>` +
+        `<button type="button" class="hub-btn hub-stack-viewer-copy" title="Copy the FULL text to the clipboard">📋 copy</button>` +
+        `<button type="button" class="hub-btn hub-stack-viewer-ins" title="Insert into the last focused hub text field">→📝</button>` +
+        `<button type="button" class="hub-btn hub-stack-viewer-x" title="Close (Esc)">✕</button>` +
+        `</div>` +
+        `<div class="hub-stack-viewer-body"></div>` +
+        `</div>`;
+    v.querySelector(".hub-stack-viewer-body").textContent = text; // textContent - never HTML
+    document.body.appendChild(v);
+    viewerEl = v;
+    v.addEventListener("mousedown", (e) => { if (e.target === v) closeViewer(); });
+    v.querySelector(".hub-stack-viewer-x").addEventListener("click", closeViewer);
+    v.querySelector(".hub-stack-viewer-copy").addEventListener("click", async () => {
+        try {
+            if (!navigator.clipboard?.writeText) { localToast("Clipboard write unavailable"); return; }
+            await navigator.clipboard.writeText(text);
+            localToast("Copied - Ctrl+V where you need it");
+            bumpUses(item);
+        } catch (_) { localToast("Copy failed"); }
+    });
+    v.querySelector(".hub-stack-viewer-ins").addEventListener("click", () => insertIntoLastFocused(item));
+    window.addEventListener("keydown", onViewerKey, true);
+    return v;
+}
+
+// ---------------------------------------------------------------------------
 // Mount / teardown
 // ---------------------------------------------------------------------------
 
 function teardown() {
+    closeViewer(); // v79: the full-text overlay must not outlive the panel
     try { panel?.remove(); } catch (_) {}
     try { chip?.remove(); } catch (_) {}
-    panel = chip = headEl = listEl = pasteEl = noteEl = grip = toolsEl = null;
+    panel = chip = headEl = listEl = pasteEl = noteEl = grip = toolsEl = tabEl = null;
     editId = null;
+    tabEdit = null;
+    tabArm = null;
     mounted = false;
     try { window.removeEventListener("paste", onPasteEvent, true); } catch (_) {}
 }
@@ -1766,6 +2111,7 @@ function buildDom() {
         // ⚙ Hub settings → Stack → Off (setStackOn(false) from the renderer).
         `</div>` +
         `<div class="hub-stack-note" style="display:none"></div>` +
+        `<div class="hub-stack-tabs"></div>` +
         `<div class="hub-stack-tools">` +
         `<input type="text" class="hub-stack-search" spellcheck="false" placeholder="🔍 search" title="Search name, content and tags">` +
         `<button type="button" class="hub-stack-kind" data-kind="all" title="Every kind">All</button>` +
@@ -1793,7 +2139,10 @@ function buildDom() {
     pasteEl = panel.querySelector(".hub-stack-paste");
     grip = panel.querySelector(".hub-stack-grip");
     toolsEl = panel.querySelector(".hub-stack-tools");
+    tabEl = panel.querySelector(".hub-stack-tabs");
     loadFilter();
+    // v79: restore the per-scope active view ("" = All)
+    activeTab = tabsBranch().active;
 
     // saved geometry
     const ui = lsUi();
@@ -1807,6 +2156,64 @@ function buildDom() {
     panel.querySelector(".hub-stack-min").addEventListener("click", () => setMinimized(true));
     // v75: the hide/close wiring is intentionally absent - see buildDom().
     chip.addEventListener("click", () => setMinimized(false));
+
+    // v79: tab bar wiring - open (click), rename (double-click), remove (the
+    // chip's ✕, armed like 🗑), create (the [＋] input).
+    tabEl.addEventListener("click", (e) => {
+        if (justDragged) return; // the click that trails a card-drop on a chip
+        if (e.target.closest?.(".hub-stack-tab-add")) {
+            tabEdit = { mode: "create" };
+            renderTabs();
+            try { tabEl.querySelector(".hub-stack-tab-input")?.focus(); } catch (_) {}
+            return;
+        }
+        const del = e.target.closest?.(".hub-stack-tab-x");
+        if (del) {
+            const chipEl = del.closest?.(".hub-stack-tab[data-tab]");
+            const name = chipEl?.dataset.tab || "";
+            if (!name) return; // "All" cannot be removed
+            const now = Date.now();
+            if (tabArm === name && now - tabArmTs <= TAB_ARM_MS) {
+                void deleteTab(name);
+                return;
+            }
+            tabArm = name;
+            tabArmTs = now;
+            renderTabs();
+            localToast(`Click ✕ again to remove the tab "${name}" (entries stay in All)`);
+            setTimeout(() => { if (tabArm === name) { tabArm = null; renderTabs(); } }, TAB_ARM_MS);
+            return;
+        }
+        if (tabEdit) return; // finish the input first
+        const chipEl = e.target.closest?.(".hub-stack-tab[data-tab]");
+        if (chipEl) setActiveTab(chipEl.dataset.tab);
+    });
+    tabEl.addEventListener("dblclick", (e) => {
+        const chipEl = e.target.closest?.(".hub-stack-tab[data-tab]");
+        if (!chipEl || !chipEl.dataset.tab) return; // "All" is not renamable
+        tabEdit = { mode: "rename", name: chipEl.dataset.tab };
+        renderTabs();
+        try {
+            const inp = tabEl.querySelector(".hub-stack-tab-input");
+            if (inp) { inp.focus(); inp.select(); }
+        } catch (_) {}
+    });
+    tabEl.addEventListener("keydown", (e) => {
+        const inp = e.target.closest?.(".hub-stack-tab-input");
+        if (!inp) return;
+        if (e.key === "Enter") {
+            e.preventDefault();
+            e.stopPropagation();
+            const v = inp.value;
+            if (tabEdit?.mode === "rename") void renameTab(tabEdit.name, v);
+            else createTab(v);
+        } else if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            tabEdit = null;
+            renderTabs();
+        }
+    });
 
     // v76: retry button inside the degraded note - re-probe + re-sync without
     // a page reload (fixing the server side, e.g. reinstalling the pack, takes
@@ -1890,7 +2297,7 @@ function buildDom() {
     listEl.addEventListener("mousedown", onCardMouseDown);
     // v74: the inline editor commits on Enter and cancels on Escape
     listEl.addEventListener("keydown", (e) => {
-        const inEditor = e.target?.closest?.(".hub-stack-edit-name, .hub-stack-edit-tags");
+        const inEditor = e.target?.closest?.(".hub-stack-edit-name, .hub-stack-edit-tags, .hub-stack-edit-tab");
         if (!inEditor) return;
         if (e.key === "Enter") {
             e.preventDefault();
@@ -1932,6 +2339,7 @@ function buildDom() {
             if (a === "send") sendToMediaRow(item);
             else if (a === "ins") insertIntoLastFocused(item);
             else if (a === "pin") togglePin(item);
+            else if (a === "view") openViewer(item); // v79: full text view
             else if (a === "edit") { editId = item.id; renderAll(); }
             else if (a === "edit-cancel") { editId = null; renderAll(); }
             else if (a === "edit-save") saveEdit(card, item);
@@ -2145,6 +2553,16 @@ export function __stackTestHooks() {
         items: () => stackItems.slice(),
         serverOk: () => serverOk,
         resetNoteSession: () => { shownGreen.clear(); greenDismissed = null; quietNoteLogged = false; }, // v78: simulate a fresh page load
+        // v79: tab + viewer introspection for the smoke tests
+        activeTab: () => activeTab,
+        knownTabs,
+        moveToTab,
+        createTab,
+        renameTab,
+        deleteTab,
+        viewerEl: () => viewerEl,
+        openViewer,
+        closeViewer,
         panelEl: () => panel,
         chipEl: () => chip,
         listEl: () => listEl,

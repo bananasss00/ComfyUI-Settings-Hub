@@ -6,7 +6,7 @@ import * as Pins from "./pins.js";
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["core"] = true;
-if (globalThis.__SettingsHubBuild !== "v78") {
+if (globalThis.__SettingsHubBuild !== "v79") {
     console.error("[SettingsHub] STALE BUILD: core.js (v77) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
 }
