@@ -1,17 +1,20 @@
 // ============================================================================
-// SettingsHub - Image Compare (v73): A/B comparison of workflow images
+// SettingsHub - Image Compare (v83): A/B comparison of workflow images
 // ----------------------------------------------------------------------------
-// v73 BUILD GUARD (must be the FIRST executable statement, before any work):
-// the loader entry stamps globalThis.__SettingsHubBuild before importing the
-// submodules; this module refuses to stay silent if it was loaded as part of
-// a MIXED build. See settings_hub.js for the field history.
-// ============================================================================
-
-// ============================================================================
-// The single feature taken from Nougan_Nodes (owner decision 2026-11-08,
-// docs/plan-paste-stack.md §3.1): A/B-compare two images of the workflow in
-// a floating panel.
+// v83 FIELD FIX (owner report 2026-11-09: "added two stack images to the
+// compare - only the A/B labels show, the images NEVER display"): since v73
+// the visibility toggle was `style.display = ""` - an empty string only
+// REMOVES the inline override and hands the element back to the stylesheet,
+// whose defaults are `display: none` (.hub-cmp-slot, .hub-cmp-canvas,
+// .hub-cmp-divider). In a real browser the slots / wipe divider / diff
+// canvas were therefore INVISIBLE FOREVER (the jsdom tests only asserted
+// `!== "none"`, which an empty string satisfies - the bug passed CI). All
+// visibility toggles now set EXPLICIT "block" / "none". Bonus: a natural-
+// size caption ("A 832x1216 · B 1024x1024") for different-resolution pairs.
 //
+// v73 BASE (the single feature taken from Nougan_Nodes, owner decision
+// 2026-11-08, docs/plan-paste-stack.md §3.1): A/B comparison of workflow
+// images in a floating panel.
 //   * Sources: a hub MEDIA ROW preview, a gallery thumbnail or a Paste Stack
 //     image card - right-click one and pick "Add to Compare". The first add
 //     fills slot A, the second slot B, further adds SHIFT (A<-B, B<-new).
@@ -25,10 +28,10 @@
 //     (settingshub.compare.ui). The panel is built lazily on the first add.
 // ============================================================================
 
-// v73 BUILD GUARD (see settings_hub.js): every submodule self-reports under
-// __SettingsHubLoaded so the entry can NAME stale cached files.
+// v83 self-report (single-source version, docs/plan-versions.md): the
+// last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["compare"] = "v73";
+globalThis.__SettingsHubLoaded["compare"] = "v83";
 
 const LS_UI = "settingshub.compare.ui";
 const Z_PANEL = "99900";
@@ -72,7 +75,7 @@ function localToast(msg, ms = 2600) {
 let panel = null, stageEl = null, slotAEl = null, slotBEl = null;
 let imgA = null, imgB = null, canvasEl = null, dividerEl = null;
 let modeSel = null, gainWrap = null, gainInput = null, fadeWrap = null, fadeInput = null;
-let labelA = null, labelB = null;
+let labelA = null, labelB = null, sizesEl = null;
 let headEl = null, grip = null, toolsHint = null;
 
 const slots = {
@@ -194,6 +197,7 @@ function ensurePanel() {
         `<span class="hub-cmp-slotlabel" data-slot="B"><b>B</b> <span class="hub-cmp-lbltext">-</span>` +
         `<button type="button" class="hub-btn hub-cmp-clear" data-clear="B" title="Clear slot B">✕</button></span>` +
         `</div>` +
+        `<div class="hub-cmp-sizes"></div>` +
         `<div class="hub-cmp-tools">` +
         `<select class="hub-cmp-mode" title="Comparison mode">` +
         MODES.map((m) => `<option value="${m[0]}">${m[1]}</option>`).join("") +
@@ -222,6 +226,7 @@ function ensurePanel() {
     fadeInput = panel.querySelector(".hub-cmp-fade");
     labelA = panel.querySelector('[data-slot="A"] .hub-cmp-lbltext');
     labelB = panel.querySelector('[data-slot="B"] .hub-cmp-lbltext');
+    sizesEl = panel.querySelector(".hub-cmp-sizes");
     toolsHint = panel.querySelector(".hub-cmp-hint");
     grip = panel.querySelector(".hub-cmp-grip");
 
@@ -260,6 +265,11 @@ function ensurePanel() {
 
     modeSel.value = mode;
     modeSel.addEventListener("change", () => setMode(modeSel.value));
+    // v83: natural sizes arrive asynchronously in a real browser
+    imgA.addEventListener("load", updateSizes);
+    imgB.addEventListener("load", updateSizes);
+    imgA.addEventListener("error", updateSizes);
+    imgB.addEventListener("error", updateSizes);
     gainInput.value = String(gain);
     gainInput.addEventListener("input", () => {
         gain = Math.min(10, Math.max(1, parseInt(gainInput.value, 10) || 3));
@@ -361,21 +371,52 @@ function setMode(m) {
     if (m === "diff") computeDiff();
 }
 
+/**
+ * v83: the ONLY correct way to toggle visibility of elements whose
+ * stylesheet default is `display: none` - an inline "" restores NOTHING.
+ * Everything in the compare stage (slots, canvas, divider) is hidden by
+ * CSS by default, so every toggle MUST be an explicit "block"/"none".
+ */
+function setDisp(el, on) {
+    if (el) el.style.display = on ? "block" : "none";
+}
+
+/** Assign a src without ever pointing an <img> at the page itself (an
+ *  empty string as src re-requests the current URL in some browsers). */
+function setImgSrc(im, src) {
+    if (!im) return;
+    if (src) im.src = src;
+    else im.removeAttribute("src");
+}
+
+/** v83: natural-size caption under the stage - with different-resolution
+ *  pairs the owner wants to see WHAT he is comparing (jsdom never fires
+ *  load, so the sizes just stay "loading..." there - harmless). */
+function updateSizes() {
+    if (!sizesEl) return;
+    const d = (im) => (im && im.naturalWidth ? im.naturalWidth + "×" + im.naturalHeight : "loading…");
+    const parts = [];
+    if (slots.A.src) parts.push("A " + d(imgA));
+    if (slots.B.src) parts.push("B " + d(imgB));
+    sizesEl.textContent = parts.join(" · ");
+}
+
 function applyModeStyles() {
     if (!panel) return;
     panel.dataset.mode = mode;
     const hasB = !!slots.B.src;
     const hasA = !!slots.A.src;
-    // layering
-    imgA.src = slots.A.src || "";
-    imgB.src = hasB ? slots.B.src : "";
-    slotAEl.style.display = hasA ? "" : "none";
-    slotBEl.style.display = hasB ? "" : "none";
-    canvasEl.style.display = mode === "diff" ? "" : "none";
-    dividerEl.style.display = (mode === "wipe" && hasA && hasB) ? "" : "none";
+    // layering (v83: explicit display - see setDisp)
+    setImgSrc(imgA, slots.A.src);
+    setImgSrc(imgB, hasB ? slots.B.src : "");
+    setDisp(slotAEl, hasA);
+    setDisp(slotBEl, hasB);
+    setDisp(canvasEl, mode === "diff");
+    setDisp(dividerEl, mode === "wipe" && hasA && hasB);
     gainWrap.style.display = mode === "diff" ? "" : "none";
     fadeWrap.style.display = mode === "fade" ? "" : "none";
     stageEl.classList.toggle("hub-cmp-blinkable", mode === "blink" && hasA && hasB);
+    updateSizes();
     // per-mode layer styles
     if (mode === "wipe") {
         slotBEl.style.clipPath = `inset(0 0 0 ${split}%)`;
@@ -396,7 +437,7 @@ function applyModeStyles() {
         toolsHint.textContent = "Click the stage to blink A↔B";
     }
     if (mode === "diff") {
-        toolsHint.textContent = "Pixel difference × gain";
+        toolsHint.textContent = "Pixel difference × gain (B is scaled to A's frame)";
     }
 }
 
@@ -420,7 +461,10 @@ function computeDiff() {
     try {
         if (!canvasEl || !slots.A.src || !slots.B.src) return;
         const ctx = canvasEl.getContext?.("2d");
-        if (!ctx) { toolsHint.textContent = "Canvas unavailable in this browser - diff is disabled"; return; }
+        // v83: a null canvas is a DEGRADED browser - the status goes to the
+        // sizes caption, the tools hint keeps its mode text (the v73 version
+        // clobbered the diff hint here).
+        if (!ctx) { if (sizesEl) sizesEl.textContent = "diff unavailable (no canvas in this browser)"; return; }
         const load = (src) => new Promise((res) => {
             const im = new Image();
             im.onload = () => res(im);
@@ -450,7 +494,7 @@ function computeDiff() {
             ctx.putImageData(out, 0, 0);
         }).catch(() => {});
     } catch (_) {
-        try { toolsHint.textContent = "Diff unavailable (canvas error)"; } catch (_) {}
+        try { if (sizesEl) sizesEl.textContent = "diff unavailable (canvas error)"; } catch (_) {}
     }
 }
 

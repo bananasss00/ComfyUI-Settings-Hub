@@ -3376,6 +3376,121 @@ button.hub-pin-back {
 }
 
 /* ===========================================================================
+   v83: LARGE MEDIA VIEWER - the 🔍 of image/video/audio/file stack cards.
+   The card stretches to most of the viewport; the stage keeps the media
+   centered and cropped (pan/zoom live in transforms on the img, never in
+   layout). The viewer body has NO padding for media kinds - the stage owns
+   every pixel.
+   ======================================================================== */
+
+.hub-stack-viewer-card.hub-stack-viewer-card-media {
+    width: min(1200px, 94vw);
+    height: min(860px, 90vh);
+    max-height: 90vh;
+}
+
+.hub-stack-viewer-meta { font-size: 10px; color: #8fa0c0; white-space: nowrap; }
+
+.hub-stack-viewer-head .hub-stack-viewer-dl {
+    text-decoration: none;
+    color: #bcd3f2;
+    display: inline-block;
+    line-height: 1;
+    padding: 3px 8px;
+}
+
+.hub-stack-viewer-body.hub-stack-viewer-body-image,
+.hub-stack-viewer-body.hub-stack-viewer-body-video,
+.hub-stack-viewer-body.hub-stack-viewer-body-audio {
+    padding: 0;
+    overflow: hidden;
+    display: flex;
+}
+
+.hub-stack-viewer-stage {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background:
+        repeating-conic-gradient(#10102a 0% 25%, #16163a 0% 50%) 0 0 / 22px 22px,
+        #10102a; /* subtle checkerboard - transparency stays readable */
+    cursor: grab;
+}
+.hub-stack-viewer-stage.hub-stack-viewer-stage-audio { cursor: default; }
+.hub-stack-viewer-stage.hub-stack-viewer-panning { cursor: grabbing; }
+
+.hub-stack-viewer-img {
+    max-width: 100%;
+    max-height: 100%;
+    user-select: none;
+    -webkit-user-drag: none;
+    will-change: transform;
+    transform-origin: center center;
+    filter: drop-shadow(0 6px 22px rgba(0, 0, 0, 0.55));
+}
+
+.hub-stack-viewer-video {
+    max-width: 100%;
+    max-height: 100%;
+    background: #000;
+}
+
+.hub-stack-viewer-audio {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    font-size: 44px;
+}
+.hub-stack-viewer-audio-el { width: min(520px, 80vw); }
+
+.hub-stack-viewer-body.hub-stack-viewer-body-file {
+    display: flex;
+    flex-direction: column;
+}
+
+.hub-stack-viewer-pre {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 12px 14px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    color: #d5d9e8;
+    user-select: text;
+}
+
+.hub-stack-viewer-nopreview {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: #8fa0c0;
+    font-size: 13px;
+    text-align: center;
+}
+.hub-stack-viewer-noprev-ico { font-size: 42px; }
+.hub-stack-viewer-noprev-sub { font-size: 11px; color: #66668a; }
+
+.hub-stack-viewer-hint {
+    flex: 0 0 auto;
+    padding: 5px 10px;
+    border-top: 1px solid #2c2c50;
+    background: #12122a;
+    color: #66668a;
+    font-size: 10px;
+    text-align: center;
+    user-select: none;
+}
+
+/* ===========================================================================
    v80: Paste Stack MOVE MODE - the ⇅ toggle in the tools row turns every
    card into a reorder handle. The panel root carries .hub-stack-move-mode:
    cards get the grab cursor + the braille grip, the hovered landing card
@@ -3705,6 +3820,20 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border-top: 1px solid #2a2a3e;
     user-select: none;
 }
+
+/* v83: natural-size caption - "A 832x1216 · B 1024x1024" for (especially
+   different-resolution) pairs; hidden entirely while no slot has a source. */
+.hub-cmp-sizes {
+    display: none;
+    padding: 0 8px 4px 8px;
+    font-size: 9px;
+    color: #66668a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+}
+.hub-cmp-sizes:empty { display: none; }
 
 .hub-cmp-slotlabel { display: inline-flex; align-items: center; gap: 4px; max-width: 46%; }
 .hub-cmp-slotlabel b { color: #58c470; }

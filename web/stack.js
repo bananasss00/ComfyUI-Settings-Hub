@@ -1,13 +1,29 @@
 // ============================================================================
-// SettingsHub - Paste Stack (v80): standalone floating clipboard panel
+// SettingsHub - Paste Stack (v83): standalone floating clipboard panel
 // ----------------------------------------------------------------------------
-// v71-v77 BUILD GUARD (must be the FIRST executable statement, before any work):
-// the loader entry stamps globalThis.__SettingsHubBuild before importing the
-// submodules; this module refuses to stay silent if it was loaded as part of
-// a MIXED build. See settings_hub.js for the field history.
+// v83 (owner report 2026-11-09: "the text can be viewed - now images, video
+//   and files must be viewable too, the small thumb hides the details that
+//   matter"): MEDIA VIEWER - every image/video/audio/file card carries a 🔍
+//   button (the same data-act="view" the text cards got in v79) opening a
+//   LARGE overlay:
+//     * image - fit-to-screen plus WHEEL ZOOM (0.2x-8x around the cursor),
+//       DRAG PAN, double-click toggles 1:1 <-> fit; the meta line shows the
+//       natural dimensions once the browser decoded the file;
+//     * video - a big player (controls, muted autoplay) instead of the
+//       thumbnail-sized one;
+//     * audio - a big player block;
+//     * file - text-like extensions (txt/md/json/csv/log/xml/yml/yaml/ini/
+//       tsv) get an INLINE TEXT PREVIEW (session blob or server file route,
+//       capped at 300 KB with a truncation marker, 📋 copy works); binary
+//       files get a clear "no inline preview" note + ⤓ download.
+//   Esc / ✕ / backdrop click close; the v79 text viewer is unchanged and
+//   stays the 🔍 of text cards; teardown() removes the overlay with the
+//   panel (same viewerEl channel).
 // ============================================================================
+// v83 self-report (single-source version, docs/plan-versions.md): the
+// last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v80";
+globalThis.__SettingsHubLoaded["stack"] = "v83";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -218,6 +234,9 @@ const IMG_EXT_OK = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
 const VID_EXT_OK = new Set(["mp4", "webm", "mov", "mkv", "avi", "m4v", "ogv"]);
 const AUD_EXT_OK = new Set(["mp3", "wav", "ogg", "flac", "aac", "m4a", "opus"]);
 const TEXT_EXT_OK = new Set(["txt", "md", "json", "csv", "log", "xml", "yml", "yaml", "ini", "tsv"]);
+const MEDIA_TEXT_BYTES = 300 * 1024;    // v83: inline text preview cap for file entries
+const VIEWER_ZOOM_MIN = 0.2;            // v83: media viewer image zoom limits
+const VIEWER_ZOOM_MAX = 8;
 const Z_PANEL = "99900";               // under project popups (100000), over canvas
 const DRAG_THRESHOLD = 6;              // px before a card mousedown becomes a drag
 
@@ -1314,7 +1333,12 @@ function cardHtml(item) {
     const pinCls = item.pinned ? " hub-stack-card-pin" : "";
     let preview = "";
     let meta = "";
-    let acts = `<button type="button" class="hub-stack-act hub-stack-pin${item.pinned ? " hub-stack-pin-on" : ""}" data-act="pin" title="${item.pinned ? "Unpin (it will age out again)" : "Pin: survives max-eviction"}">📌</button>` +
+    // v83: every NON-TEXT kind carries 🔍 - the large viewer (the small
+    // thumbnails hide the details that matter, owner report). Same
+    // data-act="view" the text cards already use - the dispatcher routes it.
+    const viewAct = `<button type="button" class="hub-stack-act" data-act="view" title="Inspect large: full-size view (images: wheel zoom, drag pan, double-click 1:1)">🔍</button>`;
+    let acts = viewAct +
+        `<button type="button" class="hub-stack-act hub-stack-pin${item.pinned ? " hub-stack-pin-on" : ""}" data-act="pin" title="${item.pinned ? "Unpin (it will age out again)" : "Pin: survives max-eviction"}">📌</button>` +
         `<button type="button" class="hub-stack-act" data-act="edit" title="Rename / tags">✎</button>`;
     if (item.type === "image") {
         preview = `<img class="hub-stack-thumb" loading="lazy" alt="" src="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">`;
@@ -1322,18 +1346,21 @@ function cardHtml(item) {
     } else if (item.type === "video") {
         preview = `<video class="hub-stack-thumb hub-stack-media" src="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}" muted controls preload="metadata" playsinline></video>`;
         meta = `video${item.size ? " · " + fmtBytes(item.size) : ""}`;
-        acts = `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
+        acts = viewAct +
+            `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
             `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + acts;
     } else if (item.type === "audio") {
         preview = `<div class="hub-stack-audio">🎵<audio class="hub-stack-audio-el" src="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}" controls preload="metadata"></audio></div>`;
         meta = `audio${item.size ? " · " + fmtBytes(item.size) : ""}`;
-        acts = `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
+        acts = viewAct +
+            `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
             `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + acts;
     } else if (item.type === "file") {
         preview = `<div class="hub-stack-file"><span class="hub-stack-file-ico">📄</span>` +
             `<span class="hub-stack-file-name">${esc(name || item.file || "file")}</span></div>`;
         meta = `file${item.size ? " · " + fmtBytes(item.size) : ""}`;
-        acts = `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
+        acts = viewAct +
+            `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
             `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + acts;
     } else if (item.id === editId) {
         // v72: inline snippet editor (rename + tags); v79 adds the tab field
@@ -2222,6 +2249,8 @@ async function dropOnTextMirror(ctx, el) {
 // text entry (owner report: long prompts share their first 260 chars and the
 // cards look like duplicates; the 🔍 button on a text card opens the whole
 // content). Copy / insert act on the full text; Esc / ✕ / backdrop close it.
+// v83: openViewer became a DISPATCHER - text keeps this overlay unchanged,
+// every other kind opens the large MEDIA viewer below it.
 // ---------------------------------------------------------------------------
 
 function onViewerKey(e) {
@@ -2238,7 +2267,16 @@ function closeViewer() {
     try { window.removeEventListener("keydown", onViewerKey, true); } catch (_) {}
 }
 
-async function openViewer(item) {
+function openViewer(item) {
+    if (!item) return null;
+    if (item.type === "image") return openMediaViewer(item, "image");
+    if (item.type === "video") return openMediaViewer(item, "video");
+    if (item.type === "audio") return openMediaViewer(item, "audio");
+    if (item.type === "file") return openMediaViewer(item, "file");
+    return openTextViewer(item); // v79: the text overlay, unchanged
+}
+
+async function openTextViewer(item) {
     if (!item) return null;
     const seq = ++viewerSeq;
     closeViewer();
@@ -2272,6 +2310,187 @@ async function openViewer(item) {
         } catch (_) { localToast("Copy failed"); }
     });
     v.querySelector(".hub-stack-viewer-ins").addEventListener("click", () => insertIntoLastFocused(item));
+    window.addEventListener("keydown", onViewerKey, true);
+    return v;
+}
+
+// ---------------------------------------------------------------------------
+// v83: LARGE MEDIA VIEWER - the 🔍 of image/video/audio/file cards (owner:
+// "text can be viewed, the media kinds need it too - the small thumbnails
+// hide the details that matter"). One overlay, shaped by kind:
+//   image  - fit-to-screen stage + wheel zoom around the cursor (0.2..8x),
+//            drag pan, double-click toggles 1:1 <-> fit; the meta line
+//            gains "W×H" when the browser decodes the file;
+//   video  - big <video controls autoplay muted> (muted autoplay is the
+//            only kind browsers allow; the user un-mutes at will);
+//   audio  - big player block;
+//   file   - text-like extensions render the content INLINE (session blob
+//            first, then the server file route; capped at 300 KB with an
+//            explicit truncation marker; 📋 copies the shown text), binary
+//            files say so plainly and offer ⤓.
+// Esc / ✕ / backdrop close; teardown() removes the overlay with the panel.
+// ---------------------------------------------------------------------------
+
+/** v83: does this entry point at a text-like file the viewer can render? */
+function isTextFileItem(item) {
+    const n = String(item?.name || item?.file || "");
+    return !!n && TEXT_EXT_OK.has(extOf(n));
+}
+
+/** v83: the text shown for a file entry's inline preview - session blobs
+ *  (getBlob) win, the server file route (itemText) is the fallback. */
+async function viewerFileText(item) {
+    try {
+        const blob = await getBlob(item);
+        if (blob && blob.size) {
+            const cut = blob.size > MEDIA_TEXT_BYTES ? blob.slice(0, MEDIA_TEXT_BYTES) : blob;
+            const t = await blobText(cut);
+            if (blob.size > MEDIA_TEXT_BYTES) {
+                return t + (t.endsWith("\n") ? "" : "\n") + "… (preview truncated at 300 KB - download for the full content)";
+            }
+            return t;
+        }
+    } catch (_) {}
+    try { return await itemText(item); } catch (_) { return ""; }
+}
+
+function openMediaViewer(item, kind) {
+    if (!item) return null;
+    const seq = ++viewerSeq;
+    closeViewer();
+    const src = item.localUrl || (item.file ? fileUrl(item.file) : "");
+    const ico = kind === "image" ? "🖼" : kind === "video" ? "🎬" : kind === "audio" ? "🎵" : "📄";
+    const fallbackTitle = { image: "Image", video: "Video", audio: "Audio", file: "File" }[kind] || "Entry";
+    const title = String(item.name || item.file || fallbackTitle);
+    const isTextFile = kind === "file" && isTextFileItem(item);
+    const v = document.createElement("div");
+    v.className = "hub-stack-viewer hub-stack-viewer-media";
+    v.innerHTML =
+        `<div class="hub-stack-viewer-card hub-stack-viewer-card-media">` +
+        `<div class="hub-stack-viewer-head">` +
+        `<span class="hub-stack-viewer-ico">${ico}</span>` +
+        `<span class="hub-stack-viewer-title" title="${esc(title)}">${esc(title)}</span>` +
+        `<span class="hub-stack-viewer-n hub-stack-viewer-meta"></span>` +
+        (kind === "image" || isTextFile
+            ? `<button type="button" class="hub-btn hub-stack-viewer-copy" title="${kind === "image" ? "Copy the image back to the clipboard" : "Copy the text content"}">📋 copy</button>`
+            : "") +
+        (src ? `<a class="hub-btn hub-stack-viewer-dl" title="Download" download="${esc(fileNameFor(item))}" href="${esc(src)}">⤓</a>` : "") +
+        `<button type="button" class="hub-btn hub-stack-viewer-x" title="Close (Esc)">✕</button>` +
+        `</div>` +
+        `<div class="hub-stack-viewer-body hub-stack-viewer-body-${esc(kind)}"></div>` +
+        (kind === "image"
+            ? `<div class="hub-stack-viewer-hint">wheel: zoom · drag: pan · double-click: 1:1 ↔ fit · Esc: close</div>`
+            : (isTextFile ? `<div class="hub-stack-viewer-hint">inline text preview (first 300 KB)</div>` : "")) +
+        `</div>`;
+    document.body.appendChild(v);
+    viewerEl = v;
+
+    const body = v.querySelector(".hub-stack-viewer-body");
+    const metaEl = v.querySelector(".hub-stack-viewer-meta");
+    if (metaEl) {
+        metaEl.textContent = [kind + (item.size ? " · " + fmtBytes(item.size) : ""),
+            item.tab || "", item.local ? "session" : ""].filter(Boolean).join(" · ");
+    }
+
+    if (kind === "image") {
+        const stage = document.createElement("div");
+        stage.className = "hub-stack-viewer-stage";
+        const img = document.createElement("img");
+        img.className = "hub-stack-viewer-img";
+        img.draggable = false;
+        img.alt = "";
+        if (src) img.src = src;
+        stage.appendChild(img);
+        body.appendChild(stage);
+        let zoom = 1, tx = 0, ty = 0, oneToOne = false, dimsShown = false;
+        const applyT = () => {
+            img.style.transform = "translate(" + tx + "px, " + ty + "px) scale(" + zoom + ")";
+        };
+        const resetView = (native) => {
+            zoom = 1; tx = 0; ty = 0; oneToOne = !!native;
+            img.style.maxWidth = native ? "none" : "100%";
+            img.style.maxHeight = native ? "none" : "100%";
+            applyT();
+        };
+        // wheel zoom keeps the point under the cursor stationary
+        stage.addEventListener("wheel", (e) => {
+            e.preventDefault();
+            const r = stage.getBoundingClientRect();
+            const cx = e.clientX - r.left - r.width / 2;
+            const cy = e.clientY - r.top - r.height / 2;
+            const old = zoom;
+            const nz = Math.min(VIEWER_ZOOM_MAX,
+                Math.max(VIEWER_ZOOM_MIN, zoom * (e.deltaY < 0 ? 1.25 : 1 / 1.25)));
+            if (nz === old) return;
+            tx = cx - (cx - tx) * (nz / old);
+            ty = cy - (cy - ty) * (nz / old);
+            zoom = nz;
+            applyT();
+        }, { passive: false });
+        img.addEventListener("mousedown", (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const sx = e.clientX, sy = e.clientY, ox = tx, oy = ty;
+            stage.classList.add("hub-stack-viewer-panning");
+            const move = (ev) => {
+                tx = ox + (ev.clientX - sx);
+                ty = oy + (ev.clientY - sy);
+                applyT();
+            };
+            const up = () => {
+                window.removeEventListener("mousemove", move, true);
+                window.removeEventListener("mouseup", up, true);
+                stage.classList.remove("hub-stack-viewer-panning");
+            };
+            window.addEventListener("mousemove", move, true);
+            window.addEventListener("mouseup", up, true);
+        });
+        stage.addEventListener("dblclick", () => resetView(!oneToOne));
+        img.addEventListener("load", () => {
+            if (dimsShown || !img.naturalWidth || !metaEl) return;
+            dimsShown = true;
+            metaEl.textContent = img.naturalWidth + "×" + img.naturalHeight + " · " + metaEl.textContent;
+        });
+    } else if (kind === "video") {
+        body.innerHTML = `<div class="hub-stack-viewer-stage">` +
+            `<video class="hub-stack-viewer-video" src="${esc(src)}" controls autoplay muted playsinline></video></div>`;
+    } else if (kind === "audio") {
+        body.innerHTML = `<div class="hub-stack-viewer-stage hub-stack-viewer-stage-audio">` +
+            `<div class="hub-stack-viewer-audio">🎵<audio class="hub-stack-viewer-audio-el" src="${esc(src)}" controls></audio></div></div>`;
+    } else if (kind === "file") {
+        if (isTextFile) {
+            body.innerHTML = `<div class="hub-stack-viewer-pre">loading…</div>`;
+            viewerFileText(item).then((t) => {
+                if (seq !== viewerSeq) return; // a newer viewer replaced this one
+                const pre = body.querySelector(".hub-stack-viewer-pre");
+                if (pre) pre.textContent = t || "(empty file)";
+            }).catch(() => {});
+        } else {
+            body.innerHTML = `<div class="hub-stack-viewer-nopreview">` +
+                `<div class="hub-stack-viewer-noprev-ico">📄</div>` +
+                `<div>Binary file - no inline preview</div>` +
+                `<div class="hub-stack-viewer-noprev-sub">Download it with ⤓ in the header</div>` +
+                `</div>`;
+        }
+    }
+
+    v.addEventListener("mousedown", (e) => { if (e.target === v) closeViewer(); });
+    v.querySelector(".hub-stack-viewer-x").addEventListener("click", closeViewer);
+    const copyBtn = v.querySelector(".hub-stack-viewer-copy");
+    if (copyBtn) {
+        copyBtn.addEventListener("click", async () => {
+            try {
+                if (kind === "image") { await copyBack(item); return; }
+                const t = await viewerFileText(item);
+                if (!t) { localToast("Nothing to copy"); return; }
+                if (!navigator.clipboard?.writeText) { localToast("Clipboard write unavailable"); return; }
+                await navigator.clipboard.writeText(t);
+                localToast("Copied - Ctrl+V where you need it");
+                bumpUses(item);
+            } catch (_) { localToast("Copy failed"); }
+        });
+    }
     window.addEventListener("keydown", onViewerKey, true);
     return v;
 }
