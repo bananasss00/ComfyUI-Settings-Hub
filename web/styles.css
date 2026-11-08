@@ -2861,6 +2861,36 @@ button.hub-pin-back {
     flex: 0 0 auto;
 }
 
+/* v76: the note is now structured - title line, reason line, retry button.
+   A green variant (.hub-stack-note-ok, legacy/mismatch verdicts where storage
+   actually WORKS) replaces the alarm red so a working server never looks
+   broken. */
+.hub-stack-note-head {
+    font-weight: 700;
+    margin-bottom: 2px;
+}
+.hub-stack-note-why {
+    opacity: 0.92;
+    margin-bottom: 4px;
+    overflow-wrap: anywhere;
+}
+.hub-stack-note-retry {
+    font: inherit;
+    font-weight: 700;
+    color: #ffe9e9;
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 4px;
+    padding: 1px 7px;
+    cursor: pointer;
+}
+.hub-stack-note-retry:hover { background: rgba(255, 255, 255, 0.22); }
+.hub-stack-note-ok {
+    background: #1f3a24;
+    color: #d9f2dd;
+    border-bottom-color: #3f7a4c;
+}
+
 .hub-stack-list {
     flex: 1 1 auto;
     /* v74: without min-height:0 a flex item refuses to shrink below its

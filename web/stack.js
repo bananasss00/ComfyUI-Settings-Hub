@@ -1,15 +1,15 @@
 // ============================================================================
-// SettingsHub - Paste Stack (v75): standalone floating clipboard panel
+// SettingsHub - Paste Stack (v76): standalone floating clipboard panel
 // ----------------------------------------------------------------------------
-// v71-v75 BUILD GUARD (must be the FIRST executable statement, before any work):
+// v71-v76 BUILD GUARD (must be the FIRST executable statement, before any work):
 // the loader entry stamps globalThis.__SettingsHubBuild before importing the
 // submodules; this module refuses to stay silent if it was loaded as part of
 // a MIXED build. See settings_hub.js for the field history.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["stack"] = true;
-if (globalThis.__SettingsHubBuild !== "v75") {
-    console.error("[SettingsHub] STALE BUILD: stack.js (v75) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v76") {
+    console.error("[SettingsHub] STALE BUILD: stack.js (v76) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5).");
 }
@@ -62,6 +62,20 @@ if (globalThis.__SettingsHubBuild !== "v75") {
 //     to a chip with a live count badge. There is NO close button (v75 owner
 //     request): the only way to remove the panel is the gear popup "Stack"
 //     section -> Off. Position/size state in localStorage.
+//
+// v76 (owner report 2026-11-08: "every page reload shows 'server storage
+//   unreachable' even after many restarts"):
+//   * the note is no longer a one-liner guess - a PROBE classifies the
+//     failure: GET /settings_hub/stack/health (new v76 py route answering
+//     {ok, version, dir, writable, items}) -> 404-on-both = py part missing
+//     (old py/, typically only web/ was replaced) / fetch throw = network /
+//     other status = HTTP error / writable=false = folder not writable /
+//     health 404 + list 200 = legacy server (storage WORKS, py < v76) /
+//     version != web build = half-updated install (mismatch).
+//   * the note names the cause and the fix, turns GREEN for
+//     legacy/mismatch (storage is ON - never look broken while working),
+//     and carries a [↻ check again] button that re-probes + re-syncs
+//     WITHOUT a page reload.
 //
 // v75 (owner request 2026-11-08):
 //   * the header [✕] hide button is GONE - only [–] (minimize to chip) and
@@ -242,6 +256,7 @@ let grip = null;         // resize handle
 
 let stackItems = [];     // server index mirror, TOP-first
 let serverOk = null;     // null=unknown, true, false
+let degraded = null;     // v76: null | {code, detail?} - probeServer() verdict
 let mounted = false;
 let pasteHover = false;  // cursor over the panel (paste-event gate)
 let clearArmTs = 0;      // clear-button double-confirm window
@@ -322,6 +337,81 @@ function panelClearAll(btn) {
 function apiReady() {
     const a = app?.api;
     return !!(a && typeof a.fetchApi === "function");
+}
+
+// ---------------------------------------------------------------------------
+// v76: server self-diagnosis probe. The old note ("storage unreachable -
+// restart ComfyUI") fired for EVERY failure mode and the owner hit a
+// persistent one across restarts. Now the panel probes /settings_hub/stack/
+// health FIRST (v76+ py answers with the pack version + storage state) and
+// classifies the failure so the note says exactly WHAT is wrong and what to
+// do; a retry button re-runs the probe without a page reload.
+//
+//   degraded = null                          healthy
+//            = { code: "missing" }           404 on health AND list: the py
+//                                            part has no stack routes (old
+//                                            py/ - typically only web/ was
+//                                            replaced during an update)
+//            = { code: "network" }           fetch threw (server down, page
+//                                            not served by ComfyUI)
+//            = { code: "http", detail: "500" }  any other non-OK status
+//            = { code: "nowrite", detail: dir }  health says the storage
+//                                            folder is not writable
+//            = { code: "legacy" }            health 404 but the v70 list route
+//                                            answers: storage WORKS, py is
+//                                            just older than v76
+//            = { code: "mismatch", detail: "vNN" }  storage works but the py
+//                                            pack version differs from the
+//                                            web build - half-updated install
+// ---------------------------------------------------------------------------
+
+const BUILD = globalThis.__SettingsHubBuild || "v76";
+
+function setDegraded(seq, d) {
+    if (seq !== initSeq) return;
+    degraded = d;
+    serverOk = d ? (d.code === "legacy" || d.code === "mismatch") : true;
+    renderNote();
+}
+
+async function probeServer(seq) {
+    if (!apiReady()) { setDegraded(seq, { code: "network" }); return; }
+    // v76+ servers answer /health with {ok, version, dir, writable, items}.
+    try {
+        const r = await app.api.fetchApi("/settings_hub/stack/health");
+        if (r && r.ok) {
+            const j = await r.json().catch(() => null);
+            if (seq !== initSeq) return;
+            if (j && j.ok) {
+                if (j.writable === false) {
+                    setDegraded(seq, { code: "nowrite", detail: String(j.dir || "") });
+                } else {
+                    const v = typeof j.version === "string" ? j.version : "";
+                    if (v && v !== BUILD) setDegraded(seq, { code: "mismatch", detail: v });
+                    else setDegraded(seq, null);
+                }
+                return;
+            }
+            // ok:false - weird server; fall through to the list probe.
+        } else if (seq === initSeq && r && r.status !== 404) {
+            // A non-404 error on health means the routes ARE there but the
+            // handler failed - report the status instead of falling through.
+            setDegraded(seq, { code: "http", detail: String(r.status) });
+            return;
+        }
+    } catch (_) { /* fall through to the list probe */ }
+    // Legacy (v70-v75) or broken server: classify via the list route.
+    try {
+        const r = await app.api.fetchApi("/settings_hub/stack");
+        if (seq !== initSeq) return;
+        if (r && r.ok) { setDegraded(seq, { code: "legacy" }); return; }
+        const st = r ? r.status : 0;
+        if (st === 404) setDegraded(seq, { code: "missing" });
+        else setDegraded(seq, { code: "http", detail: String(st) });
+    } catch (_) {
+        if (seq !== initSeq) return;
+        setDegraded(seq, { code: "network" });
+    }
 }
 
 async function apiGet() {
@@ -435,6 +525,11 @@ function applyServerAdd(res, localFallback) {
     }
     // Server unreachable: session-only fallback so capture still works.
     serverOk = false;
+    // v76: surface the failure in the note too (the probe verdict may not
+    // exist yet when the very first add fails).
+    if (!degraded || degraded.code === "legacy" || degraded.code === "mismatch") {
+        degraded = { code: "network" };
+    }
     stackItems.unshift(localFallback);
     renderAll();
     enforceMax();
@@ -857,13 +952,44 @@ function renderBadge() {
 
 function renderNote() {
     if (!noteEl) return;
-    if (serverOk === false) {
-        noteEl.style.display = "";
-        noteEl.textContent = "⚠ ComfyUI server storage unreachable - entries last this session only. Restart ComfyUI to enable persistence.";
-    } else {
+    const d = degraded;
+    if (!d) {
         noteEl.style.display = "none";
+        noteEl.classList.remove("hub-stack-note-ok");
         noteEl.textContent = "";
+        noteEl.innerHTML = "";
+        return;
     }
+    const TITLES = {
+        missing: "server storage unreachable - entries last this session only",
+        network: "server storage unreachable - entries last this session only",
+        http: "storage check failed (HTTP " + (d.detail || "?") + ")",
+        nowrite: "storage folder is not writable - entries last this session only",
+        legacy: "storage works (server py is v70-v75, no /health yet)",
+        mismatch: "version mismatch (storage is ON)",
+    };
+    const WHY = {
+        missing: "The ComfyUI server has NO /settings_hub/stack routes: the Python part of the pack is missing or older than v70 - typically only web/ was replaced during an update. Reinstall the FULL zip (all folders) and RESTART ComfyUI.",
+        network: "The request to the ComfyUI server failed. Check that ComfyUI is running and this page is served by it (same address/port).",
+        http: "The ComfyUI server answered HTTP " + (d.detail || "?") + " for the stack storage. Check the ComfyUI console for the Python error.",
+        nowrite: "The stack storage folder cannot be written: " + (d.detail || "?") + ". Fix the folder permissions, then press \u21bb.",
+        legacy: "Everything works. The Python part just predates v76 self-diagnostics - updating the full pack is recommended.",
+        mismatch: "Server py/ = " + (d.detail || "?") + " while web = " + BUILD + ". If you just updated - restart ComfyUI (py/ loads once at startup); otherwise reinstall the FULL zip (all folders).",
+    };
+    noteEl.style.display = "";
+    noteEl.classList.toggle("hub-stack-note-ok", d.code === "legacy" || d.code === "mismatch");
+    noteEl.textContent = "";
+    const head = document.createElement("div");
+    head.className = "hub-stack-note-head";
+    head.textContent = (d.code === "legacy" ? "\u2713" : "\u26a0") + " Paste Stack " + (TITLES[d.code] || TITLES.network);
+    const why = document.createElement("div");
+    why.className = "hub-stack-note-why";
+    why.textContent = WHY[d.code] || WHY.network;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "hub-stack-note-retry";
+    retry.textContent = "\u21bb check again";
+    noteEl.append(head, why, retry);
 }
 
 function renderAll() { renderList(); renderBadge(); renderNote(); renderToolbar(); }
@@ -1432,6 +1558,19 @@ function buildDom() {
     // v75: the hide/close wiring is intentionally absent - see buildDom().
     chip.addEventListener("click", () => setMinimized(false));
 
+    // v76: retry button inside the degraded note - re-probe + re-sync without
+    // a page reload (fixing the server side, e.g. reinstalling the pack, takes
+    // effect immediately).
+    noteEl.addEventListener("click", (e) => {
+        if (!e.target?.closest?.(".hub-stack-note-retry")) return;
+        const seq = initSeq;
+        void (async () => {
+            await probeServer(seq);
+            if (seq !== initSeq) return;
+            await refreshFromServer(seq);
+        })();
+    });
+
     makeDraggable(headEl, panel,
         () => ({ x: parseFloat(panel.style.left) || 0, y: parseFloat(panel.style.top) || 0 }),
         (x, y, persist) => { applyPos(x, y); if (persist) saveUi({ x, y }); }, false);
@@ -1598,10 +1737,23 @@ async function refreshFromServer(seq) {
     const remote = await apiGet();
     if (seq !== initSeq) return; // a newer init/refresh superseded this fetch
     if (remote === null) {
-        if (serverOk !== false) { serverOk = false; renderNote(); }
+        if (serverOk !== false) { serverOk = false; }
+        // v76: keep a MORE PRECISE probe verdict (missing/http/nowrite);
+        // only fill in the generic network verdict when we know nothing.
+        if (!degraded || degraded.code === "mismatch" || degraded.code === "legacy") {
+            degraded = { code: "network" };
+        }
+        renderNote();
         return;
     }
-    serverOk = true;
+    serverOk = !(degraded && degraded.code === "nowrite"); // reads may work while writes are broken
+    // v76: a successful list GET proves the data path - it contradicts only a
+    // "missing" (list 404) or "network" (fetch threw) verdict. http/nowrite/
+    // legacy/mismatch describe OTHER layers (health handler, folder rights,
+    // versions) that a working list route does NOT refute.
+    if (degraded && (degraded.code === "network" || degraded.code === "missing")) {
+        degraded = null;
+    }
     // Keep session-only entries (if any) on top of the server truth.
     const locals = stackItems.filter((x) => x.local);
     stackItems = [...locals, ...remote.filter((x) => !locals.some((l) => l.id === x.id))];
@@ -1619,7 +1771,12 @@ export function initStack() {
     buildDom();
     mounted = true;
     renderAll();
-    refreshFromServer(seq);
+    // v76: probe FIRST (classifies the server), then sync the data.
+    void (async () => {
+        await probeServer(seq);
+        if (seq !== initSeq) return;
+        await refreshFromServer(seq);
+    })();
 }
 
 // ---------------------------------------------------------------------------

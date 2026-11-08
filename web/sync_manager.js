@@ -8,8 +8,8 @@ import * as Pins from "./pins.js";
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["sync_manager"] = true;
-if (globalThis.__SettingsHubBuild !== "v75") {
-    console.error("[SettingsHub] STALE BUILD: sync_manager.js (v75) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v76") {
+    console.error("[SettingsHub] STALE BUILD: sync_manager.js (v76) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
 }
 

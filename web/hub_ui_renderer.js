@@ -11,8 +11,8 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["hub_ui_renderer"] = true;
-if (globalThis.__SettingsHubBuild !== "v75") {
-    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v75) was loaded under entry build [" +
+if (globalThis.__SettingsHubBuild !== "v76") {
+    console.error("[SettingsHub] STALE BUILD: hub_ui_renderer.js (v76) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5). Mixed builds are not supported and can break the hub UI.");
 }

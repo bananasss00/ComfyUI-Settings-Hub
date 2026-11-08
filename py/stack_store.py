@@ -18,6 +18,12 @@ media_list.py; the SettingsHub node class itself stays a stub and these
 routes never run during a queue):
 
     GET    /settings_hub/stack             -> {ok, items}
+    GET    /settings_hub/stack/health      -> {ok, version, dir, writable,
+                                              items}   (v76: the panel probes
+                                              this FIRST and tells the user
+                                              exactly why storage is down:
+                                              routes missing / not writable /
+                                              web-vs-py version mismatch)
     POST   /settings_hub/stack/item        -> JSON {type:"text", text, name?} add text
     POST   /settings_hub/stack/image       -> raw bytes, ?ext=png|jpg|...  add image
     POST   /settings_hub/stack/file        -> raw bytes, ?ext=&name=        add ANY
@@ -255,6 +261,43 @@ def _touch_dup(items, content_hash):
 @PromptServer.instance.routes.get("/settings_hub/stack")
 async def stack_get(request):
     return web.json_response({"ok": True, "items": _read_index()})
+
+
+# v76: server pack version - MUST bump together with the web build stamps
+# (the web panel compares it against globalThis.__SettingsHubBuild and warns
+# about a half-updated install: web/ replaced while py/ stayed old, or the
+# page reloaded before ComfyUI restarted). AGENTS.md release checklist line.
+STACK_SERVER_VERSION = "v76"
+
+
+@PromptServer.instance.routes.get("/settings_hub/stack/health")
+async def stack_health(request):
+    """v76 self-diagnosis for the Paste Stack panel (and humans): proves the
+    Python routes are alive, reports where the storage lives, whether it is
+    WRITABLE (a probe file is written+deleted inside items/) and how many
+    entries the index currently holds. Never throws: every check degrades to
+    a false/empty field."""
+    _ensure_dirs()
+    writable = False
+    try:
+        probe = os.path.join(_items_dir(), ".health_probe")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.unlink(probe)
+        writable = True
+    except Exception:
+        writable = False
+    try:
+        n_items = len(_read_index())
+    except Exception:
+        n_items = -1
+    return web.json_response({
+        "ok": True,
+        "version": STACK_SERVER_VERSION,
+        "dir": _stack_root(),
+        "writable": writable,
+        "items": n_items,
+    })
 
 
 @PromptServer.instance.routes.post("/settings_hub/stack/item")
