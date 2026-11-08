@@ -2,7 +2,7 @@
 // under __SettingsHubLoaded so the entry can NAME stale cached files.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["sync"] = true;
-if (globalThis.__SettingsHubBuild !== "v77") {
+if (globalThis.__SettingsHubBuild !== "v78") {
     console.error("[SettingsHub] STALE BUILD: sync.js (v77) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") + "] - hard-refresh the page (Ctrl+F5).");
 }

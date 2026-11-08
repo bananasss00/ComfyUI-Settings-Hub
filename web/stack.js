@@ -8,7 +8,7 @@
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
 globalThis.__SettingsHubLoaded["stack"] = true;
-if (globalThis.__SettingsHubBuild !== "v77") {
+if (globalThis.__SettingsHubBuild !== "v78") {
     console.error("[SettingsHub] STALE BUILD: stack.js (v77) was loaded under entry build [" +
         (globalThis.__SettingsHubBuild ?? "unknown") +
         "] - the browser served cached modules. Hard-refresh the page (Ctrl+F5).");
@@ -152,6 +152,7 @@ const LS_UI = "settingshub.stack.ui";      // {x,y,w,h,min,chipX,chipY}
 const LS_ON = "settingshub.stack.on";      // "1"/"0" - panel enabled
 const LS_MAX = "settingshub.stack.max";    // client eviction threshold
 const LS_SCOPE = "settingshub.stack.scope"; // v77: "global" | "workflow"
+const LS_NOTE = "settingshub.stack.noteSeen"; // v78: {code,key} - green self-diagnosis notes show ONCE per state
 
 export const STACK_MAX_CHOICES = [25, 50, 100, 200, 500];
 const STACK_MAX_DEFAULT = 100;
@@ -460,7 +461,33 @@ function apiReady() {
 //                                            web build - half-updated install
 // ---------------------------------------------------------------------------
 
-const BUILD = globalThis.__SettingsHubBuild || "v77";
+const BUILD = globalThis.__SettingsHubBuild || "v78";
+
+// v78: the GREEN verdicts (legacy/mismatch - storage actually WORKS) are
+// status info, not failures, and the owner found the permanent green block
+// annoying on every reload. They now show ONCE per state (the flag lives in
+// LS_NOTE), then the panel stays quiet - a single console.info carries the
+// details for whoever opens the devtools. The RED states (missing/network/
+// http/nowrite) always render: something is genuinely broken.
+let quietNoteLogged = false; // one console line per page load, not per probe
+const shownGreen = new Set(); // green states already rendered THIS page load ("code|key")
+let greenDismissed = null;    // the green state dismissed via the note's ✕ this page load
+function noteStateKey(d) {
+    return d.code === "mismatch" ? String(d.detail || "") : "";
+}
+function noteSeenGet() {
+    try {
+        const j = JSON.parse(localStorage.getItem(LS_NOTE) || "null");
+        return j && typeof j.code === "string" ? j : null;
+    } catch (_) { return null; }
+}
+function noteSeenSet(d) {
+    try { localStorage.setItem(LS_NOTE, JSON.stringify({ code: d.code, key: noteStateKey(d) })); } catch (_) {}
+}
+function noteSeenMatches(d) {
+    const s = noteSeenGet();
+    return !!s && s.code === d.code && String(s.key || "") === noteStateKey(d);
+}
 
 function setDegraded(seq, d) {
     if (seq !== initSeq) return;
@@ -1083,12 +1110,40 @@ function renderNote() {
         legacy: "storage works (server py is v70-v75, no /health yet)",
         mismatch: "version mismatch (storage is ON)",
     };
+    // v78: green verdicts self-retire - shown ONCE per state, then quiet.
+    // Semantics: the FIRST render in a page load persists the flag and keeps
+    // the note visible for the whole session (renderAll calls renderNote
+    // again on every change - the note must not flash and vanish); a state
+    // already shown in an EARLIER page load (flag matches, not in shownGreen)
+    // stays quiet, a single console.info carries the details. The ✕ dismisses
+    // for the rest of the session. Red states never consult any of this.
+    if (d.code === "legacy" || d.code === "mismatch") {
+        const sessKey = d.code + "|" + noteStateKey(d);
+        const seenBefore = noteSeenMatches(d);
+        if (greenDismissed === sessKey || (seenBefore && !shownGreen.has(sessKey))) {
+            noteEl.style.display = "none";
+            noteEl.classList.remove("hub-stack-note-ok");
+            noteEl.textContent = "";
+            noteEl.innerHTML = "";
+            if (!quietNoteLogged) {
+                quietNoteLogged = true;
+                try {
+                    console.info("[SettingsHub] Paste Stack: " + (d.code === "legacy"
+                        ? "storage works (server py predates v76 self-diagnostics). To match py/ with web " + BUILD + ": install the FULL pack zip and RESTART ComfyUI. This note stays quiet in the panel."
+                        : "server py " + (d.detail || "?") + " != web " + BUILD + ". Restart ComfyUI after a full-pack update (py/ loads only at startup). This note stays quiet in the panel."));
+                } catch (_) {}
+            }
+            return;
+        }
+        shownGreen.add(sessKey);
+        noteSeenSet(d); // remember: this state has had its one showing
+    }
     const WHY = {
         missing: "The ComfyUI server has NO /settings_hub/stack routes: the Python part of the pack is missing or older than v70 - typically only web/ was replaced during an update. Reinstall the FULL zip (all folders) and RESTART ComfyUI.",
         network: "The request to the ComfyUI server failed. Check that ComfyUI is running and this page is served by it (same address/port).",
         http: "The ComfyUI server answered HTTP " + (d.detail || "?") + " for the stack storage. Check the ComfyUI console for the Python error.",
         nowrite: "The stack storage folder cannot be written: " + (d.detail || "?") + ". Fix the folder permissions, then press \u21bb.",
-        legacy: "Everything works. The Python part just predates v76 self-diagnostics - updating the full pack is recommended.",
+        legacy: "Everything works. The Python part just predates v76 self-diagnostics. If you just updated the pack - RESTART ComfyUI (py/ loads only at server startup); otherwise reinstall the FULL zip to get the matching py/.",
         mismatch: "Server py/ = " + (d.detail || "?") + " while web = " + BUILD + ". If you just updated - restart ComfyUI (py/ loads once at startup); otherwise reinstall the FULL zip (all folders).",
     };
     noteEl.style.display = "";
@@ -1104,7 +1159,14 @@ function renderNote() {
     retry.type = "button";
     retry.className = "hub-stack-note-retry";
     retry.textContent = "\u21bb check again";
-    noteEl.append(head, why, retry);
+    // v78: the ✕ hides the green note immediately (the seen flag is already
+    // persisted on first render - the ✕ is the instant path to the same state).
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "hub-stack-note-x";
+    x.textContent = "\u2715";
+    x.title = "Hide (storage works - a green note shows only once)";
+    noteEl.append(head, why, retry, x);
 }
 
 function renderAll() {
@@ -1750,6 +1812,16 @@ function buildDom() {
     // a page reload (fixing the server side, e.g. reinstalling the pack, takes
     // effect immediately).
     noteEl.addEventListener("click", (e) => {
+        // v78: ✕ on a green note - dismiss for the rest of the session (the
+        // persisted flag is written on first render; this only affects now).
+        if (e.target?.closest?.(".hub-stack-note-x")) {
+            if (degraded) {
+                greenDismissed = degraded.code + "|" + noteStateKey(degraded);
+                noteSeenSet(degraded);
+            }
+            renderNote();
+            return;
+        }
         if (!e.target?.closest?.(".hub-stack-note-retry")) return;
         const seq = initSeq;
         void (async () => {
@@ -2072,6 +2144,7 @@ export function __stackTestHooks() {
         elemFromPoint,
         items: () => stackItems.slice(),
         serverOk: () => serverOk,
+        resetNoteSession: () => { shownGreen.clear(); greenDismissed = null; quietNoteLogged = false; }, // v78: simulate a fresh page load
         panelEl: () => panel,
         chipEl: () => chip,
         listEl: () => listEl,

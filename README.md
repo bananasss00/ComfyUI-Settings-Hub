@@ -1,7 +1,7 @@
 # Settings Hub для ComfyUI
 
-[![build](https://img.shields.io/badge/web%20build-v77-3d5a80)](#как-это-работает)
-[![tests](https://img.shields.io/badge/tests-542%20passing-2b6b3f)](#разработка-и-тесты)
+[![build](https://img.shields.io/badge/web%20build-v78-3d5a80)](#как-это-работает)
+[![tests](https://img.shields.io/badge/tests-555%20passing-2b6b3f)](#разработка-и-тесты)
 [![python](https://img.shields.io/badge/python-stub-lightgrey)](#как-это-работает)
 [![frontend](https://img.shields.io/badge/ComfyUI-frontend%20extension-3d5a80)](#установка)
 
@@ -267,6 +267,16 @@ py/ — обновите ВЕСЬ пак и перезапустите ComfyUI),
 зелёная заметка «storage works». Кнопка **[↻ check again]** повторяет
 пробу и ресинк без перезагрузки страницы.
 
+**Тихие зелёные заметки (v78):** зелёные вердикты «storage works»
+(legacy/mismatch — хранилище РАБОТАЕТ, аварии нет) показываются **один
+раз на состояние** и дальше не мозолят глаза: первый показ запоминается
+в localStorage (`settingshub.stack.noteSeen`), на следующих загрузках
+страницы заметка не появляется (одна строка в console.info вместо неё),
+а ✕ на заметке гасит её сразу. Красные состояния (нет роутов / нет
+связи / HTTP / папка не записываема) видны всегда — это реальные
+проблемы. После установки ПОЛНОГО пака и перезапуска ComfyUI заметки
+исчезают сами: версии web↔py совпадают, панель молчит.
+
 **Scope стека (v77) — общий или на каждый воркфлоу:** ⚙ → Stack →
 «Stack scope»:
 
@@ -360,7 +370,7 @@ ComfyUI и гоняют настоящие модули (Node ESM + jsdom).
 ```bash
 npm i jsdom          # единственная jsdom-зависимость
 node tests/smoke_nav.mjs    # движок точек навигации, камера, хоткеи, UI-путь, stack-bridge, глаз-скрытие (239 проверок)
-node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке/без-крестика/self-check/scope-режимы + Image Compare (210)
+node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке/без-крестика/self-check/тихие-зелёные-заметки/scope-режимы + Image Compare (223)
 node tests/smoke_menu.mjs   # регистрация меню, fail-open, баннер деградации (24)
 python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файловый/patch/health-роуты стека + per-workflow scope (69)
 ```

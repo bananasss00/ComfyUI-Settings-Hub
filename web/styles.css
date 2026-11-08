@@ -2898,6 +2898,21 @@ button.hub-pin-back {
     cursor: pointer;
 }
 .hub-stack-note-retry:hover { background: rgba(255, 255, 255, 0.22); }
+/* v78: dismiss button on the green notes (legacy/mismatch show ONCE per
+   state, the ✕ hides the current one immediately; the seen flag lives in
+   localStorage under settingshub.stack.noteSeen). */
+.hub-stack-note-x {
+    font: inherit;
+    font-weight: 700;
+    color: #d9f2dd;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin-left: 6px;
+    cursor: pointer;
+}
+.hub-stack-note-x:hover { background: rgba(255, 255, 255, 0.15); }
 .hub-stack-note-ok {
     background: #1f3a24;
     color: #d9f2dd;
