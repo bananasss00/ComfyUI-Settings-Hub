@@ -36,7 +36,7 @@ import { createVirtualHub } from "./core.js";
 
 // v92 self-report (single-source version, docs/plan-versions.md)
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["launcher"] = "v92";
+globalThis.__SettingsHubLoaded["launcher"] = "v93";
 
 const LS_ON = "settingshub.launcher.on";        // "1"/"0" - panel shown
 const LS_ITEM = "settingshub.launcher.item.";   // + kind -> "1"/"0"
@@ -227,15 +227,25 @@ function registerLauncherSettings() {
 // ---------------------------------------------------------------------------
 
 function makeDraggable() {
-    // the whole bar is the drag handle; the buttons stay clickable
+    // v93 (owner #1): the bar must be MOVABLE from anywhere - the icon
+    // buttons fill the whole strip, so a background-only handle is nearly
+    // unreachable. Like the chat chip (v92 #6): mousedown anywhere starts a
+    // potential drag; past a 5px threshold the bar MOVES (and the release is
+    // NOT a click); a release without a drag stays a click on the button.
+    let suppressClick = false;
+    panelEl.addEventListener("click", (e) => {
+        if (!suppressClick) return;
+        e.preventDefault();
+        e.stopPropagation();
+    }, true);
     panelEl.addEventListener("mousedown", (e) => {
         if (e.button !== 0 || !panelEl) return;
-        if (e.target?.closest?.("button")) return;
         e.preventDefault();
         e.stopPropagation();
         const startX = e.clientX, startY = e.clientY;
         const ox = parseFloat(panelEl.style.left) || 0;
         const oy = parseFloat(panelEl.style.top) || 0;
+        let moved = false;
         const clamp = (x, y) => {
             const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
             const w = panelEl.offsetWidth || 120, h = panelEl.offsetHeight || 40;
@@ -245,17 +255,24 @@ function makeDraggable() {
             };
         };
         const move = (ev) => {
-            const p = clamp(ox + (ev.clientX - startX), oy + (ev.clientY - startY));
+            const dx = ev.clientX - startX, dy = ev.clientY - startY;
+            if (!moved && Math.abs(dx) + Math.abs(dy) < 5) return;
+            moved = true;
+            const p = clamp(ox + dx, oy + dy);
             panelEl.style.left = p.x + "px";
             panelEl.style.top = p.y + "px";
         };
         const up = (ev) => {
             window.removeEventListener("mousemove", move, true);
             window.removeEventListener("mouseup", up, true);
+            if (!moved) return;
             const p = clamp(ox + (ev.clientX - startX), oy + (ev.clientY - startY));
             panelEl.style.left = p.x + "px";
             panelEl.style.top = p.y + "px";
             saveUi({ x: p.x, y: p.y });
+            // the click that follows this mouseup must not reach the buttons
+            suppressClick = true;
+            setTimeout(() => { suppressClick = false; }, 0);
         };
         window.addEventListener("mousemove", move, true);
         window.addEventListener("mouseup", up, true);

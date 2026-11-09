@@ -149,7 +149,7 @@
 // v87 self-report (single-source version, docs/plan-versions.md): the last
 // FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["chat"] = "v92";
+globalThis.__SettingsHubLoaded["chat"] = "v93";
 
 import { app } from "../../scripts/app.js";
 // v90: the shared UI font scale - the chat ⚙ hosts the same row as the hub
@@ -174,13 +174,23 @@ let headEl = null, tabEl = null, msgsEl = null, attachEl = null;
 let inputEl = null, sendBtn = null, statusEl = null, noteEl = null;
 let grip = null, modelSel = null, sessionsBtn = null, settingsBtn = null;
 let thinkSel = null, promptBtn = null, gpuBtn = null, modelsBtn = null;
+// v93: the ONE-SHOT run list + its header bar (siblings of msgsEl)
+let runEl = null, runBarEl = null;
 let tabs = [];            // open tabs: {id, title, msgs, pending:[part]}
 let activeId = null;      // active tab session id
-let streaming = null;     // {ctrl, sid}
+let streaming = null;     // {ctrl, sid} | v93 one-shot: {ctrl, os}
 let serverState = null;   // /chat/health result
 let cfg = null;           // cached (masked) config from the server
 let degraded = null;      // {code, why} - red note state
 let viewerEl = null;      // chat viewer overlay
+// v93 (owner: "специальный режим чата... инференс одним сообщением"): the
+// panel is either "chat" (the history dialogs) or "oneshot" (ONE message
+// in, ONE answer out - no sessions, no tree, no history; the prompt comes
+// from the SEPARATE oneshot_* config keys so the chat 📜 stays untouched).
+let chatMode = "chat";
+let runs = [];            // the one-shot runs log (server-backed, newest first)
+let runClearArm = 0;      // the 🗑 armed timestamp (destructive confirm)
+let streamHostEl = null;  // v93: the live-stream container (runEl in one-shot)
 let clearArm = null, clearArmTs = 0, sessArm = null, sessArmTs = 0;
 const CLEAR_ARM_MS = 2600, SESS_ARM_MS = 2600;
 // v87 popups (single instance each, body-level fixed): settings ⚙, prompt 📜, GPU ⚡
@@ -702,8 +712,17 @@ const TAB_ARM_MS = 2600;
 
 function renderTabs() {
     if (!tabEl) return;
-    if (tabEdit) {
-        tabEl.innerHTML = `<span class="hub-chat-tab hub-chat-tab-edit">` +
+    // v93: the MODE SWITCH lives on the left of the tabs row - 💬 chat / ⚡
+    // one-shot. In one-shot mode the tab chips + [＋] are HIDDEN (the runs
+    // list has no tabs); the switch stays reachable in both modes.
+    const modes =
+        `<span class="hub-chat-modes">` +
+        `<button type="button" class="hub-chat-mode${chatMode === "chat" ? " hub-chat-mode-on" : ""}" data-mode="chat" title="Chat - the history dialogs (tabs, sessions, the message tree)">💬</button>` +
+        `<button type="button" class="hub-chat-mode${chatMode === "oneshot" ? " hub-chat-mode-on" : ""}" data-mode="oneshot" title="One-shot - ONE message in, ONE answer out: no history, no sessions. The 📜 prompt and the model/think toolbar apply to the runs.">⚡</button>` +
+        `</span>`;
+    if (tabEdit && chatMode !== "oneshot") {
+        tabEl.innerHTML = modes +
+            `<span class="hub-chat-tab hub-chat-tab-edit">` +
             `<input type="text" class="hub-chat-tab-input" spellcheck="false" ` +
             `placeholder="${tabEdit.mode === "rename" ? "new name" : "new chat"}" ` +
             `value="${tabEdit.mode === "rename" ? esc(tabEdit.value ?? "") : ""}">` +
@@ -711,14 +730,15 @@ function renderTabs() {
         return;
     }
     const armId = tabArm;
-    tabEl.innerHTML = tabs.map((t) =>
+    tabEl.innerHTML = modes + (chatMode === "oneshot" ? "" :
+        tabs.map((t) =>
         `<span class="hub-chat-tab${t.id === activeId ? " hub-chat-tab-on" : ""}" ` +
         `data-tab="${t.id}" title="${esc(t.title || "New chat")} - double-click to rename">` +
         `<span class="hub-chat-tab-title">${esc(t.title || "New chat")}</span>` +
         `<button type="button" class="hub-chat-tab-x${armId === t.id ? " hub-chat-tab-x-armed" : ""}" ` +
         `title="Close the tab (the dialog stays in 🕘)">✕</button>` +
         `</span>`).join("") +
-        `<button type="button" class="hub-chat-tab-add" title="New chat">＋</button>`;
+        `<button type="button" class="hub-chat-tab-add" title="New chat">＋</button>`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1060,16 +1080,10 @@ function openSetPop() {
         `<select class="hub-cs-sel" data-cs="stream">` +
         `<option value="1">On (default)</option><option value="0">Off</option>` +
         `</select></label>` +
-        // v92 (owner #3): free ComfyUI's own models before EVERY LLM request
-        // (only when they are still loaded) - VRAM for the LLM.
-        `<label class="hub-cs-row" title="Before every request: unload ComfyUI's own models (only when any are still loaded) so the LLM gets the VRAM. The result shows as a note on the live bubble.">` +
-        `<span>Free ComfyUI models before request</span>` +
-        `<input type="checkbox" class="hub-cs-chk" data-cs="freec"></label>` +
-        // v92 (owner #11): the reverse direction - when a ComfyUI QUEUE
-        // starts, unload the chat engine so VRAM returns to ComfyUI.
-        `<label class="hub-cs-row" title="When a ComfyUI queue starts (execution_start), POST /v1/unload to the LLM engine - its VRAM goes back to ComfyUI for the generation. The next chat message wakes the model again (may take minutes).">` +
-        `<span>Unload the chat model when a ComfyUI queue starts</span>` +
-        `<input type="checkbox" class="hub-cs-chk" data-cs="unq"></label>` +
+        // v93 (owner #2): the two VRAM checkboxes MOVED OUT of here into the
+        // ⚡ GPU & memory popup (the chat header's lightning button) - that is
+        // where a VRAM decision belongs; the ⚙ popup is connection/sampling
+        // only. The wiring lives in openGpuPop now.
         `<label class="hub-cs-row"><span>Keep last chats</span>` +
         `<select class="hub-cs-sel" data-cs="keep">` +
         `<option value="10">10</option><option value="20">20 · default</option>` +
@@ -1179,18 +1193,7 @@ function openSetPop() {
     streamSel.addEventListener("change", () => {
         void applyPatch({ stream: streamSel.value === "1" });
     });
-    // v92 (owner #3 + #11): the two VRAM checkboxes (real checkboxes - the
-    // owner asked for checkboxes, not the selects the other rows use).
-    const freeChk = pop.querySelector('[data-cs="freec"]');
-    const unqChk = pop.querySelector('[data-cs="unq"]');
-    freeChk.checked = !!(cfg?.auto_free_comfy);
-    unqChk.checked = !!(cfg?.auto_unload_llm_on_queue);
-    freeChk.addEventListener("change", () => {
-        void applyPatch({ auto_free_comfy: freeChk.checked });
-    });
-    unqChk.addEventListener("change", () => {
-        void applyPatch({ auto_unload_llm_on_queue: unqChk.checked });
-    });
+    // v93: the VRAM checkboxes moved to the ⚡ GPU & memory popup (owner #2).
     keepSel.addEventListener("change", () => {
         void applyPatch({ keep_sessions: parseInt(keepSel.value, 10) || 20 });
     });
@@ -1279,9 +1282,8 @@ function openSetPop() {
         }
         streamSel.value = st.cfg.stream === false ? "0" : "1";
         keepSel.value = String(st.cfg.keep_sessions || 20);
-        // v92: the VRAM checkboxes follow the saved config
-        if (freeChk.isConnected) freeChk.checked = !!st.cfg.auto_free_comfy;
-        if (unqChk.isConnected) unqChk.checked = !!st.cfg.auto_unload_llm_on_queue;
+        // v93: the VRAM checkboxes live in the GPU popup now - nothing to
+        // sync here anymore.
         // v92 (owner #9): the paths must be VISIBLE, not hidden in a too-short
         // placeholder - show the REAL server folders under the fields.
         if (pdirInfo.isConnected && !pdirInfo.textContent) {
@@ -1338,15 +1340,27 @@ function promptFilter(files, q) {
     });
 }
 
+// v93: the 📜 popup + the status segment resolve the prompt of the ACTIVE
+// mode - the chat keys (system_prompt/prompt_preset) or the one-shot keys
+// (oneshot_system/oneshot_preset). The two selections never touch.
+function promptKeys() {
+    return chatMode === "oneshot"
+        ? { sys: "oneshot_system", pre: "oneshot_preset" }
+        : { sys: "system_prompt", pre: "prompt_preset" };
+}
+
 function renderPromptBtnState() {
     if (!promptBtn) return;
-    const preset = (cfg?.prompt_preset || "").trim();
-    const custom = (cfg?.system_prompt || "").trim();
+    const k = promptKeys();
+    const preset = (cfg?.[k.pre] || "").trim();
+    const custom = (cfg?.[k.sys] || "").trim();
     promptBtn.classList.toggle("hub-chat-tb-on", !!(preset || custom));
+    const where = chatMode === "oneshot" ? "one-shot runs" : "every chat";
     promptBtn.title = preset
         ? "System prompt: file " + preset + " - click to change"
         : (custom ? "System prompt: custom text - click to change"
                   : "System prompt: none - click to set");
+    if (promptBtn.title) promptBtn.title += " (applies to " + where + ")";
 }
 
 // v91 (owner: "when there are many files and a custom one from the middle is
@@ -1356,9 +1370,10 @@ function renderPromptBtnState() {
 // banner on top of the prompt popup, and (c) the popup scrolls the selected
 // file into view on open (renderPromptList).
 function activePromptLabel() {
-    const preset = (cfg?.prompt_preset || "").trim();
+    const k = promptKeys();
+    const preset = (cfg?.[k.pre] || "").trim();
     if (preset) return { text: "Active: " + preset, on: true };
-    if ((cfg?.system_prompt || "").trim()) return { text: "Active: custom text (no file selected)", on: true };
+    if ((cfg?.[k.sys] || "").trim()) return { text: "Active: custom text (no file selected)", on: true };
     return { text: "Active: none - no system prompt is sent", on: false };
 }
 
@@ -1391,7 +1406,8 @@ function renderPromptList() {
     if (!promptPop) return;
     const listEl = promptPop.querySelector('[data-cp="list"]');
     if (!listEl) return;
-    const sel = (cfg?.prompt_preset || "").trim();
+    const k = promptKeys();
+    const sel = (cfg?.[k.pre] || "").trim();
     const files = promptFilter(promptFiles, promptQuery);
     let html =
         `<button type="button" class="hub-cp-item${!sel ? " hub-cp-item-on" : ""}" ` +
@@ -1424,6 +1440,8 @@ function openPromptPop() {
         `<div class="hub-menu-title">📜 System prompt</div>` +
         // v91: the ACTIVE prompt is spelled out on top of the popup - no
         // guessing which file (or the custom text) is actually in use.
+        // v93: the popup edits the ACTIVE MODE's keys - the chat's 📜 in chat
+        // mode, the one-shot's own selection in one-shot mode.
         `<div class="hub-cp-active" data-cp="active"></div>` +
         `<div class="hub-cp-searchrow">` +
         `<input type="text" class="hub-cp-in hub-cp-search" data-cp="search" spellcheck="false" autocomplete="off" ` +
@@ -1441,11 +1459,14 @@ function openPromptPop() {
         `<span class="hub-cp-mono" data-cp="dir">…</span> - the same folder the ` +
         `PolyStrata / llama.cpp nodes use. A selected file is read fresh on EVERY ` +
         `message and WINS over the custom text; "Save" switches to the custom text; ` +
-        `"Clear" sends none. Applies to every chat.</div>`;
+        `"Clear" sends none. ` +
+        (chatMode === "oneshot"
+            ? "v93: ONE-SHOT mode - this selection applies to the ⚡ runs only; the chat keeps its own 📜."
+            : "Applies to every chat.") + `</div>`;
     document.body.appendChild(pop);
     promptPop = pop;
     const ta = pop.querySelector(".hub-cp-ta");
-    ta.value = cfg?.system_prompt || "";
+    ta.value = cfg?.[promptKeys().sys] || "";
     const dirEl = pop.querySelector('[data-cp="dir"]');
     if (dirEl) dirEl.textContent = promptDir || "ComfyUI/models/LLM/prompts";
     const searchIn = pop.querySelector('[data-cp="search"]');
@@ -1459,22 +1480,30 @@ function openPromptPop() {
         const item = e.target?.closest?.("[data-cp-name]");
         if (!item) return;
         const name = item.dataset.cpName || "";
-        const res = await applyChatSettings({ prompt_preset: name });
+        const pk = promptKeys();
+        const res = await applyChatSettings({ [pk.pre]: name });
         if (res.ok) {
             renderPromptList();
             renderPromptBtnState();
-            localToast(name ? "System prompt: " + name : "System prompt: none (custom text)");
+            renderStatus();
+            localToast(name
+                ? (chatMode === "oneshot" ? "One-shot prompt: " + name : "System prompt: " + name)
+                : (chatMode === "oneshot" ? "One-shot prompt: none (custom text)" : "System prompt: none (custom text)"));
         } else {
             localToast("Not applied: " + (res.error || "?"));
         }
     });
     const commit = async (text) => {
-        const res = await applyChatSettings({ system_prompt: text, prompt_preset: "" });
+        const pk = promptKeys();
+        const res = await applyChatSettings({ [pk.sys]: text, [pk.pre]: "" });
         if (res.ok) {
-            ta.value = res.config?.system_prompt ?? text;
+            ta.value = res.config?.[pk.sys] ?? text;
             renderPromptList();
             renderPromptBtnState();
-            localToast(text.trim() ? "System prompt: custom text saved" : "System prompt cleared");
+            renderStatus();
+            localToast(text.trim()
+                ? (chatMode === "oneshot" ? "One-shot prompt: custom text saved" : "System prompt: custom text saved")
+                : (chatMode === "oneshot" ? "One-shot prompt cleared" : "System prompt cleared"));
         } else {
             localToast("Not applied: " + (res.error || "?"));
         }
@@ -1579,12 +1608,38 @@ function openGpuPop() {
         `<button type="button" class="hub-cs-chip" data-gpu-btn="reserve" title="Apply now and remember (ComfyUI plans its loads around the LLM)">Apply</button>` +
         `<button type="button" class="hub-cs-chip" data-gpu-btn="release" title="Return the reserve to the startup state (both sides)">Release</button>` +
         `</div>` +
+        // v93 (owner #2): the two VRAM checkboxes moved here from the ⚙ chat
+        // settings - a VRAM decision belongs in the GPU & memory popup.
+        `<div class="hub-cs-sect">Automatic VRAM handoff</div>` +
+        `<label class="hub-cs-row" title="Before every request (chat AND one-shot): unload ComfyUI's own models (only when any are still loaded) so the LLM gets the VRAM. The result shows as a note on the live bubble.">` +
+        `<span>Free ComfyUI models before request</span>` +
+        `<input type="checkbox" class="hub-cs-chk" data-gpu="freec"></label>` +
+        `<label class="hub-cs-row" title="When a ComfyUI queue starts (execution_start), POST /v1/unload to the LLM engine - its VRAM goes back to ComfyUI for the generation. The next chat message or run wakes the model again (may take minutes).">` +
+        `<span>Unload the chat model when a ComfyUI queue starts</span>` +
+        `<input type="checkbox" class="hub-cs-chk" data-gpu="unq"></label>` +
         `<div class="hub-cs-hint">While a reserve is set, EVERY chat message re-applies it before ` +
         `the model wakes - ComfyUI keeps its VRAM and stops catching OOM. "Unload model" stops ` +
         `the engine and returns ALL of its memory + the reservation. "Free ComfyUI memory" is ` +
         `ComfyUI's own cache cleanup.</div>`;
     document.body.appendChild(pop);
     gpuPop = pop;
+    // v93 (owner #2): the VRAM checkboxes live here now (they left the ⚙
+    // popup). Real checkboxes, applied on change; a failed patch reverts
+    // from the server truth.
+    const vFreeChk = pop.querySelector('[data-gpu="freec"]');
+    const vUnqChk = pop.querySelector('[data-gpu="unq"]');
+    vFreeChk.checked = !!(cfg?.auto_free_comfy);
+    vUnqChk.checked = !!(cfg?.auto_unload_llm_on_queue);
+    vFreeChk.addEventListener("change", async () => {
+        const res = await applyChatSettings({ auto_free_comfy: vFreeChk.checked });
+        if (res.ok) localToast("Free ComfyUI models before request: " + (vFreeChk.checked ? "ON" : "OFF"));
+        else { localToast("Not applied: " + (res.error || "?")); vFreeChk.checked = !!res.config?.auto_free_comfy; }
+    });
+    vUnqChk.addEventListener("change", async () => {
+        const res = await applyChatSettings({ auto_unload_llm_on_queue: vUnqChk.checked });
+        if (res.ok) localToast("Unload the chat model on a ComfyUI queue: " + (vUnqChk.checked ? "ON" : "OFF"));
+        else { localToast("Not applied: " + (res.error || "?")); vUnqChk.checked = !!res.config?.auto_unload_llm_on_queue; }
+    });
     const notesEl = pop.querySelector('[data-gpu="notes"]');
     const showNotes = (j) => {
         notesEl.classList.remove("hub-cs-err");
@@ -1636,7 +1691,9 @@ function streamNote(msg) {
     // let ensureStreamBubble replay it onto the fresh meta line; a non-note
     // token arriving later overwrites it through the normal paint flow.
     streamNotePending = t;
-    const el = msgsEl?.querySelector(".hub-chat-msg-streaming .hub-chat-msg-meta");
+    // v93: the live bubble lives in the ACTIVE stream host (the chat list or
+    // the one-shot runs list)
+    const el = streamHost()?.querySelector(".hub-chat-msg-streaming .hub-chat-msg-meta");
     if (el) { el.textContent = t; el.title = t; }
 }
 
@@ -1697,14 +1754,18 @@ function renderStatus() {
     // v87: the model moved into the toolbar dropdown - the status line keeps
     // the server url + the last-answer stats (degraded errors override it).
     // v91: + a permanent 📜 segment naming the ACTIVE system prompt.
+    // v93: the segment reflects the ACTIVE MODE's prompt selection (the chat
+    // keys in chat mode, the oneshot_* keys in one-shot mode).
     let prSeg = "";
-    const prPreset = (cfg?.prompt_preset || "").trim();
-    const prCustom = (cfg?.system_prompt || "").trim();
+    const pk = promptKeys();
+    const prPreset = (cfg?.[pk.pre] || "").trim();
+    const prCustom = (cfg?.[pk.sys] || "").trim();
+    const prMark = chatMode === "oneshot" ? "📜⚡ " : "📜 ";
     if (prPreset) {
         const base = String(prPreset).split("/").pop() || prPreset;
-        prSeg = "📜 " + base;
+        prSeg = prMark + base;
     } else if (prCustom) {
-        prSeg = "📜 custom";
+        prSeg = prMark + "custom";
     }
     statusEl.textContent = (cfg?.url || "no LLM server") +
         (last ? " · " + last : "") +
@@ -2153,6 +2214,9 @@ async function addFiles(fileList) {
 
 function renderAttach() {
     if (!attachEl) return;
+    // v93: the attachments are a chat feature - one-shot is text-only, the
+    // chips row must never appear over the runs list
+    if (chatMode === "oneshot") { attachEl.style.display = "none"; return; }
     const tab = activeTab();
     const list = tab?.pending || [];
     if (!list.length) { attachEl.style.display = "none"; attachEl.innerHTML = ""; return; }
@@ -2309,10 +2373,15 @@ function setBusy(b) {
     patchRegenButtons();
 }
 
+// v93: the live-stream container - the chat message list, or the one-shot
+// runs list while a ⚡ run streams. The paint machinery below is mode-blind.
+function streamHost() { return streamHostEl || msgsEl; }
+
 function ensureStreamBubble() {
-    let el = msgsEl.querySelector(".hub-chat-msg-streaming");
+    const host = streamHost();
+    let el = host.querySelector(".hub-chat-msg-streaming");
     if (!el) {
-        msgsEl.insertAdjacentHTML("beforeend",
+        host.insertAdjacentHTML("beforeend",
             `<div class="hub-chat-msg hub-chat-msg-assistant hub-chat-msg-streaming" data-i="live">` +
             `<div class="hub-chat-msg-head"><span class="hub-chat-msg-role">Model</span>` +
             `<span class="hub-chat-msg-meta">generating…</span></div>` +
@@ -2320,7 +2389,7 @@ function ensureStreamBubble() {
             `<button type="button" class="hub-chat-think-t">💭 thinking ▸</button>` +
             `<div class="hub-chat-think-b" style="display:none"></div></div>` +
             `<div class="hub-chat-msg-body"></div></div>`);
-        el = msgsEl.querySelector(".hub-chat-msg-streaming");
+        el = host.querySelector(".hub-chat-msg-streaming");
         el.querySelector(".hub-chat-think-t")?.addEventListener("click", (e) => toggleThink(e.currentTarget));
         // v92: a prep note that arrived BEFORE the bubble (the py emits it
         // right after the response opens - the free/wake lines can precede
@@ -2393,7 +2462,8 @@ function paintStreamPart(container, full, key, st) {
 }
 
 function paintStreamBubble() {
-    if (!msgsEl || !streaming) return;
+    if (!streamHost() || !streaming) return;
+    const host = streamHost();
     const el = ensureStreamBubble();
     const st = streamPaint || { stableLen: 0, thStableLen: 0, scrolled: false };
     paintStreamPart(el.querySelector(".hub-chat-msg-body"), streaming.text, "stableLen", st);
@@ -2414,16 +2484,16 @@ function paintStreamBubble() {
         try { body.scrollTop = body.scrollHeight; } catch (_) {}
     }
     // stick-to-bottom: force the first scroll, then follow only near the end
-    const near = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 160;
+    const near = host.scrollHeight - host.scrollTop - host.clientHeight < 160;
     if (near || !st.scrolled) {
-        msgsEl.scrollTop = msgsEl.scrollHeight;
+        host.scrollTop = host.scrollHeight;
         st.scrolled = true;
     }
     streamPaint = st;
 }
 
 function updateStreamBubble() {
-    if (!msgsEl || !streaming) return;
+    if (!streamHost() || !streaming) return;
     if (streamPaintT) return;   // a paint is already scheduled
     const now = Date.now();
     const wait = streamPaintAt ? Math.max(0, STREAM_FRAME_MS - (now - streamPaintAt)) : 0;
@@ -2521,6 +2591,201 @@ async function sendCurrent(opts = {}) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// v93 ONE-SHOT mode - one message in, one answer out, no chat state
+// ---------------------------------------------------------------------------
+
+function setMode(m) {
+    if (chatMode === m) return;
+    if (streaming) { localToast("Already generating - ⏹ stops it first"); return; }
+    chatMode = m === "oneshot" ? "oneshot" : "chat";
+    saveUi({ mode: chatMode });
+    applyMode();
+}
+
+function applyMode() {
+    const os = chatMode === "oneshot";
+    if (msgsEl) msgsEl.style.display = os ? "none" : "";
+    if (runEl) runEl.style.display = os ? "" : "none";
+    if (runBarEl) runBarEl.style.display = os ? "" : "none";
+    // the 📎 attachments are a chat feature in v93 (one-shot is text-only);
+    // hide the attach button + any pending chips row while in one-shot
+    const ab = panel?.querySelector(".hub-chat-attachbtn");
+    if (ab) ab.style.display = os ? "none" : "";
+    if (attachEl && os) attachEl.style.display = "none";
+    if (inputEl) inputEl.placeholder = os
+        ? "Prompt… (Enter - run, Shift+Enter - new line)"
+        : "Message… (Enter - send, Shift+Enter - new line)";
+    renderTabs();
+    renderStatus();
+    renderPromptBtnState();
+    if (os) void loadRuns();
+    else if (runEl) { runEl.innerHTML = ""; }
+}
+
+async function loadRuns() {
+    const res = await jfetch("/settings_hub/chat/oneshot/runs");
+    if (res.json?.ok && Array.isArray(res.json.runs)) {
+        runs = res.json.runs;
+        renderRuns();
+    } else if (res.status === 404) {
+        runs = [];   // an old py without the one-shot routes - stay empty
+        renderRuns();
+    }
+}
+
+function runCardHtml(r) {
+    const bits = [];
+    if (r.model) bits.push(esc(r.model));
+    if (r.prompt && r.prompt !== "none") {
+        const p = String(r.prompt);
+        bits.push("📜 " + esc(p.startsWith("preset: ") ? (p.slice(8).split("/").pop() || p.slice(8)) : p));
+    }
+    if (r.ts) {
+        try {
+            bits.push(new Date(r.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+        } catch (_) {}
+    }
+    if (r.usage?.completion_tokens) bits.push(fmtTok(r.usage.completion_tokens) + " tok");
+    if (r.ms) bits.push((r.ms / 1000).toFixed(1) + " s");
+    if (r.stopped) bits.push("stopped");
+    return `<div class="hub-chat-run" data-run="${esc(r.id || "")}">` +
+        `<div class="hub-chat-run-head">` +
+        `<span class="hub-chat-run-meta">${bits.join(" · ") || "run"}</span>` +
+        `<button type="button" class="hub-chat-run-copy" title="Copy the answer to the clipboard">⧉ copy</button>` +
+        `</div>` +
+        (r.thoughts
+            ? `<div class="hub-chat-think"><button type="button" class="hub-chat-think-t">💭 thinking ▸</button>` +
+              `<div class="hub-chat-think-b" style="display:none">${mdLite(r.thoughts)}</div></div>`
+            : "") +
+        `<div class="hub-chat-run-body">${mdLite(r.text) || "<i>(empty)</i>"}</div>` +
+        `</div>`;
+}
+
+function renderRuns() {
+    if (!runEl) return;
+    // a live streaming card (if any) must survive the re-render
+    const live = streamHostEl === runEl ? runEl.querySelector(".hub-chat-msg-streaming") : null;
+    if (!runs.length && !live) {
+        runEl.innerHTML =
+            `<div class="hub-chat-runs-empty">No runs yet - type a prompt above and press ▶.<br>` +
+            `One-shot: ONE message in, ONE answer out - no history. ` +
+            `📜 picks the system prompt (its own one-shot selection).</div>`;
+        return;
+    }
+    runEl.innerHTML = "";
+    if (live) runEl.appendChild(live);
+    for (const r of runs) runEl.insertAdjacentHTML("beforeend", runCardHtml(r));
+}
+
+async function copyText(t) {
+    const s = String(t || "");
+    if (!s) { localToast("Nothing to copy"); return; }
+    try { await navigator.clipboard.writeText(s); localToast("Copied - " + s.length + " chars"); return; } catch (_) {}
+    try {
+        const ta = document.createElement("textarea");
+        ta.value = s;
+        ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select();
+        const ok = document.execCommand("copy");
+        ta.remove();
+        localToast(ok ? "Copied - " + s.length + " chars" : "Copy failed");
+    } catch (_) { localToast("Copy failed"); }
+}
+
+/** v93: ONE run. The body is {text, stream} - the py builds [oneshot system?]
+ *  + [user text], answers once, appends the run to its flat log; nothing is
+ *  ever written to the chat sessions. Same SSE protocol as /chat/send, so
+ *  readStream + the incremental paint work unchanged (the host is runEl). */
+async function sendRun() {
+    if (!panel) return;
+    if (streaming) { localToast("Already generating - press ⏹ to stop first"); return; }
+    const text = (inputEl?.value || "").trim();
+    if (!text) return;
+    if (!cfg?.url) {
+        setStatusErr("No LLM server configured - ⚙ in the chat header");
+        localToast("No LLM server configured - press ⚙ in the chat header");
+        return;
+    }
+    const wantStream = !!(cfg?.stream ?? true);
+    setBusy(true);
+    try {
+        const body = { text, stream: wantStream };
+        const ctrl = new AbortController();
+        streaming = { ctrl, os: true, text: "", thoughts: "" };
+        cancelStreamPaint();      // a fresh paint state per stream
+        streamHostEl = runEl;     // the live bubble paints into the runs list
+        let fin = null;
+        const r = await app.api.fetchApi("/settings_hub/chat/oneshot", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: ctrl.signal,
+        });
+        if (!r) throw new Error("no response from the chat backend");
+        let ct = "";
+        try { ct = r.headers?.get?.("content-type") || ""; } catch (_) {}
+        if (wantStream && ct.includes("text/event-stream") && r.body && r.body.getReader) {
+            renderRuns();   // the list with the live bubble slot at the end
+            await readStream(r, (ev) => {
+                if (ev.delta) { streaming.text += ev.delta; updateStreamBubble(); }
+                else if (ev.thoughts) { streaming.thoughts += ev.thoughts; updateStreamBubble(); }
+                else if (ev.note) streamNote(ev.note);
+                else if (ev.error) setStatusErr(ev.error);
+                else if (ev.done && ev.reply) fin = ev;
+            });
+            cancelStreamPaint();  // no stale paint may re-create the bubble
+        } else {
+            const j = await r.json().catch(() => null);
+            if (!r.ok || !j?.ok) throw new Error(j?.error || "HTTP " + (r.status || "?"));
+            if (j?.note) localToast(String(j.note), 6000);
+            fin = { reply: j.reply };
+        }
+        if (fin?.reply) {
+            const rp = fin.reply;
+            runs.unshift({
+                id: rp.id || Math.random().toString(16).slice(2, 10),
+                ts: Math.floor(Date.now() / 1000),
+                model: rp.model || cfg?.model || "",
+                prompt: rp.prompt || "",
+                text: rp.text || "",
+                thoughts: rp.thoughts || "",
+                ms: rp.ms || 0,
+                usage: rp.usage || {},
+                stopped: rp.stopped || undefined,
+            });
+            renderRuns();
+        }
+        if (inputEl) { inputEl.value = ""; autoGrow(); }
+    } catch (e) {
+        if (e?.name === "AbortError") {
+            const t = streaming?.text || "";
+            if (t) {
+                // ⏹ keeps the partial answer - the py logged it as stopped too
+                runs.unshift({
+                    id: Math.random().toString(16).slice(2, 10),
+                    ts: Math.floor(Date.now() / 1000),
+                    model: cfg?.model || "",
+                    prompt: "",
+                    text: t,
+                    thoughts: streaming?.thoughts || "",
+                    ms: 0, usage: {}, stopped: true,
+                });
+                renderRuns();
+            }
+            localToast("Stopped - the partial answer is kept");
+        } else {
+            setStatusErr(String(e?.message || e));
+            localToast("Run failed: " + String(e?.message || e));
+        }
+    } finally {
+        streaming = null;
+        streamHostEl = null;   // the paint host is back to the chat list
+        cancelStreamPaint();
+        setBusy(false);
+    }
+}
+
 function autoGrow() {
     if (!inputEl) return;
     inputEl.style.height = "auto";
@@ -2578,6 +2843,14 @@ function buildDom() {
         `<div class="hub-chat-note" style="display:none"></div>` +
         `<div class="hub-chat-tabs"></div>` +
         `<div class="hub-chat-msgs"></div>` +
+        // v93: the ONE-SHOT view (a sibling of the message list; exactly one
+        // of the two is visible at a time). The bar carries the log controls.
+        `<div class="hub-chat-runs-bar" style="display:none">` +
+        `<span class="hub-chat-runs-cap">⚡ one-shot - one message in, one answer out</span>` +
+        `<span class="hub-chat-runs-hspace"></span>` +
+        `<button type="button" class="hub-btn hub-chat-runs-clear" title="Clear the runs log (click twice to confirm)">🗑</button>` +
+        `</div>` +
+        `<div class="hub-chat-runs" style="display:none"></div>` +
         `<div class="hub-chat-attach" style="display:none"></div>` +
         `<div class="hub-chat-inputrow">` +
         `<button type="button" class="hub-chat-attachbtn" title="Attach an image (vision), a video or a text file">📎</button>` +
@@ -2616,6 +2889,8 @@ function buildDom() {
     headEl = panel.querySelector(".hub-chat-head");
     tabEl = panel.querySelector(".hub-chat-tabs");
     msgsEl = panel.querySelector(".hub-chat-msgs");
+    runBarEl = panel.querySelector(".hub-chat-runs-bar");
+    runEl = panel.querySelector(".hub-chat-runs");
     attachEl = panel.querySelector(".hub-chat-attach");
     inputEl = panel.querySelector(".hub-chat-input");
     sendBtn = panel.querySelector(".hub-chat-send");
@@ -2633,11 +2908,28 @@ function buildDom() {
     // geometry
     lastDpr = curDpr();   // v87: zoom tracking starts from the CURRENT dpr
     const ui = lsUi();
+    // v93: the panel mode (chat / one-shot) is per-browser UI state
+    chatMode = ui.mode === "oneshot" ? "oneshot" : "chat";
     applyPos(ui.x ?? Math.max(16, (window.innerWidth || 1600) - 560), ui.y ?? 90);
     applySize(ui.w ?? DEF_W, ui.h ?? DEF_H);
     setMinimized(!!ui.min, false);
     refitIntoView();
     window.addEventListener("resize", onWinResize);
+    // v93: apply the restored mode to the DOM (which list is visible etc.)
+    applyMode();
+    runEl.addEventListener("click", (e) => {
+        // ⧉ copy the answer of a finished run
+        const ct = e.target?.closest?.(".hub-chat-run-copy");
+        if (ct) {
+            const card = ct.closest(".hub-chat-run");
+            const r = runs.find((x) => (x.id || "") === (card?.dataset.run || ""));
+            void copyText(r?.text || "");
+            return;
+        }
+        // the 💭 thinking toggle of a run card (same handler as the chat)
+        const tt = e.target?.closest?.(".hub-chat-think-t");
+        if (tt) toggleThink(tt);
+    });
 
     // header
     panel.querySelector(".hub-chat-min").addEventListener("click", () => setMinimized(true));
@@ -2731,6 +3023,10 @@ function buildDom() {
 
     // tabs
     tabEl.addEventListener("click", (e) => {
+        // v93: the mode switch (💬 chat / ⚡ one-shot)
+        const mb = e.target?.closest?.(".hub-chat-mode");
+        if (mb) { setMode(mb.dataset.mode === "oneshot" ? "oneshot" : "chat"); return; }
+        if (chatMode === "oneshot") return;   // no tab chips in one-shot
         if (e.target?.closest?.(".hub-chat-tab-add")) {
             tabEdit = { mode: "create" };
             renderTabs();
@@ -2884,14 +3180,34 @@ function buildDom() {
     // input
     sendBtn.addEventListener("click", () => {
         if (streaming) { try { streaming.ctrl.abort(); } catch (_) {} return; }
-        void sendCurrent();
+        // v93: the send button runs the ACTIVE mode's path
+        if (chatMode === "oneshot") void sendRun();
+        else void sendCurrent();
     });
     inputEl.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             if (streaming) { localToast("Already generating - ⏹ stops it"); return; }
-            void sendCurrent();
+            if (chatMode === "oneshot") void sendRun();
+            else void sendCurrent();
         }
+    });
+    // v93: the runs log controls (🗑 clear - armed like every destructive
+    // button; the per-card ⧉ copy lives on runEl's own delegation below)
+    panel.querySelector(".hub-chat-runs-clear").addEventListener("click", async (e) => {
+        const now = Date.now();
+        if (now - runClearArm > 2600) {
+            runClearArm = now;
+            const b = e.currentTarget;
+            b.textContent = "❗";
+            b.title = "Click AGAIN to clear the runs log";
+            setTimeout(() => { try { b.textContent = "🗑"; b.title = "Clear the runs log (click twice to confirm)"; } catch (_) {} }, 2600);
+            return;
+        }
+        runClearArm = 0;
+        const res = await jfetch("/settings_hub/chat/oneshot/clear", { method: "POST" });
+        if (res.json?.ok) { runs = []; renderRuns(); localToast("Runs log cleared"); }
+        else localToast("Clear failed: " + (res.json?.error || "HTTP " + res.status));
     });
     inputEl.addEventListener("input", autoGrow);
     panel.querySelector(".hub-chat-attachbtn").addEventListener("click", () => {
@@ -3052,10 +3368,13 @@ function teardown() {
     try { chip?.remove(); } catch (_) {}
     try { window.removeEventListener("resize", onWinResize); } catch (_) {}
     panel = chip = headEl = tabEl = msgsEl = attachEl = inputEl = sendBtn = null;
+    runEl = runBarEl = null;
     statusEl = noteEl = grip = modelSel = sessionsBtn = null;
     settingsBtn = thinkSel = promptBtn = gpuBtn = modelsBtn = null;
     tabs = [];
     activeId = null;
+    runs = [];
+    streamHostEl = null;
     serverState = null;
     degraded = null;
     editState = null;
@@ -3073,6 +3392,10 @@ export function __chatTestHooks() {
         chipEl: () => chip,
         tabsEl: () => tabEl,
         msgsEl: () => msgsEl,
+        runsEl: () => runEl,
+        runsBarEl: () => runBarEl,
+        mode: () => chatMode,
+        runsList: () => runs,
         attachEl: () => attachEl,
         inputEl: () => inputEl,
         sendBtnEl: () => sendBtn,
@@ -3107,8 +3430,15 @@ export function __chatTestHooks() {
         addFiles,
         clearPending,
         send: sendCurrent,
+        // v93: one-shot mode introspection + control for the smoke tests
+        setMode,
+        sendRun,
+        loadRuns,
+        renderRuns,
+        runCardHtml,
+        copyText,
         stopStream: () => { try { streaming?.ctrl?.abort(); } catch (_) {} },
-        streaming: () => (streaming ? { sid: streaming.sid, text: streaming.text, thoughts: streaming.thoughts } : null),
+        streaming: () => (streaming ? { sid: streaming.sid, os: !!streaming.os, text: streaming.text, thoughts: streaming.thoughts } : null),
         // v92: streaming-paint internals for the smoke tests
         updateStreamBubble,
         paintStream: paintStreamBubble,

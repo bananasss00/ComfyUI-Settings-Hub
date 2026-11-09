@@ -4,7 +4,7 @@ import {
     createNewHub, createVirtualHub, HUB_NODE_NAME, detectWidgetType, portalKindOf, allHubs,
     isViewerNode, createViewerBinding, isInternalWidget,
     mediaLoaderInfo, createMediaBinding, createBindingsBulk,
-    createNodeUIBinding, runHubAction,
+    createNodeUIBinding, runHubAction, resolveHubNodeFromDom,
 } from "./core.js";
 
 // v82 SELF-REPORT (docs/plan-versions.md): the value is the version of
@@ -13,7 +13,7 @@ import {
 // browser-cached stale file is still NAMED in F12 while per-file build
 // guards are gone (owner: a release must not rewrite every file).
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["context_menu"] = "v92";
+globalThis.__SettingsHubLoaded["context_menu"] = "v93";
 
 // ============================================================================
 // 1) Standard node menu hook (canvas widgets)
@@ -36,6 +36,7 @@ export function attachContextMenu() {
     attachPanelSurfacePinMenu();
     attachCanvasVhubMenu();   // v90: "New virtual hub" in the canvas RMB menu
     attachHubNodeMenu();      // v92: Dematerialize + Rename on a hub node
+    attachHubWindowMenu();    // v93: Rename / Materialize inside a floating hub window
 
     app.registerExtension({
         name: "Comfy.SettingsHub.context",
@@ -1059,6 +1060,47 @@ function attachHubNodeMenu() {
             return entries;
         },
     });
+}
+
+// v93 (owner #3: "пкм вызывает контекстное меню браузера"): the FLOATING
+// hub windows are plain DOM - a right-click inside them hit no handler at
+// all, so the BROWSER's native menu appeared. Now: a document-level capture
+// listener resolves the window (.hub-pin-panel) to its node through the
+// core.js DOM resolver registry and shows OUR menu - ✏ Rename hub, 📌
+// Materialize (a phantom back into a canvas node) - and never the native
+// one. Text fields keep their own flows (the widget pin menu / native):
+// inputs, textareas and portal hosts are skipped.
+function attachHubWindowMenu() {
+    document.addEventListener("contextmenu", (e) => {
+        if (e.shiftKey || e.ctrlKey || e.metaKey || e.defaultPrevented) return;
+        const t = e.target;
+        if (!t || typeof t.closest !== "function") return;
+        if (!t.closest(".hub-pin-panel")) return;
+        if (t.closest("input, textarea, select, .hub-portal-host")) return;
+        const node = resolveHubNodeFromDom(t);
+        if (!node || node.type !== HUB_NODE_NAME) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const entries = [];
+        entries.push({
+            content: "✏ Rename hub",
+            callback: () => { runHubAction("rename", node); },
+        });
+        try {
+            if (node.properties?.hubConfig?.phantom) {
+                entries.push({
+                    content: "📌 Materialize - back to a canvas node",
+                    callback: () => { runHubAction("materialize", node); },
+                });
+            } else {
+                entries.push({
+                    content: "🪄 Dematerialize - turn into a floating window",
+                    callback: () => { runHubAction("dematerialize", node); },
+                });
+            }
+        } catch (_) { /* the menu must never die because of our items */ }
+        showHubMenu(e.clientX, e.clientY, entries);
+    }, true);
 }
 
 function attachDomWidgetPinMenu() {

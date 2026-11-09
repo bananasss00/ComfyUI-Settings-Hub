@@ -35,7 +35,7 @@
 // v89 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v92";
+globalThis.__SettingsHubLoaded["stack"] = "v93";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -2168,6 +2168,31 @@ function textWidgetsOf(node) {
     } catch (_) { return []; }
 }
 
+/** v93 (owner #4): the element under the cursor during a text-card drag is
+ *  often a REAL DOM widget input (ComfyUI's multiline text widgets are
+ *  textareas in the DOM widget layer). Resolve it back to its owning
+ *  (node, widget) pair by scanning the graph's widgets - the same matching
+ *  textWidgetAt layer 1 uses (inputEl / element / element.contains). */
+function domWidgetOwnerAt(el) {
+    try {
+        const t = el?.closest?.("textarea, input[type=text], .comfy-multiline-input");
+        if (!t) return null;
+        const list = Array.isArray(app.graph?._nodes) ? app.graph._nodes : [];
+        for (let i = list.length - 1; i >= 0; i--) {
+            const node = list[i];
+            const ws = Array.isArray(node?.widgets) ? node.widgets : [];
+            for (const w of ws) {
+                if (!w || !isTextWidget(w)) continue;
+                if (w.inputEl === t || w.element === t ||
+                    (w.element && typeof w.element.contains === "function" && w.element.contains(t))) {
+                    return { node, widget: w, el: t };
+                }
+            }
+        }
+    } catch (_) {}
+    return null;
+}
+
 /** The text widget under the cursor (v92 layered hit-test), else the node's
  *  first text widget (prompt nodes usually carry exactly one).
  *  v92 (owner #8): the drop used to land in the FIRST text widget - the
@@ -2176,11 +2201,14 @@ function textWidgetsOf(node) {
  *    1. a DOM multiline/input element under the cursor mapped back to the
  *       widget (ComfyUI multiline text widgets ARE real DOM textareas);
  *    2. the frontend's own getWidgetOnPos;
- *    3. a manual walk of the widget stack - the frontend stores each
+ *    3. v93: the widget's DOM element rect under the cursor - the DOM
+ *       widgets know exactly where they are (the drawn last_y of layer 4
+ *       can be stale on the modern frontend);
+ *    4. a manual walk of the widget stack - the frontend stores each
  *       widget's last drawn y (w.last_y, graph coords) + computeSize height,
  *       so a graph-space y (gy) resolves the band under the cursor;
- *    4. the NEAREST text-widget band within a generous 40px slop;
- *    5. the legacy fallback - the node's first text widget. */
+ *    5. the NEAREST text-widget band within a generous 40px slop;
+ *    6. the legacy fallback - the node's first text widget. */
 function textWidgetAt(node, gx, gy, cx, cy) {
     // 1. DOM element under the cursor (multiline textareas overlay the canvas)
     try {
@@ -2201,7 +2229,23 @@ function textWidgetAt(node, gx, gy, cx, cy) {
         const w = app.canvas?.getWidgetOnPos?.(gx, gy);
         if (w && isTextWidget(w)) return w;
     } catch (_) {}
-    // 3+4. manual widget-stack walk (last_y + computeSize), then nearest-band
+    // 3. v93: the widget's own DOM element rect under the cursor
+    try {
+        if (cx != null && cy != null) {
+            const ws = Array.isArray(node.widgets) ? node.widgets : [];
+            for (const w of ws) {
+                if (!w || w.disabled || !isTextWidget(w)) continue;
+                const el = w.inputEl || w.element;
+                if (!el?.getBoundingClientRect) continue;
+                const r = el.getBoundingClientRect();
+                if (r && r.width > 0 && r.height > 0 &&
+                    cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) {
+                    return w;
+                }
+            }
+        }
+    } catch (_) {}
+    // 4+5. manual widget-stack walk (last_y + computeSize), then nearest-band
     try {
         const ws = Array.isArray(node.widgets) ? node.widgets : [];
         const H = (window.LiteGraph?.NODE_WIDGET_HEIGHT) ?? 20;
@@ -2220,7 +2264,7 @@ function textWidgetAt(node, gx, gy, cx, cy) {
         }
         if (best && bestDist <= 40) return best;   // a sloppy landing still wins
     } catch (_) {}
-    // 5. the historical fallback
+    // 6. the historical fallback
     return textWidgetsOf(node)[0] || null;
 }
 
@@ -2302,6 +2346,11 @@ function setDragTarget(target) {
     if (prev?.kind === "text" && prev.el) {
         try { prev.el.classList.remove("hub-stack-drop-hot-text"); } catch (_) {}
     }
+    // v93: a node target resolved through the widget's DOM element highlights
+    // the TEXTAREA - the class goes when the cursor leaves the widget
+    if (prev?.kind === "node" && prev.el) {
+        try { prev.el.classList.remove("hub-stack-drop-hot-text"); } catch (_) {}
+    }
     if (prev?.kind === "tab" && prev.el) {
         try { prev.el.classList.remove("hub-stack-tab-hot"); } catch (_) {}
     }
@@ -2326,7 +2375,15 @@ function setDragTarget(target) {
         } catch (_) {}
         hideTargetBox();
     } else if (target?.kind === "node") {
-        showTargetBox(target.node, target.wkind);
+        // v93: a target resolved THROUGH the widget's own DOM element (the
+        // multiline textarea) highlights the textarea itself - the whole-node
+        // box would cover the point the user is aiming at
+        if (target.el?.isConnected) {
+            try { target.el.classList.add("hub-stack-drop-hot-text"); } catch (_) {}
+            hideTargetBox();
+        } else {
+            showTargetBox(target.node, target.wkind);
+        }
     } else {
         hideTargetBox();
     }
@@ -2347,6 +2404,11 @@ function endDragSession(keepClickBlock) {
         try { prev.el.classList.remove("hub-stack-drop-hot"); } catch (_) {}
     }
     if (prev?.kind === "text" && prev.el) {
+        try { prev.el.classList.remove("hub-stack-drop-hot-text"); } catch (_) {}
+    }
+    // v93: a node target resolved through the widget's DOM element highlights
+    // the TEXTAREA - its class must go too
+    if (prev?.kind === "node" && prev.el) {
         try { prev.el.classList.remove("hub-stack-drop-hot-text"); } catch (_) {}
     }
     if (prev?.kind === "tab" && prev.el) {
@@ -2426,6 +2488,18 @@ function onCardDragMove(e) {
         const mirror = el?.closest?.(".hub-mirror-media");
         if (mirror) target = { kind: "mirror", el: mirror };
     }
+    if (!target && t === "text") {
+        // v93 (owner #4): a DOM multiline widget UNDER THE CURSOR wins before
+        // the graph probe. The ComfyUI frontend renders multiline text
+        // widgets as REAL textareas above the canvas - pointToGraph used to
+        // see that textarea as a foreign overlay ("not the canvas") and
+        // bailed, so the target highlight died exactly over the field the
+        // user was aiming at and the drop fell to the node's FIRST widget.
+        // Resolve the (node, widget) pair from the element and highlight the
+        // textarea itself (target.el - the node-box highlight is skipped).
+        const own = domWidgetOwnerAt(el);
+        if (own) target = { kind: "node", node: own.node, widget: own.widget, wkind: "text", el: own.el };
+    }
     if (!target) {
         // v74: REAL GRAPH NODES as targets - image/video/audio cards need a
         // kind-matched upload combo, text cards a string widget.
@@ -2456,6 +2530,9 @@ function onCardDragUp(e) {
         try { ctx.target.el.classList.remove("hub-stack-drop-hot"); } catch (_) {}
     }
     if (ctx.target?.kind === "text" && ctx.target.el) {
+        try { ctx.target.el.classList.remove("hub-stack-drop-hot-text"); } catch (_) {}
+    }
+    if (ctx.target?.kind === "node" && ctx.target.el) {
         try { ctx.target.el.classList.remove("hub-stack-drop-hot-text"); } catch (_) {}
     }
     if (ctx.target?.kind === "tab" && ctx.target.el) {

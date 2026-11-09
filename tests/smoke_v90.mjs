@@ -244,7 +244,7 @@ function installCanvasStub(origImpls = {}) {
     const web = makeSandbox("vh");
     const core = await import(web + "/core.js");
 
-    check("B: core self-reports v92+ (rolling)", ["v91", "v92"].includes(globalThis.__SettingsHubLoaded?.core));
+    check("B: core self-reports v92+ (rolling)", /^v(9[1-9]|\d{3,})$/.test(String(globalThis.__SettingsHubLoaded?.core || "")));
 
     const node = core.createVirtualHub();
     check("B: node created via the canonical path", !!node && node.type === "SettingsHub");
@@ -333,7 +333,7 @@ function installCanvasStub(origImpls = {}) {
     } finally {
         console.error = realErr;
     }
-    check("C: entry self-reports v92+ (rolling)", ["v91", "v92"].includes(globalThis.__SettingsHubBuild));
+    check("C: entry self-reports v92+ (rolling)", /^v(9[1-9]|\d{3,})$/.test(String(globalThis.__SettingsHubBuild || "")));
     check("C: no stale-cache report", !errors.some((e) => e.includes("MIXED BUILD")));
 
     const body = document.body;

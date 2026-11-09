@@ -68,6 +68,16 @@ py/stack_store.py):
                                                 message, build the upstream
                                                 payload, call the LLM, store the
                                                 reply; JSON or SSE (stream)
+    POST   /settings_hub/chat/oneshot           v93: ONE-SHOT inference - a single
+                                                message in, a single answer out;
+                                                NO session, NO tree, NO history:
+                                                the prompt is [oneshot system?]
+                                                + [user text], the reply lands in
+                                                a flat runs log (oneshot_runs.json,
+                                                capped by oneshot_keep); same SSE
+                                                event protocol as /send
+    GET    /settings_hub/chat/oneshot/runs      v93: the runs log (newest first)
+    POST   /settings_hub/chat/oneshot/clear     v93: wipe the runs log
     POST   /settings_hub/chat/load              switch the model - POST {root}/
                                                 api/models/load first (the
                                                 PolyStrata way), fallback /v1/load
@@ -167,7 +177,7 @@ try:
 except Exception:  # pragma: no cover - folder_paths always exists in ComfyUI
     folder_paths = None
 
-CHAT_SERVER_VERSION = "v91"
+CHAT_SERVER_VERSION = "v93"
 
 # ---------------------------------------------------------------------------
 # Limits (server-side absolute guards; the frontend may enforce smaller ones)
@@ -263,6 +273,15 @@ DEFAULT_CONFIG = {
                                # (api "execution_start"), the JS hook unloads
                                # the chat engine (/v1/unload) so its VRAM
                                # goes back to ComfyUI. Off by default.
+    "oneshot_preset": "",      # v93: the ONE-SHOT mode's own catalog preset
+                               # (.txt relative path) - SAME resolution rules
+                               # as prompt_preset (wins over oneshot_system,
+                               # read fresh per run) but a SEPARATE choice: the
+                               # chat's 📜 selection is never touched
+    "oneshot_system": "",      # v93: the one-shot mode's custom system text
+                               # (used while no oneshot preset is selected)
+    "oneshot_keep": 30,        # v93: how many finished runs the flat
+                               # oneshot_runs.json log keeps (newest first)
     "keep_sessions": 20,       # eviction for old sessions
     "timeout_s": DEFAULT_TIMEOUT_S,
     "max_file_mb": DEFAULT_MAX_FILE_MB,
@@ -278,6 +297,7 @@ _CONFIG_NUM_RANGES = {
     "img_max_side": (256, 4096), "img_max_count": (1, 16),
     "video_frames": (2, 64), "video_max_side": (256, 4096),
     "keep_sessions": (1, 500), "timeout_s": (30, 86400),
+    "oneshot_keep": (1, 500),
     "max_file_mb": (1, 100), "vram_reserve_mib": (0, 131072),
     "ctx_size": (0, 2_000_000),
 }
@@ -984,13 +1004,34 @@ def _resolve_system_prompt(cfg):
     return str(cfg.get("system_prompt") or "").strip(), ""
 
 
-def build_upstream_payload(session_msgs, cfg, sid, stream=False, model=""):
+def _resolve_oneshot_prompt(cfg):
+    """v93: the ONE-SHOT twin of _resolve_system_prompt over the oneshot_*
+    config keys - identical semantics (a selected catalog preset wins over
+    the custom text and is read fresh per run), but a SEPARATE selection so
+    a run never rewrites the chat's own prompt."""
+    preset = str(cfg.get("oneshot_preset") or "").strip()
+    if preset:
+        text, err = _read_prompt_file(preset)
+        if err is not None:
+            print("[SettingsHub-chat] oneshot prompt preset '%s' not used: %s"
+                  % (preset, err), flush=True)
+            return "", err
+        return (text or "").strip(), ""
+    return str(cfg.get("oneshot_system") or "").strip(), ""
+
+
+def build_upstream_payload(session_msgs, cfg, sid, stream=False, model="",
+                           system_prompt=None):
     """The full /chat/completions body: history + sampling + reasoning knobs.
     reasoning 'none' maps to chat_template_kwargs.enable_thinking=false (the
     llama.cpp / vLLM convention PolyStrata speaks); low/medium/high map to
-    the OpenAI-style reasoning_effort field."""
+    the OpenAI-style reasoning_effort field.
+    v93: system_prompt=None resolves the CHAT prompt (the historical path);
+    an explicit string ("" included) is used verbatim instead - the one-shot
+    route passes its own resolved prompt there."""
     msgs = build_upstream_messages(session_msgs, cfg, sid)
-    sp, _note = _resolve_system_prompt(cfg)
+    sp, _note = (_resolve_system_prompt(cfg) if system_prompt is None
+                 else (str(system_prompt), ""))
     if sp:
         msgs.insert(0, {"role": "system", "content": sp})
     body = {
@@ -1717,6 +1758,12 @@ async def chat_config_set(request):
             cfg[k] = str(body.get(k) or "")[:8000]
     if "prompt_preset" in body:
         cfg["prompt_preset"] = str(body.get("prompt_preset") or "").replace("\\", "/").strip()[:300]
+    if "oneshot_preset" in body:
+        # v93: the ONE-SHOT mode's own catalog preset (same shape as
+        # prompt_preset; a separate key so the chat selection stays put).
+        cfg["oneshot_preset"] = str(body.get("oneshot_preset") or "").replace("\\", "/").strip()[:300]
+    if "oneshot_system" in body:
+        cfg["oneshot_system"] = str(body.get("oneshot_system") or "")[:8000]
     if "prompts_dir" in body:
         # v89: the owner's own catalog folder. "" returns to the PolyStrata
         # default; no writability probe - the catalog is READ-ONLY here and a
@@ -2648,6 +2695,271 @@ async def chat_send(request):
             _write_session(sess)
             _evict_sessions(cfg.get("keep_sessions"))
             reply["session"] = sess
+        await _emit_sse(resp, {"done": True, "reply": reply})
+        await resp.write_eof()
+    except Exception:
+        try:
+            await resp.write_eof()
+        except Exception:
+            pass
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# v93 ONE-SHOT inference - one message in, one answer out, no chat state
+# ---------------------------------------------------------------------------
+
+def _oneshot_runs_path():
+    return os.path.join(_sessions_dir(), "oneshot_runs.json")
+
+
+def _read_oneshot_runs():
+    """The flat runs log (newest first). A missing/corrupt file is an empty
+    log - the mode must never die on its own storage."""
+    try:
+        with open(_oneshot_runs_path(), "r", encoding="utf-8") as f:
+            j = json.load(f)
+        return j if isinstance(j, list) else []
+    except Exception:
+        return []
+
+
+def _write_oneshot_runs(runs):
+    try:
+        os.makedirs(_sessions_dir(), exist_ok=True)
+        tmp = _oneshot_runs_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(runs[:500], f, ensure_ascii=False)
+        os.replace(tmp, _oneshot_runs_path())
+    except Exception as e:
+        print("[SettingsHub-chat] oneshot runs log write failed: %s" % e,
+              flush=True)
+
+
+def _record_oneshot_run(cfg, rec):
+    """Prepend a finished run, cap the log at oneshot_keep (newest first)."""
+    runs = _read_oneshot_runs()
+    runs.insert(0, rec)
+    try:
+        cap = int(cfg.get("oneshot_keep") or 30)
+    except Exception:
+        cap = 30
+    _write_oneshot_runs(runs[:max(1, cap)])
+
+
+@PromptServer.instance.routes.get("/settings_hub/chat/oneshot/runs")
+async def oneshot_runs_get(request):
+    return web.json_response({"ok": True, "runs": _read_oneshot_runs()})
+
+
+@PromptServer.instance.routes.post("/settings_hub/chat/oneshot/clear")
+async def oneshot_runs_clear(request):
+    _write_oneshot_runs([])
+    return web.json_response({"ok": True})
+
+
+@PromptServer.instance.routes.post("/settings_hub/chat/oneshot")
+async def chat_oneshot(request):
+    """v93: ONE-SHOT inference. The body is {text, stream?, model?} - the
+    upstream prompt is [oneshot system prompt?] + [the user text] and
+    NOTHING else: no session, no tree, no history, no title. The reply is
+    appended to the flat runs log (oneshot_runs.json) and returned in the
+    same shape /chat/send speaks (JSON reply / SSE delta events), so the
+    client's stream reader and the incremental paint work unchanged."""
+    try:
+        body = await request.json()
+    except Exception:
+        return _jerr("bad json")
+    if not isinstance(body, dict):
+        return _jerr("bad body")
+    cfg = _load_config()
+    if not cfg.get("url"):
+        return _upstream_unconfigured()
+    if aiohttp is None:
+        return _jerr("aiohttp missing", 500)
+    text = str(body.get("text") or "")
+    if not text.strip():
+        return _jerr("empty message")
+    if len(text) > MAX_MESSAGE_CHARS:
+        return _jerr("text too large", 413)
+    model = str(body.get("model") or cfg.get("model") or "")
+    if not model:
+        return _jerr("no model selected - pick one in ⚙ Hub settings → Chat")
+    stream = bool(body.get("stream", cfg.get("stream", True)))
+
+    sp, sp_err = _resolve_oneshot_prompt(cfg)
+    payload = build_upstream_payload(
+        [{"role": "user", "text": text}], cfg, "", stream=stream,
+        model=model, system_prompt=sp)
+    url = cfg["url"] + "/chat/completions"
+    headers = _upstream_headers(cfg)
+    timeout = aiohttp.ClientTimeout(total=int(cfg.get("timeout_s") or DEFAULT_TIMEOUT_S),
+                                    sock_connect=30)
+    now = int(time.time())
+
+    # the same VRAM choreography as the chat (v92): auto-free + wake notes
+    try:
+        await _auto_reserve_for_send(cfg)
+    except Exception:
+        pass
+    ctx = estimate_ctx_tokens(payload)
+    try:
+        total = await _ctx_total(cfg)
+    except Exception:
+        total = 0
+    if total > 0:
+        ctx["total"] = int(total)
+
+    def run_record(reply):
+        rec = {"id": uuid.uuid4().hex[:12], "ts": now,
+               "model": reply.get("model") or model,
+               "prompt": ("preset: " + cfg.get("oneshot_preset")
+                          if str(cfg.get("oneshot_preset") or "").strip()
+                          else ("custom" if sp else "none")),
+               "text": reply.get("text") or "",
+               "ms": int(reply.get("ms") or 0),
+               "usage": reply.get("usage") or {}}
+        if reply.get("thoughts"):
+            rec["thoughts"] = reply["thoughts"]
+        if reply.get("stopped"):
+            rec["stopped"] = True
+        return rec
+
+    if not stream:
+        prep_notes = await _pre_send_prep(cfg, model)
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            async def call():
+                async with http.post(url, json=payload, headers=headers) as r:
+                    return r.status, await r.text()
+            try:
+                status, txt = await _await_upstream(request, call())
+            except _ClientGone:
+                return web.Response(status=499, text="client gone")
+            except asyncio.TimeoutError:
+                return _jerr("upstream timeout after %d s" % int(cfg.get("timeout_s")),
+                             504, code="timeout")
+            except Exception as e:
+                return _jerr("connect failed: %s" % e, 502, code="connect")
+        if status != 200:
+            try:
+                jerr = json.loads(txt).get("error", {})
+                msg = jerr.get("message") if isinstance(jerr, dict) else str(jerr)
+            except Exception:
+                msg = txt[:300]
+            return _jerr("HTTP %s from the LLM server: %s" % (status, msg or "?"),
+                         502, code="upstream")
+        try:
+            reply = parse_upstream_response(json.loads(txt))
+        except Exception:
+            return _jerr("unparsable answer from the LLM server", 502, code="parse")
+        pt = (reply.get("usage") or {}).get("prompt_tokens")
+        if pt:
+            ctx = dict(ctx, used=int(pt), est=False)
+        reply["ctx"] = ctx
+        reply["ms"] = int((time.time() - now) * 1000)
+        if prep_notes:
+            reply["note"] = "; ".join(prep_notes)
+        if sp_err:
+            reply["note"] = ("; ".join(x for x in (reply.get("note"), sp_err) if x))
+        async with _lock:
+            _record_oneshot_run(cfg, run_record(reply))
+        return web.json_response({"ok": True, "reply": reply})
+
+    # --- SSE streaming (the /send event protocol, no session in "done") -----
+    resp = web.StreamResponse(headers={
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    })
+    await resp.prepare(request)
+    try:
+        for _note in (await _pre_send_prep(cfg, model)):
+            if not await _emit_sse(resp, {"note": _note}):
+                break
+    except Exception:
+        pass
+    if sp_err:
+        try:
+            await _emit_sse(resp, {"note": "oneshot prompt preset: " + sp_err})
+        except Exception:
+            pass
+    acc, th_acc, stopped, err = "", "", False, None
+    t0 = time.time()
+    try:
+        http = aiohttp.ClientSession(timeout=timeout)
+        try:
+            upstream = await http.post(url, json=payload, headers=headers)
+        except Exception as e:
+            await http.close()
+            err = "connect failed: %s" % e
+            await _emit_sse(resp, {"error": err})
+            await resp.write_eof()
+            return resp
+        if upstream.status != 200:
+            txt = await upstream.text()
+            try:
+                jerr = json.loads(txt).get("error", {})
+                msg = jerr.get("message") if isinstance(jerr, dict) else str(jerr)
+            except Exception:
+                msg = txt[:300]
+            await http.close()
+            await _emit_sse(resp, {"error": "HTTP %s: %s" % (upstream.status, msg or "?")})
+            await resp.write_eof()
+            return resp
+        buf = ""
+        saw_done = False
+        try:
+            async for chunk in upstream.content.iter_any():
+                buf += chunk.decode("utf-8", "replace")
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        saw_done = True
+                        buf = ""
+                        break
+                    try:
+                        j = json.loads(data)
+                    except Exception:
+                        continue
+                    delta = ((j.get("choices") or [{}])[0].get("delta") or {})
+                    if delta.get("content"):
+                        acc += delta["content"]
+                        if not await _emit_sse(resp, {"delta": delta["content"]}):
+                            stopped = True
+                            break
+                    if delta.get("reasoning_content"):
+                        th_acc += delta["reasoning_content"]
+                        if not await _emit_sse(resp, {"thoughts": delta["reasoning_content"]}):
+                            stopped = True
+                            break
+                tr = getattr(request, "transport", None)
+                if stopped or (tr is not None and tr.is_closing()):
+                    stopped = True
+                    break
+        except asyncio.TimeoutError:
+            err = "upstream timeout after %d s" % int(cfg.get("timeout_s"))
+            await _emit_sse(resp, {"error": err})
+        except Exception:
+            stopped = True  # network hiccup / client vanished mid-stream
+        finally:
+            try:
+                upstream.release()
+            except Exception:
+                pass
+            try:
+                await http.close()
+            except Exception:
+                pass
+        reply = {"text": acc, "thoughts": th_acc, "model": model,
+                 "usage": {}, "ms": int((time.time() - t0) * 1000),
+                 "stopped": bool(stopped or not saw_done), "ctx": ctx}
+        async with _lock:
+            _record_oneshot_run(cfg, run_record(reply))
         await _emit_sse(resp, {"done": True, "reply": reply})
         await resp.write_eof()
     except Exception:

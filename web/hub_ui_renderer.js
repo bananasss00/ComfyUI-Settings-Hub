@@ -10,7 +10,7 @@
 // SUBMODULES are fresh.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v92";
+globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v93";
 
 // The whole hub interface lives inside a single LiteGraph DOM widget
 // (node.addDOMWidget), so the CSS in styles.css actually applies:
@@ -41,7 +41,7 @@ import {
     effectiveSliderParams, getSliderOverride, hasSliderOverride,
     setSliderOverride, clearSliderOverride, applyOverrideToTargetWidgets,
     maybeReapplySliderOverride,
-    registerHubAction,
+    registerHubAction, registerHubDomResolver,
 } from "./core.js";
 import {
     presetSave, presetDelete, presetMergeInto, presetFavToggle,
@@ -1155,36 +1155,29 @@ function ensurePinPanel(node, st) {
         });
     }
 
-    // v90: rename a virtual hub in place (double-click the title, like the
-    // stack tab chips). Enter commits, Esc reverts, blur commits - the title
-    // is node.title, so it serializes with the workflow.
+    // v90: rename a virtual hub in place (double-click the title). v93 FIX
+    // (owner #3: "double click does nothing"): the header's own pointerdown
+    // handler calls preventDefault() + setPointerCapture() for the WINDOW
+    // DRAG - and per the Pointer Events spec a canceled pointerdown
+    // suppresses the compatibility mouse events, so the browser's dblclick
+    // could NEVER fire on this title. The rename is now driven by a manual
+    // double-TAP detection on pointerdown (two taps within 450ms, less than
+    // 10px apart) -> the shared hubRenameFlow popup (the same input the
+    // right-click menu uses). Enter applies, Esc cancels; the name is
+    // node.title, so it serializes with the workflow.
     if (phantom) {
-        ttl.title = "Double-click to rename this virtual hub";
-        ttl.addEventListener("dblclick", (e) => {
+        ttl.title = "Double-click to rename this virtual hub (or right-click the window)";
+        let lastTap = 0, lastX = 0, lastY = 0;
+        ttl.addEventListener("pointerdown", (e) => {
+            if (e.button !== 0) return;
+            const now = Date.now();
+            const near = Math.hypot(e.clientX - lastX, e.clientY - lastY) < 10;
+            const isDouble = (now - lastTap) < 450 && near;
+            lastTap = now; lastX = e.clientX; lastY = e.clientY;
+            if (!isDouble) return;
+            lastTap = 0;
             e.stopPropagation();
-            if (ttl.querySelector("input")) return;
-            ttl.textContent = "";
-            const inp = document.createElement("input");
-            inp.type = "text";
-            inp.value = node.title || "";
-            inp.className = "hub-pin-rename";
-            inp.spellcheck = false;
-            ttl.appendChild(inp);
-            try { inp.focus(); inp.select(); } catch (_) {}
-            const commit = (ok) => {
-                const v = inp.value.trim();
-                if (ok && v) node.title = v;
-                ttl.textContent = node.title?.replace(/\s+/g, " ").trim() || "Virtual Hub";
-                try { node.setDirtyCanvas?.(true, true); } catch (_) {}
-            };
-            inp.addEventListener("keydown", (ev) => {
-                ev.stopPropagation();
-                if (ev.key === "Enter") { ev.preventDefault(); commit(true); }
-                else if (ev.key === "Escape") { ev.preventDefault(); commit(false); }
-            });
-            inp.addEventListener("blur", () => commit(true));
-            inp.addEventListener("pointerdown", (ev) => ev.stopPropagation());
-            inp.addEventListener("dblclick", (ev) => ev.stopPropagation());
+            try { hubRenameFlow(node); } catch (_) {}
         });
     }
 
@@ -1602,9 +1595,24 @@ function hubRenameFlow(node) {
 
 // v92: the implementations land in the core.js action registry - the
 // context menu (which must not import this module) fires them by name.
+// v93: + "materialize" (the floating window's right-click menu needs the way
+// back to a canvas node - the same unpin path the 📌 header button takes)
+// and a DOM resolver (a right-click inside a floating hub window resolves to
+// its node without any node reference living in the DOM).
 try {
     registerHubAction("dematerialize", dematerializeHubAction);
     registerHubAction("rename", hubRenameFlow);
+    registerHubAction("materialize", unpinHubAction);
+    registerHubDomResolver((el) => {
+        if (!el || typeof el.closest !== "function") return null;
+        const panel = el.closest(".hub-pin-panel");
+        if (!panel) return null;
+        for (const node of allHubs()) {
+            const p = pinPanels.get(node);
+            if (p?.panel === panel) return node;
+        }
+        return null;
+    });
 } catch (_) {}
 
 /**

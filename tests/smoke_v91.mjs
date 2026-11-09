@@ -266,7 +266,9 @@ phase("PA hub registry self-healing (D2 dead hub, D3 fresh hub)");
 // ---------------------------------------------------------------------------
 phase("PB launcher module: settings rows + item toggles + hosting API");
 {
-    check("PB launcher self-reports v92 (the v92 taskbar rework)", globalThis.__SettingsHubLoaded?.launcher === "v92");
+    const lv = String(globalThis.__SettingsHubLoaded?.launcher || "");
+    check("PB launcher self-reports v92+ (the v92 taskbar rework, rolling)",
+        /^v(9[2-9]|\d{3,})$/.test(lv), lv);
     check("PB on by default", launcher.isLauncherOn() === true);
     check("PB items default on",
         launcher.isLauncherItemOn("chat") && launcher.isLauncherItemOn("stack") && launcher.isLauncherItemOn("hub"));

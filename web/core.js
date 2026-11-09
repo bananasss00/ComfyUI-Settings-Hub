@@ -8,7 +8,7 @@ import * as Pins from "./pins.js";
 // browser-cached stale file is still NAMED in F12 while per-file build
 // guards are gone (owner: a release must not rewrite every file).
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["core"] = "v92";
+globalThis.__SettingsHubLoaded["core"] = "v93";
 
 export const HUB_NODE_NAME = "SettingsHub";
 
@@ -1879,4 +1879,32 @@ export function registerHubAction(name, fn) {
 
 export function runHubAction(name, node) {
     try { return hubActions[name]?.(node) ?? null; } catch (_) { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// v93: HUB DOM RESOLVER REGISTRY - element -> owning hub node. The floating
+// hub windows (pinPanels in hub_ui_renderer.js) carry no node reference in
+// their DOM, but the context menu needs the node to offer Rename/Materialize
+// on a right-click INSIDE the window. The renderer registers a closure over
+// its private registries here; context_menu.js resolves through this
+// indirection (still no renderer import). No resolver -> null -> the native
+// menu stays, exactly like an old build.
+// ---------------------------------------------------------------------------
+
+const hubDomResolvers = [];   // (el) => node | null
+
+export function registerHubDomResolver(fn) {
+    if (typeof fn === "function" && !hubDomResolvers.includes(fn)) {
+        hubDomResolvers.push(fn);
+    }
+}
+
+export function resolveHubNodeFromDom(el) {
+    for (const fn of hubDomResolvers) {
+        try {
+            const n = fn(el);
+            if (n) return n;
+        } catch (_) { /* a dead resolver must never break the menu */ }
+    }
+    return null;
 }

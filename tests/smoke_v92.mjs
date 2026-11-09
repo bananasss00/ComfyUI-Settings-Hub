@@ -221,7 +221,7 @@ const appStub = {
 };
 appStub.api = makeFakeApi();
 globalThis.__HUB_APP_STUB__ = appStub;
-globalThis.__SettingsHubBuild = "v92";
+globalThis.__SettingsHubBuild = "v93";
 
 const sb = makeSandbox();
 const core = await import(sb.core);
@@ -232,16 +232,17 @@ const hooks = chat.__chatTestHooks();
 // ---------------------------------------------------------------------------
 phase("PA build v92 + version manifest");
 {
-    check("PA the entry reports v92", globalThis.__SettingsHubBuild === "v92");
-    check("PA chat self-reports v92", globalThis.__SettingsHubLoaded?.chat === "v92");
-    check("PA launcher self-reports v92", globalThis.__SettingsHubLoaded?.launcher === "v92");
-    check("PA core self-reports v92", globalThis.__SettingsHubLoaded?.core === "v92");
+    // v93: the pack moved on - the manifest expectations follow the truth
+    check("PA the entry reports v93", globalThis.__SettingsHubBuild === "v93");
+    check("PA chat self-reports v93", globalThis.__SettingsHubLoaded?.chat === "v93");
+    check("PA launcher self-reports v93", globalThis.__SettingsHubLoaded?.launcher === "v93");
+    check("PA core self-reports v93", globalThis.__SettingsHubLoaded?.core === "v93");
     const rsrc = fs.readFileSync(sb.renderer, "utf8");
     const msrc = fs.readFileSync(sb.menu, "utf8");
     const ssrc = fs.readFileSync(sb.stack, "utf8");
-    check("PA renderer self-reports v92", rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v92"'));
-    check("PA context_menu self-reports v92", msrc.includes('__SettingsHubLoaded["context_menu"] = "v92"'));
-    check("PA stack self-reports v92", ssrc.includes('__SettingsHubLoaded["stack"] = "v92"'));
+    check("PA renderer self-reports v93", rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v93"'));
+    check("PA context_menu self-reports v93", msrc.includes('__SettingsHubLoaded["context_menu"] = "v93"'));
+    check("PA stack self-reports v93", ssrc.includes('__SettingsHubLoaded["stack"] = "v93"'));
 }
 
 // ---------------------------------------------------------------------------
@@ -394,8 +395,9 @@ phase("PC chat stream v92: incremental paint + notes + queue hook (#10, #3, #11,
         csrc.includes("it loads with the next message") &&
         !/modelSel\.addEventListener[\s\S]{0,600}switchModel/.test(csrc));
     // п.3 source marker: the two VRAM checkboxes exist
-    check("PC the ⚙ carries both VRAM checkboxes",
-        csrc.includes('data-cs="freec"') && csrc.includes('data-cs="unq"'));
+    // v93: the VRAM checkboxes MOVED from ⚙ into the ⚡ GPU popup
+    check("PC the ⚡ GPU popup carries both VRAM checkboxes",
+        csrc.includes('data-gpu="freec"') && csrc.includes('data-gpu="unq"'));
 }
 
 // ---------------------------------------------------------------------------

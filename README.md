@@ -1,6 +1,6 @@
 # Settings Hub для ComfyUI
 
-[![build](https://img.shields.io/badge/web%20build-v92-3d5a80)](#как-это-работает)
+[![build](https://img.shields.io/badge/web%20build-v93-3d5a80)](#как-это-работает)
 [![tests](https://img.shields.io/badge/tests-1018%20passing-2b6b3f)](#разработка-и-тесты)
 [![python](https://img.shields.io/badge/python-stub-lightgrey)](#как-это-работает)
 [![frontend](https://img.shields.io/badge/ComfyUI-frontend%20extension-3d5a80)](#установка)

@@ -4126,6 +4126,128 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     outline: none;
 }
 
+/* ---------------------------------------------------------------------------
+   v93: the ONE-SHOT mode - the 💬/⚡ mode switch on the tabs row, the runs
+   bar and the run cards. Same visual language as the chat list.
+   --------------------------------------------------------------------------- */
+
+.hub-chat-modes {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    background: #1b1b30;
+    border: 1px solid #3a3a5c;
+    border-radius: 8px;
+    padding: 1px;
+    flex: 0 0 auto;
+    margin-right: 4px;
+}
+
+.hub-chat-mode {
+    background: transparent;
+    border: none;
+    color: #8b93b2;
+    font-size: calc(var(--sh-fs, 1) * 11px);
+    line-height: 1.2;
+    padding: 1px 7px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.hub-chat-mode:hover { color: #dfe6f5; background: #2a2a48; }
+
+.hub-chat-mode-on {
+    background: #31415f;
+    color: #fff;
+    box-shadow: inset 0 0 0 1px #4d6a93;
+}
+
+.hub-chat-runs-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-bottom: 1px solid #2b2b45;
+    flex: 0 0 auto;
+    user-select: none;
+}
+
+.hub-chat-runs-cap {
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    color: #9aa6c8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.hub-chat-runs-hspace { flex: 1 1 auto; }
+
+.hub-chat-runs {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.hub-chat-runs-empty {
+    color: #8b93b2;
+    font-size: calc(var(--sh-fs, 1) * 11px);
+    line-height: 1.6;
+    padding: 14px 10px;
+    text-align: center;
+    border: 1px dashed #3a3a5c;
+    border-radius: 10px;
+    margin-top: 6px;
+}
+
+.hub-chat-run {
+    background: #23233c;
+    border: 1px solid #3a3a5c;
+    border-radius: 10px;
+    padding: 6px 8px;
+    flex: 0 0 auto;
+}
+
+.hub-chat-run-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.hub-chat-run-meta {
+    flex: 1 1 auto;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    color: #9aa6c8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.hub-chat-run-copy {
+    flex: 0 0 auto;
+    background: #101022;
+    border: 1px solid #3d5a80;
+    color: #9fc0ef;
+    border-radius: 6px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    padding: 1px 7px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.hub-chat-run-copy:hover { background: #31415f; color: #fff; }
+
+.hub-chat-run-body {
+    font-size: calc(var(--sh-fs, 1) * 12px);
+    line-height: 1.5;
+    color: #dfe6f5;
+    word-break: break-word;
+    white-space: pre-wrap;
+}
+
 /* the message list */
 .hub-chat-msgs {
     flex: 1 1 auto;
