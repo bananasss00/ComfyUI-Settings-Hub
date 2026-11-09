@@ -1,0 +1,663 @@
+// ============================================================================
+// SettingsHub - LLM Chat smoke test (v86)
+// ----------------------------------------------------------------------------
+// Node ESM + jsdom. Loads the REAL web/chat.js module exactly like the entry
+// does (a sandbox copies web/ and stubs ../../scripts/app.js with an in-memory
+// implementation of the py/chat_proxy.py protocol that records every call),
+// then drives the panel through its REAL UI paths.
+//
+//   SA  mount: the panel + chip appear, a first tab is created automatically,
+//       the status line shows the server url + model from the config.
+//   SB  settings surface: getChatUiState echoes the (masked) config,
+//       applyChatSettings POSTs a patch (url validated, numbers clamped).
+//   SC  tabs: [＋] creates a second dialog, switching renders that dialog's
+//       messages, ✕ closes a tab, dblclick-rename PUTs a new title.
+//   SD  send (non-stream): the input text goes to POST /send, the session in
+//       the reply replaces the tab messages (user + assistant bubbles),
+//       the input is cleared.
+//   SE  send (stream): SSE deltas update a live bubble, the done event's
+//       session is applied, the input is cleared, pending attachments gone.
+//   SF  stop: ⏹ aborts a hanging generation, the send button returns to ▶,
+//       the client re-fetches the session (the server truth wins).
+//   SG  attachments: a .txt file and a .png (jsdom cannot decode - the
+//       fallback uploads the original) land on POST /attach and render as
+//       chips; atch-del removes a chip; the image limit is enforced.
+//   SH  viewer: 🔍 on a message thumbnail opens the large overlay, Esc/✕
+//       close it.
+//   SI  markdown-lite: <script> is escaped, **bold** / `code` / fenced blocks
+//       (with a copy button) / links render; [t](javascript:...) does not.
+//   SJ  geometry: a saved off-screen position is re-clamped on mount and on a
+//       window resize (the v85 refit contract), the position persists
+//       debounced.
+//   SK  clear: 🗑 asks twice; the second click POSTs the clear and empties.
+//   SL  sessions popup: 🕘 lists saved dialogs, a click reopens one in a tab,
+//       🗑 deletes (armed, second click).
+//   SM  degraded + Off/On: a missing py shows the red note; setChatOn(false)
+//       tears the panel down, true re-mounts it.
+//   SN  entry integration: the entry FILES list + EXPECTED manifest carry
+//       chat.js, and the mount block calls initChat (source contract).
+//
+// Run from the extension root:  node tests/smoke_chat.mjs   (jsdom required)
+// ============================================================================
+
+import { createRequire } from "node:module";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import url from "node:url";
+
+const require = createRequire(import.meta.url);
+let jsdom = null;
+try { jsdom = require("jsdom"); } catch (_) {}
+if (!jsdom) {
+    console.error("smoke_chat: jsdom is required (npm install -g jsdom + NODE_PATH)");
+    process.exit(2);
+}
+
+const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), "..");
+const WEB = path.join(ROOT, "web");
+const ENTRY_SRC = fs.readFileSync(path.join(WEB, "settings_hub.js"), "utf8");
+const PACK_VERSION = (ENTRY_SRC.match(/__SettingsHubBuild\s*=\s*"(v\d+)"/) || [])[1] || "v0";
+
+// ---------------------------------------------------------------------------
+// DOM globals BEFORE chat.js evaluates
+// ---------------------------------------------------------------------------
+
+const { JSDOM } = jsdom;
+const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+    pretendToBeVisual: true,
+    url: "http://localhost:8188/",
+});
+globalThis.window = dom.window;
+globalThis.document = dom.window.document;
+try { globalThis.localStorage = dom.window.localStorage; } catch (_) {}
+globalThis.requestAnimationFrame = dom.window.requestAnimationFrame
+    ? dom.window.requestAnimationFrame.bind(dom.window)
+    : (cb) => setTimeout(() => cb(Date.now()), 16);
+globalThis.cancelAnimationFrame = dom.window.cancelAnimationFrame || clearTimeout;
+if (!dom.window.URL.createObjectURL) {
+    dom.window.URL.createObjectURL = () => "blob:fake-" + Math.random().toString(36).slice(2);
+    dom.window.URL.revokeObjectURL = () => {};
+}
+try { globalThis.URL = dom.window.URL; } catch (_) {}
+// chat.js uses Image/canvas with a decode timeout - jsdom never decodes, the
+// timeout path uploads the ORIGINAL file (which is exactly the fallback).
+globalThis.Image = dom.window.Image;
+globalThis.TextDecoder = globalThis.TextDecoder || util_TextDecoder();
+
+function util_TextDecoder() {
+    // Node has TextDecoder globally since 11 - this branch never fires.
+    const { TextDecoder: TD } = require("node:util");
+    return TD;
+}
+
+// ---------------------------------------------------------------------------
+// Fake server: in-memory py/chat_proxy.py protocol
+// ---------------------------------------------------------------------------
+
+function makeFakeApi() {
+    const calls = [];
+    const sessions = new Map();   // id -> {id,title,created,updated,messages}
+    const blobs = new Map();      // "<sid>/<name>" -> {bytes, mime, kind, orig}
+    let config = {
+        url: "http://127.0.0.1:8080/v1", key: "", model: "qwen-vl",
+        system_prompt: "", temperature: 0.8, top_p: 0.95, max_tokens: 1024,
+        reasoning: "default", ctx_depth: 12, media_depth: 1,
+        img_max_side: 1024, img_max_count: 4, video_frames: 16,
+        video_max_side: 768, stream: true, keep_sessions: 20,
+        timeout_s: 600, max_file_mb: 20,
+    };
+    let healthMode = "ok";        // "ok" | "missing" | "http"
+    let sseMode = true;           // /send answers SSE (true) or JSON (false)
+    let hangSend = false;         // SF: the send request hangs until aborted
+    const uuid = () => Math.floor(Math.random() * 0xffffffffffff).toString(16).padStart(12, "0");
+
+    const jsonResp = (data, status = 200) => ({
+        ok: status < 400, status,
+        headers: { get: (k) => (String(k).toLowerCase() === "content-type" ? "application/json" : null) },
+        json: async () => data,
+    });
+
+    const sessBrief = (s) => ({ id: s.id, title: s.title, created: s.created, updated: s.updated, n: s.messages.length });
+
+    const api = {
+        apiURL: (p) => p,
+        fetchApi: async (u, opts = {}) => {
+            const method = (opts.method || "GET").toUpperCase();
+            calls.push({ url: u, method, body: opts.body });
+            if (healthMode === "missing" && !String(u).startsWith("/settings_hub/chat/config")) {
+                if (String(u).startsWith("/settings_hub/chat/")) return jsonResp({ ok: false, error: "not found" }, 404);
+            }
+            const [p, q] = String(u).split("?");
+            const query = new URLSearchParams(q || "");
+
+            if (p === "/settings_hub/chat/health" && method === "GET") {
+                if (healthMode === "missing") return jsonResp({ ok: false, error: "404" }, 404);
+                if (healthMode === "http") return jsonResp({ ok: false, error: "boom" }, 500);
+                return jsonResp({ ok: true, version: PACK_VERSION, dir: "user/settings_hub/chat",
+                    custom: false, default: "user/settings_hub/chat", writable: true,
+                    sessions: sessions.size, configured: !!config.url, has_ffmpeg: true,
+                    model: config.model, url: config.url });
+            }
+            if (p === "/settings_hub/chat/config" && method === "GET") {
+                const masked = { ...config, key: config.key ? config.key.slice(0, 2) + "****" + config.key.slice(-4) : "" };
+                return jsonResp({ ok: true, config: masked });
+            }
+            if (p === "/settings_hub/chat/config" && method === "POST") {
+                let body = opts.body;
+                try { body = JSON.parse(body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                if ("url" in body) {
+                    const u2 = String(body.url || "").replace(/\/+$/, "");
+                    if (u2 && !/^https?:\/\//.test(u2)) return jsonResp({ ok: false, error: "URL must start with http:// or https://" }, 400);
+                    config.url = u2;
+                }
+                if ("key" in body) config.key = String(body.key || "");
+                if ("reasoning" in body) config.reasoning = String(body.reasoning);
+                if ("stream" in body) config.stream = !!body.stream;
+                for (const k of ["temperature", "top_p", "max_tokens", "ctx_depth", "media_depth",
+                    "img_max_side", "img_max_count", "video_frames", "video_max_side",
+                    "keep_sessions", "timeout_s", "max_file_mb"]) {
+                    if (k in body && Number.isFinite(parseFloat(body[k]))) config[k] = parseFloat(body[k]);
+                }
+                for (const k of ["model", "system_prompt"]) if (k in body) config[k] = String(body[k] || "");
+                const masked = { ...config, key: config.key ? config.key.slice(0, 2) + "****" + config.key.slice(-4) : "" };
+                return jsonResp({ ok: true, config: masked });
+            }
+            if (p === "/settings_hub/chat/test" && method === "POST") {
+                return jsonResp({ ok: true, models: ["qwen-vl", "glm-flash"], current: config.model || "qwen-vl", status: null });
+            }
+            if (p === "/settings_hub/chat/root" && method === "GET") {
+                return jsonResp({ ok: true, root: "user/settings_hub/chat", custom: "", writable: true });
+            }
+            if (p === "/settings_hub/chat/root" && method === "POST") {
+                let body = opts.body;
+                try { body = JSON.parse(body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                const pp = String(body.path || "").trim();
+                if (pp && !pp.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(pp)) return jsonResp({ ok: false, error: "not an absolute path: " + pp });
+                return jsonResp({ ok: true, root: pp || "user/settings_hub/chat", custom: pp, writable: true, saved: true });
+            }
+            if (p === "/settings_hub/chat/sessions" && method === "GET") {
+                return jsonResp({ ok: true, sessions: [...sessions.values()].sort((a, b) => b.updated - a.updated).map(sessBrief) });
+            }
+            if (p === "/settings_hub/chat/sessions" && method === "POST") {
+                const s = { id: uuid(), title: "", created: 1, updated: 1, messages: [] };
+                sessions.set(s.id, s);
+                return jsonResp({ ok: true, session: s });
+            }
+            let m = p.match(/^\/settings_hub\/chat\/session\/([a-f0-9]+)\/clear$/);
+            if (m && method === "POST") {
+                const s = sessions.get(m[1]);
+                if (!s) return jsonResp({ ok: false, error: "no such session" }, 404);
+                s.messages = [];
+                return jsonResp({ ok: true, session: s });
+            }
+            m = p.match(/^\/settings_hub\/chat\/session\/([a-f0-9]+)$/);
+            if (m) {
+                const s = sessions.get(m[1]);
+                if (method === "GET") {
+                    if (!s) return jsonResp({ ok: false, error: "no such session" }, 404);
+                    return jsonResp({ ok: true, session: s });
+                }
+                if (method === "PUT") {
+                    const body = JSON.parse(String(opts.body));
+                    s.title = String(body.title || "");
+                    return jsonResp({ ok: true, session: s });
+                }
+                if (method === "DELETE") {
+                    sessions.delete(m[1]);
+                    return jsonResp({ ok: true, gone: m[1] });
+                }
+            }
+            if (p === "/settings_hub/chat/attach" && method === "POST") {
+                const sid = query.get("session") || "";
+                const kind = query.get("kind") || "";
+                const orig = query.get("name") || "file";
+                if (!sessions.has(sid)) return jsonResp({ ok: false, error: "no such session" }, 404);
+                const ext = (orig.split(".").pop() || "").toLowerCase();
+                const OKD = {
+                    image: ["png", "jpg", "jpeg", "webp", "gif", "bmp"],
+                    video: ["mp4", "webm", "mov", "mkv", "avi"],
+                    file: ["png", "jpg", "txt", "md", "json", "csv", "mp4", "pdf", "bin"],
+                }[kind] || [];
+                if (!OKD.includes(ext)) return jsonResp({ ok: false, error: "bad ext '" + ext + "' for kind " + kind }, 400);
+                let bytes;
+                try { bytes = new Uint8Array(await new dom.window.Blob([opts.body]).arrayBuffer()); }
+                catch (_) { bytes = new Uint8Array(opts.body instanceof ArrayBuffer ? opts.body : []); }
+                if (!bytes.length) return jsonResp({ ok: false, error: "empty payload" }, 400);
+                const name = uuid() + "." + ext;
+                blobs.set(sid + "/" + name, { bytes, kind, orig });
+                return jsonResp({ ok: true, name, orig, size: bytes.length, kind,
+                    mime: ext === "png" ? "image/png" : "application/octet-stream" });
+            }
+            if (p === "/settings_hub/chat/send" && method === "POST") {
+                let body = opts.body;
+                try { body = JSON.parse(body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                const s = sessions.get(body.session);
+                if (!s) return jsonResp({ ok: false, error: "no such session" }, 404);
+                if (hangSend) {
+                    // SF: hang until the client aborts
+                    await new Promise((res, rej) => {
+                        const t = setTimeout(() => { res(); }, 8000);
+                        try {
+                            opts.signal.addEventListener("abort", () => {
+                                clearTimeout(t);
+                                const e = new Error("aborted");
+                                e.name = "AbortError";
+                                rej(e);
+                            });
+                        } catch (_) { clearTimeout(t); res(); }
+                    });
+                }
+                if (body.edit_index != null) {
+                    const i = body.edit_index;
+                    s.messages[i].text = String(body.text ?? s.messages[i].text);
+                    s.messages.length = i + 1;
+                } else if (body.regenerate) {
+                    if (s.messages.length && s.messages[s.messages.length - 1].role === "assistant") s.messages.pop();
+                } else {
+                    s.messages.push({ role: "user", text: String(body.text || ""), parts: body.attachments || [] });
+                    if (!s.title && String(body.text || "").trim()) s.title = String(body.text).trim().slice(0, 60);
+                }
+                const replyText = "Echo: " + (body.edit_index != null ? s.messages[body.edit_index].text : s.messages[s.messages.length - 1].text);
+                s.updated = Date.now();
+                if (body.stream && sseMode && !hangSend) {
+                    const evs = [];
+                    for (const piece of ["Hel", "lo ", "world"]) {
+                        evs.push(`data: ${JSON.stringify({ delta: piece })}\n\n`);
+                    }
+                    s.messages.push({ role: "assistant", text: replyText, parts: [] });
+                    evs.push(`data: ${JSON.stringify({ done: true, reply: { text: replyText, usage: {} }, session: s })}\n\n`);
+                    const enc = new TextEncoder();
+                    const chunks = evs.map((e) => enc.encode(e));
+                    let ci = 0;
+                    return {
+                        ok: true, status: 200,
+                        headers: { get: (k) => (String(k).toLowerCase() === "content-type" ? "text/event-stream" : null) },
+                        json: async () => { throw new Error("sse has no json"); },
+                        body: {
+                            // pace the stream: a pause before every chunk after
+                            // the first, so the test can SEE the live bubble
+                            getReader: () => ({
+                                read: async () => {
+                                    if (ci > 0 && ci < chunks.length) await new Promise((r) => setTimeout(r, 90));
+                                    return ci < chunks.length
+                                        ? { done: false, value: chunks[ci++] }
+                                        : { done: true, value: undefined };
+                                },
+                            }),
+                        },
+                    };
+                }
+                s.messages.push({ role: "assistant", text: replyText, parts: [] });
+                return jsonResp({ ok: true, session: s, reply: { text: replyText, usage: { completion_tokens: 5 } } });
+            }
+            return jsonResp({ ok: false, error: "unhandled " + method + " " + p }, 404);
+        },
+        __calls: () => calls,
+        __sessions: () => sessions,
+        __blobs: () => blobs,
+        __setHealth: (m) => { healthMode = m; },
+        __setSse: (v) => { sseMode = !!v; },
+        __setHang: (v) => { hangSend = !!v; },
+        __config: () => config,
+    };
+    return api;
+}
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
+let pass = 0, fail = 0;
+const failures = [];
+function check(name, cond, detail = "") {
+    if (cond) { pass++; }
+    else {
+        fail++;
+        failures.push(`${name}${detail ? " :: " + detail : ""}`);
+        console.error(`  ✗ ${name}${detail ? " :: " + detail : ""}`);
+    }
+}
+function phase(title) { console.log(`— ${title}`); }
+
+function makeSandbox() {
+    const sb = fs.mkdtempSync(path.join(os.tmpdir(), "hubchat-"));
+    fs.mkdirSync(path.join(sb, "scripts"), { recursive: true });
+    fs.mkdirSync(path.join(sb, "Hub", "web"), { recursive: true });
+    for (const f of fs.readdirSync(WEB)) {
+        if (f.endsWith(".js")) fs.copyFileSync(path.join(WEB, f), path.join(sb, "Hub", "web", f));
+    }
+    fs.writeFileSync(
+        path.join(sb, "scripts", "app.js"),
+        "export const app = globalThis.__HUB_APP_STUB__;\n",
+    );
+    return { chat: path.join(sb, "Hub", "web", "chat.js") };
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 6));
+async function settle(n = 8) { for (let i = 0; i < n; i++) await tick(); }
+
+function fakeFile(name, type, bytes) {
+    return {
+        name, type,
+        arrayBuffer: async () => Uint8Array.from(bytes).buffer,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
+const appStub = { registerExtension(ext) { appStub.__extensions.push(ext); }, __extensions: [], canvas: null, graph: null };
+const fakeApi = makeFakeApi();
+appStub.api = fakeApi;
+globalThis.__HUB_APP_STUB__ = appStub;
+
+// a pre-existing saved session (the 🕘 reopen path)
+fakeApi.fetchApi("/settings_hub/chat/sessions", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+}).then(async (r) => {
+    const j = await r.json();
+    j.session.title = "Старый чат";
+    j.session.messages = [{ role: "user", text: "previous" }, { role: "assistant", text: "earlier answer" }];
+}).catch(() => {});
+await settle();
+
+const { chat: chatUrl } = makeSandbox();
+globalThis.__SettingsHubBuild = PACK_VERSION;
+const chat = await import(chatUrl);
+const hooks = chat.__chatTestHooks();
+
+// setChatOn(true) is the default; mount like the entry's extension setup does
+chat.initChat();
+await settle();
+
+// ---------------------------------------------------------------------------
+phase("SA mount: panel + chip + an auto-created first tab + status line");
+
+const panel = hooks.panelEl();
+check("panel exists", !!panel && panel.className === "hub-chat-panel");
+check("chip exists (hidden)", !!hooks.chipEl() && hooks.chipEl().style.display === "none");
+check("no ✕ close button (the v75 contract)", !panel.querySelector(".hub-chat-close"));
+await settle();
+check("one tab auto-created", hooks.tabs().length === 1, JSON.stringify(hooks.tabs()));
+check("tab is active", hooks.activeId() === hooks.tabs()[0].id);
+check("status line shows url + model",
+    hooks.statusEl().textContent.includes("http://127.0.0.1:8080/v1") &&
+    hooks.statusEl().textContent.includes("qwen-vl"), hooks.statusEl().textContent);
+check("model dropdown populated", hooks.modelSelEl().textContent.includes("qwen-vl") ||
+    hooks.modelSelEl().innerHTML.includes("qwen-vl"), hooks.modelSelEl().innerHTML);
+check("tabs markup rendered", hooks.tabsEl().querySelectorAll(".hub-chat-tab").length === 1);
+check("input + send + attach present",
+    !!hooks.inputEl() && !!hooks.sendBtnEl() && !!panel.querySelector(".hub-chat-attachbtn"));
+
+// ---------------------------------------------------------------------------
+phase("SB settings surface: config echo + apply");
+
+const st = await chat.getChatUiState();
+check("ui state echoes the config", st.cfg && st.cfg.url === "http://127.0.0.1:8080/v1" && st.cfg.model === "qwen-vl");
+check("ui state reports ffmpeg", st.has_ffmpeg === true);
+const ap = await chat.applyChatSettings({ temperature: 1.25 });
+check("applyChatSettings applies", ap.ok && ap.config.temperature === 1.25, ap);
+const ap2 = await chat.applyChatSettings({ url: "not-a-url" });
+check("bad url refused", !ap2.ok && /http/.test(ap2.error), ap2);
+const tr = await chat.testChatServer();
+check("testChatServer returns models", tr.ok && tr.models.includes("qwen-vl"), tr);
+
+// ---------------------------------------------------------------------------
+phase("SC tabs: create / switch / rename / close");
+
+const firstId = hooks.activeId();
+const t2 = await hooks.createTab();
+await settle();
+check("second tab created + active", hooks.tabs().length === 2 && hooks.activeId() === t2.id, JSON.stringify(hooks.tabs()));
+hooks.inputEl().value = "tab2 message";
+await hooks.send();
+await settle();
+check("message landed in tab2", hooks.tabById(t2.id).msgs.length === 2, hooks.tabById(t2.id).msgs.length);
+hooks.setActive(firstId);
+await settle();
+check("switching back shows tab1 (empty)", hooks.tabById(firstId).msgs.length === 0);
+check("the rendered list belongs to tab1", hooks.msgsEl().querySelectorAll(".hub-chat-msg").length === 0);
+check("tab chips rendered", hooks.tabsEl().querySelectorAll(".hub-chat-tab").length === 2);
+await hooks.renameTab(t2.id, "Второй диалог");
+await settle();
+check("rename PUT applied", hooks.tabById(t2.id).title === "Второй диалог", hooks.tabById(t2.id).title);
+hooks.closeTab(t2.id);
+await settle();
+check("close removes the tab and re-activates tab1", hooks.tabs().length === 1 && hooks.activeId() === firstId);
+
+// ---------------------------------------------------------------------------
+phase("SD send (non-stream): server session replaces the tab");
+
+fakeApi.__setSse(false);
+hooks.setCfg({ ...hooks.cfg(), stream: false });
+hooks.inputEl().value = "Привет, модель";
+await hooks.send();
+await settle();
+const tab1 = hooks.tabById(firstId);
+check("two bubbles rendered", hooks.msgsEl().querySelectorAll(".hub-chat-msg").length === 2);
+check("user + assistant in the tab", tab1.msgs.length === 2 && tab1.msgs[0].role === "user");
+check("reply text", tab1.msgs[1].text === "Echo: Привет, модель", tab1.msgs[1].text);
+check("input cleared", hooks.inputEl().value === "");
+check("send recorded with the session id",
+    fakeApi.__calls().some((c) => c.url.startsWith("/settings_hub/chat/send") && String(c.body).includes('"session":"' + firstId + '"')));
+check("assistant bubble carries a regen button",
+    !!hooks.msgsEl().querySelector('[data-act="regen"]'));
+check("user bubble carries an edit button",
+    !!hooks.msgsEl().querySelector('.hub-chat-msg-user [data-act="edit"]'));
+
+// ---------------------------------------------------------------------------
+phase("SE send (stream): live deltas then the done session");
+
+fakeApi.__setSse(true);
+hooks.setCfg({ ...hooks.cfg(), stream: true });
+hooks.inputEl().value = "streamed question";
+const sendP = hooks.send();
+await new Promise((r) => setTimeout(r, 40));
+check("live streaming bubble appears", !!hooks.msgsEl().querySelector(".hub-chat-msg-streaming"));
+check("send button shows stop", hooks.sendBtnEl().textContent === "⏹", hooks.sendBtnEl().textContent);
+await sendP;
+await settle();
+check("streamed answer applied (2+2 msgs)", tab1.msgs.length === 4, tab1.msgs.length);
+check("streamed text assembled", tab1.msgs[3].text === "Echo: streamed question", tab1.msgs[3].text);
+check("input cleared after stream", hooks.inputEl().value === "");
+check("send button back to send", hooks.sendBtnEl().textContent === "▶");
+check("no streaming bubble left", !hooks.msgsEl().querySelector(".hub-chat-msg-streaming"));
+
+// ---------------------------------------------------------------------------
+phase("SF stop: abort a hanging generation");
+
+fakeApi.__setHang(true);
+hooks.inputEl().value = "will be aborted";
+const hangP = hooks.send();
+await settle();
+check("busy during the hang", hooks.sendBtnEl().textContent === "⏹");
+hooks.stopStream();
+await hangP;
+await settle();
+check("busy cleared after abort", hooks.sendBtnEl().textContent === "▶");
+check("input NOT cleared on abort (owner keeps the text)", hooks.inputEl().value === "will be aborted",
+    hooks.inputEl().value);
+fakeApi.__setHang(false);
+await new Promise((r) => setTimeout(r, 1100)); // refreshSessionSoon's 900ms debounce
+check("a session refresh GET followed the abort",
+    fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/session/" + firstId && c.method === "GET" &&
+        fakeApi.__calls().indexOf(c) > fakeApi.__calls().findIndex((c2) => c2.url.startsWith("/settings_hub/chat/send"))));
+
+// ---------------------------------------------------------------------------
+phase("SG attachments: chips, upload, limits");
+
+const sid = hooks.activeId();
+await hooks.addFiles([fakeFile("notes.txt", "text/plain", [104, 105])]);
+await settle();
+check("txt chip rendered", hooks.attachEl().querySelectorAll(".hub-chat-atch").length === 1);
+check("attach POST recorded", fakeApi.__calls().some((c) => c.url.includes("/settings_hub/chat/attach") && c.url.includes("kind=file")));
+const pend = hooks.tabById(sid).pending;
+check("pending references the blob", pend.length === 1 && /^[a-f0-9]+\.txt$/.test(pend[0].name), JSON.stringify(pend));
+// a video without real bytes still attaches (has_ffmpeg=true in the fake)
+await hooks.addFiles([fakeFile("clip.mp4", "video/mp4", [1, 2, 3, 4])]);
+await settle();
+check("video chip added", hooks.tabById(sid).pending.filter((p) => p.kind === "video").length === 1);
+// png: jsdom cannot decode -> the timeout fallback uploads the ORIGINAL file
+const t0 = Date.now();
+await hooks.addFiles([fakeFile("shot.png", "image/png", [137, 80, 78, 71])]);
+check("image attach finished via the decode fallback", Date.now() - t0 < 4000);
+await settle();
+const imgs = hooks.tabById(sid).pending.filter((p) => p.kind === "image");
+check("image chip added", imgs.length === 1, JSON.stringify(hooks.tabById(sid).pending));
+check("image blob name kept the extension", /\.png$/.test(imgs[0]?.name || ""), imgs[0]?.name);
+// the per-message image limit
+for (let i = 0; i < 5; i++) {
+    await hooks.addFiles([fakeFile("more.png", "image/png", [1])]);
+}
+check("img_max_count=4 enforced", hooks.tabById(sid).pending.filter((p) => p.kind === "image").length === 4,
+    hooks.tabById(sid).pending.length);
+// remove a chip via its ✕
+const del = hooks.attachEl().querySelector('[data-act="atch-del"]');
+const before = hooks.tabById(sid).pending.length;
+del.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("atch-del removed a chip", hooks.tabById(sid).pending.length === before - 1);
+hooks.clearPending();
+check("clearPending empties the row", hooks.attachEl().style.display === "none");
+
+// ---------------------------------------------------------------------------
+phase("SH viewer: 🔍 opens the overlay, Esc closes");
+
+const part = { kind: "file", name: "x.txt", orig: "x.txt" };
+hooks.tabById(hooks.activeId()).msgs.push({ role: "user", text: "with a file", parts: [part] });
+await settle();
+await hooks.openViewer(hooks.tabById(hooks.activeId()), part);
+check("viewer overlay open", !!hooks.viewerEl() && hooks.viewerEl().className.includes("hub-stack-viewer"));
+check("text preview staged", !!hooks.viewerEl().querySelector(".hub-chat-view-text"));
+hooks.closeViewer();
+check("viewer closed", !hooks.viewerEl());
+
+// ---------------------------------------------------------------------------
+phase("SI markdown-lite: escaping + fences + links");
+
+const html = hooks.mdLite("Hi **bold** `code` <script>alert(1)</script>\n```py\nx<1\n```\n[site](https://x.y) [bad](javascript:alert(1))");
+check("script tag escaped", !html.includes("<script>"), html);
+check("bold rendered", html.includes("<b>bold</b>"));
+check("inline code rendered", html.includes('class="hub-chat-icode"'));
+check("fenced block + copy button", html.includes("hub-chat-code") && html.includes("data-code-copy"));
+check("fence content escaped", html.includes("x&lt;1"));
+check("http link kept", html.includes('href="https://x.y"'));
+check("javascript: link neutralized", !html.includes('href="javascript:'), html);
+
+// ---------------------------------------------------------------------------
+phase("SJ geometry: refit on mount and on resize (the v85 contract)");
+
+try { localStorage.setItem("settingshub.chat.ui", JSON.stringify({ x: 3000, y: 1600, w: 2800, h: 1200 })); } catch (_) {}
+chat.setChatOn(false);
+await settle();
+chat.setChatOn(true);
+await settle();
+const p2 = hooks.panelEl();
+const left = parseFloat(p2.style.left), top = parseFloat(p2.style.top);
+const w = parseFloat(p2.style.width), h = parseFloat(p2.style.height);
+check("size capped to the 1024x768 viewport", w <= 1000 && h <= 744, `${w}x${h}`);
+// jsdom has NO layout: offsetWidth/offsetHeight are 0, so clampIntoView
+// measures the 260x120 FALLBACK box (the same observable contract the stack
+// suite TX pins: a 1024x768 viewport clamps x to vw-260-8 and y to vh-120-8;
+// a real browser measures the real box and clamps the full panel in).
+check("position clamped inside", left >= 8 && top >= 8 && left <= 1024 - 260 - 8 && top <= 768 - 120 - 8,
+    `${left},${top}`);
+// a resize event re-fits
+p2.style.left = "1000px";
+hooks.fireResize();
+await tick();
+check("resize re-clamps instantly", parseFloat(hooks.panelEl().style.left) <= 1024 - 260 - 8 + 4,
+    hooks.panelEl().style.left);
+await new Promise((r) => setTimeout(r, 250)); // the debounced persist
+const uiSaved = JSON.parse(localStorage.getItem("settingshub.chat.ui") || "{}");
+check("position persisted debounced", typeof uiSaved.x === "number" && uiSaved.x <= 1024 - 260 - 8 + 4, JSON.stringify(uiSaved));
+
+// ---------------------------------------------------------------------------
+phase("SK clear: 🗑 asks twice");
+
+const clearBtn = p2.querySelector(".hub-chat-clear");
+clearBtn.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("first click only arms", tab1.msgs.length > 0);
+clearBtn.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("second click cleared the tab", hooks.tabById(hooks.activeId()).msgs.length === 0);
+check("clear POST recorded",
+    fakeApi.__calls().some((c) => c.url.endsWith("/clear") && c.method === "POST"));
+
+// ---------------------------------------------------------------------------
+phase("SL sessions popup: reopen + armed delete");
+
+await hooks.openSessPop();
+await settle();
+const pop = hooks.sessPopEl();
+check("popup rendered", !!pop && pop.className.includes("hub-chat-sessions"));
+check("saved chat listed", pop.textContent.includes("Старый чат"));
+const nTabs = hooks.tabs().length;
+const oldRow = [...pop.querySelectorAll(".hub-chat-sess")].find((r) => r.textContent.includes("Старый чат"));
+check("the saved row is addressable", !!oldRow);
+oldRow.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("click reopened the dialog in a new tab", hooks.tabs().length === nTabs + 1, hooks.tabs().length);
+const reopened = hooks.tabById(hooks.activeId());
+check("reopened tab carries its messages", reopened.msgs.length === 2, reopened.msgs.length);
+check("reopened tab title", reopened.title === "Старый чат", reopened.title);
+hooks.closeSessPop();
+await hooks.openSessPop();
+await settle();
+const oldRow2 = [...hooks.sessPopEl().querySelectorAll(".hub-chat-sess")].find((r) => r.textContent.includes("Старый чат"));
+const delBtn = oldRow2.querySelector(".hub-chat-sess-del");
+delBtn.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("first 🗑 re-arms the same row", !!hooks.sessPopEl() &&
+    !!hooks.sessPopEl().querySelector(".hub-chat-sess-del-armed"), !!hooks.sessPopEl());
+const delBtn2 = hooks.sessPopEl().querySelector(".hub-chat-sess-del-armed") ||
+    hooks.sessPopEl().querySelector(".hub-chat-sess-del");
+delBtn2.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("second 🗑 DELETEd the session",
+    fakeApi.__calls().some((c) => c.method === "DELETE" && c.url.startsWith("/settings_hub/chat/session/")));
+hooks.closeSessPop();
+
+// ---------------------------------------------------------------------------
+phase("SM degraded py + Off/On");
+
+fakeApi.__setHealth("missing");
+chat.setChatOn(false);
+await settle();
+chat.setChatOn(true);
+await settle();
+check("red note names the fix", hooks.noteEl().textContent.includes("RESTART ComfyUI"),
+    hooks.noteEl().textContent);
+check("panel still mounted despite the degraded py", !!hooks.panelEl());
+fakeApi.__setHealth("ok");
+chat.setChatOn(false);
+await settle();
+check("Off removes the panel", !hooks.panelEl() && !hooks.chipEl());
+check("Off is the localStorage switch", localStorage.getItem("settingshub.chat.on") === "0");
+chat.setChatOn(true);
+await settle();
+check("On re-mounts", !!hooks.panelEl());
+
+// ---------------------------------------------------------------------------
+phase("SN entry integration (source contract)");
+
+check("entry FILES carries ./chat.js", /"\.\/chat\.js",\s*\/\/ v86/.test(ENTRY_SRC));
+check("entry EXPECTED carries chat", /"chat":\s*"v86"/.test(ENTRY_SRC));
+check("entry mounts the chat extension", /initChat\(\)/.test(ENTRY_SRC) && /Comfy\.SettingsHub\.chat/.test(ENTRY_SRC));
+check("chat self-reports the pack version",
+    globalThis.__SettingsHubLoaded?.chat === "v86", globalThis.__SettingsHubLoaded?.chat);
+check("the py module is wired in __init__.py",
+    fs.readFileSync(path.join(ROOT, "__init__.py"), "utf8").includes("chat_proxy"));
+
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log("smoke_chat: %d passed, %d failed", pass, fail);
+if (failures.length) {
+    console.log("FAILURES:");
+    for (const f of failures) console.log("  - " + f);
+}
+process.exit(fail ? 1 : 0);
