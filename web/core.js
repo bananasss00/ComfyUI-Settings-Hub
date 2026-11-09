@@ -8,7 +8,7 @@ import * as Pins from "./pins.js";
 // browser-cached stale file is still NAMED in F12 while per-file build
 // guards are gone (owner: a release must not rewrite every file).
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["core"] = "v91";
+globalThis.__SettingsHubLoaded["core"] = "v92";
 
 export const HUB_NODE_NAME = "SettingsHub";
 
@@ -1856,4 +1856,27 @@ export function createVirtualHub(title) {
     node.setDirtyCanvas?.(true, true);
     syncNode(node);          // renderHub re-floats pinned hubs on mount
     return node;
+}
+
+// ---------------------------------------------------------------------------
+// v92: HUB NODE ACTION REGISTRY (owner #4+#5: "dematerialize through the
+// node's right-click menu" + "rename the virtual hubs").
+// context_menu.js contributes the menu entries but MUST NOT import
+// hub_ui_renderer.js (the v82/v89 module-independence rule: a renderer
+// cascade can never kill the menus). The renderer registers its
+// implementations here under a name; the menu calls them through
+// runHubAction(). A missing implementation fails closed (null) - an old
+// build simply shows menu entries that do nothing, never throws.
+// ---------------------------------------------------------------------------
+
+const hubActions = {};   // name -> (node) => any
+
+export function registerHubAction(name, fn) {
+    if (typeof name === "string" && name && typeof fn === "function") {
+        hubActions[name] = fn;
+    }
+}
+
+export function runHubAction(name, node) {
+    try { return hubActions[name]?.(node) ?? null; } catch (_) { return null; }
 }

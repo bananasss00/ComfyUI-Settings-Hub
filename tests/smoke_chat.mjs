@@ -826,8 +826,8 @@ chat.setChatOn(false);
 await settle();
 check("Off removes the panel", !hooks.panelEl() && !hooks.chipEl());
 check("Off is the localStorage switch", localStorage.getItem("settingshub.chat.on") === "0");
-check("Off tells WHERE the way back is (v89)",
-    document.body.textContent.includes("ComfyUI Settings → SettingsHub → 'LLM Chat panel'"));
+check("Off tells WHERE the way back is (v91: the mini panel)",
+    document.body.textContent.includes("the mini panel (💬 toggle) or ComfyUI Settings → SettingsHub → 'Mini panel'"));
 chat.setChatOn(true);
 await settle();
 check("On re-mounts", !!hooks.panelEl());
@@ -861,8 +861,8 @@ check("every number sits under a visible label",
 check("label names are readable (temperature, history depth, context size)",
     setPop.textContent.includes("temperature") && setPop.textContent.includes("history depth") &&
     setPop.textContent.includes("context size (0 = auto)"));
-check("the Off row spells the way back",
-    setPop.textContent.includes("ComfyUI Settings → SettingsHub → 'LLM Chat panel'"));
+check("the Off row spells the way back (v91: the mini panel)",
+    setPop.textContent.includes("the mini panel (💬 toggle) or ComfyUI Settings → SettingsHub → 'Mini panel'"));
 urlIn2.value = "http://127.0.0.1:9999/v1";
 urlIn2.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
 await settle();
@@ -937,7 +937,7 @@ hooks.closePromptPop();
 check("prompt popup closed", !hooks.promptPopEl());
 
 // ---------------------------------------------------------------------------
-phase("SP2 (v88) model dropdown: the FULL registry list, status marks, select = switch");
+phase("SP2 (v88→v92) model dropdown: the FULL registry list, status marks; select = SAVE ONLY");
 
 check("fillModels used GET /chat/models",
     fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/models" && c.method === "GET"));
@@ -951,16 +951,18 @@ check("dropdown shows the loaded mark for the current model",
 check("dropdown shows the available mark for the other model",
     hooks.modelSelEl().innerHTML.includes("○ glm-4b-air"), hooks.modelSelEl().innerHTML);
 
-// selecting the not-loaded registry model SWITCHES the server (the node way)
+// selecting a model ONLY SAVES the choice (v92 owner #1: nothing loads or
+// switches here - the wake happens with the FIRST message through the py
+// _ensure_llm_ready path; ⚡ can still load on demand)
+const loadCallsBeforeSel = fakeApi.__calls().filter((c) => c.url === "/settings_hub/chat/load").length;
 hooks.modelSelEl().value = "glm-4b-air";
 hooks.modelSelEl().dispatchEvent(new dom.window.Event("change", { bubbles: true }));
 await settle();
 check("selection saved cfg.model", hooks.cfg().model === "glm-4b-air", hooks.cfg().model);
-check("POST /chat/load fired (registry switch)",
-    fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/load" && c.method === "POST" &&
-        String(c.body).includes("glm-4b-air")));
-check("switch marked the model loaded",
-    hooks.models().find((m) => m.id === "glm-4b-air").status === "loaded",
+check("v92: the pick fires NO switch (it only saves)",
+    fakeApi.__calls().filter((c) => c.url === "/settings_hub/chat/load").length === loadCallsBeforeSel);
+check("v92: the picked model keeps its registry status (nothing loaded)",
+    hooks.models().find((m) => m.id === "glm-4b-air").status === "available",
     JSON.stringify(hooks.models()));
 
 // an openai-style server (no registry) just takes the name - no switch call
@@ -994,8 +996,10 @@ check("Panel Off tore the panel down (incl. the popup)", !hooks.panelEl() && !ho
 chat.setChatOn(true);
 await settle();
 check("Panel On re-mounted the chat", !!hooks.panelEl());
-check("source-level: the native ComfyUI setting is registered",
-    fs.readFileSync(path.join(ROOT, "web", "chat.js"), "utf8").includes('id: "SettingsHub.Chat.enabled"'));
+check("source-level: the v91 launcher replaces the native chat switch",
+    fs.readFileSync(path.join(ROOT, "web", "chat.js"), "utf8").includes('from "./launcher.js"') &&
+    fs.readFileSync(path.join(ROOT, "web", "launcher.js"), "utf8").includes('mk("SettingsHub.Launcher.enabled"') &&
+    !fs.readFileSync(path.join(ROOT, "web", "chat.js"), "utf8").includes('SettingsHub.Chat.enabled'));
 await settle();
 
 // ---------------------------------------------------------------------------

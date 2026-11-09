@@ -244,7 +244,7 @@ function installCanvasStub(origImpls = {}) {
     const web = makeSandbox("vh");
     const core = await import(web + "/core.js");
 
-    check("B: core self-reports v90", globalThis.__SettingsHubLoaded?.core === "v90");
+    check("B: core self-reports v92+ (rolling)", ["v91", "v92"].includes(globalThis.__SettingsHubLoaded?.core));
 
     const node = core.createVirtualHub();
     check("B: node created via the canonical path", !!node && node.type === "SettingsHub");
@@ -270,7 +270,7 @@ function installCanvasStub(origImpls = {}) {
 
     // hub_node: draw + hit-test skipping (only for phantoms).
     const hn = await import(web + "/hub_node.js");
-    check("B: hub_node self-reports v90", globalThis.__SettingsHubLoaded?.hub_node === "v90");
+    check("B: hub_node self-reports v90+ (v90 is fine - unchanged)", ["v90", "v91"].includes(globalThis.__SettingsHubLoaded?.hub_node));
     hn.registerHubNode();   // the extension setup() normally calls this
     check("B: node type registered", !!window.LiteGraph.registered_node_types?.SettingsHub);
 
@@ -333,7 +333,7 @@ function installCanvasStub(origImpls = {}) {
     } finally {
         console.error = realErr;
     }
-    check("C: entry self-reports v90", globalThis.__SettingsHubBuild === "v90");
+    check("C: entry self-reports v92+ (rolling)", ["v91", "v92"].includes(globalThis.__SettingsHubBuild));
     check("C: no stale-cache report", !errors.some((e) => e.includes("MIXED BUILD")));
 
     const body = document.body;

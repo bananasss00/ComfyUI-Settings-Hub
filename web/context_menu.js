@@ -4,7 +4,7 @@ import {
     createNewHub, createVirtualHub, HUB_NODE_NAME, detectWidgetType, portalKindOf, allHubs,
     isViewerNode, createViewerBinding, isInternalWidget,
     mediaLoaderInfo, createMediaBinding, createBindingsBulk,
-    createNodeUIBinding,
+    createNodeUIBinding, runHubAction,
 } from "./core.js";
 
 // v82 SELF-REPORT (docs/plan-versions.md): the value is the version of
@@ -13,7 +13,7 @@ import {
 // browser-cached stale file is still NAMED in F12 while per-file build
 // guards are gone (owner: a release must not rewrite every file).
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["context_menu"] = "v91";
+globalThis.__SettingsHubLoaded["context_menu"] = "v92";
 
 // ============================================================================
 // 1) Standard node menu hook (canvas widgets)
@@ -35,6 +35,7 @@ export function attachContextMenu() {
     attachCtrlRmbOverride();
     attachPanelSurfacePinMenu();
     attachCanvasVhubMenu();   // v90: "New virtual hub" in the canvas RMB menu
+    attachHubNodeMenu();      // v92: Dematerialize + Rename on a hub node
 
     app.registerExtension({
         name: "Comfy.SettingsHub.context",
@@ -1026,6 +1027,38 @@ function attachCanvasVhubMenu() {
     } catch (err) {
         console.warn("[SettingsHub] canvas virtual-hub menu unavailable:", err);
     }
+}
+
+// v92 (owner #4 + #5): the SettingsHub node's OWN right-click menu gains
+// "🪄 Dematerialize" (the node turns into its floating window - the same
+// UI, the same bindings, the canvas node hides) and "✏ Rename" (a real
+// input - the floating window's hidden double-click title edit was
+// undiscoverable). The implementations live in hub_ui_renderer.js and are
+// reached through the core.js action registry - this module MUST NOT import
+// the renderer (the v82/v89 module-independence rule, see the
+// attachCanvasVhubMenu note). A missing implementation (a stale web
+// half-update) fails closed - the menu entry just does nothing.
+function attachHubNodeMenu() {
+    app.registerExtension({
+        name: "Comfy.SettingsHub.hubNodeMenu",
+        "getNodeMenuItems"(node) {
+            if (!node || node.type !== HUB_NODE_NAME) return [];
+            const entries = [];
+            try {
+                if (!node.properties?.hubConfig?.phantom) {
+                    entries.push({
+                        content: "🪄 Dematerialize - turn into a floating window",
+                        callback: () => { runHubAction("dematerialize", node); },
+                    });
+                }
+                entries.push({
+                    content: "✏ Rename hub",
+                    callback: () => { runHubAction("rename", node); },
+                });
+            } catch (_) { /* the menu must never die because of our items */ }
+            return entries;
+        },
+    });
 }
 
 function attachDomWidgetPinMenu() {

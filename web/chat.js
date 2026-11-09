@@ -149,7 +149,7 @@
 // v87 self-report (single-source version, docs/plan-versions.md): the last
 // FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["chat"] = "v91";
+globalThis.__SettingsHubLoaded["chat"] = "v92";
 
 import { app } from "../../scripts/app.js";
 // v90: the shared UI font scale - the chat ⚙ hosts the same row as the hub
@@ -193,6 +193,10 @@ let lastDpr = 0;
 // (source registry = the PolyStrata /api/models registry)
 let models = [];          // [{id, status}]
 let modelsSource = "";    // registry | openai | status
+// v92 (owner #11): the ComfyUI queue hook (wired once) + a cooldown so a
+// multi-item queue does not spam /v1/unload
+let queueHookWired = false;
+let lastQueueUnload = 0;
 
 // ---------------------------------------------------------------------------
 // Small helpers (the stack.js patterns, chat flavor)
@@ -1056,6 +1060,16 @@ function openSetPop() {
         `<select class="hub-cs-sel" data-cs="stream">` +
         `<option value="1">On (default)</option><option value="0">Off</option>` +
         `</select></label>` +
+        // v92 (owner #3): free ComfyUI's own models before EVERY LLM request
+        // (only when they are still loaded) - VRAM for the LLM.
+        `<label class="hub-cs-row" title="Before every request: unload ComfyUI's own models (only when any are still loaded) so the LLM gets the VRAM. The result shows as a note on the live bubble.">` +
+        `<span>Free ComfyUI models before request</span>` +
+        `<input type="checkbox" class="hub-cs-chk" data-cs="freec"></label>` +
+        // v92 (owner #11): the reverse direction - when a ComfyUI QUEUE
+        // starts, unload the chat engine so VRAM returns to ComfyUI.
+        `<label class="hub-cs-row" title="When a ComfyUI queue starts (execution_start), POST /v1/unload to the LLM engine - its VRAM goes back to ComfyUI for the generation. The next chat message wakes the model again (may take minutes).">` +
+        `<span>Unload the chat model when a ComfyUI queue starts</span>` +
+        `<input type="checkbox" class="hub-cs-chk" data-cs="unq"></label>` +
         `<label class="hub-cs-row"><span>Keep last chats</span>` +
         `<select class="hub-cs-sel" data-cs="keep">` +
         `<option value="10">10</option><option value="20">20 · default</option>` +
@@ -1165,6 +1179,18 @@ function openSetPop() {
     streamSel.addEventListener("change", () => {
         void applyPatch({ stream: streamSel.value === "1" });
     });
+    // v92 (owner #3 + #11): the two VRAM checkboxes (real checkboxes - the
+    // owner asked for checkboxes, not the selects the other rows use).
+    const freeChk = pop.querySelector('[data-cs="freec"]');
+    const unqChk = pop.querySelector('[data-cs="unq"]');
+    freeChk.checked = !!(cfg?.auto_free_comfy);
+    unqChk.checked = !!(cfg?.auto_unload_llm_on_queue);
+    freeChk.addEventListener("change", () => {
+        void applyPatch({ auto_free_comfy: freeChk.checked });
+    });
+    unqChk.addEventListener("change", () => {
+        void applyPatch({ auto_unload_llm_on_queue: unqChk.checked });
+    });
     keepSel.addEventListener("change", () => {
         void applyPatch({ keep_sessions: parseInt(keepSel.value, 10) || 20 });
     });
@@ -1253,6 +1279,19 @@ function openSetPop() {
         }
         streamSel.value = st.cfg.stream === false ? "0" : "1";
         keepSel.value = String(st.cfg.keep_sessions || 20);
+        // v92: the VRAM checkboxes follow the saved config
+        if (freeChk.isConnected) freeChk.checked = !!st.cfg.auto_free_comfy;
+        if (unqChk.isConnected) unqChk.checked = !!st.cfg.auto_unload_llm_on_queue;
+        // v92 (owner #9): the paths must be VISIBLE, not hidden in a too-short
+        // placeholder - show the REAL server folders under the fields.
+        if (pdirInfo.isConnected && !pdirInfo.textContent) {
+            void refreshPromptList(false).then(() => {
+                if (pdirInfo.isConnected && !pdirInfo.textContent) {
+                    pdirInfo.textContent = "Folder: " +
+                        (promptDir || "models/LLM/prompts (default)");
+                }
+            });
+        }
         if (!info.textContent) {
             info.textContent = st.configured
                 ? (st.has_ffmpeg ? "" : "ffmpeg NOT found - video attachments are unavailable")
@@ -1584,6 +1623,22 @@ function openGpuPop() {
 // ---------------------------------------------------------------------------
 // Status line + degraded/config notes
 // ---------------------------------------------------------------------------
+
+/** v92: the py prep notes ("auto-free before the request…", "model X loaded
+ *  (on request)…") - they can describe a MINUTES-long wake, so they live on
+ *  the live bubble's meta line + a toast, not in the transient status row. */
+function streamNote(msg) {
+    const t = String(msg || "").trim();
+    if (!t) return;
+    localToast(t, 5200);
+    // v92: the py emits the prep notes right after the response opens - the
+    // bubble may not exist yet (no token painted). Remember the LAST note and
+    // let ensureStreamBubble replay it onto the fresh meta line; a non-note
+    // token arriving later overwrites it through the normal paint flow.
+    streamNotePending = t;
+    const el = msgsEl?.querySelector(".hub-chat-msg-streaming .hub-chat-msg-meta");
+    if (el) { el.textContent = t; el.title = t; }
+}
 
 function setStatusErr(msg) {
     if (!statusEl) return;
@@ -2267,25 +2322,90 @@ function ensureStreamBubble() {
             `<div class="hub-chat-msg-body"></div></div>`);
         el = msgsEl.querySelector(".hub-chat-msg-streaming");
         el.querySelector(".hub-chat-think-t")?.addEventListener("click", (e) => toggleThink(e.currentTarget));
+        // v92: a prep note that arrived BEFORE the bubble (the py emits it
+        // right after the response opens - the free/wake lines can precede
+        // the first token by minutes) replays onto the fresh meta line.
+        if (streamNotePending) {
+            const meta = el.querySelector(".hub-chat-msg-meta");
+            if (meta) { meta.textContent = streamNotePending; meta.title = streamNotePending; }
+        }
     }
     return el;
 }
 
-function updateStreamBubble() {
+// v92 (owner #10): streaming lag - the old live bubble re-rendered the WHOLE
+// accumulated text through mdLite on EVERY SSE token (O(n^2) over an answer)
+// and force-scrolled the message list, so a long answer stalled the page (and
+// with it ComfyUI). Now paints are THROTTLED (~10 Hz) and INCREMENTAL: the
+// text is split at the last paragraph boundary ("\n\n" outside a code fence),
+// the stable part is rendered ONCE and only the small growing tail is
+// re-rendered per paint. The auto-scroll became stick-to-bottom: it only
+// follows the stream while the user is already near the bottom.
+let streamPaint = null;    // {stableLen, thStableLen, scrolled} - paint state
+let streamPaintT = 0;      // the pending paint timer (throttling)
+let streamPaintAt = 0;     // the last paint ts, ms
+let streamNotePending = "";  // v92: a note seen before the live bubble exists
+const STREAM_FRAME_MS = 100;  // ~10 paints/s - plenty for the eye
+
+function cancelStreamPaint() {
+    if (streamPaintT) { clearTimeout(streamPaintT); streamPaintT = 0; }
+    streamPaint = null;
+    streamNotePending = "";   // v92: a fresh stream never replays an old note
+    streamPaintAt = 0;
+}
+
+function streamSplit(text) {
+    // -> [stable, tail]: stable ends at the last "\n\n" OUTSIDE any ``` fence;
+    // while inside a fence nothing is stable (the fence grows atomically).
+    const s = String(text || "");
+    if ((s.match(/```/g) || []).length % 2) {
+        const i = s.lastIndexOf("```");
+        return [s.slice(0, i), s.slice(i)];
+    }
+    const i = s.lastIndexOf("\n\n");
+    if (i < 0) return ["", s];
+    return [s.slice(0, i + 2), s.slice(i + 2)];
+}
+
+function paintStreamPart(container, full, key, st) {
+    // append-only stable nodes + one re-rendered tail node inside `container`
+    let stable = container.querySelector(":scope > .hub-chat-stable");
+    let tail = container.querySelector(":scope > .hub-chat-tail");
+    if (!stable || !tail) {
+        container.innerHTML = "";
+        stable = document.createElement("div");
+        stable.className = "hub-chat-stable";
+        tail = document.createElement("div");
+        tail.className = "hub-chat-tail";
+        container.appendChild(stable);
+        container.appendChild(tail);
+    }
+    const [stText, tailText] = streamSplit(full);
+    if (stText.length < st[key]) {
+        stable.innerHTML = "";   // a fresh stream re-used the dom
+        st[key] = 0;
+    }
+    if (stText.length > st[key]) {
+        stable.insertAdjacentHTML("beforeend", mdLite(stText.slice(st[key])));
+        st[key] = stText.length;
+    }
+    tail.innerHTML = mdLite(tailText) || (full ? "" : "…");
+}
+
+function paintStreamBubble() {
     if (!msgsEl || !streaming) return;
     const el = ensureStreamBubble();
-    el.querySelector(".hub-chat-msg-body").innerHTML =
-        mdLite(streaming.text || (streaming.thoughts ? "" : "…"));
+    const st = streamPaint || { stableLen: 0, thStableLen: 0, scrolled: false };
+    paintStreamPart(el.querySelector(".hub-chat-msg-body"), streaming.text, "stableLen", st);
     if (streaming.thoughts) {
         const th = el.querySelector(".hub-chat-think");
         th.style.display = "";
         const body = th.querySelector(".hub-chat-think-b");
-        body.innerHTML = mdLite(streaming.thoughts);
+        paintStreamPart(body, streaming.thoughts, "thStableLen", st);
         // v91 (owner: "the thinking block does not expand during generation"):
         // it AUTO-OPENS as soon as reasoning tokens arrive and keeps following
-        // the text while the model thinks; after the answer lands the normal
-        // re-render collapses it again (the historical look), and a manual
-        // toggle during the stream always wins (toggleThink sets thinkUser).
+        // the text while the model thinks; a manual toggle during the stream
+        // always wins (toggleThink sets thinkUser).
         if (el.dataset.thinkUser !== "1") {
             body.style.display = "";
             const btn = th.querySelector(".hub-chat-think-t");
@@ -2293,7 +2413,25 @@ function updateStreamBubble() {
         }
         try { body.scrollTop = body.scrollHeight; } catch (_) {}
     }
-    msgsEl.scrollTop = msgsEl.scrollHeight;
+    // stick-to-bottom: force the first scroll, then follow only near the end
+    const near = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 160;
+    if (near || !st.scrolled) {
+        msgsEl.scrollTop = msgsEl.scrollHeight;
+        st.scrolled = true;
+    }
+    streamPaint = st;
+}
+
+function updateStreamBubble() {
+    if (!msgsEl || !streaming) return;
+    if (streamPaintT) return;   // a paint is already scheduled
+    const now = Date.now();
+    const wait = streamPaintAt ? Math.max(0, STREAM_FRAME_MS - (now - streamPaintAt)) : 0;
+    streamPaintT = setTimeout(() => {
+        streamPaintT = 0;
+        streamPaintAt = Date.now();
+        paintStreamBubble();
+    }, wait);
 }
 
 async function sendCurrent(opts = {}) {
@@ -2332,6 +2470,7 @@ async function sendCurrent(opts = {}) {
         }
         const ctrl = new AbortController();
         streaming = { ctrl, sid: tab.id, text: "", thoughts: "" };
+        cancelStreamPaint();   // v92: a fresh paint state per stream
         const r = await app.api.fetchApi("/settings_hub/chat/send", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -2347,14 +2486,19 @@ async function sendCurrent(opts = {}) {
             await readStream(r, (ev) => {
                 if (ev.delta) { streaming.text += ev.delta; updateStreamBubble(); }
                 else if (ev.thoughts) { streaming.thoughts += ev.thoughts; updateStreamBubble(); }
+                else if (ev.note) streamNote(ev.note);   // v92: prep notes
                 else if (ev.error) setStatusErr(ev.error);
                 else if (ev.done && ev.reply) fin = ev;
             });
+            cancelStreamPaint();   // no stale paint may re-create the bubble
             if (fin?.reply?.session) applySession(tab, fin.reply.session);
             else refreshSessionSoon(tab.id, 300);
         } else {
             const j = await r.json().catch(() => null);
             if (!r.ok || !j?.ok) throw new Error(j?.error || "HTTP " + (r.status || "?"));
+            // v92: the non-stream prep notes ride the reply ("note" next to
+            // "ctx") - free/load lines are user-relevant, surface them.
+            if (j?.note) localToast(String(j.note), 6000);
             applySession(tab, j.session);
         }
         if (!isEdit && !isRegen) {
@@ -2371,6 +2515,7 @@ async function sendCurrent(opts = {}) {
         refreshSessionSoon(tab.id); // the server truth wins (it saved the user msg)
     } finally {
         streaming = null;
+        cancelStreamPaint();   // v92: never paint after the final render
         setBusy(false);
         renderMsgs();
     }
@@ -2464,7 +2609,7 @@ function buildDom() {
     chip.className = "hub-chat-chip";
     chip.style.zIndex = Z_PANEL;
     chip.innerHTML = `💬`;
-    chip.title = "Chat - click to open";
+    chip.title = "Chat - click to open, drag to move";
     chip.style.display = "none";
     document.body.appendChild(chip);
 
@@ -2496,27 +2641,57 @@ function buildDom() {
 
     // header
     panel.querySelector(".hub-chat-min").addEventListener("click", () => setMinimized(true));
-    chip.addEventListener("click", () => setMinimized(false));
+    // v92 (owner #6): the collapsed chip never MOVED - it had only a click
+    // handler. Now: mousedown tracks a drag; past a 5px threshold the chip
+    // moves (and the release is NOT a click - the chat stays collapsed); a
+    // release without a drag still opens the panel. The position persists.
+    let chipMoved = false;
+    chip.addEventListener("mousedown", (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        chipMoved = false;
+        const sx = e.clientX, sy = e.clientY;
+        const ui = lsUi();
+        const ox = ui.chipX ?? ui.x ?? 16, oy = ui.chipY ?? ui.y ?? 16;
+        const move = (ev) => {
+            const dx = ev.clientX - sx, dy = ev.clientY - sy;
+            if (!chipMoved && Math.abs(dx) + Math.abs(dy) < 5) return;
+            chipMoved = true;
+            const p = clampPos(ox + dx, oy + dy, chip);
+            applyChipPos(p.x, p.y);
+        };
+        const up = (ev) => {
+            window.removeEventListener("mousemove", move, true);
+            window.removeEventListener("mouseup", up, true);
+            if (chipMoved) {
+                const p = clampPos(ox + (ev.clientX - sx), oy + (ev.clientY - sy), chip);
+                applyChipPos(p.x, p.y);
+                saveUi({ chipX: p.x, chipY: p.y });
+                // reset AFTER the click event - the click that follows this
+                // mouseup must not open the panel
+                setTimeout(() => { chipMoved = false; }, 0);
+            }
+        };
+        window.addEventListener("mousemove", move, true);
+        window.addEventListener("mouseup", up, true);
+    });
+    chip.addEventListener("click", () => { if (!chipMoved) setMinimized(false); });
     panel.querySelector(".hub-chat-clear").addEventListener("click", (e) => panelClearAll(e.currentTarget));
     sessionsBtn.addEventListener("click", () => void openSessPop());
     settingsBtn.addEventListener("click", () => openSetPop());
     modelSel.addEventListener("change", () => {
         const v = modelSel.value;
         if (!v) return;
-        const item = models.find((m) => m.id === v);
         void applyChatSettings({ model: v }).then((res) => {
             if (!res.ok) { localToast("Model not applied: " + (res.error || "?")); return; }
             renderStatus(); renderModelSel();
-            // v88: a PolyStrata registry model that is NOT loaded must be
-            // SWITCHED (the nodes' POST /api/models/load) - the chat stays
-            // usable meanwhile; plain /v1/models servers just take the name.
-            if (modelsSource === "registry" && item && item.status
-                && item.status !== "loaded" && item.status !== "loading") {
-                localToast("Switching to " + v + " - may take minutes…");
-                void switchModel(v);
-            } else {
-                localToast("Model: " + v + " - it loads with the next message (⚡ can load it now)");
-            }
+            // v92 (owner #1): picking a model ONLY SAVES the choice - nothing
+            // is loaded or switched here. The model is woken by the FIRST
+            // MESSAGE (the py _ensure_llm_ready path - it may take minutes,
+            // the progress shows as a note on the live bubble); ⚡ can still
+            // load it right away on demand.
+            localToast("Model: " + v + " - saved; it loads with the next message (⚡ can load it now)");
         });
     });
     modelsBtn.addEventListener("click", () => void fillModels(true));
@@ -2781,15 +2956,44 @@ async function panelClearAll(btn) {
 
 export function initChat() {
     if (!isChatOn()) return;
+    // v92 (owner #11): when a ComfyUI QUEUE starts, unload the chat engine so
+    // its VRAM goes back to ComfyUI (only when the ⚙ checkbox is on). Wired
+    // ONCE per page - the listener survives panel rebuilds and reads cfg live.
+    if (app?.api?.addEventListener && !queueHookWired) {
+        queueHookWired = true;
+        try {
+            app.api.addEventListener("execution_start", () => {
+                if (!cfg?.auto_unload_llm_on_queue) return;
+                const now = Date.now();
+                if (now - lastQueueUnload < 30000) return;   // a 30 s cooldown
+                lastQueueUnload = now;
+                void (async () => {
+                    try {
+                        const r = await app.api.fetchApi("/settings_hub/chat/gpu", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ action: "unload" }),
+                        });
+                        const j = await r.json().catch(() => null);
+                        if (j?.ok) localToast("Chat model unloaded - the VRAM is ComfyUI's now", 4200);
+                        else localToast("Chat unload failed: " + (j?.error || "HTTP " + (r?.status || "?")), 4200);
+                    } catch (_) {}
+                })();
+            });
+        } catch (_) {}
+    }
     // v91: the native "LLM Chat panel" ComfyUI switch is gone - the MINI
     // PANEL (launcher) carries the SettingsHub rows now; register the panel
     // with it so [–] can collapse the chat INTO the bar.
+    // v92 (owner #7): badge() feeds the taskbar - the chat button pulses a
+    // DOT while a generation is running (read live on every launcher tick).
     registerLauncherPanel("chat", {
         isOn: () => isChatOn(),
         setOn: (v) => setChatOn(v),
         isMin: () => !!(panel && panel.style.display === "none"),
         minimize: () => setMinimized(true),
         restore: () => setMinimized(false),
+        badge: () => (streaming ? { dot: true } : null),
         showChip: () => {
             if (!panel || !chip || !isChatOn()) return;
             const ui = lsUi();
@@ -2838,6 +3042,7 @@ function teardown() {
     resizePersistT = null;
     clearTimeout(refreshT);
     refreshT = null;
+    cancelStreamPaint();   // v92: no pending paint may outlive the panel
     try { streaming?.ctrl?.abort(); } catch (_) {}
     streaming = null;
     closeViewer();
@@ -2904,6 +3109,12 @@ export function __chatTestHooks() {
         send: sendCurrent,
         stopStream: () => { try { streaming?.ctrl?.abort(); } catch (_) {} },
         streaming: () => (streaming ? { sid: streaming.sid, text: streaming.text, thoughts: streaming.thoughts } : null),
+        // v92: streaming-paint internals for the smoke tests
+        updateStreamBubble,
+        paintStream: paintStreamBubble,
+        cancelStreamPaint,
+        streamNote,
+        streamPaintState: () => (streamPaint ? { ...streamPaint } : null),
         // v91: branch/edit/delete/fork/export introspection for the smoke tests
         variantInfo,
         switchVariant,

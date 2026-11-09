@@ -35,7 +35,7 @@
 // v89 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v91";
+globalThis.__SettingsHubLoaded["stack"] = "v92";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -388,6 +388,7 @@ let headEl = null, listEl = null, pasteEl = null, noteEl = null;
 let toolsEl = null;      // v72: search + kind filter row
 let tabEl = null;        // v79: tab bar (All + groups + [+])
 let chip = null;         // minimized chip
+let chipDrag = null;     // v92: makeDraggable handle for the chip (wasDragged)
 let grip = null;         // resize handle
 
 let stackItems = [];     // server index mirror, TOP-first
@@ -626,7 +627,9 @@ function openStkSettingsPop() {
         `<div class="hub-cs-info" data-stk="rootinfo"></div>` +
         `<div class="hub-cs-hint">Enter applies the folder, Esc reverts it. Off hides the ` +
         `panel; the way back is the mini panel (📋 toggle) or ComfyUI Settings → ` +
-        `SettingsHub → 'Mini panel'. Switching the scope or the folder never moves ` +
+        `SettingsHub → 'Mini panel'. The folder shown above ("Now: …") is where ` +
+        `the entries AND stack_root.json live - copy it out of this popup any time. ` +
+        `Switching the scope or the folder never moves ` +
         `entries - each location/scope keeps its own. 🗑 in the panel header clears ` +
         `the entries.</div>`;
     document.body.appendChild(pop);
@@ -1954,14 +1957,21 @@ function clampPos(x, y, el) {
 }
 
 function makeDraggable(handle, target, getPos, setPos, isChip) {
+    // v92 (owner #6): a DRAG must not turn into a click on release - the chip
+    // unfolded every time it was dropped. The closure now tracks whether the
+    // press moved past a 5px threshold; the chip's click handler consults
+    // wasDragged() and stays collapsed; the flag resets AFTER the click event.
+    let moved = false;
     handle.addEventListener("mousedown", (e) => {
         if (e.button !== 0) return;
         if (e.target?.closest?.("button")) return; // header buttons stay clickable
         e.preventDefault();
         e.stopPropagation();
+        moved = false;
         const startX = e.clientX, startY = e.clientY;
         const { x: ox, y: oy } = getPos();
         const move = (ev) => {
+            if (!moved && Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) >= 5) moved = true;
             const p = clampPos(ox + (ev.clientX - startX), oy + (ev.clientY - startY), target);
             setPos(p.x, p.y, false);
         };
@@ -1970,10 +1980,12 @@ function makeDraggable(handle, target, getPos, setPos, isChip) {
             window.removeEventListener("mouseup", up, true);
             const p = clampPos(ox + (ev.clientX - startX), oy + (ev.clientY - startY), target);
             setPos(p.x, p.y, true); // persist on release
+            if (moved) setTimeout(() => { moved = false; }, 0);   // outlive the click
         };
         window.addEventListener("mousemove", move, true);
         window.addEventListener("mouseup", up, true);
     });
+    return { wasDragged: () => moved };
 }
 
 function applyPos(x, y) {
@@ -2156,13 +2168,59 @@ function textWidgetsOf(node) {
     } catch (_) { return []; }
 }
 
-/** The text widget under the cursor (LiteGraph hit-test), else the node's
- *  first text widget (prompt nodes usually carry exactly one). */
-function textWidgetAt(node, gx, gy) {
+/** The text widget under the cursor (v92 layered hit-test), else the node's
+ *  first text widget (prompt nodes usually carry exactly one).
+ *  v92 (owner #8): the drop used to land in the FIRST text widget - the
+ *  frontend's getWidgetOnPos misses on most builds (and multiline textareas
+ *  are DOM elements it never looks at). Layers, in order:
+ *    1. a DOM multiline/input element under the cursor mapped back to the
+ *       widget (ComfyUI multiline text widgets ARE real DOM textareas);
+ *    2. the frontend's own getWidgetOnPos;
+ *    3. a manual walk of the widget stack - the frontend stores each
+ *       widget's last drawn y (w.last_y, graph coords) + computeSize height,
+ *       so a graph-space y (gy) resolves the band under the cursor;
+ *    4. the NEAREST text-widget band within a generous 40px slop;
+ *    5. the legacy fallback - the node's first text widget. */
+function textWidgetAt(node, gx, gy, cx, cy) {
+    // 1. DOM element under the cursor (multiline textareas overlay the canvas)
+    try {
+        const el = (cx != null && cy != null) ? elemFromPoint(cx, cy) : null;
+        if (el) {
+            const t = el.closest?.("textarea, input[type=text], .comfy-multiline-input");
+            if (t) {
+                const ws = Array.isArray(node.widgets) ? node.widgets : [];
+                const hit = ws.find((w) => w && isTextWidget(w) &&
+                    (w.inputEl === t || w.element === t ||
+                     (w.element && typeof w.element.contains === "function" && w.element.contains(t))));
+                if (hit) return hit;
+            }
+        }
+    } catch (_) {}
+    // 2. the frontend's own hit-test
     try {
         const w = app.canvas?.getWidgetOnPos?.(gx, gy);
         if (w && isTextWidget(w)) return w;
     } catch (_) {}
+    // 3+4. manual widget-stack walk (last_y + computeSize), then nearest-band
+    try {
+        const ws = Array.isArray(node.widgets) ? node.widgets : [];
+        const H = (window.LiteGraph?.NODE_WIDGET_HEIGHT) ?? 20;
+        const width = node.size?.[0] || 140;
+        let best = null, bestDist = Infinity;
+        for (const w of ws) {
+            if (!w || w.disabled) continue;
+            let h;
+            try { h = w.computeSize ? w.computeSize(width)[1] : H; } catch (_) { h = H; }
+            if (!isTextWidget(w)) continue;
+            const ly = typeof w.last_y === "number" ? w.last_y : null;
+            if (ly != null && gy >= ly - 3 && gy <= ly + h + 3) return w;   // exact band
+            const d = ly == null ? Infinity
+                : (gy < ly ? ly - gy : (gy > ly + h ? gy - (ly + h) : 0));
+            if (d < bestDist) { bestDist = d; best = w; }
+        }
+        if (best && bestDist <= 40) return best;   // a sloppy landing still wins
+    } catch (_) {}
+    // 5. the historical fallback
     return textWidgetsOf(node)[0] || null;
 }
 
@@ -2374,7 +2432,7 @@ function onCardDragMove(e) {
         const g = pointToGraph(e.clientX, e.clientY);
         if (g) {
             if (t === "text") {
-                const w = textWidgetAt(g.node, g.gx, g.gy);
+                const w = textWidgetAt(g.node, g.gx, g.gy, e.clientX, e.clientY);
                 if (w) target = { kind: "node", node: g.node, widget: w, wkind: "text" };
             } else if (t === "image" || t === "video" || t === "audio") {
                 const w = uploadWidgetOf(g.node, t);
@@ -2971,7 +3029,12 @@ function buildDom() {
     panel.querySelector(".hub-stack-clear").addEventListener("click", (e) => panelClearAll(e.currentTarget));
     panel.querySelector(".hub-stack-min").addEventListener("click", () => setMinimized(true));
     // v75: the hide/close wiring is intentionally absent - see buildDom().
-    chip.addEventListener("click", () => setMinimized(false));
+    // v92 (owner #6): the chip is draggable (below) - a DRAG release must not
+    // also fire this click and unfold the panel; only a plain click opens.
+    chipDrag = makeDraggable(chip, chip,
+        () => ({ x: parseFloat(chip.style.left) || 0, y: parseFloat(chip.style.top) || 0 }),
+        (x, y, persist) => { applyChipPos(x, y); if (persist) saveUi({ chipX: x, chipY: y }); }, true);
+    chip.addEventListener("click", () => { if (chipDrag?.wasDragged?.()) return; setMinimized(false); });
 
     // v79: tab bar wiring - open (click), rename (double-click), remove (the
     // chip's ✕, armed like 🗑), create (the [＋] input).
@@ -3057,9 +3120,6 @@ function buildDom() {
     makeDraggable(headEl, panel,
         () => ({ x: parseFloat(panel.style.left) || 0, y: parseFloat(panel.style.top) || 0 }),
         (x, y, persist) => { applyPos(x, y); if (persist) saveUi({ x, y }); }, false);
-    makeDraggable(chip, chip,
-        () => ({ x: parseFloat(chip.style.left) || 0, y: parseFloat(chip.style.top) || 0 }),
-        (x, y, persist) => { applyChipPos(x, y); if (persist) saveUi({ chipX: x, chipY: y }); }, true);
 
     // resize: grip at the bottom-right
     grip.addEventListener("mousedown", (e) => {
@@ -3311,12 +3371,16 @@ export function initStack() {
     // v91: the native "Paste Stack panel" ComfyUI switch is gone - the MINI
     // PANEL (launcher) carries the SettingsHub rows now; register the panel
     // with it so [–] can collapse the stack INTO the bar.
+    // v92 (owner #7): badge() feeds the taskbar - the stack button shows the
+    // ENTRY COUNT (the same number the floating chip carried), read live on
+    // every launcher tick.
     registerLauncherPanel("stack", {
         isOn: () => isStackOn(),
         setOn: (v) => setStackOn(v),
         isMin: () => !!(panel && panel.style.display === "none"),
         minimize: () => setMinimized(true),
         restore: () => setMinimized(false),
+        badge: () => (stackItems.length ? { text: String(stackItems.length) } : null),
         showChip: () => {
             if (!panel || !chip || !isStackOn()) return;
             const ui = lsUi();

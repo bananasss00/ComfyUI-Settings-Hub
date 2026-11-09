@@ -296,6 +296,21 @@ def load(name, rel):
 
 chat = load("shub_chat_proxy", "py/chat_proxy.py")
 
+# v92: the LLM WAKE path (_pre_send_prep -> _ensure_llm_ready) probes the
+# PolyStrata registry (GET /api/models) BEFORE every send - the scripted
+# FakeClientSession below only carries /chat/completions answers, so the
+# legacy phases stub the registry probe out (fail-open: no registry -> no
+# wake). The REAL wake/free mechanics get their own scripted phase at the
+# bottom (v92: conditional free + wake + prep notes).
+_orig_upstream_models_full = chat._upstream_models_full
+
+
+async def _no_registry_stub(cfg):
+    return {"ok": False, "source": "", "models": []}
+
+
+chat._upstream_models_full = _no_registry_stub
+
 # ---------------------------------------------------------------------------
 
 PASS = 0
@@ -900,6 +915,10 @@ seed_config(prompt_preset="")
 # ---------------------------------------------------------------------------
 phase("v88 model list: /api/models registry first, /v1/models fallback, switch route")
 
+# v92: the REAL registry probe back for these phases (the wake stub above
+# would hollow them out); the /send phases further down re-stub it.
+chat._upstream_models_full = _orig_upstream_models_full
+
 FakeClientSession.requests.clear()
 FakeClientSession.script = [
     FakeUpstream(200, json.dumps({"models": [
@@ -972,6 +991,10 @@ r = run(chat.chat_test(FakeRequest(method="POST", path="/settings_hub/chat/test"
 j = resp_json(r)
 check("test probe now reports the registry source + ids",
       j["ok"] and j["source"] == "registry" and j["models"] == ["m-loaded", "m-avail"], j)
+
+# v92: the /send phases below run the wake probe on every send - stub the
+# registry probe out again (no network in the scripted phases).
+chat._upstream_models_full = _no_registry_stub
 
 # ---------------------------------------------------------------------------
 phase("v89 ctx fill: estimate, auto probe, ctx_size, exact usage")
@@ -1117,6 +1140,271 @@ r = run(chat.chat_prompts_list(FakeRequest(method="GET", path="/settings_hub/cha
 j = resp_json(r)
 check("default catalog is back (the v88 models dir)",
       j["ok"] and j["files"] == ["cinematic.txt"], j)
+
+# ---------------------------------------------------------------------------
+phase("v91 tree: migration, branches, variants, edit/delete, import")
+
+seed_config(stream=False)
+
+# a fresh chat: q1 -> a1
+sess = make_session("v91 tree")
+sid = sess["id"]
+FakeClientSession.script = [FakeUpstream(status=200, text=json.dumps({
+    "choices": [{"message": {"content": "a1"}}], "usage": {}}))]
+r = run(chat.chat_send(FakeRequest(json_body={"session": sid, "text": "q1", "stream": False})))
+j = resp_json(r)
+ms = j["session"]["messages"]
+check("v91 send keeps the linear shape", [m["text"] for m in ms] == ["q1", "a1"], ms)
+check("v91 linear messages carry nids", all(m.get("nid") for m in ms), ms)
+check("v91 session carries the tree", isinstance(j["session"].get("tree"), dict))
+tree = j["session"]["tree"]
+check("v91 tree has the virtual root", "__root__" in tree["nodes"])
+check("v91 activeLeaf is the answer", tree["activeLeaf"] == ms[1]["nid"], tree)
+q1, a1 = ms[0]["nid"], ms[1]["nid"]
+
+# session GET migrates + hands out the tree
+r = run(chat.chat_session_get(FakeRequest(match_info={"sid": sid})))
+j = resp_json(r)["session"]
+check("v91 GET returns the tree + nids", j["tree"]["nodes"][j["messages"][0]["nid"]]["text"] == "q1")
+
+# an OLD session (linear only) migrates lazily and keeps the messages
+old = make_session("old chat")
+with open(os.path.join(chat._session_dir(old["id"]), "session.json"), "w", encoding="utf-8") as f:
+    json.dump({"id": old["id"], "title": "old chat", "created": 1, "updated": 1,
+               "messages": [{"role": "user", "text": "u1", "ts": 1},
+                            {"role": "assistant", "text": "x1", "ts": 2}]}, f)
+r = run(chat.chat_session_get(FakeRequest(match_info={"sid": old["id"]})))
+j = resp_json(r)["session"]
+check("v91 old session migrated", "tree" in j and len(j["messages"]) == 2, j.get("tree"))
+check("v91 migration preserves the texts",
+      [m["text"] for m in j["messages"]] == ["u1", "x1"], j["messages"])
+
+# EDIT = a NEW BRANCH: the old wording + its answer stay in the tree
+FakeClientSession.script = [FakeUpstream(status=200, text=json.dumps({
+    "choices": [{"message": {"content": "a2"}}], "usage": {}}))]
+r = run(chat.chat_send(FakeRequest(json_body={
+    "session": sid, "edit_nid": q1, "text": "q1-edited", "stream": False})))
+j = resp_json(r)
+ms = j["session"]["messages"]
+q2, a2 = ms[0]["nid"], ms[1]["nid"]
+check("v91 edit: the active path shows the new branch",
+      [m["text"] for m in ms] == ["q1-edited", "a2"], ms)
+tree = j["session"]["tree"]
+check("v91 edit: the old branch survives in the tree",
+      tree["nodes"][q1]["text"] == "q1" and tree["nodes"][a1]["text"] == "a1", tree["nodes"].get(q1))
+check("v91 edit: root has TWO variants", len(tree["nodes"]["__root__"]["children"]) == 2,
+      tree["nodes"]["__root__"]["children"])
+check("v91 edit: the old answer subtree survives",
+      tree["nodes"][q1]["children"] == [a1], tree["nodes"][q1])
+
+# the arrows walk the variants - back to the original branch
+r = run(chat.chat_branch(FakeRequest(json_body={"session": sid, "nid": q2, "dir": -1})))
+j = resp_json(r)
+ms = j["session"]["messages"]
+check("v91 branch switch: the WHOLE path follows the request",
+      [m["text"] for m in ms] == ["q1", "a1"], ms)
+r = run(chat.chat_branch(FakeRequest(json_body={"session": sid, "nid": q1, "set": 0})))
+check("v91 branch set-index works",
+      [m["text"] for m in resp_json(r)["session"]["messages"]] == ["q1", "a1"])
+r = run(chat.chat_branch(FakeRequest(json_body={"session": sid, "nid": q1, "dir": -1})))
+check("v91 branch switch past the start refused", r.status == 400, r.status)
+r = run(chat.chat_branch(FakeRequest(json_body={"session": sid, "nid": q1, "set": 1})))
+check("v91 branch set-index forward",
+      [m["text"] for m in resp_json(r)["session"]["messages"]] == ["q1-edited", "a2"])
+r = run(chat.chat_branch(FakeRequest(json_body={"session": sid, "nid": q2, "dir": -1})))
+check("v91 branch back to the original",
+      [m["text"] for m in resp_json(r)["session"]["messages"]] == ["q1", "a1"])
+
+# REGENERATE = a NEW SIBLING answer (the old one stays a variant)
+FakeClientSession.script = [FakeUpstream(status=200, text=json.dumps({
+    "choices": [{"message": {"content": "a3"}}], "usage": {}}))]
+r = run(chat.chat_send(FakeRequest(json_body={"session": sid, "regenerate": True, "stream": False})))
+j = resp_json(r)
+ms = j["session"]["messages"]
+a3 = ms[1]["nid"]
+check("v91 regenerate: the new answer is active", [m["text"] for m in ms] == ["q1", "a3"], ms)
+tree = j["session"]["tree"]
+check("v91 regenerate: the old answer stays a sibling",
+      tree["nodes"][q1]["children"] == [a1, a3] and tree["nodes"][q1]["activeChild"] == a3,
+      tree["nodes"][q1])
+r = run(chat.chat_branch(FakeRequest(json_body={"session": sid, "nid": a3, "dir": -1})))
+check("v91 answer variants walk back",
+      [m["text"] for m in resp_json(r)["session"]["messages"]] == ["q1", "a1"])
+
+# a failed send leaves a trailing user request; regenerate retries it
+FakeClientSession.script = [FakeUpstream(status=500, text=json.dumps(
+    {"error": {"message": "boom"}}))]
+r = run(chat.chat_send(FakeRequest(json_body={"session": sid, "text": "retry-me", "stream": False})))
+check("v91 failed send returns an error", r.status == 502, r.status)
+j = resp_json(run(chat.chat_session_get(FakeRequest(match_info={"sid": sid}))))["session"]
+ms = j["messages"]
+check("v91 failed send: the request stays active",
+      ms[-1]["role"] == "user" and ms[-1]["text"] == "retry-me", ms)
+FakeClientSession.script = [FakeUpstream(status=200, text=json.dumps({
+    "choices": [{"message": {"content": "retried"}}], "usage": {}}))]
+r = run(chat.chat_send(FakeRequest(json_body={"session": sid, "regenerate": True, "stream": False})))
+j = resp_json(r)
+check("v91 retry hangs the answer under the same request",
+      [m["text"] for m in j["session"]["messages"]][-2:] == ["retry-me", "retried"],
+      j["session"]["messages"])
+
+# in-place edit (the model's replies too)
+r = run(chat.chat_msg_edit(FakeRequest(
+    match_info={"sid": sid},
+    json_body={"nid": j["session"]["messages"][-1]["nid"], "text": "retried+corrected"})))
+j = resp_json(r)
+check("v91 in-place edit applied", j["session"]["messages"][-1]["text"] == "retried+corrected", j)
+r = run(chat.chat_msg_edit(FakeRequest(match_info={"sid": sid}, json_body={"nid": "__root__", "text": "x"})))
+check("v91 in-place edit refuses the root", r.status == 400)
+
+# delete a message WITH its subtree
+r = run(chat.chat_msg_delete(FakeRequest(
+    match_info={"sid": sid},
+    json_body={"nid": [m for m in j["session"]["messages"] if m["role"] == "user"][-1]["nid"]})))
+j = resp_json(r)
+check("v91 delete removes the node + its answer",
+      "retry-me" not in [m["text"] for m in j["session"]["messages"]], j["session"]["messages"])
+r = run(chat.chat_msg_delete(FakeRequest(match_info={"sid": sid}, json_body={"nid": "nope"})))
+check("v91 delete unknown nid refused", r.status == 400)
+
+# fork / import: blobs are copied from the source session
+src = make_session("fork me")
+add_blob(src["id"], "forkimg.png", PNG)
+body = {"session": src["id"], "text": "look", "stream": False,
+        "attachments": [{"kind": "image", "name": "forkimg.png", "orig": "fork.png", "size": len(PNG)}]}
+FakeClientSession.script = [FakeUpstream(status=200, text=json.dumps({
+    "choices": [{"message": {"content": "nice"}}], "usage": {}}))]
+run(chat.chat_send(FakeRequest(json_body=body)))
+sess_src = resp_json(run(chat.chat_session_get(FakeRequest(match_info={"sid": src["id"]}))))["session"]
+r = run(chat.chat_import(FakeRequest(json_body={
+    "title": "Fork: fork me",
+    "messages": [dict(m, nid=None) for m in sess_src["messages"]],
+    "copy_blobs_from": src["id"]})))
+j = resp_json(r)
+check("v91 import creates a session", j["ok"] and j["session"]["id"] != src["id"], j)
+check("v91 import carries the messages",
+      [m["text"] for m in j["session"]["messages"]] == ["look", "nice"], j["session"]["messages"])
+check("v91 import keeps the attachment part",
+      j["session"]["messages"][0]["parts"][0]["name"] == "forkimg.png", j["session"]["messages"][0])
+check("v91 import copies the blob file",
+      os.path.isfile(os.path.join(chat._blobs_dir(j["session"]["id"]), "forkimg.png")))
+check("v91 import builds a tree", "tree" in j["session"])
+r = run(chat.chat_import(FakeRequest(json_body={"messages": "nope"})))
+check("v91 import refuses a bad body", r.status == 400)
+
+# clear resets the tree too
+r = run(chat.chat_session_clear(FakeRequest(match_info={"sid": sid})))
+j = resp_json(r)["session"]
+check("v91 clear empties the path", j["messages"] == [], j["messages"])
+check("v91 clear drops the tree", "tree" not in j, j.get("tree"))
+
+# a linear payload never leaks nid into the upstream request
+body = chat.build_upstream_payload(
+    [{"role": "user", "text": "plain", "nid": "deadbeef", "ts": 1, "parts": []}],
+    chat._load_config(), sid)
+um = [m for m in body["messages"] if m["role"] == "user"][-1]
+check("v91 nid never goes upstream",
+      um == {"role": "user", "content": [{"type": "text", "text": "plain"}]}, um)
+
+# ---------------------------------------------------------------------------
+phase("v92: conditional free + LLM wake + prep notes + queue flag")
+
+# the registry probe comes back for the REAL mechanics
+chat._upstream_models_full = _orig_upstream_models_full
+
+# _comfy_loaded_count mirrors comfy.model_management.current_loaded_models
+saved_mm = getattr(chat, "_comfy_mm", None)
+
+
+class _FakeMM:
+    def __init__(self, lst):
+        self.current_loaded_models = lst
+
+
+def _with_mm(lst, fn):
+    chat._comfy_mm = lambda: _FakeMM(lst)
+    try:
+        return fn()
+    finally:
+        if saved_mm is not None:
+            chat._comfy_mm = saved_mm
+
+
+with0 = _with_mm([], lambda: chat._comfy_loaded_count())
+check("v92 loaded count = 0 for an empty list", with0 == 0, with0)
+none_mm = _with_mm(None, lambda: chat._comfy_loaded_count())
+check("v92 loaded count = None when comfy hides the list", none_mm is None, none_mm)
+
+# the conditional free: 0 loaded -> the nothing-to-free note, no real free
+freed = {"n": 0}
+chat._comfy_free_memory = lambda: (freed.__setitem__("n", freed["n"] + 1) or "freed!")
+note = _with_mm([], lambda: chat._comfy_free_if_loaded())
+check("v92 zero loaded -> already-unloaded note", "already unloaded" in note, note)
+check("v92 zero loaded -> the real free did NOT run", freed["n"] == 0)
+note = _with_mm([object(), object()], lambda: chat._comfy_free_if_loaded())
+check("v92 two loaded -> the free ran with its note",
+      freed["n"] == 1 and note.startswith("auto-free before the request: freed!"), note)
+
+# _ensure_llm_ready: loaded -> skip; available -> switch + note; no registry -> no-op
+async def _mm(models):
+    return {"ok": True, "source": "registry", "models": models, "current": ""}
+
+
+async def _loaded_registry(cfg):
+    return await _mm([{"id": "test-model", "status": "loaded"}])
+
+
+async def _available_registry(cfg):
+    return await _mm([{"id": "test-model", "status": "available"}])
+
+
+cfgw = seed_config(stream=False)
+chat._upstream_models_full = _loaded_registry
+ok, note = run(chat._ensure_llm_ready(cfgw, "test-model"))
+check("v92 a loaded registry model wakes instantly", ok and note is None, (ok, note))
+check("v92 a loaded model fires NO switch POST",
+      not any(c[1].endswith("/api/models/load") for c in FakeClientSession.requests[-1:]))
+
+chat._upstream_models_full = _available_registry
+FakeClientSession.script = [FakeUpstream(status=200, text=json.dumps({"ok": True}))]
+ok, note = run(chat._ensure_llm_ready(cfgw, "test-model"))
+check("v92 an available model is switched on the upstream", ok and note and "loaded (on request)" in note, (ok, note))
+sw = [c for c in FakeClientSession.requests if c[1].endswith("/api/models/load")]
+check("v92 the switch POST hit /api/models/load", len(sw) == 1, [c[1] for c in FakeClientSession.requests[-2:]])
+
+chat._upstream_models_full = _no_registry_stub
+ok, note = run(chat._ensure_llm_ready(cfgw, "test-model"))
+check("v92 no registry -> the wake is a silent no-op", ok and note is None, (ok, note))
+
+# _pre_send_prep: the notes come back as a list and NEVER raise
+chat._upstream_models_full = _available_registry
+FakeClientSession.script = [FakeUpstream(status=200, text=json.dumps({"ok": True}))]
+cfgf = seed_config(stream=False, auto_free_comfy=True)
+notes = run(chat._pre_send_prep(cfgf, "test-model"))
+check("v92 prep notes carry the free + wake lines",
+      isinstance(notes, list) and len(notes) == 2 and "auto-free" in notes[0] and "loaded (on request)" in notes[1],
+      notes)
+async def _probe_boom(cfg):
+    raise RuntimeError("probe boom")
+
+
+chat._upstream_models_full = _probe_boom
+notes = run(chat._pre_send_prep(cfgf, "test-model"))
+check("v92 a broken probe never fails the prep (error becomes a note)",
+      isinstance(notes, list) and any("model wake failed" in n for n in notes), notes)
+
+# the config roundtrip accepts the v92 queue flag
+chat._upstream_models_full = _orig_upstream_models_full
+r = run(chat.chat_config_set(FakeRequest(json_body={"auto_unload_llm_on_queue": True,
+                                                    "auto_free_comfy": True})))
+j = resp_json(r)
+check("v92 config accepts auto_unload_llm_on_queue",
+      j["ok"] and j["config"]["auto_unload_llm_on_queue"] is True, j.get("config"))
+check("v92 config accepts auto_free_comfy",
+      j["config"]["auto_free_comfy"] is True, j.get("config"))
+r = run(chat.chat_config_set(FakeRequest(json_body={"auto_unload_llm_on_queue": False})))
+check("v92 the queue flag flips back off",
+      resp_json(r)["config"]["auto_unload_llm_on_queue"] is False)
 
 # ---------------------------------------------------------------------------
 

@@ -10,7 +10,7 @@
 // SUBMODULES are fresh.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v90";
+globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v92";
 
 // The whole hub interface lives inside a single LiteGraph DOM widget
 // (node.addDOMWidget), so the CSS in styles.css actually applies:
@@ -41,6 +41,7 @@ import {
     effectiveSliderParams, getSliderOverride, hasSliderOverride,
     setSliderOverride, clearSliderOverride, applyOverrideToTargetWidgets,
     maybeReapplySliderOverride,
+    registerHubAction,
 } from "./core.js";
 import {
     presetSave, presetDelete, presetMergeInto, presetFavToggle,
@@ -222,16 +223,16 @@ function buildTabBarHtml(cfg) {
         tabBtnHtml(t, t.id === getActiveTabId(cfg),
             cfg.items.filter((i) => i.tabId === t.id).length)).join("");
     // v25 right-side group: 🔍 compact filter, 👁 row-handles visibility,
-    // 📌 screen pin, + new tab.
+    // + new tab. v92 (owner #4): the 📌 SCREEN-PIN button is GONE from the
+    // node UI - a hub is EITHER a floating window OR a canvas node now, and
+    // the way to the floating window is the node's right-click menu
+    // ("🪄 Dematerialize"); the window's own header still has the buttons.
     return `<div class="hub-tab-bar">${btns}` +
         `<input type="text" class="hub-search" data-role="hub-search" spellcheck="false" ` +
         `placeholder="🔍" title="Filter widgets on this tab (substring, case-insensitive; Esc clears)">` +
         `<button type="button" class="hub-chrome-toggle${cfg.hideChrome ? " hub-chrome-off" : ""}" data-action="chrome-toggle" ` +
         `title="Show / hide row chrome (handles ⠿, row ✕, tab ✕, slider ⚙, hub ⚙, ＋Div, + tab)" ` +
         `aria-pressed="${cfg.hideChrome ? "true" : "false"}">👁</button>` +
-        `<button type="button" class="hub-pin-toggle${cfg.pinned ? " hub-pin-on" : ""}" data-action="pin-toggle" ` +
-        `title="Keep this hub on screen - float above the canvas, survives panning/zoom" ` +
-        `aria-pressed="${cfg.pinned ? "true" : "false"}">📌</button>` +
         `<button type="button" class="hub-add-tab" data-action="add-tab" title="Add tab">+</button>` +
         `</div>`;
 }
@@ -1436,12 +1437,6 @@ function floatHub(node) {
     p.panel.style.top = `${c.y}px`;
     applyPinSize(node, p.panel);   // v27.2: restore the persisted window size
     slimHubSlot(node, st);
-    // Reflect the state on the (already mounted) tab-bar marker instantly.
-    const tgl = st.root.querySelector('[data-action="pin-toggle"]');
-    if (tgl) {
-        tgl.classList.add("hub-pin-on");
-        tgl.setAttribute("aria-pressed", "true");
-    }
     paintQueueBarDom(st.root);
     return true;
 }
@@ -1507,6 +1502,110 @@ function unpinHubAction(node) {
     }
     return toggleHubPinned(node);
 }
+
+/**
+ * v92 (owner #4): DEMATERIALIZE a hub node back into its floating window -
+ * the node right-click menu entry (context_menu.js calls this through the
+ * core.js action registry). The flag pair makes the canvas hide the node
+ * completely (hub_node skips drawNode + hit-testing) while renderHub floats
+ * the same UI in the pin window: a hub is EITHER a floating window OR a
+ * canvas node - the intermediate v24 state (visible slim node + window) is
+ * gone with the tab-bar 📌. The inverse (materialize) stays the window
+ * header's 📌 (unpinHubAction above). Everything survives: the same node,
+ * bindings, presets, registry entry; the flags serialize with the workflow.
+ */
+function dematerializeHubAction(node) {
+    if (!node || node.type !== "SettingsHub") return false;
+    const cfg = getHubConfig(node);
+    if (isPhantomHub(node) && cfg.pinned) return true;   // already floating
+    cfg.phantom = true;
+    cfg.pinned = true;
+    try { node.setDirtyCanvas?.(true, true); } catch (_) {}
+    try {
+        renderHub(node);   // re-render + float through the normal pinned path
+    } catch (err) {
+        console.warn("[SettingsHub] dematerialize re-render failed:", err);
+    }
+    try {
+        showHubToast("🧩→👻 " + (node.title || "Hub") +
+            " is a floating window now - the canvas node is hidden. 📌 in its header materializes it back.");
+    } catch (_) {}
+    return true;
+}
+
+/**
+ * v92 (owner #5): RENAME a hub from its right-click menu (a virtual hub
+ * could only be renamed by the hidden double-click on the floating title -
+ * nobody finds that; now there is an explicit menu entry for BOTH kinds).
+ * A small body-level popup with an input; Enter commits, Esc cancels, blur
+ * commits - the value is node.title, so it serializes with the workflow and
+ * the floating header + the tab bar follow on the next render.
+ */
+function hubRenameFlow(node) {
+    if (!node) return false;
+    try {
+        const pop = document.createElement("div");
+        pop.className = "hub-menu hub-hub-rename-pop";
+        pop.innerHTML =
+            `<div class="hub-menu-title">✏ Rename hub</div>` +
+            `<input type="text" class="hub-hub-rename-in" spellcheck="false" autocomplete="off">` +
+            `<div class="hub-cs-hint">Enter applies, Esc cancels. The name is the node title - it travels with the workflow.</div>`;
+        document.body.appendChild(pop);
+        const inp = pop.querySelector("input");
+        inp.value = node.title || "";
+        // place over the hub's visible surface: the floating window, else
+        // the mounted DOM root, else the viewport center
+        const anchor = pinPanels.get(node)?.panel || stateMap.get(node)?.root || null;
+        const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+        let x = Math.max(8, (vw - (pop.offsetWidth || 300)) / 2);
+        let y = Math.max(8, (vh - 140) / 2);
+        if (anchor?.isConnected) {
+            const r = anchor.getBoundingClientRect();
+            if (r && (r.width || r.height)) {
+                x = Math.min(Math.max(8, r.left), vw - (pop.offsetWidth || 300) - 8);
+                y = Math.min(Math.max(8, r.top - 8), vh - (pop.offsetHeight || 140) - 8);
+            }
+        }
+        pop.style.left = `${Math.max(8, x)}px`;
+        pop.style.top = `${Math.max(8, y)}px`;
+        const close = () => {
+            try { pop.remove(); } catch (_) {}
+            try { window.removeEventListener("mousedown", onDown, true); } catch (_) {}
+            try { window.removeEventListener("keydown", onKey, true); } catch (_) {}
+        };
+        const commit = (ok) => {
+            const v = String(inp.value || "").replace(/\s+/g, " ").trim();
+            if (ok && v) {
+                node.title = v;
+                try { node.setDirtyCanvas?.(true, true); } catch (_) {}
+                try { renderHub(node); } catch (_) {}
+            }
+            close();
+        };
+        const onDown = (e) => { if (!pop.contains(e.target)) { commit(true); } };
+        const onKey = (e) => {
+            if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); commit(false); }
+            else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); commit(true); }
+        };
+        inp.addEventListener("keydown", (e) => e.stopPropagation());
+        inp.addEventListener("mousedown", (e) => e.stopPropagation());
+        inp.addEventListener("dblclick", (e) => e.stopPropagation());
+        window.addEventListener("mousedown", onDown, true);
+        window.addEventListener("keydown", onKey, true);
+        try { inp.focus(); inp.select(); } catch (_) {}
+        return true;
+    } catch (err) {
+        console.warn("[SettingsHub] hub rename popup failed:", err);
+        return false;
+    }
+}
+
+// v92: the implementations land in the core.js action registry - the
+// context menu (which must not import this module) fires them by name.
+try {
+    registerHubAction("dematerialize", dematerializeHubAction);
+    registerHubAction("rename", hubRenameFlow);
+} catch (_) {}
 
 /**
  * Toggle (or force) the floating screen-pinned window for a hub.
@@ -5644,7 +5743,7 @@ function wireEvents(node, st) {
                 cfg.hideChrome = !cfg.hideChrome;
                 renderHub(node);
                 break;
-            case "pin-toggle": unpinHubAction(node); break;
+            // v92: the "pin-toggle" case is gone with the 📌 button (owner #4).
             case "locate": {
                 const row = btn.closest("[data-hub-item]");
                 const item = cfg.items.find((i) => i.id === row?.dataset.hubItem);

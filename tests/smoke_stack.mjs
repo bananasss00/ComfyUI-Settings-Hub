@@ -798,9 +798,10 @@ phase("SJ stack settings — own ⚙ popup since v88, the hub hosts nothing");
         ssrc.includes("setStackRootPath(") && ssrc.includes("getStackRootInfo("));
     check("SJ: v88 - the popup dies with the panel (teardown closes it)",
         ssrc.includes("closeStkPop();") && ssrc.includes("closeStkPop();  // v88"));
-    check("SJ: v88 - the native ComfyUI setting is registered",
-        ssrc.includes("SettingsHub.PasteStack.enabled") &&
-        ssrc.includes("app?.ui?.settings") && ssrc.includes('s.addSetting('));
+    check("SJ: v91 - the launcher replaces the native stack switch",
+        ssrc.includes('from "./launcher.js"') &&
+        fs.readFileSync(path.join(ROOT, "web", "launcher.js"), "utf8").includes('mk("SettingsHub.Launcher.itemStack"') &&
+        !ssrc.includes("SettingsHub.PasteStack.enabled"));
     check("SJ: v74 - the clear button lives in the PANEL HEADER",
         ssrc.includes("hub-stack-clear") && ssrc.includes("panelClearAll"));
     check("SJ: v75 - the hide button is gone from stack.js entirely",

@@ -1,33 +1,30 @@
 // ============================================================================
-// SettingsHub - MINI PANEL / LAUNCHER (v91)
+// SettingsHub - MINI PANEL / LAUNCHER (v92)
 // ----------------------------------------------------------------------------
-// Owner request v91 #1: "a mini panel where toggles switch the chat and the
-// stack on/off, or create a new virtual hub. Collapsing now goes INTO this
-// (movable) panel - the chat and the stack collapse into it. And the ComfyUI
-// settings only show the panel itself and which elements appear on it."
+// v92 (owner: "ты сделал странную панельку не так как я хотел ... панель типа
+// панели задач в windows все!"): the launcher is a TASKBAR now - a thin
+// movable strip of ICON buttons [💬][📋][＋], nothing else:
+//   * the confusing per-item CHECKBOXES are gone (they only ever disabled the
+//     button next to them - the owner called it nonsense). An item switch
+//     lives ONLY in ComfyUI Settings → SettingsHub → "Mini panel" rows;
+//   * no ⚙ gear on the bar either - the bar configures nothing about itself;
+//   * the STATES speak through the button look: bright = the panel is on
+//     screen, AMBER = the panel is collapsed INTO the bar (click restores),
+//     dimmed = the panel is off (click turns it on) - the exact Windows
+//     taskbar metaphor;
+//   * BADGES carry the extra info the owner asked for ("минипанель пусть
+//     отображает доп инфу"): the stack button shows the ENTRY COUNT, the
+//     chat button pulses a dot while a generation is running. Panels report
+//     through the registerLauncherPanel hook's new badge() field;
+//   * the collapse-hosting contract of v91 is untouched: [–] on the chat /
+//     the stack collapses them INTO this bar (the amber state), a hidden
+//     launcher or a hidden item falls back to the panels' own chips.
 //
-// So the launcher is:
-//   * a small always-there floating BAR (drag by its handle, geometry in
-//     localStorage settingshub.launcher.ui) with:
-//       [chat button + on/off toggle] [stack button + on/off toggle]
-//       [+ hub] [⚙];
-//   * the collapse TARGET of both utility panels: [–] on the chat / stack
-//     no longer leaves a free chip floating around - when the launcher is on
-//     and the panel's item is visible, the panel collapses INTO the launcher
-//     (its button gets the amber "collapsed" state; a click restores it).
-//     A hidden launcher or a hidden item falls back to the old own-chip
-//     behavior, so nothing can ever become unreachable;
-//   * the ONLY SettingsHub rows in ComfyUI's own Settings dialog (the
-//     SettingsHub group): "Mini panel (SettingsHub)" + the three item
-//     switches (Chat / Stack / New-hub). The v88 per-panel rows
-//     (SettingsHub.Chat.enabled / SettingsHub.PasteStack.enabled) are GONE -
-//     the way back to a hidden chat/stack is the launcher itself, and the
-//     way back to a hidden launcher is the ComfyUI setting above.
-//
-// The state mirrors run off a cheap 800ms re-render + immediate refreshes on
-// every local action; the on/off toggles stay the SAME truth the panels use
-// (settingshub.chat.on / settingshub.stack.on), so the launcher, the panel
-// ⚙ popups and the collapsed states can never disagree for long.
+// v91 history: "a mini panel where toggles switch the chat and the stack
+// on/off, or create a new virtual hub. Collapsing now goes INTO this
+// (movable) panel - the chat and the stack collapse into it." The ONLY
+// SettingsHub rows in ComfyUI's own Settings dialog stay the four launcher
+// ones (the bar + Chat / Stack / New-hub items).
 // ============================================================================
 
 import { app } from "../../scripts/app.js";
@@ -37,19 +34,21 @@ import { createVirtualHub } from "./core.js";
 // stays a leaf module - a broken chat.js can never take the stack (or this
 // bar) down with it, and the import graph stays cycle-free.
 
-// v91 self-report (single-source version, docs/plan-versions.md)
+// v92 self-report (single-source version, docs/plan-versions.md)
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["launcher"] = "v91";
+globalThis.__SettingsHubLoaded["launcher"] = "v92";
 
 const LS_ON = "settingshub.launcher.on";        // "1"/"0" - panel shown
 const LS_ITEM = "settingshub.launcher.item.";   // + kind -> "1"/"0"
 const LS_UI = "settingshub.launcher.ui";        // {x,y}
 const Z_PANEL = "99902";                        // above chat (99901) / stack (99900)
 const ITEM_KINDS = ["chat", "stack", "hub"];
-const ITEM_LABEL = { chat: "💬 Chat", stack: "📋 Stack", hub: "＋ Hub" };
+// v92: the taskbar is ICON-ONLY (the owner's Windows-taskbar request) - the
+// labels live in the tooltips now.
+const ITEM_ICON = { chat: "💬", stack: "📋", hub: "＋" };
 const ITEM_TITLE = {
-    chat: "Chat - click: minimize into this panel / restore; the checkbox switches it on/off",
-    stack: "Paste Stack - click: minimize into this panel / restore; the checkbox switches it on/off",
+    chat: "Chat - click: minimize into this bar / restore; dimmed = the chat panel is off (click turns it on)",
+    stack: "Paste Stack - click: minimize into this bar / restore; dimmed = the stack panel is off (click turns it on)",
     hub: "Create a new VIRTUAL hub (a floating control window without a canvas node)",
 };
 
@@ -57,8 +56,7 @@ let panelEl = null;
 let mounted = false;
 let initSeq = 0;
 let collapsed = { chat: false, stack: false };   // the panels collapsed INTO this bar
-const panelHooks = {};                           // kind -> {isOn,isMin,minimize,restore,showChip}
-let popEl = null;                                // the ⚙ popup
+const panelHooks = {};                           // kind -> {isOn,isMin,minimize,restore,showChip,badge}
 let renderT = null;
 let nativeRegistered = false;
 
@@ -159,7 +157,9 @@ export function launcherSetCollapsed(kind, on) {
 }
 
 /** chat.js / stack.js register their state + restore/minimize/chip actions.
- *  hooks: {isOn, setOn, isMin, minimize, restore, showChip}. */
+ *  hooks: {isOn, setOn, isMin, minimize, restore, showChip, badge} - badge()
+ *  (v92) is optional and returns null or {text} / {dot:true} for the corner
+ *  badge of the taskbar button. */
 export function registerLauncherPanel(kind, hooks) {
     if (!ITEM_KINDS.includes(kind) || !hooks) return;
     panelHooks[kind] = hooks;
@@ -177,8 +177,8 @@ function unhostAll(why) {
 }
 
 // ---------------------------------------------------------------------------
-// ComfyUI Settings - THE SettingsHub rows (the launcher replaces the old
-// per-panel Chat/Stack switches)
+// ComfyUI Settings - THE SettingsHub rows (the taskbar itself carries no
+// configuration since v92 - the item switches live here)
 // ---------------------------------------------------------------------------
 
 function syncNative() {
@@ -223,13 +223,14 @@ function registerLauncherSettings() {
 }
 
 // ---------------------------------------------------------------------------
-// DOM
+// DOM - the v92 taskbar
 // ---------------------------------------------------------------------------
 
-function makeDraggable(handle) {
-    handle.addEventListener("mousedown", (e) => {
+function makeDraggable() {
+    // the whole bar is the drag handle; the buttons stay clickable
+    panelEl.addEventListener("mousedown", (e) => {
         if (e.button !== 0 || !panelEl) return;
-        if (e.target?.closest?.("button, input, select, label")) return;
+        if (e.target?.closest?.("button")) return;
         e.preventDefault();
         e.stopPropagation();
         const startX = e.clientX, startY = e.clientY;
@@ -263,7 +264,7 @@ function makeDraggable(handle) {
 
 function itemState(kind) {
     // the panel hooks carry the live state (registered by chat.js/stack.js);
-    // an unregistered panel counts as off-ish - its toggle simply has noone
+    // an unregistered panel counts as off-ish - its button simply has noone
     // to command yet
     const h = panelHooks[kind];
     if (kind === "hub") return "on";
@@ -271,27 +272,44 @@ function itemState(kind) {
     return collapsed[kind] ? "min" : "on";
 }
 
+/** v92: the corner badge of a taskbar button - {text} or {dot:true} or null.
+ *  A hidden item never shows a badge; a huge count caps at "99+". */
+function badgeOf(kind) {
+    if (!isLauncherItemOn(kind)) return null;
+    let b = null;
+    try { b = panelHooks[kind]?.badge?.() || null; } catch (_) { b = null; }
+    if (!b) return null;
+    if (b.dot) return { dot: true };
+    const n = parseInt(b.text, 10);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return { text: n > 99 ? "99+" : String(n) };
+}
+
 function renderItems() {
     if (!panelEl) return;
-    for (const kind of ["chat", "stack"]) {
+    for (const kind of ["chat", "stack", "hub"]) {
         const btn = panelEl.querySelector(`[data-lnch="${kind}"]`);
-        const cb = panelEl.querySelector(`[data-lnch-cb="${kind}"]`);
-        if (!btn || !cb) continue;
-        const st = itemState(kind);
+        if (!btn) continue;
         const on = isLauncherItemOn(kind);
-        btn.classList.toggle("hub-lnch-on", st === "on" && on);
-        btn.classList.toggle("hub-lnch-min", st === "min" && on);
-        btn.classList.toggle("hub-lnch-off", st === "off" || !on);
-        btn.disabled = !on;
-        cb.checked = st !== "off" && on;
-        cb.disabled = !on;
-        const bit = st === "min" ? " ▪" : "";
-        btn.title = ITEM_TITLE[kind] + (st === "min" ? " (collapsed HERE - click to restore)" : "");
-        const lbl = btn.querySelector(".hub-lnch-lbl");
-        if (lbl) lbl.textContent = ITEM_LABEL[kind] + bit;
+        // a hidden item is GONE from the bar (a taskbar shows what exists)
+        btn.style.display = on ? "" : "none";
+        const st = itemState(kind);
+        btn.classList.toggle("hub-lnch-on", on && st === "on");
+        btn.classList.toggle("hub-lnch-min", on && st === "min");
+        btn.classList.toggle("hub-lnch-off", on && st === "off");
+        if (kind !== "hub") {
+            btn.title = ITEM_TITLE[kind] +
+                (st === "min" ? " (collapsed HERE - click to restore)" : "");
+        }
+        // v92: the corner badge (stack = the entry count, chat = a live dot)
+        const bEl = btn.querySelector(".hub-lnch-badge");
+        if (bEl) {
+            const b = badgeOf(kind);
+            bEl.textContent = b?.text || "";
+            bEl.classList.toggle("hub-lnch-dot", !!b?.dot);
+            bEl.style.display = b ? "" : "none";
+        }
     }
-    const hubBtn = panelEl.querySelector('[data-lnch="hub"]');
-    if (hubBtn) hubBtn.classList.toggle("hub-lnch-on", isLauncherItemOn("hub"));
 }
 
 function onItemBtn(kind) {
@@ -309,81 +327,13 @@ function onItemBtn(kind) {
     const h = panelHooks[kind];
     if (!h) { localToast("The " + (kind === "chat" ? "chat" : "stack") + " module is not loaded yet"); return; }
     if (itemState(kind) === "off") {
-        h.setOn(true);   // off -> turn the panel on (the checkbox mirrors it)
+        h.setOn(true);   // dimmed button -> turn the panel on (one click, no checkbox)
         renderItems();
         return;
     }
     if (collapsed[kind]) h.restore?.();
     else h.minimize?.();
     renderItems();
-}
-
-function onItemToggle(kind, v) {
-    if (!isLauncherItemOn(kind)) return;
-    panelHooks[kind]?.setOn?.(!!v);
-    renderItems();
-}
-
-// --- the ⚙ popup (the same rows the ComfyUI settings carry) ----------------
-
-function closePop() {
-    try { popEl?.remove(); } catch (_) {}
-    popEl = null;
-    try { window.removeEventListener("mousedown", onPopDown, true); } catch (_) {}
-    try { window.removeEventListener("keydown", onPopKey, true); } catch (_) {}
-}
-function onPopDown(e) {
-    if (!popEl || popEl.contains(e.target)) return;
-    closePop();
-}
-function onPopKey(e) {
-    if (e.key === "Escape" && popEl) { e.preventDefault(); closePop(); }
-}
-
-function openPop() {
-    if (popEl) { closePop(); return; }
-    const pop = document.createElement("div");
-    pop.className = "hub-menu hub-lnch-pop";
-    const row = (kind, label, title) =>
-        `<label class="hub-cs-row" title="${title}"><span>${label}</span>` +
-        `<select class="hub-cs-sel" data-lnch-set="${kind}">` +
-        `<option value="1">On</option><option value="0">Off</option>` +
-        `</select></label>`;
-    pop.innerHTML =
-        `<div class="hub-menu-title">⚙ Mini panel</div>` +
-        row("__on", "Panel shown", "The mini panel itself. Off falls minimized chat/stack back to their own chips.") +
-        row("chat", "Chat item", "The chat button + toggle on the mini panel.") +
-        row("stack", "Stack item", "The stack button + toggle on the mini panel.") +
-        row("hub", "New-hub button", "The ＋ Hub button on the mini panel (creates a virtual hub).") +
-        `<div class="hub-cs-info">[–] on the chat / the stack collapses them INTO this panel ` +
-        `(an amber ▪ marks it); a click restores. This panel is also configured in ` +
-        `ComfyUI Settings → SettingsHub → "Mini panel (SettingsHub)" - reachable in every workflow.</div>`;
-    document.body.appendChild(pop);
-    const r = panelEl?.getBoundingClientRect?.();
-    const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
-    let x = 12, y = 12;
-    if (r) {
-        x = Math.max(8, Math.min(r.left, vw - (pop.offsetWidth || 260) - 8));
-        y = r.bottom + 6;
-        if (y + (pop.offsetHeight || 220) > vh - 8) y = Math.max(8, r.top - (pop.offsetHeight || 220) - 6);
-    }
-    pop.style.left = x + "px";
-    pop.style.top = y + "px";
-    popEl = pop;
-    const vals = { __on: isLauncherOn(), chat: isLauncherItemOn("chat"), stack: isLauncherItemOn("stack"), hub: isLauncherItemOn("hub") };
-    for (const sel of pop.querySelectorAll("[data-lnch-set]")) {
-        sel.value = vals[sel.dataset.lnchSet] ? "1" : "0";
-        sel.addEventListener("change", () => {
-            const v = sel.value === "1";
-            const k = sel.dataset.lnchSet;
-            if (k === "__on") setLauncherOn(v);
-            else setLauncherItemOn(k, v);
-            if (popEl) sel.value = (k === "__on" ? isLauncherOn() : isLauncherItemOn(k)) ? "1" : "0";
-        });
-    }
-    pop.addEventListener("mousedown", (e) => e.stopPropagation());
-    window.addEventListener("mousedown", onPopDown, true);
-    window.addEventListener("keydown", onPopKey, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -398,17 +348,14 @@ export function initLauncher() {
     panelEl = document.createElement("div");
     panelEl.className = "hub-lnch";
     panelEl.style.zIndex = Z_PANEL;
+    // v92: the Windows-taskbar strip - three icon buttons, nothing else
     panelEl.innerHTML =
-        `<span class="hub-lnch-drag" title="Drag to move">⣿</span>` +
-        `<button type="button" class="hub-lnch-btn" data-lnch="chat">` +
-        `<span class="hub-lnch-lbl">💬 Chat</span></button>` +
-        `<label class="hub-lnch-tg" title="Chat panel on/off"><input type="checkbox" data-lnch-cb="chat"></label>` +
-        `<button type="button" class="hub-lnch-btn" data-lnch="stack">` +
-        `<span class="hub-lnch-lbl">📋 Stack</span></button>` +
-        `<label class="hub-lnch-tg" title="Stack panel on/off"><input type="checkbox" data-lnch-cb="stack"></label>` +
-        `<button type="button" class="hub-lnch-btn hub-lnch-hub" data-lnch="hub">` +
-        `<span class="hub-lnch-lbl">＋ Hub</span></button>` +
-        `<button type="button" class="hub-lnch-gear" title="Mini panel settings (also in ComfyUI Settings → SettingsHub)">⚙</button>`;
+        ITEM_KINDS.map((kind) =>
+            `<button type="button" class="hub-lnch-btn${kind === "hub" ? " hub-lnch-hub" : ""}" data-lnch="${kind}" ` +
+            `title="${ITEM_TITLE[kind]}">` +
+            `<span class="hub-lnch-ico">${ITEM_ICON[kind]}</span>` +
+            (kind === "hub" ? "" : `<span class="hub-lnch-badge" style="display:none"></span>`) +
+            `</button>`).join("");
     document.body.appendChild(panelEl);
     const ui = lsUi();
     const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
@@ -416,15 +363,14 @@ export function initLauncher() {
     const y = Math.min(Math.max(typeof ui.y === "number" ? ui.y : 8, 0), Math.max(8, vh - 60));
     panelEl.style.left = x + "px";
     panelEl.style.top = y + "px";
-    makeDraggable(panelEl.querySelector(".hub-lnch-drag"));
-    for (const kind of ["chat", "stack", "hub"]) {
+    makeDraggable();
+    for (const kind of ITEM_KINDS) {
         panelEl.querySelector(`[data-lnch="${kind}"]`)?.addEventListener("click", () => onItemBtn(kind));
-        panelEl.querySelector(`[data-lnch-cb="${kind}"]`)?.addEventListener("change", (e) => onItemToggle(kind, e.target?.checked));
     }
-    panelEl.querySelector(".hub-lnch-gear").addEventListener("click", openPop);
     mounted = true;
     renderItems();
-    // a cheap mirror: the panels can change state from their own popups
+    // a cheap mirror: the panels can change state from their own popups, and
+    // the badges (stream dot, entry count) follow without any event wiring
     clearTimeout(renderT);
     renderT = setInterval(() => { if (initSeq === seq) renderItems(); }, 800);
     // v91: a shrinking window must never park the bar outside the viewport
@@ -452,9 +398,24 @@ function teardown() {
     initSeq++;
     clearInterval(renderT);
     renderT = null;
-    closePop();
     try { window.removeEventListener("resize", onWinResize); } catch (_) {}
     try { panelEl?.remove(); } catch (_) {}
     panelEl = null;
     mounted = false;
+}
+
+// ---------------------------------------------------------------------------
+// v92 test hooks (the smoke suite drives the taskbar contract through these)
+// ---------------------------------------------------------------------------
+
+export function __launcherTestHooks() {
+    return {
+        el: () => panelEl,
+        mounted: () => mounted,
+        itemState,
+        badgeOf,
+        renderItems: () => renderItems(),
+        click: (kind) => onItemBtn(kind),
+        hooks: () => panelHooks,
+    };
 }

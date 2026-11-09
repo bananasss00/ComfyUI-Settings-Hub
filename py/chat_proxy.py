@@ -256,6 +256,13 @@ DEFAULT_CONFIG = {
     "video_frames": 16,        # frames per video (server-side ffmpeg cut)
     "video_max_side": 768,
     "stream": True,            # SSE streaming replies
+    "auto_free_comfy": False,  # v92: unload ComfyUI's own models before every
+                               # LLM request (only when they are actually
+                               # loaded - _comfy_free_if_loaded). Off by default.
+    "auto_unload_llm_on_queue": False,  # v92: when a ComfyUI QUEUE starts
+                               # (api "execution_start"), the JS hook unloads
+                               # the chat engine (/v1/unload) so its VRAM
+                               # goes back to ComfyUI. Off by default.
     "keep_sessions": 20,       # eviction for old sessions
     "timeout_s": DEFAULT_TIMEOUT_S,
     "max_file_mb": DEFAULT_MAX_FILE_MB,
@@ -1213,6 +1220,93 @@ def _comfy_free_memory():
     return "; ".join(notes) or "nothing done"
 
 
+def _comfy_loaded_count():
+    """v92: HOW MANY models ComfyUI currently keeps loaded (its own model
+    management bookkeeping). None = the counter is unavailable (odd builds /
+    tests) - the caller then frees unconditionally (the old behavior)."""
+    mm = _comfy_mm()
+    try:
+        cur = getattr(mm, "current_loaded_models", None)
+        if isinstance(cur, list):
+            return len(cur)
+    except Exception:
+        pass
+    return None
+
+
+def _comfy_free_if_loaded():
+    """v92 (owner #3): the AUTO free before an LLM request. 'выгружать должно
+    только если модели еще не выгружены' - when ComfyUI reports an empty
+    current_loaded_models, nothing is touched at all. Returns a human note;
+    never raises."""
+    n = _comfy_loaded_count()
+    if n == 0:
+        return "ComfyUI models already unloaded - nothing to free"
+    return "auto-free before the request: " + _comfy_free_memory()
+
+
+async def _ensure_llm_ready(cfg, model):
+    """v92 (owner #1 + #2): the model loads ONLY when a request needs it.
+    A PolyStrata registry server reports per-model statuses - when the target
+    is not loaded yet it is switched exactly the nodes' way (POST
+    /api/models/load; may take minutes), an already-loading target is waited
+    for. Plain OpenAI-style servers keep the name in the payload (nothing to
+    wake). Returns (ok, note|None); note is a short human status for the UI."""
+    if aiohttp is None or not cfg.get("url") or not model:
+        return True, None
+    mm = await _upstream_models_full(cfg)
+    if not mm.get("ok") or mm.get("source") != "registry":
+        return True, None
+    entry = next((m for m in (mm.get("models") or [])
+                  if m.get("id") == model), None)
+    status = (entry or {}).get("status") or ""
+    if status == "loaded":
+        return True, None
+    if status == "loading":
+        # someone (the nodes / a previous send) is loading it right now -
+        # wait for the server to finish instead of stacking a second load
+        deadline = time.time() + SWITCH_TIMEOUT_S
+        while time.time() < deadline:
+            await asyncio.sleep(3)
+            try:
+                mm2 = await _upstream_models_full(cfg)
+            except Exception:
+                break
+            st2 = next((m for m in (mm2.get("models") or [])
+                        if m.get("id") == model), None)
+            st2s = (st2 or {}).get("status") or ""
+            if st2s == "loaded":
+                return True, "model %s finished loading" % model
+            if st2s not in ("loading", ""):
+                break
+    ok, code, txt, via = await _upstream_switch(cfg, model)
+    if not ok:
+        return False, "model %s load failed: %s" % (model, txt or code or via or "?")
+    return True, "model %s loaded (on request)" % model
+
+
+async def _pre_send_prep(cfg, model):
+    """v92: everything that must happen BEFORE the upstream call, in order:
+      1) the optional auto-free of ComfyUI's own models (cfg.auto_free_comfy)
+         - only when they are actually still loaded;
+      2) the on-demand LLM wake (registry servers report not-loaded models).
+    Returns a list of human notes; NEVER raises - a chat request must not
+    die because of a memory bookkeeping hiccup."""
+    notes = []
+    if cfg.get("auto_free_comfy"):
+        try:
+            notes.append(_comfy_free_if_loaded())
+        except Exception as e:
+            notes.append("auto-free failed: %s" % e)
+    try:
+        ok, note = await _ensure_llm_ready(cfg, model)
+        if note:
+            notes.append(note)
+    except Exception as e:
+        notes.append("model wake failed: %s" % e)
+    return notes
+
+
 def _vram_status_snapshot(st):
     """Extract a compact GPU picture from an upstream /v1/status dict."""
     if not isinstance(st, dict):
@@ -1607,6 +1701,17 @@ async def chat_config_set(request):
         cfg["reasoning"] = r
     if "stream" in body:
         cfg["stream"] = bool(body.get("stream"))
+    if "auto_free_comfy" in body:
+        # v92 (owner #3): unload ComfyUI's own models before every LLM
+        # request (only when they are actually still loaded - see
+        # _comfy_free_if_loaded). Off by default.
+        cfg["auto_free_comfy"] = bool(body.get("auto_free_comfy"))
+    if "auto_unload_llm_on_queue" in body:
+        # v92 (owner #11): the JS hook on the ComfyUI queue start
+        # ("execution_start") unloads the chat engine (POST /chat/gpu
+        # "unload") when this is on - VRAM returns to ComfyUI for the
+        # generation. Off by default.
+        cfg["auto_unload_llm_on_queue"] = bool(body.get("auto_unload_llm_on_queue"))
     for k in ("model", "system_prompt"):
         if k in body:
             cfg[k] = str(body.get(k) or "")[:8000]
@@ -2375,6 +2480,9 @@ async def chat_send(request):
     if total > 0:
         ctx["total"] = int(total)
     if not stream:
+        # v92: the auto-free (optional) + the on-demand model wake run right
+        # before the upstream call; the notes travel in reply.note.
+        prep_notes = await _pre_send_prep(cfg, model)
         async with aiohttp.ClientSession(timeout=timeout) as http:
             async def call():
                 async with http.post(url, json=payload, headers=headers) as r:
@@ -2404,6 +2512,8 @@ async def chat_send(request):
         if pt:
             ctx = dict(ctx, used=int(pt), est=False)
         reply["ctx"] = ctx
+        if prep_notes:
+            reply["note"] = "; ".join(prep_notes)   # v92: auto-free / wake notes
         async with _lock:
             sess = _read_session(sid) or sess
             _ensure_tree(sess)
@@ -2435,6 +2545,15 @@ async def chat_send(request):
         "X-Accel-Buffering": "no",
     })
     await resp.prepare(request)
+    # v92: the auto-free (optional) + the on-demand model wake run AFTER the
+    # SSE headers are out (a big model may load for MINUTES - the notes give
+    # the user live feedback while the answer has not started yet).
+    try:
+        for _note in (await _pre_send_prep(cfg, model)):
+            if not await _emit_sse(resp, {"note": _note}):
+                break   # the browser went away during the prep
+    except Exception:
+        pass   # prep must never kill the stream - upstream errors report later
     acc, th_acc, stopped, err = "", "", False, None
     t0 = time.time()
     try:
