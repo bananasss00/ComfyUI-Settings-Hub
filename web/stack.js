@@ -20,10 +20,10 @@
 //   stays the 🔍 of text cards; teardown() removes the overlay with the
 //   panel (same viewerEl channel).
 // ============================================================================
-// v84 self-report (single-source version, docs/plan-versions.md): the
+// v85 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v84";
+globalThis.__SettingsHubLoaded["stack"] = "v85";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -1393,13 +1393,20 @@ function cardHtml(item) {
     const pinCls = item.pinned ? " hub-stack-card-pin" : "";
     let preview = "";
     let meta = "";
-    // v83: every NON-TEXT kind carries 🔍 - the large viewer (the small
-    // thumbnails hide the details that matter, owner report). Same
+    // v83: every kind carries 🔍 - the large viewer (the small thumbnails /
+    // text excerpts hide the details that matter, owner report). Same
     // data-act="view" the text cards already use - the dispatcher routes it.
-    const viewAct = `<button type="button" class="hub-stack-act" data-act="view" title="Inspect large: full-size view (images: wheel zoom, drag pan, double-click 1:1)">🔍</button>`;
-    let acts = viewAct +
-        `<button type="button" class="hub-stack-act hub-stack-pin${item.pinned ? " hub-stack-pin-on" : ""}" data-act="pin" title="${item.pinned ? "Unpin (it will age out again)" : "Pin: survives max-eviction"}">📌</button>` +
-        `<button type="button" class="hub-stack-act" data-act="edit" title="Rename / tags">✎</button>`;
+    // v85: ONE magnifier per card. The base set below already carries viewAct;
+    // the per-kind branches only APPEND their extra buttons in front of pin /
+    // edit - the old `viewAct + ... + acts` prepended a SECOND magnifier on
+    // text/video/audio/file cards (owner report: "text elements show 2 loupes").
+    const viewTitle = item.type === "text"
+        ? "Full text view - long prompts start alike, this shows EVERYTHING"
+        : "Inspect large: full-size view (images: wheel zoom, drag pan, double-click 1:1)";
+    const viewAct = `<button type="button" class="hub-stack-act" data-act="view" title="${viewTitle}">🔍</button>`;
+    const pinAct = `<button type="button" class="hub-stack-act hub-stack-pin${item.pinned ? " hub-stack-pin-on" : ""}" data-act="pin" title="${item.pinned ? "Unpin (it will age out again)" : "Pin: survives max-eviction"}">📌</button>`;
+    const editAct = `<button type="button" class="hub-stack-act" data-act="edit" title="Rename / tags">✎</button>`;
+    let acts = viewAct + pinAct + editAct;
     if (item.type === "image") {
         preview = `<img class="hub-stack-thumb" loading="lazy" alt="" src="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">`;
         meta = `image${item.size ? " · " + fmtBytes(item.size) : ""}`;
@@ -1408,20 +1415,20 @@ function cardHtml(item) {
         meta = `video${item.size ? " · " + fmtBytes(item.size) : ""}`;
         acts = viewAct +
             `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
-            `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + acts;
+            `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + pinAct + editAct;
     } else if (item.type === "audio") {
         preview = `<div class="hub-stack-audio">🎵<audio class="hub-stack-audio-el" src="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}" controls preload="metadata"></audio></div>`;
         meta = `audio${item.size ? " · " + fmtBytes(item.size) : ""}`;
         acts = viewAct +
             `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
-            `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + acts;
+            `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + pinAct + editAct;
     } else if (item.type === "file") {
         preview = `<div class="hub-stack-file"><span class="hub-stack-file-ico">📄</span>` +
             `<span class="hub-stack-file-name">${esc(name || item.file || "file")}</span></div>`;
         meta = `file${item.size ? " · " + fmtBytes(item.size) : ""}`;
         acts = viewAct +
             `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
-            `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + acts;
+            `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + pinAct + editAct;
     } else if (item.id === editId) {
         // v72: inline snippet editor (rename + tags); v79 adds the tab field
         return `<div class="hub-stack-card hub-stack-card-edit" data-id="${esc(item.id)}" data-type="${item.type}">` +
@@ -1436,8 +1443,8 @@ function cardHtml(item) {
     } else {
         preview = `<div class="hub-stack-text">${esc(excerptOf(item))}</div>`;
         meta = `${(item.text != null ? item.text.length : item.size || 0).toLocaleString()} chars`;
-        acts = `<button type="button" class="hub-stack-act" data-act="view" title="Full text view - long prompts start alike, this shows EVERYTHING">🔍</button>` +
-            `<button type="button" class="hub-stack-act" data-act="ins" title="Insert into the last focused hub text field">→📝</button>` + acts;
+        acts = viewAct +
+            `<button type="button" class="hub-stack-act" data-act="ins" title="Insert into the last focused hub text field">→📝</button>` + pinAct + editAct;
     }
     const mainTitle = item.type === "text" || item.type === "image"
         ? "Click: copy back to clipboard"
@@ -1796,6 +1803,57 @@ function setMinimized(min, persist = true) {
         applyChipPos(ui.chipX ?? ui.x ?? 16, ui.chipY ?? ui.y ?? 16);
     }
     if (persist) saveUi({ min: !!min });
+}
+
+// v85: keep the stacker reachable when the browser window SHRINKS. The saved
+// x/y used to stay untouched, so a panel parked near the right/bottom edge
+// ended up fully outside the smaller viewport with no way to grab it (owner
+// report: "when the browser window shrinks, the stacker disappears beyond
+// the window"). clampIntoView prefers the FULL element inside the viewport
+// and falls back to the drag clamp's 64px sliver when even that cannot fit.
+function clampIntoView(x, y, el) {
+    const p = clampPos(x, y, el);
+    const w = el?.offsetWidth || 260, h = el?.offsetHeight || 120;
+    const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+    return {
+        x: w + 16 <= vw ? Math.min(Math.max(p.x, 8), vw - w - 8) : p.x,
+        y: h + 16 <= vh ? Math.min(Math.max(p.y, 8), vh - h - 8) : p.y,
+    };
+}
+
+function refitIntoView() {
+    if (!panel || !chip) return;
+    const ui = lsUi();
+    const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+    // size first (so clampIntoView measures the CURRENT box): the saved w/h
+    // capped by the viewport. The size is NOT persisted here - once the
+    // window grows back the saved w/h apply again on the next resize/reload.
+    applySize(Math.min(ui.w ?? 280, Math.max(200, vw - 24)),
+        Math.min(ui.h ?? 380, Math.max(160, vh - 24)));
+    if (!ui.min) {
+        const p = clampIntoView(ui.x ?? 16, ui.y ?? 120, panel);
+        applyPos(p.x, p.y);
+    } else {
+        const c = clampIntoView(ui.chipX ?? ui.x ?? 16, ui.chipY ?? ui.y ?? 16, chip);
+        applyChipPos(c.x, c.y);
+    }
+}
+
+let resizePersistT = null;
+function onWinResize() {
+    refitIntoView(); // instant - the panel never leaves the viewport
+    clearTimeout(resizePersistT);
+    resizePersistT = setTimeout(() => { // debounced persist of the new spot
+        if (!panel || !chip) return;
+        const ui = lsUi();
+        const p = clampIntoView(ui.x ?? 16, ui.y ?? 120, panel);
+        const patch = { x: p.x, y: p.y };
+        if (ui.min) {
+            const c = clampIntoView(ui.chipX ?? p.x, ui.chipY ?? p.y, chip);
+            patch.chipX = c.x; patch.chipY = c.y;
+        }
+        saveUi(patch);
+    }, 150);
 }
 
 // ---------------------------------------------------------------------------
@@ -2570,6 +2628,8 @@ function teardown() {
     moveMode = false; // v80: a fresh panel always starts with sorting OFF
     mounted = false;
     try { window.removeEventListener("paste", onPasteEvent, true); } catch (_) {}
+    clearTimeout(resizePersistT); // v85: the resize hook must not outlive the panel
+    try { window.removeEventListener("resize", onWinResize); } catch (_) {}
 }
 
 function buildDom() {
@@ -2627,6 +2687,10 @@ function buildDom() {
     applyPos(ui.x ?? Math.max(16, (window.innerWidth || 1600) - 320), ui.y ?? 120);
     applySize(ui.w ?? 280, ui.h ?? 380);
     setMinimized(!!ui.min, false);
+    refitIntoView(); // v85: a saved x/y/w/h can sit outside a small window
+
+    // v85: browser window resized -> re-fit immediately, persist debounced
+    window.addEventListener("resize", onWinResize);
 
     // wiring
     pasteEl.addEventListener("click", () => captureFromRead());

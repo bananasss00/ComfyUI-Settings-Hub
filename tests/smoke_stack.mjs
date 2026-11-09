@@ -1548,8 +1548,14 @@ phase("TX v83 media viewer — 🔍 opens a large preview for every non-text kin
 
     // ---- source + css contracts ----
     const stackSrc = fs.readFileSync(path.join(ROOT, "web", "stack.js"), "utf8");
-    check("TX source: the 🔍 view act is wired for all four non-text kinds",
-        (stackSrc.match(/acts = viewAct/g) || []).length === 4,
+    // v85: ONE magnifier per card - the base set carries the single viewAct
+    // button literal and all four kind branches (video/audio/file/text) start
+    // their acts with it: base(1) + 4 = 5. A reintroduced duplicate (the v83
+    // `viewAct + ... + acts` prepend) would push the count to 6, a second
+    // inline button literal would break the === 1 below.
+    check("TX source: the 🔍 view act is wired ONCE per card, all four kind branches use it (v85: no duplicate magnifier)",
+        (stackSrc.match(/class="hub-stack-act" data-act="view"/g) || []).length === 1 &&
+        (stackSrc.match(/acts = viewAct/g) || []).length === 5,
         String((stackSrc.match(/acts = viewAct/g) || []).length));
     check("TX source: openViewer dispatches by type (text keeps v79 overlay)",
         /if \(item\.type === "image"\) return openMediaViewer\(item, "image"\)/.test(stackSrc) &&
@@ -1576,6 +1582,54 @@ phase("TX v83 media viewer — 🔍 opens a large preview for every non-text kin
         /hub-stack-viewer-card-media \{[^}]*94vw/.test(css.replace(/\n/g, " ")));
     check("TX css: .hub-cmp-sizes caption exists",
         css.includes(".hub-cmp-sizes") && css.includes(".hub-cmp-sizes:empty"));
+}
+
+// ===========================================================================
+// TZ - v85: the stacker stays on-screen when the browser window shrinks
+// ===========================================================================
+
+phase("TZ v85 resize — build + window resize re-fit the panel into the viewport");
+{
+    // Part 1 - BUILD path: saved geometry parked outside a small viewport
+    // (as if saved on a big monitor) must land inside on mount. jsdom inner
+    // size is 1024x768; offsetWidth is 0 there, so the clamps work with
+    // their 260x120 fallbacks: x -> vw-260-8 = 756, y -> vh-120-8 = 640,
+    // saved w 2800 -> cap 560 (applySize max), saved h 1200 -> vh-24 = 744.
+    localStorage.setItem("settingshub.stack.ui",
+        JSON.stringify({ x: 3000, y: 1600, w: 2800, h: 1200 }));
+    extStack.setup(); // fresh mount - buildDom() ends with refitIntoView()
+    await settle();
+    check("TZ build: the panel is pulled back inside the viewport",
+        panel().style.left === "756px" && panel().style.top === "640px",
+        panel().style.left + " " + panel().style.top);
+    check("TZ build: the saved size is capped to the viewport (560x744)",
+        panel().style.width === "560px" && panel().style.height === "744px",
+        panel().style.width + " " + panel().style.height);
+
+    // Part 2 - RESIZE path: park the panel outside again and fire a real
+    // window resize event; refitIntoView runs instantly, the debounced
+    // persist (150ms) remembers the clamped spot.
+    localStorage.setItem("settingshub.stack.ui",
+        JSON.stringify({ x: 3000, y: 1600, w: 280, h: 380 }));
+    window.dispatchEvent(new dom.window.Event("resize"));
+    await settle();
+    check("TZ resize: the panel is re-clamped inside the viewport",
+        panel().style.left === "756px" && panel().style.top === "640px",
+        panel().style.left + " " + panel().style.top);
+    check("TZ resize: the debounced persist remembers the clamped spot",
+        await new Promise((r) => setTimeout(() => {
+            const ui = JSON.parse(localStorage.getItem("settingshub.stack.ui") || "{}");
+            r(ui.x === 756 && ui.y === 640);
+        }, 250)),
+        localStorage.getItem("settingshub.stack.ui"));
+
+    // Part 3 - contract: teardown must remove the resize hook (the test
+    // hooks expose no teardown entry point, so this one is checked on the
+    // source the suite actually loaded)
+    const src85 = fs.readFileSync(stackUrl, "utf8");
+    check("TZ teardown: teardown() removes the resize listener + debounced timer",
+        /removeEventListener\("resize", onWinResize\)/.test(src85) &&
+        /clearTimeout\(resizePersistT\)/.test(src85));
 }
 
 // ===========================================================================
