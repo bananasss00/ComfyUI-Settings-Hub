@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - LLM Chat smoke test (v87)
+// SettingsHub - LLM Chat smoke test (v89)
 // ----------------------------------------------------------------------------
 // Node ESM + jsdom. Loads the REAL web/chat.js module exactly like the entry
 // does (a sandbox copies web/ and stubs ../../scripts/app.js with an in-memory
@@ -56,6 +56,19 @@
 //   SQ  (v87) ⚡ opens the GPU popup: the state line renders from
 //       GET /chat/gpu, the buttons POST the actions (reserve/unload/load/
 //       free_comfy/release) and the notes render.
+//   SV  (v89) ⚙ NAMED FIELDS: every number sits in a .hub-cs-cell with a
+//       visible non-empty .hub-cs-lab label (11 cells incl. context size
+//       and timeout); the labels carry the field names.
+//   SW  (v89) CONTEXT FILL: an assistant message carrying ctx {used,total,
+//       est} renders "ctx 1.2k/32k" (≈ when estimated, ⚠ past 90%, exact
+//       without ≈ when the server reported usage).
+//   SX  (v89) 🕘 SEARCH: a live multi-word query filters the saved chats by
+//       the title OR the content, hits show a content snippet, a no-match
+//       query shows "nothing matches".
+//   SY  (v89) 📜 PROMPTS FOLDER: the ⚙ 'Prompts folder' row applies a custom
+//       catalog path via POST /config {prompts_dir} and [default] resets.
+//   SZ  (v89) THE WAY BACK: hiding the chat toasts "ComfyUI Settings →
+//       SettingsHub → 'LLM Chat panel'".
 //
 // Run from the extension root:  node tests/smoke_chat.mjs   (jsdom required)
 // ============================================================================
@@ -121,7 +134,8 @@ function makeFakeApi() {
     const blobs = new Map();      // "<sid>/<name>" -> {bytes, mime, kind, orig}
     let config = {
         url: "http://127.0.0.1:8080/v1", key: "", model: "qwen-vl",
-        system_prompt: "", prompt_preset: "", temperature: 0.8, top_p: 0.95,
+        system_prompt: "", prompt_preset: "", prompts_dir: "", ctx_size: 0,
+        temperature: 0.8, top_p: 0.95,
         max_tokens: 1024, reasoning: "default", ctx_depth: 12, media_depth: 1,
         img_max_side: 1024, img_max_count: 4, video_frames: 16,
         video_max_side: 768, stream: true, keep_sessions: 20,
@@ -140,6 +154,8 @@ function makeFakeApi() {
     let modelSource = "registry";
     let promptFiles = ["analysis/detailed.txt", "cinematic.txt", "short_story.txt", "notes.md"];
     let promptDir = "/comfy/models/LLM/prompts";
+    // v89: scriptable ctx fill for the /send answers
+    let fakeCtx = { used: 1234, est: true, images: 0 };
     const uuid = () => Math.floor(Math.random() * 0xffffffffffff).toString(16).padStart(12, "0");
 
     const jsonResp = (data, status = 200) => ({
@@ -192,6 +208,7 @@ function makeFakeApi() {
                 for (const k of ["model", "system_prompt"])
                     if (k in body) config[k] = String(body[k] || "");
                 if ("prompt_preset" in body) config.prompt_preset = String(body.prompt_preset || "");
+                if ("prompts_dir" in body) config.prompts_dir = String(body.prompts_dir || "");
                 const masked = { ...config, key: config.key ? config.key.slice(0, 2) + "****" + config.key.slice(-4) : "" };
                 return jsonResp({ ok: true, config: masked });
             }
@@ -232,7 +249,28 @@ function makeFakeApi() {
                 return jsonResp({ ok: true, root: pp || "user/settings_hub/chat", custom: pp, writable: true, saved: true });
             }
             if (p === "/settings_hub/chat/sessions" && method === "GET") {
-                return jsonResp({ ok: true, sessions: [...sessions.values()].sort((a, b) => b.updated - a.updated).map(sessBrief) });
+                // v89: ?q= = the flexible search - every word must hit the
+                // title OR any message text; hits carry a content snippet.
+                const q = String(query.get("q") || "").trim().toLowerCase();
+                let list = [...sessions.values()];
+                if (q) {
+                    const toks = q.split(/\s+/).filter(Boolean);
+                    list = list.map((s) => {
+                        const lt = String(s.title || "").toLowerCase();
+                        const texts = s.messages.map((mm) => String(mm.text || ""));
+                        const hitLine = texts.flatMap((t) => String(t).split("\n"))
+                            .find((line) => line && toks.some((tk) => line.toLowerCase().includes(tk)));
+                        const okAll = toks.every((tk) =>
+                            lt.includes(tk) || texts.some((t) => t.toLowerCase().includes(tk)));
+                        if (!okAll) return null;
+                        const brief = sessBrief(s);
+                        if (hitLine) brief.hit = hitLine.trim().slice(0, 120);
+                        return brief;
+                    }).filter(Boolean);
+                } else {
+                    list = list.map(sessBrief);
+                }
+                return jsonResp({ ok: true, sessions: list.sort((a, b) => b.updated - a.updated), q });
             }
             if (p === "/settings_hub/chat/sessions" && method === "POST") {
                 let body = opts.body;
@@ -361,13 +399,20 @@ function makeFakeApi() {
                 }
                 const replyText = "Echo: " + (body.edit_index != null ? s.messages[body.edit_index].text : s.messages[s.messages.length - 1].text);
                 s.updated = Date.now();
+                // v89: the context fill - the fake server attaches ctx to the
+                // assistant message and the reply (total = ctx_size or 32000).
+                const ctxTotal = parseInt(config.ctx_size, 10) > 0 ? parseInt(config.ctx_size, 10) : 32000;
+                const ctx = { used: fakeCtx.used, total: ctxTotal,
+                    est: fakeCtx.est !== false, images: fakeCtx.images || 0 };
                 if (body.stream && sseMode && !hangSend) {
                     const evs = [];
                     for (const piece of ["Hel", "lo ", "world"]) {
                         evs.push(`data: ${JSON.stringify({ delta: piece })}\n\n`);
                     }
-                    s.messages.push({ role: "assistant", text: replyText, parts: [] });
-                    evs.push(`data: ${JSON.stringify({ done: true, reply: { text: replyText, usage: {} }, session: s })}\n\n`);
+                    s.messages.push({ role: "assistant", text: replyText, parts: [], ctx });
+                    // the REAL proxy puts the session INSIDE reply (chat_proxy.py:
+                    // reply["session"] = sess) - match it exactly
+                    evs.push(`data: ${JSON.stringify({ done: true, reply: { text: replyText, usage: {}, ctx, session: s } })}\n\n`);
                     const enc = new TextEncoder();
                     const chunks = evs.map((e) => enc.encode(e));
                     let ci = 0;
@@ -389,8 +434,8 @@ function makeFakeApi() {
                         },
                     };
                 }
-                s.messages.push({ role: "assistant", text: replyText, parts: [] });
-                return jsonResp({ ok: true, session: s, reply: { text: replyText, usage: { completion_tokens: 5 } } });
+                s.messages.push({ role: "assistant", text: replyText, parts: [], ctx });
+                return jsonResp({ ok: true, session: s, reply: { text: replyText, usage: { completion_tokens: 5 }, ctx } });
             }
             return jsonResp({ ok: false, error: "unhandled " + method + " " + p }, 404);
         },
@@ -400,6 +445,7 @@ function makeFakeApi() {
         __setHealth: (m) => { healthMode = m; },
         __setModels: (items, source) => { modelItems = items; modelSource = source || "registry"; },
         __setPrompts: (files, dir) => { promptFiles = files; if (dir) promptDir = dir; },
+        __setCtx: (c) => { fakeCtx = { ...fakeCtx, ...c }; },
         __setSse: (v) => { sseMode = !!v; },
         __setHang: (v) => { hangSend = !!v; },
         __config: () => config,
@@ -780,6 +826,8 @@ chat.setChatOn(false);
 await settle();
 check("Off removes the panel", !hooks.panelEl() && !hooks.chipEl());
 check("Off is the localStorage switch", localStorage.getItem("settingshub.chat.on") === "0");
+check("Off tells WHERE the way back is (v89)",
+    document.body.textContent.includes("ComfyUI Settings → SettingsHub → 'LLM Chat panel'"));
 chat.setChatOn(true);
 await settle();
 check("On re-mounts", !!hooks.panelEl());
@@ -787,11 +835,11 @@ check("On re-mounts", !!hooks.panelEl());
 // ---------------------------------------------------------------------------
 phase("SN entry integration (source contract)");
 
-check("entry FILES carries ./chat.js", /"\.\/chat\.js",\s*\/\/ v88/.test(ENTRY_SRC));
-check("entry EXPECTED carries chat", /"chat":\s*"v88"/.test(ENTRY_SRC));
+check("entry FILES carries ./chat.js", /"\.\/chat\.js",\s*\/\/ v\d+/.test(ENTRY_SRC));
+check("entry EXPECTED carries chat", /"chat":\s*"v\d+"/.test(ENTRY_SRC));
 check("entry mounts the chat extension", /initChat\(\)/.test(ENTRY_SRC) && /Comfy\.SettingsHub\.chat/.test(ENTRY_SRC));
 check("chat self-reports the pack version",
-    globalThis.__SettingsHubLoaded?.chat === "v88", globalThis.__SettingsHubLoaded?.chat);
+    globalThis.__SettingsHubLoaded?.chat === PACK_VERSION, globalThis.__SettingsHubLoaded?.chat);
 check("the py module is wired in __init__.py",
     fs.readFileSync(path.join(ROOT, "__init__.py"), "utf8").includes("chat_proxy"));
 
@@ -805,7 +853,16 @@ check("settings popup open", !!setPop && setPop.className.includes("hub-chat-set
 const urlIn2 = setPop.querySelector('[data-cs="url"]');
 check("URL row arrived from GET /config", urlIn2.value === "http://127.0.0.1:8080/v1", urlIn2.value);
 const nums2 = setPop.querySelectorAll("[data-cs-num]");
-check("sampling rows arrived", nums2.length === 10, nums2.length);
+check("sampling rows arrived (11 = 9 + ctx_size + timeout)", nums2.length === 11, nums2.length);
+check("every number sits under a visible label",
+    [...setPop.querySelectorAll(".hub-cs-cell")].every((c) =>
+        c.querySelector(".hub-cs-lab")?.textContent?.trim().length > 0 && c.querySelector("[data-cs-num]")),
+    [...setPop.querySelectorAll(".hub-cs-cell")].map((c) => c.querySelector(".hub-cs-lab")?.textContent));
+check("label names are readable (temperature, history depth, context size)",
+    setPop.textContent.includes("temperature") && setPop.textContent.includes("history depth") &&
+    setPop.textContent.includes("context size (0 = auto)"));
+check("the Off row spells the way back",
+    setPop.textContent.includes("ComfyUI Settings → SettingsHub → 'LLM Chat panel'"));
 urlIn2.value = "http://127.0.0.1:9999/v1";
 urlIn2.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
 await settle();
@@ -975,6 +1032,112 @@ check("free_comfy action POSTed",
         String(c.body).includes('"action":"free_comfy"')));
 hooks.closeGpuPop();
 check("gpu popup closed", !hooks.gpuPopEl());
+
+// ---------------------------------------------------------------------------
+phase("SW (v89) context fill: the status line shows used/available");
+
+// a fresh send leaves an assistant ctx {used:1234, total:32000, est} on the tab
+const tabC = hooks.tabById(hooks.activeId());
+tabC.msgs = [...tabC.msgs,
+    { role: "user", text: "ctx question", parts: [] },
+    { role: "assistant", text: "ctx answer", parts: [], ctx: { used: 1234, total: 32000, est: true, images: 0 } }];
+hooks.renderStatus();
+check("status line shows ctx used/total",
+    /ctx ≈1\.2k\s*\/\s*32k/.test(hooks.statusEl().textContent), hooks.statusEl().textContent);
+// exact usage (the server reported prompt_tokens) loses the ≈
+tabC.msgs[tabC.msgs.length - 1].ctx = { used: 1234, total: 32000, est: false, images: 0 };
+hooks.renderStatus();
+check("exact usage drops the ≈",
+    /ctx 1\.2k\s*\/\s*32k/.test(hooks.statusEl().textContent) && !hooks.statusEl().textContent.includes("≈"),
+    hooks.statusEl().textContent);
+// past 90% of the context - the warning mark
+tabC.msgs[tabC.msgs.length - 1].ctx = { used: 31000, total: 32000, est: true, images: 2 };
+hooks.renderStatus();
+check("past 90% shows ⚠ + the image count",
+    hooks.statusEl().textContent.includes("31k / 32k ⚠") && hooks.statusEl().textContent.includes("2 img"),
+    hooks.statusEl().textContent);
+// no total reported -> only the used part
+tabC.msgs[tabC.msgs.length - 1].ctx = { used: 900, total: 0, est: true, images: 0 };
+hooks.renderStatus();
+check("unknown total shows only the used",
+    /ctx ≈900(\s|$)/.test(hooks.statusEl().textContent) && !hooks.statusEl().textContent.includes(" / "),
+    hooks.statusEl().textContent);
+// the real send path stores ctx from the reply (fake server attaches it)
+hooks.inputEl().value = "hello ctx";
+await hooks.send();
+await settle();
+const sentTab = hooks.tabById(hooks.activeId());
+check("a real send stores ctx on the assistant message",
+    !!sentTab.msgs[sentTab.msgs.length - 1].ctx && sentTab.msgs[sentTab.msgs.length - 1].ctx.used === 1234,
+    JSON.stringify(sentTab.msgs[sentTab.msgs.length - 1].ctx));
+check("the sent ctx renders in the status line",
+    hooks.statusEl().textContent.includes("ctx"), hooks.statusEl().textContent);
+
+// ---------------------------------------------------------------------------
+phase("SX (v89) 🕘 search: multi-word over title + content, snippets");
+
+// two fresh saved chats with distinct titles/content
+const rA = await fakeApi.fetchApi("/settings_hub/chat/sessions",
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+const sA = (await rA.json()).session;
+sA.title = "Cat breeds";
+sA.messages = [{ role: "user", text: "About Maine Coon cats" }, { role: "assistant", text: "They are large" }];
+const rB = await fakeApi.fetchApi("/settings_hub/chat/sessions",
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+const sB = (await rB.json()).session;
+sB.title = "Trip plan";
+sB.messages = [{ role: "user", text: "Visit Rome and Naples" }];
+
+await hooks.openSessPop();
+await settle();
+const sPop2 = hooks.sessPopEl();
+check("the search row is there", !!sPop2.querySelector('[data-ss="q"]'));
+const sIn = sPop2.querySelector('[data-ss="q"]');
+sIn.value = "cats";
+sIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+await new Promise((r) => setTimeout(r, 350));   // the debounce + fetch
+await settle();
+check("content word filters to its chat",
+    sPop2.textContent.includes("Cat breeds") && !sPop2.textContent.includes("Trip plan"),
+    sPop2.textContent.slice(0, 200));
+sIn.value = "trip rome";
+sIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+await new Promise((r) => setTimeout(r, 350));
+await settle();
+check("multi-word title+content combined",
+    sPop2.textContent.includes("Trip plan") && !sPop2.textContent.includes("Cat breeds"),
+    sPop2.textContent.slice(0, 200));
+check("hit snippet shows the matched line", sPop2.textContent.includes("Visit Rome and Naples"),
+    sPop2.textContent.slice(0, 300));
+sIn.value = "zzz-nowhere";
+sIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+await new Promise((r) => setTimeout(r, 350));
+await settle();
+check("no match -> nothing matches the search", sPop2.textContent.includes("nothing matches"),
+    sPop2.textContent.slice(0, 200));
+hooks.closeSessPop();
+
+// ---------------------------------------------------------------------------
+phase("SY (v89) prompts folder: a custom catalog path in ⚙");
+
+hooks.openSetPop();
+await settle();
+const setPop4 = hooks.setPopEl();
+const pdirIn = setPop4.querySelector('[data-cs="pdir"]');
+check("Prompts folder row exists", !!pdirIn);
+pdirIn.value = "/my/own/prompts";
+pdirIn.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+await settle();
+check("Enter applied prompts_dir via POST /config",
+    fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/config" && c.method === "POST" &&
+        String(c.body).includes("/my/own/prompts")), JSON.stringify(hooks.cfg().prompts_dir));
+check("config followed", hooks.cfg().prompts_dir === "/my/own/prompts", hooks.cfg().prompts_dir);
+check("info line confirms", setPop4.querySelector('[data-cs="pdirinfo"]').textContent.includes("/my/own/prompts"),
+    setPop4.querySelector('[data-cs="pdirinfo"]').textContent);
+setPop4.querySelector('[data-cs-btn="pdirdef"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("[default] resets to the PolyStrata path", hooks.cfg().prompts_dir === "", hooks.cfg().prompts_dir);
+hooks.closeSetPop();
 
 // ---------------------------------------------------------------------------
 

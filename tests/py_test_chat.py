@@ -26,6 +26,10 @@ Covers:
     a truncated stream still stores the partial
   * video: without ffmpeg _video_frames reports a human reason instead of
     raising; eviction prunes the oldest sessions beyond keep_sessions
+  * v89: reply ctx {used,total,est} (exact usage.prompt_tokens vs estimate;
+    ctx_size override + the auto /v1/status context.native probe), the
+    saved-chat search ?q= (multi-word over title + content, hit snippets)
+    and the owner's own prompts_dir catalog folder
 
 Run: python3 tests/py_test_chat.py   (exit 0 = all good)
 """
@@ -329,6 +333,10 @@ def seed_config(**over):
     cfg["url"] = UPSTREAM
     cfg["model"] = "test-model"
     cfg["stream"] = False
+    # v89: a non-zero ctx_size keeps _ctx_total() from probing the scripted
+    # upstream (the probe would consume a scripted /chat/completions answer);
+    # the auto-probe path gets its OWN phase with a scripted /status answer.
+    cfg["ctx_size"] = 8192
     cfg.update(over)
     chat._save_config(cfg)
     return cfg
@@ -535,6 +543,10 @@ ms = j["session"]["messages"]
 check("user + assistant stored", len(ms) == 2 and ms[0]["role"] == "user" and ms[1]["role"] == "assistant", ms)
 check("assistant text", ms[1]["text"] == "The answer")
 check("usage stored", ms[1]["usage"]["completion_tokens"] == 9)
+check("reply ctx: exact from usage + seeded total",
+      j["reply"]["ctx"]["used"] == 3 and j["reply"]["ctx"]["est"] is False
+      and j["reply"]["ctx"]["total"] == 8192, j.get("reply", {}).get("ctx"))
+check("assistant message stores ctx", ms[1]["ctx"]["used"] == 3, ms[1].get("ctx"))
 check("auto title from the first message", j["session"]["title"] == "Привет, модель", j["session"]["title"])
 sent = FakeClientSession.requests[-1]
 check("upstream URL is <url>/chat/completions", sent[1] == UPSTREAM + "/chat/completions", sent[1])
@@ -637,6 +649,10 @@ for i, s in enumerate(made):  # strictly decreasing updated -> a stable oldest
 chat._evict_sessions(3)
 left = chat._list_sessions()
 check("eviction keeps 3 newest", len(left) == 3, len(left))
+# restore the default for the REST of the run - a leaked keep=3 makes every
+# later make_session() an eviction hazard (same-second updated ties are
+# resolved by the arbitrary os.listdir order -> random "no such session")
+seed_config(keep_sessions=20)
 check("the oldest are gone", all(s["id"] not in [m["id"] for m in made[:2]] for s in left))
 
 # ---------------------------------------------------------------------------
@@ -956,6 +972,151 @@ r = run(chat.chat_test(FakeRequest(method="POST", path="/settings_hub/chat/test"
 j = resp_json(r)
 check("test probe now reports the registry source + ids",
       j["ok"] and j["source"] == "registry" and j["models"] == ["m-loaded", "m-avail"], j)
+
+# ---------------------------------------------------------------------------
+phase("v89 ctx fill: estimate, auto probe, ctx_size, exact usage")
+
+est = chat.estimate_ctx_tokens({"messages": [
+    {"role": "user", "content": "abcdefg" * 4},          # 28 chars
+    {"role": "assistant", "content": [
+        {"type": "text", "text": "abcdefgh"},            # 8 chars
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+    ]},
+]})
+# chars 28+8=36 -> 9; 2 msgs -> 16; 1 image -> 750
+check("estimate math (chars/4 + 8/msg + 750/img)",
+      est["used"] == 9 + 16 + 750 and est["images"] == 1 and est["est"] is True, est)
+
+check("_status_ctx_total: polystrata context.native",
+      chat._status_ctx_total({"context": {"native": 8192}}) == 8192)
+check("_status_ctx_total: bare dict -> 0", chat._status_ctx_total({"loaded": True}) == 0)
+check("_status_ctx_total: alternative n_ctx", chat._status_ctx_total({"n_ctx": 4096}) == 4096)
+
+seed_config(ctx_size=0, stream=False)
+chat._CTX_TOTAL_CACHE.update({"total": 0, "ts": 0.0})
+sC = make_session()
+REPLY_NO_USAGE = json.dumps({"choices": [{"message": {"content": "auto"}}]})
+FakeClientSession.script = [
+    FakeUpstream(200, json.dumps({"model": "test-model", "context": {"native": 32768}})),  # GET /status
+    FakeUpstream(200, REPLY_NO_USAGE),   # POST /chat/completions (no usage)
+]
+r = run(chat.chat_send(FakeRequest(json_body={
+    "session": sC["id"], "text": "ctx auto", "stream": False})))
+j = resp_json(r)
+cx = j.get("reply", {}).get("ctx", {})
+check("auto: total from /v1/status context.native", cx.get("total") == 32768, cx)
+check("auto: the estimate is marked", cx.get("est") is True and cx.get("used", 0) > 0, cx)
+check("auto: assistant stores ctx",
+      j["session"]["messages"][-1]["ctx"].get("total") == 32768,
+      j["session"]["messages"][-1].get("ctx"))
+
+# the probe result is cached (TTL) - a second send must NOT re-probe
+FakeClientSession.script = [FakeUpstream(200, REPLY_NO_USAGE)]
+FakeClientSession.requests = []
+r = run(chat.chat_send(FakeRequest(json_body={
+    "session": sC["id"], "text": "ctx cached", "stream": False})))
+check("ctx total cached (no re-probe within the TTL)",
+      not any(q[1] == UPSTREAM + "/status" for q in FakeClientSession.requests),
+      [(q[0], q[1]) for q in FakeClientSession.requests])
+
+seed_config(ctx_size=4096, stream=False)
+FakeClientSession.script = [FakeUpstream(200, REPLY_NO_USAGE)]
+r = run(chat.chat_send(FakeRequest(json_body={
+    "session": sC["id"], "text": "ctx cfg", "stream": False})))
+cx = resp_json(r).get("reply", {}).get("ctx", {})
+check("cfg ctx_size wins over the probe", cx.get("total") == 4096, cx)
+
+REPLY_USAGE = json.dumps({"choices": [{"message": {"content": "exact"}}],
+                          "usage": {"prompt_tokens": 111}})
+FakeClientSession.script = [FakeUpstream(200, REPLY_USAGE)]
+r = run(chat.chat_send(FakeRequest(json_body={
+    "session": sC["id"], "text": "ctx exact", "stream": False})))
+cx = resp_json(r).get("reply", {}).get("ctx", {})
+check("usage.prompt_tokens replaces the estimate",
+      cx.get("used") == 111 and cx.get("est") is False and cx.get("total") == 4096, cx)
+chat._CTX_TOTAL_CACHE.update({"total": 0, "ts": 0.0})
+
+# ---------------------------------------------------------------------------
+phase("v89 sessions search: multi-word, title, content, hit snippets")
+
+s1 = chat._new_session("Cat breeds")
+s1["messages"] = [{"role": "user", "text": "Tell me about Maine Coon cats", "ts": 1},
+                  {"role": "assistant", "text": "Maine Coons are large and friendly", "ts": 2}]
+chat._write_session(s1)
+s2 = chat._new_session("Trip plan")
+s2["messages"] = [{"role": "user", "text": "Visit Rome and Naples this spring", "ts": 1}]
+chat._write_session(s2)
+s3 = chat._new_session("scratch")
+s3["messages"] = []
+chat._write_session(s3)
+
+
+def _search(q):
+    r_ = run(chat.chat_sessions_list(FakeRequest(method="GET", path="/x", query={"q": q})))
+    j_ = resp_json(r_)
+    return j_
+
+
+j = _search("")
+check("no q -> the plain list", j["ok"] and any(s["id"] == s1["id"] for s in j["sessions"]))
+j = _search("cats")
+ids = [s["id"] for s in j["sessions"]]
+check("single word hits title AND content", s1["id"] in ids and s2["id"] not in ids, ids)
+j = _search("rome")
+ids = [s["id"] for s in j["sessions"]]
+hit = next((s.get("hit") for s in j["sessions"] if s["id"] == s2["id"]), None)
+check("content word hits its chat", s2["id"] in ids and s1["id"] not in ids, ids)
+check("hit snippet quotes the matched line", hit and "Rome" in hit, hit)
+j = _search("trip rome")
+ids = [s["id"] for s in j["sessions"]]
+check("multi-word combined over title + content",
+      s2["id"] in ids and s1["id"] not in ids, ids)
+j = _search("maine plan")
+check("each word must hit the SAME chat", not j["sessions"], j["sessions"])
+j = _search("breed")
+hit = next((s.get("hit") for s in j["sessions"] if s["id"] == s1["id"]), None)
+check("title-only match carries no snippet",
+      any(s["id"] == s1["id"] for s in j["sessions"]) and not hit, j["sessions"])
+j = _search("zzz-nowhere")
+check("no match -> empty list", j["ok"] and j["sessions"] == [])
+for s in (s1, s2, s3):
+    chat.shutil.rmtree(chat._session_dir(s["id"]), ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+phase("v89 prompts_dir: the owner's own catalog folder")
+
+PDIR = tempfile.mkdtemp(prefix="shub-prompts-")
+os.makedirs(os.path.join(PDIR, "nested"), exist_ok=True)
+with open(os.path.join(PDIR, "my_prompt.txt"), "w", encoding="utf-8") as f:
+    f.write("My own prompt")
+with open(os.path.join(PDIR, "nested", "deep2.txt"), "w", encoding="utf-8") as f:
+    f.write("Deep two")
+
+r = run(chat.chat_config_set(FakeRequest(json_body={"prompts_dir": PDIR})))
+j = resp_json(r)
+check("config POST stores prompts_dir", j["ok"] and j["config"]["prompts_dir"] == PDIR, j.get("config"))
+check("prompts_dir persisted", chat._load_config()["prompts_dir"] == PDIR)
+r = run(chat.chat_prompts_list(FakeRequest(method="GET", path="/settings_hub/chat/prompts")))
+j = resp_json(r)
+check("custom dir listed recursively", j["ok"] and j["files"] == ["my_prompt.txt", "nested/deep2.txt"], j)
+check("custom dir echoed", os.path.normpath(j["dir"]) == os.path.normpath(PDIR), j["dir"])
+r = run(chat.chat_prompt_read(FakeRequest(
+    method="GET", path="/x", query={"name": "nested/deep2.txt"})))
+check("custom dir read works", resp_json(r)["text"] == "Deep two", resp_json(r))
+
+seed_config(prompt_preset="my_prompt.txt")
+body = chat.build_upstream_payload([{"role": "user", "text": "hi", "ts": 1, "parts": []}],
+                                   chat._load_config(), s3["id"])
+check("the preset resolves inside the custom dir",
+      body["messages"][0] == {"role": "system", "content": "My own prompt"}, body["messages"][0])
+seed_config(prompt_preset="")
+
+r = run(chat.chat_config_set(FakeRequest(json_body={"prompts_dir": ""})))
+check("empty prompts_dir returns to the default", resp_json(r)["config"]["prompts_dir"] == "")
+r = run(chat.chat_prompts_list(FakeRequest(method="GET", path="/settings_hub/chat/prompts")))
+j = resp_json(r)
+check("default catalog is back (the v88 models dir)",
+      j["ok"] and j["files"] == ["cinematic.txt"], j)
 
 # ---------------------------------------------------------------------------
 

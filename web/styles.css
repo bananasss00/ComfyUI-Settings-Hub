@@ -4496,8 +4496,8 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 /* 🕘 saved-chats popup (body-level) */
 .hub-chat-sessions {
     position: fixed;
-    width: 320px;
-    max-height: 420px;
+    width: 340px;
+    max-height: 460px;
     overflow-y: auto;
     background: #1a1a30;
     border: 1px solid #44445e;
@@ -4507,6 +4507,15 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     z-index: 100002;
     font-size: 11px;
 }
+
+/* v89: the search row - multi-word, by the title, the content or both */
+.hub-chat-sessq {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 2px 2px 6px;
+}
+.hub-chat-sessq .hub-cp-search { flex: 1 1 auto; min-width: 0; }
 
 .hub-chat-sess {
     display: flex;
@@ -4519,7 +4528,23 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 .hub-chat-sess:hover { background: #26263f; }
 .hub-chat-sess-on { background: #31415f; }
 
-.hub-chat-sess-title { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #e0e6f5; }
+.hub-chat-sess-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+.hub-chat-sess-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #e0e6f5; }
+/* v89: the matched content line under the title */
+.hub-chat-sess-hit {
+    color: #8fa7d9;
+    font-size: 9.5px;
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
 .hub-chat-sess-n { color: #6d6d92; font-size: 9px; flex: 0 0 auto; }
 .hub-chat-sess-open { color: #7fb0ff; font-size: 8px; }
 
@@ -4683,6 +4708,34 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 }
 .hub-cs-sel:focus { border-color: #5a5a9e; }
 
+/* v89: the settings numbers under their own visible mini labels (the owner:
+   "fields without names, only tooltips" - a 2-column grid, one label per
+   input; the full explanation stays in the title tooltip) */
+.hub-cs-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px 8px;
+    margin: 6px 2px;
+}
+.hub-cs-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    cursor: text;
+}
+.hub-cs-cell .hub-cs-in { width: 100%; box-sizing: border-box; }
+.hub-cs-cell-wide { margin: 6px 2px; }
+.hub-cs-lab {
+    font-size: 9px;
+    line-height: 1.2;
+    letter-spacing: 0.3px;
+    color: #9a9ac4;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .hub-cs-sect {
     margin: 10px 2px 2px;
     padding-top: 7px;
@@ -4753,6 +4806,13 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 .hub-cp-list::-webkit-scrollbar { width: 8px; }
 .hub-cp-list::-webkit-scrollbar-track { background: #191930; }
 .hub-cp-list::-webkit-scrollbar-thumb { background: #3d4460; border-radius: 4px; }
+/* v89 THE SQUISHED-LIST FIX: this container is a flex COLUMN with a
+   max-height, and the items used to keep the default flex-shrink:1 - once
+   the files outnumber the fit, EVERY item collapsed to a few px (text
+   clipped to slivers, nothing readable - the owner's screenshot). Pins:
+   the items keep their natural height and the LIST scrolls instead. */
+.hub-cp-item,
+.hub-cp-empty { flex: 0 0 auto; }
 .hub-cp-item {
     text-align: left;
     background: transparent;

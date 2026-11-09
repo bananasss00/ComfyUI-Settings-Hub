@@ -32,10 +32,10 @@
 //   stays the 🔍 of text cards; teardown() removes the overlay with the
 //   panel (same viewerEl channel).
 // ============================================================================
-// v88 self-report (single-source version, docs/plan-versions.md): the
+// v89 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v88";
+globalThis.__SettingsHubLoaded["stack"] = "v89";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -421,11 +421,17 @@ export function isStackOn() {
 let nativeStackSetting = null; // v88: the ComfyUI Settings dialog mirror
 
 export function setStackOn(v, src) {
+    const was = isStackOn();
     try { localStorage.setItem(LS_ON, v ? "1" : "0"); } catch (_) {}
     // v88: keep the native setting in sync when the flip came from OUR ui
     // (the panel ⚙ popup); a "native" flip already IS that setting.
     if (src !== "native") {
         try { nativeStackSetting?.set?.(!!v); } catch (_) {}
+    }
+    // v89: a hidden panel has NO ui of its own - always say WHERE the way
+    // back is (ComfyUI Settings -> SettingsHub), whatever flipped it.
+    if (was && !v) {
+        localToast("Stack hidden - bring it back: ComfyUI Settings → SettingsHub → 'Paste Stack panel'", 5200);
     }
     if (v && !mounted) initStack();
     else if (!v) teardown();
@@ -603,6 +609,10 @@ function openStkSettingsPop() {
         `<option value="1">On (default)</option>` +
         `<option value="0">Off - hide the panel + chip</option>` +
         `</select></label>` +
+        // v89: the way back spelled out right under the switch (the owner: a
+        // hidden panel must tell WHERE it can be brought back).
+        `<div class="hub-cs-info">Off hides the panel AND its chip. Bring it ` +
+        `back: ComfyUI Settings → SettingsHub → 'Paste Stack panel'.</div>` +
         `<label class="hub-cs-row"><span>Max saved entries</span>` +
         `<select class="hub-cs-sel" data-stk="max">` +
         STACK_MAX_CHOICES.map((n) => `<option value="${n}">${n}${n === STACK_MAX_DEFAULT ? " · default" : ""}</option>`).join("") +

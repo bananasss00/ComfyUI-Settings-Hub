@@ -80,6 +80,36 @@ py/stack_store.py):
                                                 mechanics (/v1/vram, /v1/unload)
                                                 + ComfyUI-side cleanup
 
+v89 owner corrections (2026-11-09):
+  * "the chat settings are just fields without names - you can only learn
+    what a value is from the tooltip - the fields must have NAMES" (web).
+  * "display the used and the available context in the chat": every /send
+    answer now carries reply["ctx"] = {used, total, est, images}. "used"
+    is usage.prompt_tokens when the upstream reports it (exact), otherwise
+    an estimate (chars/4 + 8/message + a nominal 750/image, est=true).
+    "total" comes from cfg "ctx_size" when the owner sets it, otherwise
+    from the PolyStrata /v1/status context.native (probed + cached 180 s).
+    The assistant message stores the same dict, so the status line keeps
+    showing "ctx 3.2k/32k" after a reload.
+  * "the saved-chat search must be flexible: multi-words, by the chat
+    title, by the content or all together": GET /chat/sessions?q= scans
+    EVERY session (title + all message texts), every whitespace-separated
+    word must hit somewhere (title or content, combined); each hit also
+    carries a "hit" snippet of the first matching content line.
+  * "the user must be able to set his own system-prompts path": cfg
+    "prompts_dir" (empty = the PolyStrata default models/LLM/prompts).
+    The catalog list/read jail now resolves through it; the ⚙ popup gets
+    a "Prompts folder" row (Enter applies, [default] resets).
+  * "the system prompts list is unreadable - many files all squished
+    together" (web): .hub-cp-list is a flex COLUMN with max-height, and
+    the items kept the default flex-shrink:1 - with more files than fit,
+    EVERY item shrank to a few px instead of the list scrolling. Fixed
+    with flex: 0 0 auto (web/styles.css).
+  * "when the chat or the stack is hidden the user may not know where to
+    bring it back - the info that it is in the ComfyUI settings must be
+    there" (web): hiding either panel now toasts the exact way back
+    (ComfyUI Settings -> SettingsHub), the ⚙ popups say it too.
+
 v88 owner corrections (2026-11-09):
   * "the model list shows only ONE active model - look how the PolyStrata
     nodes get the models": they call GET /api/models - the server registry
@@ -137,7 +167,7 @@ try:
 except Exception:  # pragma: no cover - folder_paths always exists in ComfyUI
     folder_paths = None
 
-CHAT_SERVER_VERSION = "v88"
+CHAT_SERVER_VERSION = "v89"
 
 # ---------------------------------------------------------------------------
 # Limits (server-side absolute guards; the frontend may enforce smaller ones)
@@ -206,6 +236,15 @@ DEFAULT_CONFIG = {
     "prompt_preset": "",       # v88: relative .txt in models/LLM/prompts;
                                # non-empty WINS over system_prompt (the
                                # PolyStrata node semantics), read fresh per send
+    "prompts_dir": "",         # v89: the owner's OWN catalog folder (absolute
+                               # or relative to the ComfyUI cwd). Empty = the
+                               # PolyStrata node path models/LLM/prompts.
+                               # READ-ONLY: the catalog never writes here.
+    "ctx_size": 0,             # v89: model context for the ctx display,
+                               # tokens. 0 = auto: the PolyStrata /v1/status
+                               # context.native (probed, cached 180 s); when
+                               # nothing reports it the UI shows only the
+                               # used part.
     "temperature": 0.8,
     "top_p": 0.95,
     "max_tokens": 1024,        # 0 = no limit (send nothing)
@@ -233,6 +272,7 @@ _CONFIG_NUM_RANGES = {
     "video_frames": (2, 64), "video_max_side": (256, 4096),
     "keep_sessions": (1, 500), "timeout_s": (30, 86400),
     "max_file_mb": (1, 100), "vram_reserve_mib": (0, 131072),
+    "ctx_size": (0, 2_000_000),
 }
 _REASONS = {"default", "none", "low", "medium", "high"}
 
@@ -666,12 +706,21 @@ def build_upstream_messages(session_msgs, cfg, sid):
 # v88 system-prompt catalog - the user's OWN presets, the PolyStrata node way
 # ---------------------------------------------------------------------------
 
-def _prompt_catalog_dir():
-    """The catalog folder - EXACTLY the PolyStrata nodes' prompt_root(): the
-    llama.cpp-node path <ComfyUI>/models/LLM/prompts (one preset = one .txt
-    file, subdirs allowed). READ-ONLY here: nothing is created, nothing is
-    registered in folder_paths, nothing is cached - the PolyStrata / llama.cpp
-    packs own this folder and its default files."""
+def _prompt_catalog_dir(cfg=None):
+    """The catalog folder. v89: cfg "prompts_dir" (the owner's own folder,
+    absolute or relative to the ComfyUI cwd) wins when set; otherwise EXACTLY
+    the PolyStrata nodes' prompt_root(): the llama.cpp-node path
+    <ComfyUI>/models/LLM/prompts (one preset = one .txt file, subdirs
+    allowed). READ-ONLY here: nothing is created, nothing is registered in
+    folder_paths, nothing is cached - the catalog folder belongs to the user."""
+    if cfg is None:
+        cfg = _load_config()
+    custom = str(cfg.get("prompts_dir") or "").strip()
+    if custom:
+        p = os.path.expanduser(custom)
+        if not os.path.isabs(p):
+            p = os.path.join(os.getcwd(), p)
+        return os.path.normpath(p)
     md = None
     try:
         if folder_paths is not None:
@@ -720,7 +769,8 @@ def _safe_prompt_rel(name):
 
 
 def _read_prompt_file(rel):
-    """Read one catalog file, jailed inside the folder. Returns (text, error)."""
+    """Read one catalog file, jailed inside the folder (v89: the folder is
+    cfg "prompts_dir" when set - the jail follows it). Returns (text, error)."""
     root_abs = os.path.abspath(_prompt_catalog_dir())
     p_abs = os.path.abspath(os.path.join(root_abs, *rel.split("/")))
     if p_abs != root_abs and not p_abs.startswith(root_abs + os.sep):
@@ -793,6 +843,83 @@ def parse_upstream_response(j):
                   ("prompt_tokens", "completion_tokens", "total_tokens")
                   if usage.get(k) is not None},
     }
+
+
+# ---------------------------------------------------------------------------
+# v89 context fill (used / available) for the chat status line
+# ---------------------------------------------------------------------------
+
+_CTX_TOTAL_CACHE = {"total": 0, "ts": 0.0}
+CTX_TOTAL_TTL_S = 180
+
+
+def estimate_ctx_tokens(payload):
+    """An honest-ish ESTIMATE of the request size in tokens (est=true):
+    chars/4 per text part + 8/message overhead + a nominal 750/image (a rough
+    cross-model mean for a ~1k-side vision frame; videos count per frame).
+    When the upstream reports usage.prompt_tokens the caller REPLACES this
+    with the exact number (est=false)."""
+    chars = 0
+    imgs = 0
+    msgs = payload.get("messages") or []
+    for m in msgs:
+        c = m.get("content")
+        if isinstance(c, str):
+            chars += len(c)
+        elif isinstance(c, list):
+            for p in c:
+                if not isinstance(p, dict):
+                    continue
+                if p.get("type") == "text":
+                    chars += len(p.get("text") or "")
+                elif p.get("type") == "image_url":
+                    imgs += 1
+    used = chars // 4 + 8 * len(msgs) + imgs * 750
+    return {"used": int(used), "images": imgs, "est": True}
+
+
+def _status_ctx_total(st):
+    """Pull the native context size out of a /v1/status dict (PolyStrata:
+    context.native; a few alternative spellings tolerated). 0 = unknown."""
+    if not isinstance(st, dict):
+        return 0
+    c = st.get("context")
+    if isinstance(c, dict):
+        for v in (c.get("native"), c.get("ctx"), c.get("n_ctx"),
+                  c.get("tokens"), c.get("size")):
+            try:
+                n = int(v or 0)
+                if n > 0:
+                    return n
+            except Exception:
+                pass
+    for k in ("n_ctx", "ctx_size", "context_size", "native_ctx"):
+        try:
+            n = int(st.get(k) or 0)
+            if n > 0:
+                return n
+        except Exception:
+            pass
+    return 0
+
+
+async def _ctx_total(cfg):
+    """The AVAILABLE context: cfg ctx_size wins, else the cached /v1/status
+    probe (180 s TTL). 0 = nothing reported - the UI shows only the used."""
+    try:
+        n = int(cfg.get("ctx_size") or 0)
+    except Exception:
+        n = 0
+    if n > 0:
+        return n
+    now = time.time()
+    if now - _CTX_TOTAL_CACHE["ts"] < CTX_TOTAL_TTL_S:
+        return int(_CTX_TOTAL_CACHE["total"] or 0)
+    st = await _upstream_status(cfg)
+    total = _status_ctx_total(st)
+    if total > 0:
+        _CTX_TOTAL_CACHE.update({"total": total, "ts": now})
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -1310,6 +1437,14 @@ async def chat_config_set(request):
             cfg[k] = str(body.get(k) or "")[:8000]
     if "prompt_preset" in body:
         cfg["prompt_preset"] = str(body.get("prompt_preset") or "").replace("\\", "/").strip()[:300]
+    if "prompts_dir" in body:
+        # v89: the owner's own catalog folder. "" returns to the PolyStrata
+        # default; no writability probe - the catalog is READ-ONLY here and a
+        # not-yet-existing folder just lists empty with an error note.
+        pd = str(body.get("prompts_dir") or "").strip().replace("\\", "/")
+        if len(pd) > 500:
+            return _jerr("prompts_dir is too long")
+        cfg["prompts_dir"] = pd
     for k, (lo, hi) in _CONFIG_NUM_RANGES.items():
         if k in body:
             try:
@@ -1548,7 +1683,57 @@ async def _gpu_release(cfg, notes):
 
 @PromptServer.instance.routes.get("/settings_hub/chat/sessions")
 async def chat_sessions_list(request):
-    return web.json_response({"ok": True, "sessions": _list_sessions()})
+    """v89: ?q= turns the list into a FLEXIBLE SEARCH - every
+    whitespace-separated word must hit SOMEWHERE (the title OR any message
+    text; title and content are searched together). Each hit carries "hit":
+    a snippet of the first matching content line ("" when only the title
+    matched). No q -> the plain recent list."""
+    q = str(request.query.get("q") or "").strip()
+    if not q:
+        return web.json_response({"ok": True, "sessions": _list_sessions(), "q": ""})
+    toks = [t.lower() for t in q.split() if t]
+    if not toks:
+        return web.json_response({"ok": True, "sessions": _list_sessions(), "q": ""})
+    out = []
+    for brief in _list_sessions():
+        sess = _read_session(brief["id"])
+        if not sess:
+            continue
+        title = str(sess.get("title") or "")
+        texts = [str(m.get("text") or "") for m in (sess.get("messages") or [])]
+        lt = title.lower()
+        # every word must hit somewhere: title or content (combined)
+        if not all(t in lt or any(t in x.lower() for x in texts) for t in toks):
+            continue
+        hit = _session_hit_snippet(texts, toks)
+        brief = dict(brief)
+        if hit:
+            brief["hit"] = hit
+        out.append(brief)
+    out.sort(key=lambda x: x.get("updated", 0), reverse=True)
+    return web.json_response({"ok": True, "sessions": out, "q": q})
+
+
+def _session_hit_snippet(texts, toks):
+    """The first content line containing any search word, trimmed around the
+    match (~120 chars) - the 'where exactly' cue under the session title."""
+    for x in texts:
+        if not x:
+            continue
+        for line in x.splitlines():
+            ll = line.lower().strip()
+            if not ll:
+                continue
+            if any(t in ll for t in toks):
+                s = line.strip()
+                low = s.lower()
+                pos = min((low.find(t) for t in toks if low.find(t) >= 0),
+                          default=0)
+                start = max(0, pos - 40)
+                end = min(len(s), pos + 100)
+                return ("…" if start > 0 else "") + s[start:end].strip() + \
+                       ("…" if end < len(s) else "")
+    return ""
 
 
 @PromptServer.instance.routes.post("/settings_hub/chat/sessions")
@@ -1779,6 +1964,16 @@ async def chat_send(request):
         await _auto_reserve_for_send(cfg)
     except Exception:
         pass
+    # v89: the context fill for the status line, computed on the EXACT payload
+    # this request sends; the upstream's prompt_tokens replaces the estimate
+    # when it reports usage (both branches below).
+    ctx = estimate_ctx_tokens(payload)
+    try:
+        total = await _ctx_total(cfg)
+    except Exception:
+        total = 0
+    if total > 0:
+        ctx["total"] = int(total)
     if not stream:
         async with aiohttp.ClientSession(timeout=timeout) as http:
             async def call():
@@ -1805,6 +2000,10 @@ async def chat_send(request):
             reply = parse_upstream_response(json.loads(txt))
         except Exception:
             return _jerr("unparsable answer from the LLM server", 502, code="parse")
+        pt = (reply.get("usage") or {}).get("prompt_tokens")
+        if pt:
+            ctx = dict(ctx, used=int(pt), est=False)
+        reply["ctx"] = ctx
         async with _lock:
             sess = _read_session(sid) or sess
             reply["ms"] = int((time.time() - now) * 1000)
@@ -1814,6 +2013,8 @@ async def chat_send(request):
             for k in ("usage", "model", "ms", "finish"):
                 if reply.get(k):
                     assistant[k] = reply[k]
+            assistant["ctx"] = {"used": ctx["used"], "total": ctx.get("total", 0),
+                                "est": bool(ctx.get("est")), "images": ctx.get("images", 0)}
             sess["messages"].append(assistant)
             sess["updated"] = int(time.time())
             _write_session(sess)
@@ -1901,7 +2102,7 @@ async def chat_send(request):
                 pass
         reply = {"text": acc, "thoughts": th_acc, "model": model,
                  "usage": {}, "ms": int((time.time() - t0) * 1000),
-                 "stopped": bool(stopped or not saw_done)}
+                 "stopped": bool(stopped or not saw_done), "ctx": ctx}
         async with _lock:
             sess = _read_session(sid) or sess
             assistant = {"role": "assistant", "text": acc, "ts": int(time.time())}
@@ -1909,6 +2110,8 @@ async def chat_send(request):
                 assistant["thoughts"] = th_acc
             assistant["model"] = model
             assistant["ms"] = reply["ms"]
+            assistant["ctx"] = {"used": ctx["used"], "total": ctx.get("total", 0),
+                                "est": bool(ctx.get("est")), "images": ctx.get("images", 0)}
             if reply["stopped"]:
                 assistant["stopped"] = True
             sess["messages"].append(assistant)

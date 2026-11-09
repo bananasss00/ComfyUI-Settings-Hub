@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - LLM Chat (v88): floating panel with TABS, OpenAI-compatible
+// SettingsHub - LLM Chat (v89): floating panel with TABS, OpenAI-compatible
 // upstream through the py proxy (py/chat_proxy.py)
 // ----------------------------------------------------------------------------
 // v86 (owner request 2026-11-09: "a simple LLM chat in the settings hub, just
@@ -39,6 +39,42 @@
 //       absolute folder is supported (the v84 stack-root mechanics).
 //   The chat is NOT an agent (owner decision): no tools, no queue control,
 //   no workflow access. ComfyUI integrations are parked for later.
+// ----------------------------------------------------------------------------
+// v89 (owner corrections 2026-11-09: "the chat settings are just fields
+//   without names - you only learn what a value is from the tooltip - the
+//   fields must have NAMES" + "display the used and the available context in
+//   the chat" + "the saved-chat search must be flexible: multi-words, by the
+//   chat title, the content or all together" + "the user must be able to set
+//   his own system-prompts path" + "the system prompts list is unreadable -
+//   many files all squished together" + "when the chat or the stack is hidden
+//   the user may not know where to bring it back - the info that it is in the
+//   ComfyUI settings must be there"):
+//     * ⚙ CHAT SETTINGS: every number now sits under its own visible MINI
+//       LABEL (a 2-column grid - temperature / top_p / max tokens / history
+//       depth / media depth / image max side / images per msg / video frames
+//       / video max side); the full explanation stays in the tooltip.
+//     * CONTEXT FILL: every answer stores reply ctx {used, total, est} -
+//       used = the upstream usage.prompt_tokens when reported (exact),
+//       otherwise an estimate (chars/4 + 8/msg + 750/image, shown as "≈");
+//       total = cfg "ctx_size" (a NEW ⚙ row, 0 = auto) or the PolyStrata
+//       /v1/status context.native (probed + cached server-side). The status
+//       line shows "ctx 3.2k/32k" (≈ when estimated, ⚠ past 90%); it
+//       survives reloads because the assistant message carries it.
+//     * 🕘 SEARCH: a live search row - multi-word (every word must hit),
+//       matching the chat TITLE, the message CONTENT or both together;
+//       each hit shows a snippet of the matching content line; the server
+//       does the scan (GET /chat/sessions?q=).
+//     * 📜 PROMPTS PATH: ⚙ gains a "System prompt catalog" section with a
+//       "Prompts folder" row (Enter applies, [default] resets) - the owner's
+//       own folder (absolute or ComfyUI-relative) replaces the PolyStrata
+//       models/LLM/prompts for BOTH the listing and the per-send read.
+//     * 📜 LIST FIX: .hub-cp-list is a flex COLUMN with max-height and the
+//       items kept the default flex-shrink:1 - with more files than fit
+//       EVERY item collapsed to a few px (the "squished" screenshot);
+//       flex: 0 0 auto pins them and the list scrolls instead.
+//     * THE WAY BACK: hiding the chat (⚙ → Off or the ComfyUI setting)
+//       toasts "ComfyUI Settings → SettingsHub → 'LLM Chat panel'" - the
+//       stack does the same; the ⚙ Off option names it too.
 // ----------------------------------------------------------------------------
 // v88 (owner corrections 2026-11-09: "the settingshub is not present in every
 //   workflow and managing the stacker and chat from it is inconvenient - they
@@ -113,7 +149,7 @@
 // v87 self-report (single-source version, docs/plan-versions.md): the last
 // FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["chat"] = "v88";
+globalThis.__SettingsHubLoaded["chat"] = "v89";
 
 import { app } from "../../scripts/app.js";
 
@@ -239,11 +275,17 @@ export function isChatOn() {
 }
 
 export function setChatOn(v, src) {
+    const was = isChatOn();
     try { localStorage.setItem(LS_ON, v ? "1" : "0"); } catch (_) {}
     // v88: keep the native ComfyUI setting in sync when the flip came from
     // OUR ui (⚙ popup / code); a "native" flip already IS that setting.
     if (src !== "native") {
         try { nativeChatSetting?.set?.(!!v); } catch (_) {}
+    }
+    // v89: a hidden panel has NO ui of its own - always say WHERE the way
+    // back is (ComfyUI Settings -> SettingsHub), whatever flipped it.
+    if (was && !v) {
+        localToast("Chat hidden - bring it back: ComfyUI Settings → SettingsHub → 'LLM Chat panel'", 5200);
     }
     if (v && !mounted) initChat();
     else if (!v) teardown();
@@ -554,8 +596,14 @@ function renderTabs() {
 // ---------------------------------------------------------------------------
 
 let sessPop = null;
+// v89: the saved-chats search - multi-word, by the title, the content or
+// both together (the server scans, GET /chat/sessions?q=); kept while the
+// popup re-renders.
+let sessQuery = "";
+let sessFetchSeq = 0;
 
 function closeSessPop() {
+    sessFetchSeq++;   // an in-flight render must not fill a closed popup
     try { sessPop?.remove(); } catch (_) {}
     sessPop = null;
     try { window.removeEventListener("mousedown", onSessPopDown, true); } catch (_) {}
@@ -571,26 +619,55 @@ function onSessPopKey(e) {
     if (e.key === "Escape" && sessPop) { e.preventDefault(); closeSessPop(); }
 }
 
-async function openSessPop() {
-    if (sessPop) { closeSessPop(); return; }
-    const res = await jfetch("/settings_hub/chat/sessions");
-    if (!res.json?.ok) { localToast("Sessions unavailable: " + (res.json?.error || "HTTP " + res.status)); return; }
+function sessRowHtml(s) {
+    const open = tabs.some((t) => t.id === s.id);
+    const armed = sessArm === s.id && Date.now() - sessArmTs <= SESS_ARM_MS;
+    return `<div class="hub-chat-sess${s.id === activeId ? " hub-chat-sess-on" : ""}" data-sid="${s.id}">` +
+        `<span class="hub-chat-sess-main">` +
+        `<span class="hub-chat-sess-title">${esc(s.title || "(untitled)")}</span>` +
+        (s.hit ? `<span class="hub-chat-sess-hit" title="${esc(s.hit)}">${esc(s.hit)}</span>` : "") +
+        `</span>` +
+        `<span class="hub-chat-sess-n">${s.n} msg · ${new Date((s.updated || 0) * 1000)
+            .toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>` +
+        (open ? `<span class="hub-chat-sess-open" title="This dialog is open in a tab">●</span>` : "") +
+        `<button type="button" class="hub-chat-sess-del${armed ? " hub-chat-sess-del-armed" : ""}" ` +
+        `title="${armed ? "Click again to DELETE the dialog with its files" : "Delete the dialog (asks twice)"}">🗑</button>` +
+        `</div>`;
+}
+
+async function renderSessList() {
+    if (!sessPop) return;
+    const seq = ++sessFetchSeq;
+    const listEl = sessPop.querySelector('[data-ss="list"]');
+    const q = sessQuery.trim();
+    const res = await jfetch("/settings_hub/chat/sessions" +
+        (q ? "?q=" + encodeURIComponent(q) : ""));
+    if (!sessPop || seq !== sessFetchSeq || !listEl) return;   // closed / stale
+    if (!res.json?.ok) {
+        listEl.innerHTML = `<div class="hub-chat-sess-empty">unavailable: ` +
+            `${esc(res.json?.error || "HTTP " + res.status)}</div>`;
+        return;
+    }
     const list = res.json.sessions || [];
+    listEl.innerHTML = list.length ? list.map(sessRowHtml).join("")
+        : (q ? `<div class="hub-chat-sess-empty">nothing matches the search</div>`
+             : `<div class="hub-chat-sess-empty">No saved chats yet</div>`);
+}
+
+function openSessPop() {
+    if (sessPop) { closeSessPop(); return; }
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-chat-sessions";
     pop.innerHTML = `<div class="hub-menu-title">🕘 Saved chats</div>` +
-        (list.length ? list.map((s) => {
-            const open = tabs.some((t) => t.id === s.id);
-            const armed = sessArm === s.id && Date.now() - sessArmTs <= SESS_ARM_MS;
-            return `<div class="hub-chat-sess${s.id === activeId ? " hub-chat-sess-on" : ""}" data-sid="${s.id}">` +
-                `<span class="hub-chat-sess-title">${esc(s.title || "(untitled)")}</span>` +
-                `<span class="hub-chat-sess-n">${s.n} msg · ${new Date((s.updated || 0) * 1000)
-                    .toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>` +
-                (open ? `<span class="hub-chat-sess-open" title="This dialog is open in a tab">●</span>` : "") +
-                `<button type="button" class="hub-chat-sess-del${armed ? " hub-chat-sess-del-armed" : ""}" ` +
-                `title="${armed ? "Click again to DELETE the dialog with its files" : "Delete the dialog (asks twice)"}">🗑</button>` +
-                `</div>`;
-        }).join("") : `<div class="hub-chat-sess-empty">No saved chats yet</div>`);
+        // v89: the flexible search - every word must hit the title or the
+        // content (together); hits show a content snippet.
+        `<div class="hub-chat-sessq">` +
+        `<input type="text" class="hub-cp-in hub-cp-search" data-ss="q" spellcheck="false" autocomplete="off" ` +
+        `placeholder="search… (title, text or both)" ` +
+        `title="Live multi-word search: every word must match the chat title OR its message text - together they cover both. A matched content line is shown under the title.">` +
+        `<button type="button" class="hub-cs-chip" data-ss="refresh" title="Re-run the search">↻</button>` +
+        `</div>` +
+        `<div data-ss="list"><div class="hub-chat-sess-empty">loading…</div></div>`;
     document.body.appendChild(pop);
     const r = sessionsBtn?.getBoundingClientRect?.();
     if (r) {
@@ -599,6 +676,25 @@ async function openSessPop() {
         pop.style.top = Math.min(r.bottom + 6, vh - (pop.offsetHeight || 200) - 8) + "px";
     }
     sessPop = pop;
+    const qIn = pop.querySelector('[data-ss="q"]');
+    qIn.value = sessQuery;
+    let deb = null;
+    qIn.addEventListener("input", () => {
+        sessQuery = qIn.value;
+        clearTimeout(deb);
+        deb = setTimeout(() => void renderSessList(), 250);
+    });
+    qIn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault(); e.stopPropagation();
+            clearTimeout(deb);
+            sessQuery = qIn.value;
+            void renderSessList();
+        } else if (e.key === "Escape") {
+            e.preventDefault(); e.stopPropagation(); closeSessPop();
+        }
+    });
+    pop.querySelector('[data-ss="refresh"]').addEventListener("click", () => void renderSessList());
     pop.addEventListener("mousedown", (e) => e.stopPropagation());
     pop.addEventListener("click", async (e) => {
         const del = e.target?.closest?.(".hub-chat-sess-del");
@@ -609,13 +705,11 @@ async function openSessPop() {
                 await jfetch("/settings_hub/chat/session/" + sid, { method: "DELETE" });
                 if (tabs.some((t) => t.id === sid)) closeTab(sid);
                 sessArm = null;
-                closeSessPop();
-                void openSessPop(); // refresh the list
+                void renderSessList(); // refresh the list, the popup stays
                 return;
             }
             sessArm = sid; sessArmTs = Date.now();
-            closeSessPop();          // allow the re-render below to rebuild
-            void openSessPop();     // re-render with the armed state
+            void renderSessList();   // re-render with the armed state
             localToast("Click 🗑 again to DELETE this dialog (files included)");
             return;
         }
@@ -634,6 +728,8 @@ async function openSessPop() {
             renderTabs(); renderMsgs(); renderAttach(); renderStatus();
         }
     });
+    void renderSessList();
+    try { qIn.focus(); } catch (_) {}
     window.addEventListener("mousedown", onSessPopDown, true);
     window.addEventListener("keydown", onSessPopKey, true);
 }
@@ -747,18 +843,34 @@ function closeAllChatPops() { closeSetPop(); closePromptPop(); closeGpuPop(); }
 
 // --- ⚙ Chat settings (moved out of the hub window in v87) -------------------
 
+// v89: [key, tooltip, step, min, max, VISIBLE LABEL] - the owner: "the fields
+// must have names, not just tooltips". The label is short; the tooltip keeps
+// the full explanation.
 const SET_NUM_KEYS = [
-    ["temperature", "temperature (0-2)", "0.05", "0", "2"],
-    ["top_p", "top_p (0-1)", "0.01", "0", "1"],
-    ["max_tokens", "max_tokens (0 = no limit)", "64", "0", "131072"],
-    ["ctx_depth", "how many last messages go into every request", "1", "1", "200"],
-    ["media_depth", "how many of them may carry real image/video parts", "1", "0", "50"],
-    ["img_max_side", "the client downscales a pasted image to this side (px)", "64", "256", "4096"],
-    ["img_max_count", "images per one message", "1", "1", "16"],
-    ["video_frames", "frames cut from one video (needs ffmpeg on the server)", "1", "2", "64"],
-    ["video_max_side", "long side of a video frame (px)", "64", "256", "4096"],
-    ["timeout_s", "generation timeout, seconds - a local model may think for minutes", "30", "30", "86400"],
+    ["temperature", "temperature (0-2)", "0.05", "0", "2", "temperature"],
+    ["top_p", "top_p (0-1)", "0.01", "0", "1", "top_p"],
+    ["max_tokens", "max_tokens (0 = no limit)", "64", "0", "131072", "max tokens"],
+    ["ctx_depth", "how many last messages go into every request", "1", "1", "200", "history depth"],
+    ["media_depth", "how many of them may carry real image/video parts", "1", "0", "50", "media depth"],
+    ["img_max_side", "the client downscales a pasted image to this side (px)", "64", "256", "4096", "image max side"],
+    ["img_max_count", "images per one message", "1", "1", "16", "images / msg"],
+    ["video_frames", "frames cut from one video (needs ffmpeg on the server)", "1", "2", "64", "video frames"],
+    ["video_max_side", "long side of a video frame (px)", "64", "256", "4096", "video max side"],
 ];
+const CTX_TOOLTIP = "model context in tokens for the ctx display. 0 = auto: " +
+    "the LLM server reports it (PolyStrata /v1/status context.native); when " +
+    "nothing reports it the status line shows only the used part";
+const TIMEOUT_TOOLTIP = "generation timeout, seconds - a local model may think for minutes";
+
+// v89: one labeled cell per number - <label> wraps the mini label + the
+// input, so a click on the label focuses the field too.
+const setNumCell = ([k, t, step, min, max, lab]) =>
+    `<label class="hub-cs-cell" title="${t}">` +
+    `<span class="hub-cs-lab">${lab}</span>` +
+    `<input type="number" step="${step}" min="${min}" max="${max}" data-cs-num="${k}" class="hub-cs-in">` +
+    `</label>`;
+const setNumGrid = (keys) =>
+    `<div class="hub-cs-grid">` + keys.map(setNumCell).join("") + `</div>`;
 
 function openSetPop() {
     if (setPop) { closeSetPop(); return; }
@@ -775,6 +887,10 @@ function openSetPop() {
         `<option value="1">On (default)</option>` +
         `<option value="0">Off - hide the panel + chip</option>` +
         `</select></label>` +
+        // v89: a hidden panel has NO ui of its own - spell the way back out.
+        `<div class="hub-cs-info">Off hides the panel AND its chip. Bring it ` +
+        `back: ComfyUI Settings → SettingsHub → 'LLM Chat panel' (reachable ` +
+        `in every workflow).</div>` +
         `<label class="hub-cs-row"><span>LLM server URL</span>` +
         `<input type="text" class="hub-cs-in" data-cs="url" placeholder="http://127.0.0.1:8080/v1" spellcheck="false" autocomplete="off"></label>` +
         `<label class="hub-cs-row"><span>API key (optional)</span>` +
@@ -783,19 +899,13 @@ function openSetPop() {
         `<span class="hub-cs-box"><button type="button" class="hub-cs-chip" data-cs-btn="test">Test</button></span></div>` +
         `<div class="hub-cs-info" data-cs="testinfo"></div>` +
         `<div class="hub-cs-sect">Sampling</div>` +
-        `<div class="hub-cs-trio">` +
-        SET_NUM_KEYS.slice(0, 3).map(([k, t, step, min, max]) =>
-            `<input type="number" step="${step}" min="${min}" max="${max}" data-cs-num="${k}" class="hub-cs-in" title="${t}">`).join("") +
-        `</div>` +
-        `<div class="hub-cs-sect">History & media</div>` +
-        `<div class="hub-cs-trio">` +
-        SET_NUM_KEYS.slice(3, 5).map(([k, t, step, min, max]) =>
-            `<input type="number" step="${step}" min="${min}" max="${max}" data-cs-num="${k}" class="hub-cs-in" title="${t}">`).join("") +
-        `</div>` +
-        `<div class="hub-cs-trio">` +
-        SET_NUM_KEYS.slice(5, 9).map(([k, t, step, min, max]) =>
-            `<input type="number" step="${step}" min="${min}" max="${max}" data-cs-num="${k}" class="hub-cs-in" title="${t}">`).join("") +
-        `</div>` +
+        setNumGrid(SET_NUM_KEYS.slice(0, 3)) +
+        // v89: the available-context override (0 = auto-detect server-side).
+        `<label class="hub-cs-cell hub-cs-cell-wide" title="${CTX_TOOLTIP}">` +
+        `<span class="hub-cs-lab">context size (0 = auto)</span>` +
+        `<input type="number" step="512" min="0" max="2000000" data-cs-num="ctx_size" class="hub-cs-in"></label>` +
+        `<div class="hub-cs-sect">History &amp; media</div>` +
+        setNumGrid(SET_NUM_KEYS.slice(3, 9)) +
         `<label class="hub-cs-row"><span>Streaming replies</span>` +
         `<select class="hub-cs-sel" data-cs="stream">` +
         `<option value="1">On (default)</option><option value="0">Off</option>` +
@@ -805,8 +915,16 @@ function openSetPop() {
         `<option value="10">10</option><option value="20">20 · default</option>` +
         `<option value="50">50</option><option value="100">100</option>` +
         `</select></label>` +
-        `<label class="hub-cs-row"><span>Timeout (s)</span>` +
-        `<input type="number" step="30" min="30" max="86400" data-cs-num="timeout_s" class="hub-cs-in" title="${SET_NUM_KEYS[9][1]}"></label>` +
+        // v89: the timeout number keeps a NAMED row (label + input).
+        `<label class="hub-cs-cell hub-cs-cell-wide" title="${TIMEOUT_TOOLTIP}">` +
+        `<span class="hub-cs-lab">timeout, s</span>` +
+        `<input type="number" step="30" min="30" max="86400" data-cs-num="timeout_s" class="hub-cs-in"></label>` +
+        // v89: the owner's own prompt-catalog folder (empty = the PolyStrata path).
+        `<div class="hub-cs-sect">System prompt catalog</div>` +
+        `<div class="hub-cs-row"><span>Prompts folder</span><span class="hub-cs-box">` +
+        `<input type="text" class="hub-cs-in hub-cs-path" data-cs="pdir" placeholder="default: models/LLM/prompts" spellcheck="false" autocomplete="off">` +
+        `<button type="button" class="hub-cs-chip" data-cs-btn="pdirdef">default</button></span></div>` +
+        `<div class="hub-cs-info" data-cs="pdirinfo"></div>` +
         `<div class="hub-cs-sect">Storage folder</div>` +
         `<div class="hub-cs-row"><span class="hub-cs-box">` +
         `<input type="text" class="hub-cs-in hub-cs-path" data-cs="root" placeholder="default: user/settings_hub/chat" spellcheck="false" autocomplete="off">` +
@@ -928,6 +1046,32 @@ function openSetPop() {
         void rootApply();
     });
 
+    // v89: the owner's own prompt-catalog folder (empty = the PolyStrata path).
+    const pdirIn = pop.querySelector('[data-cs="pdir"]');
+    const pdirInfo = pop.querySelector('[data-cs="pdirinfo"]');
+    const pdirApply = async () => {
+        const res = await applyChatSettings({ prompts_dir: pdirIn.value });
+        if (res.ok) {
+            pdirIn.value = res.config?.prompts_dir || "";
+            pdirIn.dataset.cur = pdirIn.value;
+            pdirInfo.classList.remove("hub-cs-err");
+            pdirInfo.textContent = "Now: " + (pdirIn.value || "models/LLM/prompts (default)") +
+                " - the 📜 list re-scans it on open";
+            if (promptPop) void refreshPromptList(false);   // a live refresh
+        } else {
+            pdirInfo.classList.add("hub-cs-err");
+            pdirInfo.textContent = "Not applied: " + (res.error || "error");
+        }
+    };
+    pdirIn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); void pdirApply(); }
+        else if (e.key === "Escape") { e.stopPropagation(); pdirIn.value = pdirIn.dataset.cur || ""; pdirIn.blur(); }
+    });
+    pop.querySelector('[data-cs-btn="pdirdef"]').addEventListener("click", () => {
+        pdirIn.value = "";
+        void pdirApply();
+    });
+
     // async initial values (the popup is already open)
     void (async () => {
         const st = await getChatUiState();
@@ -938,6 +1082,15 @@ function openSetPop() {
             ? ("saved: " + st.cfg.key + " - type + Enter to replace, empty + Enter clears")
             : "(no key) - type + Enter to set";
         syncNums(st.cfg);
+        if (pdirIn.isConnected && !pdirIn.value) {
+            pdirIn.value = st.cfg.prompts_dir || "";
+            pdirIn.dataset.cur = pdirIn.value;
+            if (pdirInfo.isConnected && !pdirInfo.textContent) {
+                pdirInfo.textContent = pdirIn.value
+                    ? "Custom folder - the 📜 list scans it"
+                    : "";
+            }
+        }
         streamSel.value = st.cfg.stream === false ? "0" : "1";
         keepSel.value = String(st.cfg.keep_sessions || 20);
         if (!info.textContent) {
@@ -1246,6 +1399,13 @@ function setStatusErr(msg) {
     statusEl.textContent = msg;
 }
 
+function fmtTok(n) {
+    const v = Number(n || 0);
+    if (v >= 10000) return Math.round(v / 1000) + "k";
+    if (v >= 1000) return (Math.round(v / 100) / 10) + "k";
+    return String(v);
+}
+
 function renderStatus() {
     if (!statusEl) return;
     statusEl.classList.remove("hub-chat-status-err");
@@ -1261,9 +1421,36 @@ function renderStatus() {
             last = bits.length ? "last: " + bits.join(", ") : "";
         }
     }
+    // v89: the context fill - the last answer carries ctx {used, total, est}.
+    // "ctx 3.2k/32k", "≈" when estimated (no usage.prompt_tokens), ⚠ past 90%.
+    let ctxSeg = "";
+    if (tab && tab.msgs.length) {
+        const a = [...tab.msgs].reverse().find((m) => m.role === "assistant" && m.ctx?.used);
+        if (a) {
+            const c = a.ctx;
+            const used = Number(c.used || 0);
+            const total = Number(c.total || 0);
+            let seg = (c.est ? "ctx ≈" : "ctx ") + fmtTok(used);
+            if (total > 0) {
+                seg += " / " + fmtTok(total);
+                if (used > total * 0.9) seg += " ⚠";
+            }
+            const tail = [];
+            if (c.images) tail.push(c.images + " img");
+            if (tail.length) seg += " (" + tail.join(", ") + ")";
+            ctxSeg = seg;
+            statusEl.title = ctxSeg
+                ? "Context: the request size after the last answer" +
+                  (total > 0 ? " of the model context" : " (the model context is unknown - set it in ⚙ 'context size')") +
+                  ". ≈ = the proxy's estimate (the exact prompt_tokens arrives when the server reports usage); ⚠ = past 90% - the model starts forgetting the oldest messages (trim the history or raise 'history depth' limits)."
+                : "";
+        }
+    }
     // v87: the model moved into the toolbar dropdown - the status line keeps
     // the server url + the last-answer stats (degraded errors override it).
-    statusEl.textContent = (cfg?.url || "no LLM server") + (last ? " · " + last : "");
+    statusEl.textContent = (cfg?.url || "no LLM server") +
+        (last ? " · " + last : "") +
+        (ctxSeg ? " · " + ctxSeg : "");
 }
 
 function noteDegraded(d) {
@@ -2337,6 +2524,7 @@ export function __chatTestHooks() {
         inputEl: () => inputEl,
         sendBtnEl: () => sendBtn,
         statusEl: () => statusEl,
+        renderStatus,
         noteEl: () => noteEl,
         modelSelEl: () => modelSel,
         settingsBtnEl: () => settingsBtn,
@@ -2359,6 +2547,10 @@ export function __chatTestHooks() {
         openSessPop,
         closeSessPop,
         sessPopEl: () => sessPop,
+        sessQuery: () => sessQuery,
+        setSessQuery: (q) => { sessQuery = q; },
+        renderSessList,
+        fmtTok,
         addFiles,
         clearPending,
         send: sendCurrent,

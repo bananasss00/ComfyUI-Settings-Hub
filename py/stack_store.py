@@ -492,7 +492,7 @@ async def stack_get(request):
 # (the web panel compares it against globalThis.__SettingsHubBuild and warns
 # about a half-updated install: web/ replaced while py/ stayed old, or the
 # page reloaded before ComfyUI restarted). AGENTS.md release checklist line.
-STACK_SERVER_VERSION = "v88"
+STACK_SERVER_VERSION = "v89"
 
 
 @PromptServer.instance.routes.get("/settings_hub/stack/health")
