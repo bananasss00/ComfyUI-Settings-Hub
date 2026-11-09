@@ -10,7 +10,7 @@
 // SUBMODULES are fresh.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v88";
+globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v90";
 
 // The whole hub interface lives inside a single LiteGraph DOM widget
 // (node.addDOMWidget), so the CSS in styles.css actually applies:
@@ -35,7 +35,7 @@ import {
     liveComboValues, coerceNumeric, removeItem, detectWidgetType,
     isMultilineWidget, portalKindOf, resolveBindingTarget, findHolderChainOf,
     findWidgetOnNode, allGraphs, forgetHubNode, nodeListOf,
-    childGraphsOfNode,
+    childGraphsOfNode, isPhantomHub,
     liveGraphs, isNodeInLiveTree, isNodeInViewTree, liveViewGraphs,
     synthSliderWindow, growSynthWindow, allHubs,
     effectiveSliderParams, getSliderOverride, hasSliderOverride,
@@ -66,7 +66,8 @@ import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel,
          getPinFoldHoverMs, setPinFoldHoverMs,
          getNavMarkersOn, setNavMarkersOn,
          getNavMenuOn, setNavMenuOn,
-         getNavHotkeysOn, setNavHotkeysOn } from "./global_settings.js";
+         getNavHotkeysOn, setNavHotkeysOn,
+         UI_FONT_SCALE_CHOICES, getUiFontScale, setUiFontScale, uiFontScaleLabel } from "./global_settings.js";
 import { firstMediaSpec } from "./viewer_gallery.js";
 // v70: the Paste Stack panel (web/stack.js) - v88: it is a SELF-MANAGED
 // utility: the panel ⚙ hosts its settings (On/Off, max, scope, storage
@@ -1017,6 +1018,12 @@ function ensurePinPanel(node, st) {
 
     ensurePinResizeWired();   // v87: the zoom-follow listener arms on first use
 
+    // v90: a VIRTUAL hub (phantom - no visible canvas node) gets a distinct
+    // floating header: the 📌 button materializes it ("return to the canvas"
+    // must never embed the UI into an invisible node), a 🗑 deletes it
+    // (double-click confirm) and the title renames on double-click.
+    const phantom = isPhantomHub(node);
+
     const panel = document.createElement("div");
     panel.className = "hub-pin-panel";
     panel.dataset.hubPin = "1";
@@ -1048,11 +1055,21 @@ function ensurePinPanel(node, st) {
     btnBack.type = "button";
     btnBack.className = "hub-pin-back hub-pin-btn";
     btnBack.textContent = "📌";
-    btnBack.title = "Return the hub onto the canvas";
+    btnBack.title = phantom
+        ? "Materialize: turn this virtual hub into a normal canvas node (keeps everything)"
+        : "Return the hub onto the canvas";
+    const btnDel = phantom ? document.createElement("button") : null;
+    if (btnDel) {
+        btnDel.type = "button";
+        btnDel.className = "hub-pin-btn hub-pin-del";
+        btnDel.textContent = "🗑";
+        btnDel.title = "Delete this virtual hub - its node and this window (click twice)";
+    }
     head.appendChild(grip);
     head.appendChild(ttl);
     head.appendChild(btnAuto);
     head.appendChild(btnMin);
+    if (btnDel) head.appendChild(btnDel);
     head.appendChild(btnBack);
 
     const body = document.createElement("div");
@@ -1071,6 +1088,7 @@ function ensurePinPanel(node, st) {
     let drag = null;
     head.addEventListener("pointerdown", (e) => {
         if (e.target.closest?.(".hub-pin-btn")) return;
+        if (e.target.closest?.("input")) return;   // v90: title rename typing
         e.preventDefault();
         e.stopPropagation();
         const r = panel.getBoundingClientRect();
@@ -1105,8 +1123,69 @@ function ensurePinPanel(node, st) {
     });
     btnBack.addEventListener("click", (e) => {
         e.stopPropagation();
-        toggleHubPinned(node, false);
+        unpinHubAction(node);   // v90: a phantom materializes instead of embedding into nothing
     });
+
+    // v90: 🗑 delete (phantom only) - double-click confirm, like the stack
+    // trash (AGENTS.md 5.1 rule 9: destructive actions are armed). The node
+    // removal fires onRemoved -> forgetHubNode + disposeHubVisuals, so the
+    // window tears down through the normal path - no extra cleanup here.
+    if (btnDel) {
+        let delArm = 0;
+        btnDel.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const now = Date.now();
+            if (now - delArm > 2500) {
+                delArm = now;
+                btnDel.textContent = "❗";
+                btnDel.title = "Click AGAIN to delete the virtual hub";
+                setTimeout(() => {
+                    try {
+                        btnDel.textContent = "🗑";
+                        btnDel.title = "Delete this virtual hub - its node and this window (click twice)";
+                    } catch (_) {}
+                }, 2600);
+                return;
+            }
+            delArm = 0;
+            try { node.graph?.remove(node); } catch (err) {
+                console.warn("[SettingsHub] virtual hub delete failed:", err);
+            }
+        });
+    }
+
+    // v90: rename a virtual hub in place (double-click the title, like the
+    // stack tab chips). Enter commits, Esc reverts, blur commits - the title
+    // is node.title, so it serializes with the workflow.
+    if (phantom) {
+        ttl.title = "Double-click to rename this virtual hub";
+        ttl.addEventListener("dblclick", (e) => {
+            e.stopPropagation();
+            if (ttl.querySelector("input")) return;
+            ttl.textContent = "";
+            const inp = document.createElement("input");
+            inp.type = "text";
+            inp.value = node.title || "";
+            inp.className = "hub-pin-rename";
+            inp.spellcheck = false;
+            ttl.appendChild(inp);
+            try { inp.focus(); inp.select(); } catch (_) {}
+            const commit = (ok) => {
+                const v = inp.value.trim();
+                if (ok && v) node.title = v;
+                ttl.textContent = node.title?.replace(/\s+/g, " ").trim() || "Virtual Hub";
+                try { node.setDirtyCanvas?.(true, true); } catch (_) {}
+            };
+            inp.addEventListener("keydown", (ev) => {
+                ev.stopPropagation();
+                if (ev.key === "Enter") { ev.preventDefault(); commit(true); }
+                else if (ev.key === "Escape") { ev.preventDefault(); commit(false); }
+            });
+            inp.addEventListener("blur", () => commit(true));
+            inp.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+            inp.addEventListener("dblclick", (ev) => ev.stopPropagation());
+        });
+    }
 
     // --- v27.2: SE-corner resize (same pointer-capture pattern as the drag)
     let rszDrag = null;
@@ -1407,6 +1486,26 @@ function homeHub(node) {
         st.__slimApplied = false;
     }
     return true;
+}
+
+/**
+ * v90: the un-pin affordance (📌 in the pin header / the tab-bar pin toggle)
+ * for a VIRTUAL hub must never embed the UI into an INVISIBLE node - a
+ * phantom materializes first: the flag clears, the node becomes a normal
+ * canvas hub (same id, same bindings, same presets, still in the registry),
+ * then the ordinary un-pin runs. A regular hub behaves exactly as before
+ * (a plain toggle).
+ */
+function unpinHubAction(node) {
+    if (node && node.type === "SettingsHub" && isPhantomHub(node)) {
+        try { getHubConfig(node).phantom = false; } catch (_) {}
+        try { node.setDirtyCanvas?.(true, true); } catch (_) {}
+        try {
+            showHubToast("👻→🧩 " + (node.title || "Virtual Hub") +
+                " is a canvas node now - it keeps all its bindings and presets.");
+        } catch (_) {}
+    }
+    return toggleHubPinned(node);
 }
 
 /**
@@ -2098,6 +2197,10 @@ function openSettingsPopup(node, trigger) {
     const curThumb = getMediaThumbSize();
     const thumbChoices = [...new Set([...SET_THUMB_SIZE_CHOICES, curThumb])]
         .sort((a, b) => a - b);
+    // v90: font-scale options = quick picks ∪ current (a custom 75..250
+    // value set elsewhere keeps its place in the list).
+    const curFs = getUiFontScale();
+    const fsChoices = [...new Set([...UI_FONT_SCALE_CHOICES, curFs])].sort((a, b) => a - b);
 
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-set-pop";
@@ -2190,6 +2293,17 @@ function openSettingsPopup(node, trigger) {
         `(＋🧭). Hotkeys: every point may carry a keyboard shortcut (assign it in the point popover, ` +
         `click the ⌨ chip) - pressing it jumps to the point from anywhere. This switch turns the ` +
         `hotkey engine ON/OFF globally (assignments are kept). Global for every hub.</div>` +
+
+        `<div class="hub-set-section">Interface (v90)</div>` +
+        `<label class="hub-set-row"><span>Font size (hub · stack · chat)</span>` +
+        `<select data-set-role="fontscale">` +
+        fsChoices.map((p) =>
+            `<option value="${p}">${esc(uiFontScaleLabel(p))}</option>`).join("") +
+        `</select></label>` +
+        `<div class="hub-pop-hint">ONE shared text scale for every hub window and floating panel, ` +
+        `the Paste Stack, the LLM Chat and all their popups. The interfaces ADAPT instead of zooming: ` +
+        `rows re-wrap, long values ellipsize with a tooltip, lists and panels scroll - nothing overflows. ` +
+        `Custom values 75-250% are honored.</div>` +
 
         `<div class="hub-set-section">Panels (v88)</div>` +
         `<div class="hub-pop-hint">The Paste Stack and the LLM Chat are STANDALONE utilities now - ` +
@@ -2319,6 +2433,18 @@ function openSettingsPopup(node, trigger) {
     nkSel.addEventListener("change", () => {
         setNavHotkeysOn(nkSel.value === "1");
         nkSel.value = getNavHotkeysOn() ? "1" : "0";
+        flashBtn(trigger, "✓");
+    });
+
+    // --- Interface: font size (v90) ------------------------------------------
+    // setUiFontScale flips the --sh-fs CSS variable on :root, so every open
+    // panel and popup reflows the moment the value changes; new popups read
+    // the getter at build time (a custom value keeps its option slot).
+    const fsSel = pop.querySelector('[data-set-role="fontscale"]');
+    fsSel.value = String(getUiFontScale());
+    fsSel.addEventListener("change", () => {
+        const applied = setUiFontScale(fsSel.value);
+        fsSel.value = String(applied);
         flashBtn(trigger, "✓");
     });
 
@@ -5518,7 +5644,7 @@ function wireEvents(node, st) {
                 cfg.hideChrome = !cfg.hideChrome;
                 renderHub(node);
                 break;
-            case "pin-toggle": toggleHubPinned(node); break;
+            case "pin-toggle": unpinHubAction(node); break;
             case "locate": {
                 const row = btn.closest("[data-hub-item]");
                 const item = cfg.items.find((i) => i.id === row?.dataset.hubItem);

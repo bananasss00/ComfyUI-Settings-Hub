@@ -8,7 +8,7 @@ import * as Pins from "./pins.js";
 // browser-cached stale file is still NAMED in F12 while per-file build
 // guards are gone (owner: a release must not rewrite every file).
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["core"] = "v70";
+globalThis.__SettingsHubLoaded["core"] = "v90";
 
 export const HUB_NODE_NAME = "SettingsHub";
 
@@ -1778,5 +1778,52 @@ export function createNewHub() {
     // Registry safety net: normally extension nodeCreated does this during
     // graph.add - but programmatic adds must never depend on that dispatch.
     try { trackHubNode(node); } catch (_) {}
+    return node;
+}
+
+// ---------------------------------------------------------------------------
+// v90: VIRTUAL HUBS (owner: "the project was planned as control panels on
+// the ComfyUI canvas, then the panel could be detached from the node; it is
+// used detached all the time. Add the ability to create hubs IN PROCESS (any
+// number, for different tasks) WITHOUT a node on the canvas. But the node
+// way must STAY - sometimes it is convenient to keep a control panel as a
+// node next to a group of nodes this hub is meant for").
+// ---------------------------------------------------------------------------
+// A virtual hub is a REAL SettingsHub node on the ROOT graph (the canonical
+// createNewHub path - the DOM-widget mount invariant #16 needs node.graph)
+// carrying cfg.phantom = true. The canvas hides it completely (hub_node.js
+// skips drawNode and hit-testing for phantom hubs), so the user only ever
+// sees its floating pin window; cfg.pinned is set at creation so renderHub
+// floats the panel the moment the UI ladder mounts the widget. The flag
+// lives in node.properties.hubConfig, i.e. it SERIALIZES with the workflow:
+// virtual hubs survive reloads (and re-float via the normal pinned-hub
+// path) without any extra storage. Materializing ("return to the canvas")
+// simply clears the flag - the very same node becomes a normal hub node.
+
+/** True when the hub node is a virtual (canvas-hidden) hub. Fail-open. */
+export function isPhantomHub(node) {
+    try {
+        return node?.type === HUB_NODE_NAME &&
+            node?.properties?.hubConfig?.phantom === true;
+    } catch (_) { return false; }
+}
+
+/**
+ * Create a virtual hub: a phantom SettingsHub node + a floating window.
+ * Returns the node (or null - createNewHub already alerted on failure).
+ * The pin window opens automatically as soon as the UI is mounted; the
+ * caller may pass a title (the panel header rename edits node.title too).
+ */
+export function createVirtualHub(title) {
+    const node = createNewHub();
+    if (!node) return null;
+    const cfg = getHubConfig(node);
+    cfg.phantom = true;      // canvas hiding + the phantom pin header (v90)
+    cfg.pinned = true;       // renderHub floats it right after the mount
+    cfg.pinPos = null;       // cascade position like every first pin
+    node.title = (typeof title === "string" && title.trim())
+        ? title.trim() : "Virtual Hub";
+    node.setDirtyCanvas?.(true, true);
+    syncNode(node);          // renderHub re-floats pinned hubs on mount
     return node;
 }

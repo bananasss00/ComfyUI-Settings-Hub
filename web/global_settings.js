@@ -441,3 +441,73 @@ export function setNavHotkeysOn(on) {
     writeBoolFlag(LS_NAV_HOTKEYS, navHotkeysOn);
     return navHotkeysOn;
 }
+
+// ============================================================================
+// v90: UI FONT SCALE (owner: "a setting to regulate the font size in the hub,
+// the stack and the chat - the main thing is that nothing goes out of bounds,
+// the interfaces must adapt correctly to different font sizes")
+// ----------------------------------------------------------------------------
+// ONE shared scale factor for ALL three utilities (hub windows + floating pin
+// panels, the Paste Stack, the LLM Chat - and every body-level popup they
+// open). It is a USER preference (localStorage, same family as the rest of
+// this file), applied through the CSS variable --sh-fs on :root: every
+// font-size in styles.css reads calc(var(--sh-fs, 1) * Npx), so a scale of
+// 1.4 turns 11px text into 15.4px WITHOUT rewriting any rule. At the default
+// 1 the calc folds back to exactly Npx - the historical look is unchanged.
+// The layout adapts rather than zooms: rows re-wrap, values ellipsize,
+// lists/panels scroll (the v90 overflow guards in styles.css).
+// ============================================================================
+
+const LS_FONT_SCALE = "settingshub.ui.fontScale";
+
+/** Quick-pick percentages offered by the three ⚙ popups (hub / stack / chat). */
+export const UI_FONT_SCALE_CHOICES = [80, 90, 100, 110, 125, 150, 175, 200];
+
+const FONT_SCALE_MIN = 75;
+const FONT_SCALE_MAX = 250;
+
+function readFontScale() {
+    try {
+        const n = Number(localStorage.getItem(LS_FONT_SCALE));
+        if (Number.isFinite(n) && n >= FONT_SCALE_MIN && n <= FONT_SCALE_MAX) return n;
+    } catch (_) { /* private mode etc. */ }
+    return 100;
+}
+
+let uiFontScale = readFontScale();
+
+function applyFontScaleVar() {
+    try {
+        document.documentElement.style.setProperty("--sh-fs", String(uiFontScale / 100));
+    } catch (_) { /* no document (tests) - nothing to scale */ }
+}
+
+applyFontScaleVar();   // boot: a reloaded page restores the saved scale BEFORE the panels build
+
+/** Current font scale in percent (100 = the historical sizes). */
+export function getUiFontScale() { return uiFontScale; }
+
+/**
+ * Set the scale (any number 75..250, not only the quick-pick values; the
+ * ⚙ SELECTS normalize through this too). Persists and applies immediately -
+ * the CSS var is inherited by every panel and popup the moment it changes.
+ */
+export function setUiFontScale(v) {
+    const n = Math.round(Number(v) * 100) / 100;
+    uiFontScale = (Number.isFinite(n) && n >= FONT_SCALE_MIN && n <= FONT_SCALE_MAX) ? n : 100;
+    try { localStorage.setItem(LS_FONT_SCALE, String(uiFontScale)); }
+    catch (_) { /* private mode etc. - session-only preference */ }
+    applyFontScaleVar();
+    return uiFontScale;
+}
+
+/** "100% · default" style label for the ⚙ selects. */
+export function uiFontScaleLabel(v) {
+    return `${v}%${v === 100 ? " · default" : ""}`;
+}
+
+/** Test hook: re-apply the current scale (idempotent). */
+export function applyUiFontScale() {
+    applyFontScaleVar();
+    return uiFontScale;
+}

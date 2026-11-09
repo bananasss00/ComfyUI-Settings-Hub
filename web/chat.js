@@ -149,9 +149,12 @@
 // v87 self-report (single-source version, docs/plan-versions.md): the last
 // FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["chat"] = "v89";
+globalThis.__SettingsHubLoaded["chat"] = "v90";
 
 import { app } from "../../scripts/app.js";
+// v90: the shared UI font scale - the chat ⚙ hosts the same row as the hub
+// ⚙ and the stack ⚙ (one localStorage value, one CSS variable --sh-fs).
+import { UI_FONT_SCALE_CHOICES, getUiFontScale, setUiFontScale, uiFontScaleLabel } from "./global_settings.js";
 
 // ---------------------------------------------------------------------------
 // Constants & state
@@ -213,6 +216,7 @@ function localToast(msg, ms = 2600) {
     try {
         const t = document.createElement("div");
         t.textContent = msg;
+        t.className = "hub-sh-note";   // v90: the modal guard hides it too
         Object.assign(t.style, {
             position: "fixed", left: "14px", bottom: "86px", zIndex: "999990",
             maxWidth: "440px", padding: "8px 12px", borderRadius: "8px",
@@ -875,6 +879,10 @@ const setNumGrid = (keys) =>
 function openSetPop() {
     if (setPop) { closeSetPop(); return; }
     closePromptPop(); closeGpuPop();
+    // v90: font-scale options = quick picks ∪ current (a custom 75..250
+    // value keeps its slot - same contract as the hub ⚙ row).
+    const curFs = getUiFontScale();
+    const fsChoices = [...new Set([...UI_FONT_SCALE_CHOICES, curFs])].sort((a, b) => a - b);
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-chat-setpop";
     pop.innerHTML =
@@ -919,6 +927,13 @@ function openSetPop() {
         `<label class="hub-cs-cell hub-cs-cell-wide" title="${TIMEOUT_TOOLTIP}">` +
         `<span class="hub-cs-lab">timeout, s</span>` +
         `<input type="number" step="30" min="30" max="86400" data-cs-num="timeout_s" class="hub-cs-in"></label>` +
+        // v90: the shared interface font scale (the same value the hub ⚙ and
+        // the stack ⚙ edit; applies instantly through the --sh-fs CSS var).
+        `<div class="hub-cs-sect">Interface (v90)</div>` +
+        `<label class="hub-cs-row"><span>Font size (hub · stack · chat)</span>` +
+        `<select class="hub-cs-sel" data-cs="font">` +
+        fsChoices.map((p) => `<option value="${p}">${esc(uiFontScaleLabel(p))}</option>`).join("") +
+        `</select></label>` +
         // v89: the owner's own prompt-catalog folder (empty = the PolyStrata path).
         `<div class="hub-cs-sect">System prompt catalog</div>` +
         `<div class="hub-cs-row"><span>Prompts folder</span><span class="hub-cs-box">` +
@@ -951,6 +966,13 @@ function openSetPop() {
         const on = panelSel.value === "1";
         setChatOn(on);   // Off tears the panel down - this popup dies with it
         if (on && setPop) panelSel.value = isChatOn() ? "1" : "0";
+    });
+    // v90: the shared font scale (applies instantly via the --sh-fs var -
+    // the open popup reflows with the rest of the UI).
+    const fsSel = pop.querySelector('[data-cs="font"]');
+    fsSel.value = String(getUiFontScale());
+    fsSel.addEventListener("change", () => {
+        fsSel.value = String(setUiFontScale(fsSel.value));
     });
     const nums = Array.from(pop.querySelectorAll("[data-cs-num]"));
     const syncNums = (c) => {

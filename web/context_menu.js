@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import {
     getHubConfig, getActiveTabId, createBinding, createPortalBinding,
-    createNewHub, HUB_NODE_NAME, detectWidgetType, portalKindOf, allHubs,
+    createNewHub, createVirtualHub, HUB_NODE_NAME, detectWidgetType, portalKindOf, allHubs,
     isViewerNode, createViewerBinding, isInternalWidget,
     mediaLoaderInfo, createMediaBinding, createBindingsBulk,
     createNodeUIBinding,
@@ -13,7 +13,7 @@ import {
 // browser-cached stale file is still NAMED in F12 while per-file build
 // guards are gone (owner: a release must not rewrite every file).
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["context_menu"] = "v70";
+globalThis.__SettingsHubLoaded["context_menu"] = "v90";
 
 // ============================================================================
 // 1) Standard node menu hook (canvas widgets)
@@ -34,6 +34,7 @@ export function attachContextMenu() {
     attachDomWidgetPinMenu();
     attachCtrlRmbOverride();
     attachPanelSurfacePinMenu();
+    attachCanvasVhubMenu();   // v90: "New virtual hub" in the canvas RMB menu
 
     app.registerExtension({
         name: "Comfy.SettingsHub.context",
@@ -933,6 +934,68 @@ function isTextField(el) {
         return !["checkbox", "range", "button", "submit", "color", "file", "radio"].includes(t);
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// v90: VIRTUAL HUBS - the canvas right-click menu gains "＋ New virtual hub".
+// A virtual hub is a floating control window with NO node on the canvas (the
+// owner: "create hubs in process, any number for different tasks, without a
+// node on the canvas; but the node way must stay"). The litegraph canvas
+// menu is patched once on the prototype, the same way nav_points.js adds
+// "🧭 Add navigation point here" (own flag - no cross-talk with theirs).
+// NOTE: no import from hub_ui_renderer here ON PURPOSE - the v82/v89 module
+// dependency graph keeps context_menu independent of the renderer so a
+// nav_points/renderer cascade can never kill the menus (smoke_menu MC).
+// ---------------------------------------------------------------------------
+
+function vhToast(msg) {
+    try {
+        const t = document.createElement("div");
+        t.className = "hub-sh-note";   // v90: the modal guard hides it too
+        t.textContent = msg;
+        Object.assign(t.style, {
+            position: "fixed", left: "14px", bottom: "120px", zIndex: "999990",
+            maxWidth: "460px", padding: "8px 12px", borderRadius: "8px",
+            background: "rgba(24,28,38,0.95)", color: "#dfe6f5",
+            border: "1px solid #3d5a80", font: "12px/1.45 system-ui, sans-serif",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.4)", userSelect: "none",
+        });
+        document.body.appendChild(t);
+        setTimeout(() => t.remove(), 4200);
+    } catch (_) { /* a toast must never break the menu callback */ }
+}
+
+function attachCanvasVhubMenu() {
+    try {
+        const proto = window.LGraphCanvas?.prototype ?? app.canvas?.constructor?.prototype ?? null;
+        if (!proto || typeof proto.getCanvasMenuOptions !== "function" ||
+            proto.__hubVhubMenu) return;
+        proto.__hubVhubMenu = true;
+        const orig = proto.getCanvasMenuOptions;
+        proto.getCanvasMenuOptions = function (...args) {
+            const items = orig.apply(this, args);
+            try {
+                if (Array.isArray(items)) {
+                    items.unshift({
+                        content: "＋ New virtual hub (floating, no canvas node)",
+                        callback: () => {
+                            // createVirtualHub alerts + returns null on
+                            // failure itself (the canonical-create guard).
+                            const node = createVirtualHub();
+                            if (node) {
+                                vhToast(
+                                    "👻 Virtual hub created - the floating window opens when its UI mounts. " +
+                                    "📌 in its header turns it back into a canvas node.");
+                            }
+                        },
+                    });
+                }
+            } catch (_) { /* the menu must never die because of our item */ }
+            return items;
+        };
+    } catch (err) {
+        console.warn("[SettingsHub] canvas virtual-hub menu unavailable:", err);
+    }
 }
 
 function attachDomWidgetPinMenu() {

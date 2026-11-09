@@ -2,7 +2,7 @@
 
 .settings-hub {
     font-family: "Inter", -apple-system, sans-serif;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     color: #e0e0e0;
     user-select: none;
 }
@@ -15,7 +15,7 @@
     padding: 2px 4px;
     background: #16162a;
     border-bottom: 1px solid #333355;
-    min-height: 24px;
+    min-height: calc(var(--sh-fs, 1) * 24px);
     flex: 0 0 auto;
 }
 
@@ -25,7 +25,7 @@
     border: 1px solid #444;
     border-radius: 3px;
     padding: 2px 6px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     cursor: pointer;
     white-space: nowrap;
     max-width: 100px;
@@ -47,7 +47,7 @@
 
 .hub-tab-del {
     opacity: 0.4;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     margin-left: 3px;
 }
 
@@ -61,7 +61,7 @@
     border: 1px dashed #444;
     border-radius: 3px;
     padding: 2px 6px;
-    font-size: 12px;
+    font-size: calc(var(--sh-fs, 1) * 12px);
     cursor: pointer;
     line-height: 1;
 }
@@ -93,7 +93,7 @@
     gap: 4px;
     padding: 3px 2px;
     border-bottom: 1px solid #2a2a3e;
-    min-height: 22px;
+    min-height: calc(var(--sh-fs, 1) * 22px);
 }
 
 .hub-item-row:hover {
@@ -104,7 +104,7 @@
 .hub-drag-handle {
     cursor: grab;
     color: #555;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     user-select: none;
     flex-shrink: 0;
 }
@@ -121,7 +121,7 @@
     min-width: 56px;
     max-width: 45%;
     color: #ccc;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -153,9 +153,9 @@
     color: #e0e0e0;
     border: 1px solid #444;
     border-radius: 3px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     padding: 2px 4px;
-    max-width: 100px;
+    max-width: calc(var(--sh-fs, 1) * 100px);
 }
 
 .hub-mirror input[type="checkbox"] {
@@ -167,7 +167,7 @@
 /* Orphan indicator */
 .hub-orphan {
     color: #ff8866;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     flex-shrink: 0;
 }
 
@@ -178,7 +178,7 @@
     border: 1px solid #444;
     border-radius: 3px;
     padding: 1px 5px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     cursor: pointer;
     flex-shrink: 0;
     line-height: 1.2;
@@ -190,14 +190,14 @@
 }
 
 .hub-locate {
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
 }
 
 /* Divider */
 .hub-divider-label {
     flex: 1;
     color: #6b6b8e;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     font-style: italic;
     padding: 2px 0;
 }
@@ -217,7 +217,7 @@
     color: #e0e0e0;
     border: 1px solid #444;
     border-radius: 3px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 2px 5px;
     flex: 1;
     display: inline-flex;
@@ -249,7 +249,7 @@
     border-radius: 8px;
     padding: 0 5px;
     color: #b0b0e0;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
 }
 
 /* Context menu (custom menu for DOM-widget text fields) */
@@ -263,13 +263,13 @@
     min-width: 190px;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
     font-family: "Inter", -apple-system, sans-serif;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     color: #e0e0e0;
 }
 
 .hub-menu-title {
     color: #8a8aae;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 2px 8px 4px;
     border-bottom: 1px solid #2a2a3e;
     margin-bottom: 3px;
@@ -329,7 +329,7 @@
 /* Tab count chip */
 .hub-tab-count {
     color: #6b6b8e;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
 }
 
 /* Inline rename input (tabs / labels / dividers) */
@@ -339,7 +339,7 @@
     color: #fff;
     border: 1px solid #6b6b8e;
     border-radius: 2px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     padding: 0 4px;
     width: 90px;
     outline: none;
@@ -354,7 +354,7 @@
 /* Empty state */
 .hub-empty {
     color: #555;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     text-align: center;
     padding: 14px 6px;
     border: 1px dashed #33334e;
@@ -398,7 +398,7 @@ span.hub-mirror.hub-mirror-grow {
 }
 
 .hub-mirror input.hub-num-input {
-    width: 52px;
+    width: calc(var(--sh-fs, 1) * 52px);
     appearance: textfield;
 }
 
@@ -412,7 +412,7 @@ span.hub-mirror.hub-mirror-grow {
 .hub-text-area {
     resize: vertical;
     min-width: 130px;
-    min-height: 46px;
+    min-height: calc(var(--sh-fs, 1) * 46px);
     line-height: 1.35;
     font-family: inherit;
     /* v30.2: the mirror height is MANAGED IN JS - every hub textarea gets an
@@ -469,7 +469,7 @@ span.hub-mirror.hub-mirror-text {
    dragging would break the row layout. */
 .hub-portal-ghost textarea {
     resize: vertical !important;
-    min-height: 46px;
+    min-height: calc(var(--sh-fs, 1) * 46px);
     max-width: 100%;
 }
 
@@ -477,7 +477,7 @@ span.hub-mirror.hub-mirror-text {
    element IS the editor, not a wrapper div). */
 textarea.hub-portal-ghost {
     resize: vertical !important;
-    min-height: 46px;
+    min-height: calc(var(--sh-fs, 1) * 46px);
     max-width: 100%;
 }
 
@@ -509,7 +509,7 @@ textarea.hub-portal-ghost {
 
 .hub-portal-tag {
     color: #6b8ecb;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     padding: 0 2px;
     user-select: none;
     align-self: flex-start;
@@ -517,7 +517,7 @@ textarea.hub-portal-ghost {
 
 .hub-portal-host.hub-portal-broken {
     color: #ff8866;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 4px;
 }
 
@@ -621,7 +621,7 @@ textarea.hub-portal-ghost {
     color: #c6cbde;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1;
     padding: 3px 6px;
     opacity: 0;
@@ -682,7 +682,7 @@ textarea.hub-portal-ghost {
     color: #c6cbde;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     line-height: 1;
     padding: 4px 7px;
     opacity: 0;
@@ -700,8 +700,8 @@ textarea.hub-portal-ghost {
 }
 .hub-gal-prev { left: 4px; top: 50%; transform: translateY(-50%); }
 .hub-gal-next { right: 4px; top: 50%; transform: translateY(-50%); }
-.hub-gal-fs { right: 4px; top: 4px; font-size: 12px; padding: 3px 6px; }
-.hub-gal-dl { right: 34px; top: 4px; font-size: 12px; padding: 3px 6px; }
+.hub-gal-fs { right: 4px; top: 4px; font-size: calc(var(--sh-fs, 1) * 12px); padding: 3px 6px; }
+.hub-gal-dl { right: 34px; top: 4px; font-size: calc(var(--sh-fs, 1) * 12px); padding: 3px 6px; }
 
 .hub-gal-counter {
     position: absolute;
@@ -711,7 +711,7 @@ textarea.hub-portal-ghost {
     border: 1px solid #3a3a5e;
     border-radius: 4px;
     color: #aeb4c9;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     line-height: 1.4;
     padding: 1px 5px;
     pointer-events: none;
@@ -786,14 +786,14 @@ textarea.hub-portal-ghost {
     color: #c6cbde;
     border-radius: 6px;
     cursor: pointer;
-    font-size: 14px;
+    font-size: calc(var(--sh-fs, 1) * 14px);
     line-height: 1;
     padding: 10px 14px;
     transition: background 0.12s ease;
 }
 .hub-fs-btn:hover { background: #2a2a46; color: #fff; }
-.hub-fs-prev { left: 14px; top: 50%; transform: translateY(-50%); font-size: 18px; }
-.hub-fs-next { right: 14px; top: 50%; transform: translateY(-50%); font-size: 18px; }
+.hub-fs-prev { left: 14px; top: 50%; transform: translateY(-50%); font-size: calc(var(--sh-fs, 1) * 18px); }
+.hub-fs-next { right: 14px; top: 50%; transform: translateY(-50%); font-size: calc(var(--sh-fs, 1) * 18px); }
 .hub-fs-close { right: 14px; top: 14px; }
 .hub-fs-dl { right: 66px; top: 14px; }
 
@@ -806,7 +806,7 @@ textarea.hub-portal-ghost {
     border: 1px solid #3a3a5e;
     border-radius: 6px;
     color: #aeb4c9;
-    font-size: 12px;
+    font-size: calc(var(--sh-fs, 1) * 12px);
     padding: 3px 10px;
     pointer-events: none;
 }
@@ -851,7 +851,7 @@ button.hub-btn.hub-btn-action:hover {
     background: #2b3550;
     border-color: #45538a;
     color: #cfe0ff;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     padding: 2px 10px;
 }
 
@@ -862,7 +862,7 @@ button.hub-btn.hub-btn-action:hover {
 
 .hub-queue-times {
     color: #77789e;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     flex-shrink: 0;
 }
 
@@ -872,7 +872,7 @@ input.hub-queue-count {
     color: #e8e8ff;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     padding: 2px 5px;
     outline: none;
     appearance: textfield;
@@ -929,7 +929,7 @@ button.hub-combo {
     color: #e0e0e0;
     border: 1px solid #444;
     border-radius: 3px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     padding: 2px 6px;
     /* v31: fills the stretching mirror (was capped at 110px while the hub
        could grow much wider). The label span still ellipsizes. */
@@ -955,7 +955,7 @@ button.hub-combo:hover {
 
 .hub-combo-caret {
     color: #8899bb;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     flex: 0 0 auto;
 }
 
@@ -981,7 +981,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
     border: 1px solid #44445e;
     border-radius: 3px;
     color: #eaeaff;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     font-family: inherit;
     padding: 3px 6px;
     outline: none;
@@ -1000,7 +1000,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
 .hub-combo-opt {
     padding: 3px 8px;
     cursor: pointer;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1030,7 +1030,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
     padding: 6px 8px;
     color: #78789f;
     font-style: italic;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
 }
 
 .hub-combo-hint {
@@ -1038,7 +1038,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
     padding-top: 3px;
     border-top: 1px solid #2a2a3e;
     color: #66668a;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     white-space: nowrap;
 }
 
@@ -1049,7 +1049,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
    --------------------------------------------------------------------------- */
 
 .hub-btn.hub-gear {
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     opacity: 0.72;
 }
 
@@ -1080,7 +1080,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
 
 .hub-pop-grid label {
     color: #9aa0c0;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
@@ -1093,7 +1093,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
     border: 1px solid #33334a;
     border-radius: 4px;
     color: #e8e8f2;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
 }
 
 .hub-pop-grid input.hub-pop-bad {
@@ -1106,7 +1106,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
     align-items: center;
     gap: 6px;
     margin-top: 8px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     color: #b6bccf;
     cursor: pointer;
 }
@@ -1114,7 +1114,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
 .hub-pop-hint {
     margin-top: 4px;
     color: #66668a;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
 }
 
 .hub-pop-btns {
@@ -1130,7 +1130,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
     border: 1px solid #3a3a55;
     border-radius: 4px;
     color: #dcdcea;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     cursor: pointer;
 }
 
@@ -1167,7 +1167,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
 }
 
 .hub-combo-opt .hc-dir {
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     color: #7e7ea6;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     white-space: nowrap;
@@ -1208,13 +1208,13 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
     align-items: center;
     justify-content: center;
     min-width: 18px;
-    height: 16px;
+    height: calc(var(--sh-fs, 1) * 16px);
     padding: 0 5px;
     border-radius: 8px;
     background: #23233a;
     border: 1px solid #3a3a55;
     color: #9aa0c0;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1;
     flex-shrink: 0;
 }
@@ -1289,12 +1289,12 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
 
 .hub-pin-grip {
     color: #66668a;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
 }
 
 .hub-pin-title {
     flex: 1;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     color: #cfcfe6;
     white-space: nowrap;
     overflow: hidden;
@@ -1306,7 +1306,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
     border: 1px solid #3a3a55;
     border-radius: 3px;
     color: #c9c9de;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 1px 6px;
     cursor: pointer;
     line-height: 1.3;
@@ -1319,7 +1319,7 @@ button.hub-combo.hub-combo-missing .hub-combo-label {
 }
 
 button.hub-pin-back {
-    font-size: 12px;
+    font-size: calc(var(--sh-fs, 1) * 12px);
     padding: 1px 7px;
 }
 
@@ -1446,7 +1446,7 @@ button.hub-pin-back {
     border: 1px solid #3a3a55;
     border-radius: 3px;
     padding: 1px 5px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     cursor: pointer;
     filter: grayscale(1);
     opacity: 0.65;
@@ -1484,7 +1484,7 @@ button.hub-pin-back {
     color: #e8e8ff;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 2px 5px;
     outline: none;
     transition: width 0.15s ease;
@@ -1505,7 +1505,7 @@ button.hub-pin-back {
     border: 1px solid #3a3a55;
     border-radius: 3px;
     padding: 1px 5px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     cursor: pointer;
 }
 
@@ -1575,13 +1575,13 @@ button.hub-pin-back {
 
 .hub-media-ph {
     color: #77789e;
-    font-size: 13px;
+    font-size: calc(var(--sh-fs, 1) * 13px);
     line-height: 1;
 }
 
 .hub-media-name {
     color: #9a9abe;
-    font-size: 8px;
+    font-size: calc(var(--sh-fs, 1) * 8px);
     max-width: 48px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1598,7 +1598,7 @@ button.hub-pin-back {
     width: 22px;
     height: 30px;
     padding: 0;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     line-height: 1;
     display: inline-flex;
     align-items: center;
@@ -1664,7 +1664,7 @@ button.hub-pin-back {
     max-width: 300px;
 }
 .hub-media-preview-name {
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     color: #aaa;
     padding: 2px 2px 0;
     text-align: center;
@@ -1728,7 +1728,7 @@ button.hub-pin-back {
     border: 0;
     border-radius: 2px;
     padding: 2px 6px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1.3;
     cursor: pointer;
     white-space: nowrap;
@@ -1752,20 +1752,20 @@ button.hub-pin-back {
     padding: 0 4px;
 }
 .hub-media-thumb-size-label {
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     color: #6b6b8e;
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
 .hub-media-thumb-size-input {
     width: 80px;
-    height: 14px;
+    height: calc(var(--sh-fs, 1) * 14px);
     cursor: pointer;
     accent-color: #7a9dd6;
     background: transparent;
 }
 .hub-media-thumb-size-val {
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     color: #7a9dd6;
     font-family: monospace;
     min-width: 22px;
@@ -1837,7 +1837,7 @@ button.hub-pin-back {
     line-height: 60px;
 }
 .hub-media-thumb-name {
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     color: #c6cbde;
     padding: 2px 3px 0;
     overflow: hidden;
@@ -1851,17 +1851,17 @@ button.hub-pin-back {
    jump when the dim text arrives). Monospace so the numbers align
    across cells in the same row. */
 .hub-media-thumb-dim {
-    font-size: 8px;
+    font-size: calc(var(--sh-fs, 1) * 8px);
     color: #7a8aae;
     padding: 0 3px 2px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: monospace;
-    min-height: 10px;
+    min-height: calc(var(--sh-fs, 1) * 10px);
 }
 .hub-media-thumb-dir {
-    font-size: 8px;
+    font-size: calc(var(--sh-fs, 1) * 8px);
     color: #6b6b8e;
     padding: 0 3px 2px;
     overflow: hidden;
@@ -1871,13 +1871,13 @@ button.hub-pin-back {
 }
 .hub-media-thumb-none {
     color: #77789e;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     text-align: center;
     padding: 20px;
     grid-column: 1 / -1;
 }
 .hub-media-thumb-hint {
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     color: #6b6b8e;
     padding: 4px 6px;
     border-top: 1px solid #33334e;
@@ -1902,7 +1902,7 @@ button.hub-pin-back {
 
 .hub-search-empty {
     color: #77789e;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     text-align: center;
     padding: 8px 6px;
 }
@@ -1916,8 +1916,8 @@ button.hub-pin-back {
    v87: the popup grew for years (Sync/Previews/Picker/Pin/Stack/Chat...) and
    could exceed the viewport height - cap it and SCROLL (a slim styled bar). */
 .hub-set-pop {
-    min-width: 240px;
-    max-width: 300px;
+    min-width: calc(var(--sh-fs, 1) * 240px);
+    max-width: calc(var(--sh-fs, 1) * 300px);
     max-height: min(92vh, calc(100vh - 12px));
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -1936,7 +1936,7 @@ button.hub-pin-back {
     margin: 10px 2px 2px;
     padding-top: 7px;
     border-top: 1px solid #26263e;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     font-weight: 700;
     letter-spacing: 1.2px;
     text-transform: uppercase;
@@ -1954,7 +1954,7 @@ button.hub-pin-back {
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     color: #c9c9e8;
     margin: 8px 2px;
     white-space: nowrap;
@@ -1965,7 +1965,7 @@ button.hub-pin-back {
     color: #e8e8ff;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     padding: 2px 4px;
     outline: none;
     max-width: 150px;
@@ -1990,7 +1990,7 @@ button.hub-pin-back {
     color: #e8e8ff;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     padding: 2px 4px;
     outline: none;
     width: 148px;
@@ -2009,7 +2009,7 @@ button.hub-pin-back {
     color: #9a9ac0;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1.4;
     padding: 2px 6px;
     cursor: pointer;
@@ -2023,7 +2023,7 @@ button.hub-pin-back {
 
 .hub-set-pathinfo {
     margin: -2px 2px 6px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1.4;
     color: #7f7fa8;
     word-break: break-all;
@@ -2052,7 +2052,7 @@ button.hub-pin-back {
     position: relative;
     flex: 0 0 auto;
     margin: 0 1px;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     line-height: 1;
     padding: 2px 3px;
     cursor: pointer;
@@ -2134,7 +2134,7 @@ button.hub-pin-back {
 .hub-ppr-type {
     flex: 0 0 auto;
     color: #8a8aae;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
 }
 
 .hub-ppr-val {
@@ -2144,7 +2144,7 @@ button.hub-pin-back {
     text-overflow: ellipsis;
     white-space: nowrap;
     color: #b0b0cc;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
 }
 
 .hub-ppr-drift-mark {
@@ -2168,7 +2168,7 @@ button.hub-pin-back {
     border-radius: 3px;
     padding: 4px 6px;
     cursor: pointer;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
 }
 
 .hub-ppr-foot button:hover {
@@ -2203,7 +2203,7 @@ button.hub-pin-back {
 
 .hub-pp-sec {
     color: #8a8aae;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     letter-spacing: 0.04em;
     padding: 4px 4px 2px;
     white-space: nowrap;
@@ -2239,7 +2239,7 @@ button.hub-pin-back {
     flex: 0 0 auto;
     width: 9px;
     color: #e8c352;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
 }
 
 .hub-pp-name {
@@ -2255,7 +2255,7 @@ button.hub-pin-back {
     background: #241f30;
     border-radius: 7px;
     padding: 0 5px;
-    font-size: 8.5px;
+    font-size: calc(var(--sh-fs, 1) * 8.5px);
     max-width: 80px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2268,7 +2268,7 @@ button.hub-pin-back {
     background: #22223a;
     border-radius: 7px;
     padding: 0 5px;
-    font-size: 8.5px;
+    font-size: calc(var(--sh-fs, 1) * 8.5px);
 }
 
 .hub-pp-dead {
@@ -2277,7 +2277,7 @@ button.hub-pin-back {
     border: 1px solid #6a5a30;
     border-radius: 7px;
     padding: 0 4px;
-    font-size: 8.5px;
+    font-size: calc(var(--sh-fs, 1) * 8.5px);
     cursor: pointer;
 }
 
@@ -2307,7 +2307,7 @@ button.hub-pin-back {
     background: none;
     border: none;
     color: #c0c0e0;
-    font-size: 9.5px;
+    font-size: calc(var(--sh-fs, 1) * 9.5px);
     padding: 1px 2px;
     cursor: pointer;
     border-radius: 2px;
@@ -2319,7 +2319,7 @@ button.hub-pin-back {
 
 .hub-pp-empty {
     color: #77789e;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 8px 6px;
     text-align: center;
 }
@@ -2337,7 +2337,7 @@ button.hub-pin-back {
     color: #e8e8ff;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     padding: 3px 5px;
     outline: none;
 }
@@ -2348,7 +2348,7 @@ button.hub-pin-back {
 
 .hub-qs-info {
     color: #9a9abe;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 4px 2px;
 }
 
@@ -2385,7 +2385,7 @@ button.hub-pin-back {
     border: 1px solid #3a3a55;
     color: #c0c0e0;
     border-radius: 3px;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     padding: 1px 5px;
     cursor: pointer;
 }
@@ -2397,7 +2397,7 @@ button.hub-pin-back {
 
 .hub-qs-none {
     color: #77789e;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 4px;
 }
 
@@ -2413,7 +2413,7 @@ button.hub-pin-back {
     border: 1px solid #3a3a55;
     color: #e0e0e0;
     border-radius: 3px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 2px 8px;
     cursor: pointer;
 }
@@ -2435,14 +2435,14 @@ button.hub-pin-back {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
 }
 
 .hub-ppr-arrow {
     flex: 0 0 auto;
     color: #7a7ae0;
     padding: 0 1px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
 }
 
 .hub-ppr-onlychg {
@@ -2451,7 +2451,7 @@ button.hub-pin-back {
     align-items: center;
     gap: 4px;
     color: #9a9abe;
-    font-size: 9.5px;
+    font-size: calc(var(--sh-fs, 1) * 9.5px);
     cursor: pointer;
     white-space: nowrap;
     min-width: 0;
@@ -2493,7 +2493,7 @@ button.hub-pin-back {
     padding: 6px 10px;
     color: #e0e0e0;
     font-family: "Inter", -apple-system, sans-serif;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
     max-width: 70vw;
 }
@@ -2509,7 +2509,7 @@ button.hub-pin-back {
     border: 1px solid #5a5a9e;
     color: #d0d0ff;
     border-radius: 3px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 1px 7px;
     cursor: pointer;
     white-space: nowrap;
@@ -2524,7 +2524,7 @@ button.hub-pin-back {
     border: none;
     color: #77789e;
     cursor: pointer;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 0 1px;
 }
 
@@ -2545,7 +2545,7 @@ button.hub-pin-back {
     max-width: 92vw;
     box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
     font-family: "Inter", -apple-system, sans-serif;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     color: #e0e0e0;
 }
 .hub-batch-head {
@@ -2559,7 +2559,7 @@ button.hub-pin-back {
 }
 .hub-batch-title {
     color: #c8c8e0;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2569,7 +2569,7 @@ button.hub-pin-back {
     border: 0;
     color: #77778e;
     cursor: pointer;
-    font-size: 13px;
+    font-size: calc(var(--sh-fs, 1) * 13px);
     line-height: 1;
     padding: 0 2px;
 }
@@ -2596,7 +2596,7 @@ button.hub-pin-back {
 .hub-batch-chip {
     flex: 0 0 auto;
     color: #8a8aae;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     border: 1px solid #33334e;
     border-radius: 3px;
     padding: 0 4px;
@@ -2608,7 +2608,7 @@ button.hub-pin-back {
     align-items: center;
     padding: 2px 2px 6px;
     color: #8a8aae;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     cursor: pointer;
     user-select: none;
 }
@@ -2628,7 +2628,7 @@ button.hub-pin-back {
     border: 1px solid #33334e;
     border-radius: 3px;
     padding: 3px 5px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     min-width: 0;
 }
 .hub-batch-foot { display: flex; gap: 6px; justify-content: flex-end; }
@@ -2639,7 +2639,7 @@ button.hub-pin-back {
     border-radius: 3px;
     padding: 3px 10px;
     cursor: pointer;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
 }
 .hub-batch-btn:hover { background: #3a3a5e; }
 .hub-batch-btn.hub-batch-primary { background: #3a2a5e; border-color: #6b5a9e; }
@@ -2678,7 +2678,7 @@ button.hub-pin-back {
 }
 
 .hub-nav-ico {
-    font-size: 12px;
+    font-size: calc(var(--sh-fs, 1) * 12px);
     flex: none;
 }
 
@@ -2688,7 +2688,7 @@ button.hub-pin-back {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 12px;
+    font-size: calc(var(--sh-fs, 1) * 12px);
     color: #dcdce8;
 }
 
@@ -2698,7 +2698,7 @@ button.hub-pin-back {
 
 .hub-nav-zoom {
     flex: none;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1;
     padding: 3px 6px;
     border-radius: 8px;
@@ -2720,7 +2720,7 @@ button.hub-pin-back {
    a combo is assigned; dimmed while the engine is globally off */
 .hub-nav-key {
     flex: none;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1;
     padding: 3px 6px;
     border-radius: 8px;
@@ -2753,7 +2753,7 @@ button.hub-pin-back {
     border: 1px solid #6b6b8e;
     color: #e0e0e0;
     font-family: "Inter", -apple-system, sans-serif;
-    font-size: 12px;
+    font-size: calc(var(--sh-fs, 1) * 12px);
     padding: 6px 14px;
     border-radius: 8px;
     pointer-events: none;
@@ -2775,7 +2775,7 @@ button.hub-pin-back {
 }
 
 .hub-nav-grid label {
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     color: #8e8ea8;
 }
 
@@ -2785,7 +2785,7 @@ button.hub-pin-back {
     color: #e0e0e0;
     border-radius: 4px;
     padding: 3px 6px;
-    font-size: 12px;
+    font-size: calc(var(--sh-fs, 1) * 12px);
     width: 100%;
     box-sizing: border-box;
     font-family: inherit;
@@ -2866,7 +2866,7 @@ button.hub-pin-back {
     border-radius: 6px;
     box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
     font-family: "Inter", -apple-system, sans-serif;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     color: #e0e0e0;
     overflow: hidden;
 }
@@ -2883,7 +2883,7 @@ button.hub-pin-back {
     user-select: none;
 }
 
-.hub-stack-ico { font-size: 12px; }
+.hub-stack-ico { font-size: calc(var(--sh-fs, 1) * 12px); }
 .hub-stack-title { font-weight: 600; color: #fff; letter-spacing: 0.2px; }
 
 /* v77: per-workflow scope badge - sits between the title and the count. */
@@ -2893,8 +2893,8 @@ button.hub-pin-back {
     border: 1px solid #8a6a3e;
     border-radius: 8px;
     padding: 0 6px;
-    font-size: 9px;
-    line-height: 14px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
+    line-height: calc(var(--sh-fs, 1) * 14px);
     margin-left: 6px;
     white-space: nowrap;
 }
@@ -2904,8 +2904,8 @@ button.hub-pin-back {
     color: #fff;
     border-radius: 8px;
     padding: 0 6px;
-    font-size: 10px;
-    line-height: 15px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    line-height: calc(var(--sh-fs, 1) * 15px);
     margin-left: auto;
 }
 
@@ -2915,7 +2915,7 @@ button.hub-pin-back {
     border: 1px solid #444;
     border-radius: 3px;
     padding: 1px 6px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     cursor: pointer;
     margin-left: 0;
 }
@@ -2939,7 +2939,7 @@ button.hub-pin-back {
     background: #4a1f1f;
     color: #ffd9d9;
     border-bottom: 1px solid #a5533f;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1.4;
     flex: 0 0 auto;
 }
@@ -3030,7 +3030,7 @@ button.hub-pin-back {
     margin: auto;
     text-align: center;
     color: #77779a;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     line-height: 1.5;
     padding: 12px;
 }
@@ -3067,7 +3067,7 @@ button.hub-pin-back {
     overflow: hidden;
     color: #d5d9e8;
     line-height: 1.35;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
 }
 
 .hub-stack-meta {
@@ -3076,7 +3076,7 @@ button.hub-pin-back {
     gap: 8px;
     margin-top: 3px;
     color: #66668a;
-    font-size: 9.5px;
+    font-size: calc(var(--sh-fs, 1) * 9.5px);
     font-family: ui-monospace, monospace;
 }
 
@@ -3085,15 +3085,15 @@ button.hub-pin-back {
     top: 3px;
     right: 3px;
     width: 16px;
-    height: 16px;
-    line-height: 14px;
+    height: calc(var(--sh-fs, 1) * 16px);
+    line-height: calc(var(--sh-fs, 1) * 14px);
     text-align: center;
     background: #2a2a3e;
     color: #a66;
     border: 1px solid #444;
     border-radius: 3px;
     cursor: pointer;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 0;
     opacity: 0;
     transition: opacity 0.12s;
@@ -3142,7 +3142,7 @@ button.hub-pin-back {
     border: 1px solid #44445e;
     border-radius: 12px;
     color: #cfd6ee;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     cursor: pointer;
     box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
     user-select: none;
@@ -3155,7 +3155,7 @@ button.hub-pin-back {
     color: #fff;
     border-radius: 8px;
     padding: 0 5px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     margin-left: 2px;
 }
 
@@ -3183,15 +3183,15 @@ button.hub-pin-back {
 
 .hub-stack-act {
     width: 16px;
-    height: 16px;
-    line-height: 14px;
+    height: calc(var(--sh-fs, 1) * 16px);
+    line-height: calc(var(--sh-fs, 1) * 14px);
     text-align: center;
     background: #2a2a3e;
     color: #9fb6d8;
     border: 1px solid #44445e;
     border-radius: 3px;
     cursor: pointer;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 0;
     text-decoration: none;
     display: block;
@@ -3201,7 +3201,7 @@ button.hub-pin-back {
 
 .hub-stack-name {
     color: #a8b3d8;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     max-width: 132px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3221,7 +3221,7 @@ button.hub-pin-back {
     align-items: center;
     gap: 6px;
     color: #9fb6d8;
-    font-size: 15px;
+    font-size: calc(var(--sh-fs, 1) * 15px);
     padding: 2px 0;
 }
 
@@ -3233,10 +3233,10 @@ button.hub-pin-back {
     gap: 7px;
     padding: 4px 0;
     color: #cfd6ee;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
 }
 
-.hub-stack-file-ico { font-size: 17px; }
+.hub-stack-file-ico { font-size: calc(var(--sh-fs, 1) * 17px); }
 
 .hub-stack-file-name {
     overflow: hidden;
@@ -3262,7 +3262,7 @@ button.hub-pin-back {
     border: 1px solid #3d5a80;
     border-radius: 6px;
     overflow: hidden;
-    font-size: 22px;
+    font-size: calc(var(--sh-fs, 1) * 22px);
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
 }
 
@@ -3318,7 +3318,7 @@ button.hub-pin-back {
     align-items: center;
     gap: 3px;
     font: inherit;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     color: #b9c2d8;
     background: #171730;
     border: 1px solid #34345a;
@@ -3339,11 +3339,11 @@ button.hub-pin-back {
     text-overflow: ellipsis;
 }
 .hub-stack-tab-n {
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     opacity: 0.75;
 }
 .hub-stack-tab-x {
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     line-height: 1;
     opacity: 0.55;
     padding: 0 1px;
@@ -3358,7 +3358,7 @@ button.hub-pin-back {
 .hub-stack-tab-add {
     flex: 0 0 auto;
     font: inherit;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     line-height: 1;
     color: #b9c2d8;
     background: transparent;
@@ -3375,7 +3375,7 @@ button.hub-pin-back {
     border: 1px solid #3d5a80;
     border-radius: 4px;
     color: #dfe6f5;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 2px 5px;
     outline: none;
 }
@@ -3418,14 +3418,14 @@ button.hub-pin-back {
 }
 .hub-stack-viewer-title {
     font-weight: 700;
-    font-size: 12px;
+    font-size: calc(var(--sh-fs, 1) * 12px);
     color: #eaf1fb;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 .hub-stack-viewer-n {
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     color: #8fa0c0;
     white-space: nowrap;
 }
@@ -3440,7 +3440,7 @@ button.hub-pin-back {
     padding: 10px 12px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font: calc(var(--sh-fs, 1) * 12px)/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
     color: #d5d9e8;
     user-select: text;
 }
@@ -3459,7 +3459,7 @@ button.hub-pin-back {
     max-height: 90vh;
 }
 
-.hub-stack-viewer-meta { font-size: 10px; color: #8fa0c0; white-space: nowrap; }
+.hub-stack-viewer-meta { font-size: calc(var(--sh-fs, 1) * 10px); color: #8fa0c0; white-space: nowrap; }
 
 .hub-stack-viewer-head .hub-stack-viewer-dl {
     text-decoration: none;
@@ -3514,7 +3514,7 @@ button.hub-pin-back {
     flex-direction: column;
     align-items: center;
     gap: 14px;
-    font-size: 44px;
+    font-size: calc(var(--sh-fs, 1) * 44px);
 }
 .hub-stack-viewer-audio-el { width: min(520px, 80vw); }
 
@@ -3530,7 +3530,7 @@ button.hub-pin-back {
     padding: 12px 14px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font: calc(var(--sh-fs, 1) * 12px)/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
     color: #d5d9e8;
     user-select: text;
 }
@@ -3543,11 +3543,11 @@ button.hub-pin-back {
     justify-content: center;
     gap: 8px;
     color: #8fa0c0;
-    font-size: 13px;
+    font-size: calc(var(--sh-fs, 1) * 13px);
     text-align: center;
 }
-.hub-stack-viewer-noprev-ico { font-size: 42px; }
-.hub-stack-viewer-noprev-sub { font-size: 11px; color: #66668a; }
+.hub-stack-viewer-noprev-ico { font-size: calc(var(--sh-fs, 1) * 42px); }
+.hub-stack-viewer-noprev-sub { font-size: calc(var(--sh-fs, 1) * 11px); color: #66668a; }
 
 .hub-stack-viewer-hint {
     flex: 0 0 auto;
@@ -3555,7 +3555,7 @@ button.hub-pin-back {
     border-top: 1px solid #2c2c50;
     background: #12122a;
     color: #66668a;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     text-align: center;
     user-select: none;
 }
@@ -3569,7 +3569,7 @@ button.hub-pin-back {
    ======================================================================== */
 
 .hub-stack-kind.hub-stack-move {
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     line-height: 1;
     padding: 1px 7px;
 }
@@ -3587,7 +3587,7 @@ button.hub-pin-back {
     left: 2px;
     top: 50%;
     transform: translateY(-50%);
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1;
     color: #7c86a8;
     pointer-events: none;
@@ -3633,7 +3633,7 @@ button.hub-pin-back {
     border: 1px solid #3a3a55;
     border-radius: 4px;
     color: #d5d9e8;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 2px 5px;
     outline: none;
 }
@@ -3646,7 +3646,7 @@ button.hub-pin-back {
     border: 1px solid #3a3a55;
     border-radius: 8px;
     color: #8a8ab0;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     padding: 1px 6px;
     cursor: pointer;
     user-select: none;
@@ -3674,7 +3674,7 @@ button.hub-pin-back {
     position: absolute;
     left: 5px;
     top: 2px;
-    font-size: 8px;
+    font-size: calc(var(--sh-fs, 1) * 8px);
     opacity: 0.85;
     pointer-events: none;
     z-index: 1;
@@ -3696,7 +3696,7 @@ button.hub-pin-back {
     border: 1px solid #2c4460;
     color: #9fc0e8;
     border-radius: 7px;
-    font-size: 8.5px;
+    font-size: calc(var(--sh-fs, 1) * 8.5px);
     padding: 0 5px;
     cursor: pointer;
     user-select: none;
@@ -3712,7 +3712,7 @@ button.hub-pin-back {
 
 .hub-stack-uses {
     color: #7f8fae;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
 }
 
 .hub-stack-tagslot {
@@ -3734,7 +3734,7 @@ button.hub-pin-back {
     border: 1px solid #3a3a55;
     border-radius: 4px;
     color: #d5d9e8;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     padding: 3px 6px;
     outline: none;
     width: 100%;
@@ -3750,9 +3750,9 @@ button.hub-pin-back {
 
 .hub-stack-edit-btns .hub-stack-act {
     width: 20px;
-    height: 18px;
-    line-height: 16px;
-    font-size: 11px;
+    height: calc(var(--sh-fs, 1) * 18px);
+    line-height: calc(var(--sh-fs, 1) * 16px);
+    font-size: calc(var(--sh-fs, 1) * 11px);
 }
 
 input.hub-text-input.hub-stack-drop-hot-text,
@@ -3793,8 +3793,8 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     user-select: none;
 }
 
-.hub-cmp-ico { font-size: 12px; }
-.hub-cmp-title { font-weight: 600; color: #fff; font-size: 12px; letter-spacing: 0.2px; }
+.hub-cmp-ico { font-size: calc(var(--sh-fs, 1) * 12px); }
+.hub-cmp-title { font-weight: 600; color: #fff; font-size: calc(var(--sh-fs, 1) * 12px); letter-spacing: 0.2px; }
 .hub-cmp-head .hub-btn {
     margin-left: 0;
     background: #2a2a3e;
@@ -3802,7 +3802,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #444;
     border-radius: 3px;
     cursor: pointer;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 1px 6px;
 }
 
@@ -3864,7 +3864,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     background: #58c470;
     color: #0d2a15;
     border-radius: 8px;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     padding: 1px 4px;
 }
 
@@ -3876,7 +3876,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     justify-content: center;
     text-align: center;
     color: #66668a;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     padding: 10px;
     pointer-events: none;
 }
@@ -3885,7 +3885,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     display: flex;
     gap: 10px;
     padding: 5px 8px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     color: #8a8ab0;
     border-top: 1px solid #2a2a3e;
     user-select: none;
@@ -3896,7 +3896,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 .hub-cmp-sizes {
     display: none;
     padding: 0 8px 4px 8px;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     color: #66668a;
     white-space: nowrap;
     overflow: hidden;
@@ -3910,7 +3910,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 .hub-cmp-slotlabel[data-slot="B"] b { color: #5a9bd8; }
 .hub-cmp-lbltext { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hub-cmp-slot-on .hub-cmp-lbltext { color: #dfe6f5; }
-.hub-cmp-clear { background: none; border: none; color: #666; cursor: pointer; font-size: 9px; padding: 0; }
+.hub-cmp-clear { background: none; border: none; color: #666; cursor: pointer; font-size: calc(var(--sh-fs, 1) * 9px); padding: 0; }
 .hub-cmp-clear:hover { color: #ff9c9c; }
 
 .hub-cmp-tools {
@@ -3920,7 +3920,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     padding: 5px 8px 6px 8px;
     border-top: 1px solid #2a2a3e;
     color: #8a8ab0;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
 }
 
 .hub-cmp-mode {
@@ -3928,7 +3928,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #3a3a55;
     color: #d5d9e8;
     border-radius: 4px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 2px 4px;
     outline: none;
 }
@@ -3968,7 +3968,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border-radius: 6px;
     box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
     font-family: "Inter", -apple-system, sans-serif;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     color: #e0e0e0;
     overflow: hidden;
 }
@@ -3985,7 +3985,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     user-select: none;
 }
 
-.hub-chat-ico { font-size: 12px; }
+.hub-chat-ico { font-size: calc(var(--sh-fs, 1) * 12px); }
 .hub-chat-title { font-weight: 600; color: #fff; letter-spacing: 0.2px; }
 .hub-chat-hspace { flex: 1 1 auto; }
 
@@ -3995,7 +3995,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #444;
     border-radius: 3px;
     padding: 1px 6px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     cursor: pointer;
 }
 
@@ -4015,7 +4015,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     color: #cfe0ff;
     border: 1px solid #44445e;
     border-radius: 3px;
-    font: 10px/1.4 "Inter", -apple-system, sans-serif;
+    font: calc(var(--sh-fs, 1) * 10px)/1.4 "Inter", -apple-system, sans-serif;
     padding: 1px 2px;
     outline: none;
     white-space: nowrap;
@@ -4029,7 +4029,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     background: #4a1f1f;
     color: #ffd9d9;
     border-bottom: 1px solid #a5533f;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1.4;
     flex: 0 0 auto;
 }
@@ -4081,7 +4081,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 .hub-chat-tab-on { background: #31415f; border-color: #4d6a93; }
 
 .hub-chat-tab-title {
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     color: #cdd6ee;
     white-space: nowrap;
     overflow: hidden;
@@ -4095,7 +4095,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     background: transparent;
     border: none;
     color: #77779c;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     cursor: pointer;
     padding: 0 3px;
     border-radius: 6px;
@@ -4109,7 +4109,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     color: #9aa6c8;
     border-radius: 8px;
     padding: 1px 8px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     cursor: pointer;
     flex: 0 0 auto;
 }
@@ -4120,7 +4120,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #4d6a93;
     color: #fff;
     border-radius: 8px;
-    font: 10px/1.4 "Inter", -apple-system, sans-serif;
+    font: calc(var(--sh-fs, 1) * 10px)/1.4 "Inter", -apple-system, sans-serif;
     padding: 1px 8px;
     width: 140px;
     outline: none;
@@ -4150,7 +4150,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border-radius: 8px;
     padding: 5px 8px;
     line-height: 1.45;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     overflow-wrap: anywhere;
 }
 
@@ -4175,9 +4175,9 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     margin-bottom: 3px;
 }
 
-.hub-chat-msg-role { font-weight: 700; font-size: 9px; letter-spacing: 0.4px; text-transform: uppercase; color: #8fa7d9; }
+.hub-chat-msg-role { font-weight: 700; font-size: calc(var(--sh-fs, 1) * 9px); letter-spacing: 0.4px; text-transform: uppercase; color: #8fa7d9; }
 .hub-chat-msg-user .hub-chat-msg-role { color: #9fc0f0; }
-.hub-chat-msg-meta { font-size: 9px; color: #6d6d92; }
+.hub-chat-msg-meta { font-size: calc(var(--sh-fs, 1) * 9px); color: #6d6d92; }
 
 .hub-chat-msg-acts { margin-left: auto; display: inline-flex; gap: 2px; opacity: 0; transition: opacity 0.12s; }
 .hub-chat-msg:hover .hub-chat-msg-acts { opacity: 1; }
@@ -4187,7 +4187,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #3c3c60;
     color: #9aa6c8;
     border-radius: 3px;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     padding: 0 4px;
     cursor: pointer;
 }
@@ -4201,7 +4201,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #3a3a5c;
     color: #b0a6e8;
     border-radius: 4px;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     padding: 0 6px;
     cursor: pointer;
 }
@@ -4214,7 +4214,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border-left: 2px solid #4a4a7e;
     border-radius: 0 4px 4px 0;
     color: #9d9dc4;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
 }
 
 /* markdown-lite */
@@ -4227,7 +4227,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border-radius: 3px;
     padding: 0 3px;
     font-family: ui-monospace, Consolas, monospace;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
 }
 
 .hub-chat-code {
@@ -4244,7 +4244,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     justify-content: space-between;
     background: #1a1a30;
     padding: 1px 6px;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     color: #77779c;
     border-bottom: 1px solid #2f2f4e;
 }
@@ -4254,7 +4254,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: none;
     color: #9aa6c8;
     cursor: pointer;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
 }
 .hub-chat-code-copy:hover { color: #fff; }
 
@@ -4263,7 +4263,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     padding: 6px 8px;
     overflow-x: auto;
     font-family: ui-monospace, Consolas, monospace;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1.4;
     color: #d5dcf0;
 }
@@ -4290,7 +4290,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #3a3a5c;
     color: #cdd6ee;
     border-radius: 3px;
-    font-size: 8px;
+    font-size: calc(var(--sh-fs, 1) * 8px);
     padding: 0 2px;
     cursor: pointer;
     opacity: 0;
@@ -4307,19 +4307,19 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #2f2f4e;
     border-radius: 5px;
     padding: 2px 6px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     color: #cdd6ee;
     cursor: zoom-in;
     max-width: 200px;
 }
 .hub-chat-filechip-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.hub-chat-filechip-size { color: #6d6d92; font-size: 9px; }
+.hub-chat-filechip-size { color: #6d6d92; font-size: calc(var(--sh-fs, 1) * 9px); }
 
 .hub-chat-empty {
     margin: auto;
     text-align: center;
     color: #6d6d92;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     line-height: 1.6;
     user-select: none;
 }
@@ -4332,10 +4332,10 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #4d6a93;
     border-radius: 4px;
     color: #eef2ff;
-    font: 11px/1.45 "Inter", -apple-system, sans-serif;
+    font: calc(var(--sh-fs, 1) * 11px)/1.45 "Inter", -apple-system, sans-serif;
     padding: 5px 7px;
     resize: vertical;
-    min-height: 54px;
+    min-height: calc(var(--sh-fs, 1) * 54px);
     outline: none;
 }
 
@@ -4346,7 +4346,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #3d5a80;
     color: #d5e4ff;
     border-radius: 4px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     padding: 1px 8px;
     cursor: pointer;
 }
@@ -4383,15 +4383,15 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     display: block;
 }
 
-.hub-chat-atch-ico { font-size: 14px; padding: 0 2px; }
-.hub-chat-atch-name { font-size: 10px; color: #cdd6ee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 90px; }
-.hub-chat-atch-size { font-size: 9px; color: #6d6d92; }
+.hub-chat-atch-ico { font-size: calc(var(--sh-fs, 1) * 14px); padding: 0 2px; }
+.hub-chat-atch-name { font-size: calc(var(--sh-fs, 1) * 10px); color: #cdd6ee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 90px; }
+.hub-chat-atch-size { font-size: calc(var(--sh-fs, 1) * 9px); color: #6d6d92; }
 
 .hub-chat-atch-view, .hub-chat-atch-del {
     background: transparent;
     border: none;
     color: #9aa6c8;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     cursor: pointer;
     padding: 0 2px;
 }
@@ -4412,7 +4412,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #44445e;
     color: #9aa6c8;
     border-radius: 4px;
-    font-size: 12px;
+    font-size: calc(var(--sh-fs, 1) * 12px);
     padding: 4px 7px;
     cursor: pointer;
     flex: 0 0 auto;
@@ -4425,7 +4425,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #3c3c60;
     border-radius: 5px;
     color: #eef2ff;
-    font: 11px/1.45 "Inter", -apple-system, sans-serif;
+    font: calc(var(--sh-fs, 1) * 11px)/1.45 "Inter", -apple-system, sans-serif;
     padding: 5px 8px;
     resize: none;
     outline: none;
@@ -4438,7 +4438,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #3d5a80;
     color: #fff;
     border-radius: 5px;
-    font-size: 12px;
+    font-size: calc(var(--sh-fs, 1) * 12px);
     padding: 4px 10px;
     cursor: pointer;
     flex: 0 0 auto;
@@ -4454,7 +4454,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 /* status line */
 .hub-chat-status {
     padding: 2px 10px 5px;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     color: #6d6d92;
     white-space: nowrap;
     overflow: hidden;
@@ -4485,7 +4485,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border: 1px solid #44445e;
     border-radius: 16px;
     padding: 4px 12px;
-    font-size: 14px;
+    font-size: calc(var(--sh-fs, 1) * 14px);
     cursor: pointer;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
     user-select: none;
@@ -4505,7 +4505,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
     padding: 6px;
     z-index: 100002;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
 }
 
 /* v89: the search row - multi-word, by the title, the content or both */
@@ -4539,20 +4539,20 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 /* v89: the matched content line under the title */
 .hub-chat-sess-hit {
     color: #8fa7d9;
-    font-size: 9.5px;
+    font-size: calc(var(--sh-fs, 1) * 9.5px);
     line-height: 1.3;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.hub-chat-sess-n { color: #6d6d92; font-size: 9px; flex: 0 0 auto; }
-.hub-chat-sess-open { color: #7fb0ff; font-size: 8px; }
+.hub-chat-sess-n { color: #6d6d92; font-size: calc(var(--sh-fs, 1) * 9px); flex: 0 0 auto; }
+.hub-chat-sess-open { color: #7fb0ff; font-size: calc(var(--sh-fs, 1) * 8px); }
 
 .hub-chat-sess-del {
     background: transparent;
     border: none;
     cursor: pointer;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     opacity: 0;
     transition: opacity 0.12s;
 }
@@ -4574,7 +4574,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     border-radius: 4px;
     padding: 10px;
     font-family: ui-monospace, Consolas, monospace;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     color: #d5dcf0;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -4607,13 +4607,13 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 
 .hub-chat-toolbar .hub-chat-model {
     flex: 1 1 90px;
-    min-width: 70px;
-    max-width: 220px;
+    min-width: calc(var(--sh-fs, 1) * 70px);
+    max-width: calc(var(--sh-fs, 1) * 220px);
     background: #10101e;
     color: #cfe0ff;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font: 10px/1.5 "Inter", -apple-system, sans-serif;
+    font: calc(var(--sh-fs, 1) * 10px)/1.5 "Inter", -apple-system, sans-serif;
     padding: 1px 3px;
     outline: none;
     white-space: nowrap;
@@ -4627,7 +4627,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     color: #a8b4d8;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font: 10px/1.5 "Inter", -apple-system, sans-serif;
+    font: calc(var(--sh-fs, 1) * 10px)/1.5 "Inter", -apple-system, sans-serif;
     padding: 1px 6px;
     cursor: pointer;
     white-space: nowrap;
@@ -4650,7 +4650,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 /* --- shared popup pieces (⚙ / 📜 / ⚡ are all .hub-menu instances) -------- */
 
 .hub-chat-setpop, .hub-chat-promptpop, .hub-chat-gpupop {
-    width: 300px;
+    width: calc(var(--sh-fs, 1) * 300px);
     max-width: calc(100vw - 16px);
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -4674,7 +4674,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     justify-content: space-between;
     gap: 6px;
     margin: 7px 2px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     color: #c9c9e8;
     white-space: nowrap;
 }
@@ -4685,7 +4685,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     color: #e8e8ff;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font: 11px/1.5 "Inter", -apple-system, sans-serif;
+    font: calc(var(--sh-fs, 1) * 11px)/1.5 "Inter", -apple-system, sans-serif;
     padding: 2px 4px;
     outline: none;
     width: 148px;
@@ -4701,10 +4701,10 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     color: #e8e8ff;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     padding: 2px 4px;
     outline: none;
-    max-width: 160px;
+    max-width: calc(var(--sh-fs, 1) * 160px);
 }
 .hub-cs-sel:focus { border-color: #5a5a9e; }
 
@@ -4727,7 +4727,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 .hub-cs-cell .hub-cs-in { width: 100%; box-sizing: border-box; }
 .hub-cs-cell-wide { margin: 6px 2px; }
 .hub-cs-lab {
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     line-height: 1.2;
     letter-spacing: 0.3px;
     color: #9a9ac4;
@@ -4740,7 +4740,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     margin: 10px 2px 2px;
     padding-top: 7px;
     border-top: 1px solid #26263e;
-    font-size: 9px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
     font-weight: 700;
     letter-spacing: 1.2px;
     text-transform: uppercase;
@@ -4749,7 +4749,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 
 .hub-cs-info {
     margin: 3px 2px 6px;
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1.45;
     color: #8fa7d9;
     overflow-wrap: anywhere;
@@ -4762,7 +4762,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     color: #9a9ac0;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font: 10px/1.5 "Inter", -apple-system, sans-serif;
+    font: calc(var(--sh-fs, 1) * 10px)/1.5 "Inter", -apple-system, sans-serif;
     padding: 2px 7px;
     cursor: pointer;
     white-space: nowrap;
@@ -4771,7 +4771,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 
 .hub-cs-hint {
     margin: 8px 2px 2px;
-    font-size: 9.5px;
+    font-size: calc(var(--sh-fs, 1) * 9.5px);
     line-height: 1.5;
     color: #77779e;
     overflow-wrap: anywhere;
@@ -4819,7 +4819,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     color: #c9c9e8;
     border: 1px solid transparent;
     border-radius: 3px;
-    font: 11px/1.4 "Inter", -apple-system, sans-serif;
+    font: calc(var(--sh-fs, 1) * 11px)/1.4 "Inter", -apple-system, sans-serif;
     padding: 3px 6px;
     cursor: pointer;
     white-space: nowrap;
@@ -4835,7 +4835,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 }
 .hub-cp-item.hub-cp-item-on:hover { background: #2c4f46; color: #e2fff4; }
 .hub-cp-empty {
-    font-size: 10px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
     line-height: 1.45;
     color: #8a8ab0;
     padding: 5px 4px;
@@ -4850,11 +4850,11 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     color: #e8e8ff;
     border: 1px solid #3a3a55;
     border-radius: 3px;
-    font: 11px/1.5 "Inter", -apple-system, sans-serif;
+    font: calc(var(--sh-fs, 1) * 11px)/1.5 "Inter", -apple-system, sans-serif;
     padding: 4px 6px;
     outline: none;
     resize: vertical;
-    min-height: 84px;
+    min-height: calc(var(--sh-fs, 1) * 84px);
 }
 .hub-cp-ta:focus { border-color: #5a5a9e; }
 .hub-cp-btns { display: flex; gap: 6px; margin: 7px 2px; flex-wrap: wrap; }
@@ -4879,7 +4879,7 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 
 .hub-gp-state {
     margin: 6px 2px;
-    font-size: 11px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
     color: #dfe6f5;
     line-height: 1.5;
     overflow-wrap: anywhere;
@@ -4888,3 +4888,80 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 .hub-gp-unload { border-color: #6a4040; color: #d8a8a8; }
 .hub-gp-unload:hover { background: #3a2226; border-color: #a5535f; color: #ffd9d9; }
 .hub-gp-mib { width: 120px; }
+
+/* ===========================================================================
+   v90 MODAL GUARD (owner: "when I open ComfyUI windows, like the Comfy
+   settings, my stacker, hub and chat are ON TOP of those windows, do not
+   react to clicks and get in the way of interacting with the settings window
+   or other ComfyUI windows").
+   The entry installs a watcher (settings_hub.js) that toggles
+   body.sh-modal-open whenever a ComfyUI modal (.comfy-modal shown) or a
+   native <dialog open> is on screen. While it is, EVERY SettingsHub floating
+   layer steps aside: invisible and click-through. Rects stay intact
+   (visibility, not display) so the geometry/clamp code never reads zeros,
+   and everything comes back the moment the modal closes.
+   =========================================================================== */
+body.sh-modal-open .hub-pin-panel,
+body.sh-modal-open .hub-menu,
+body.sh-modal-open .hub-toast,
+body.sh-modal-open .hub-batch,
+body.sh-modal-open .hub-nav-aim-hint,
+body.sh-modal-open .hub-cmp-panel,
+body.sh-modal-open .hub-cmp-menu,
+body.sh-modal-open .hub-stack-panel,
+body.sh-modal-open .hub-stack-chip,
+body.sh-modal-open .hub-stack-ghost,
+body.sh-modal-open .hub-stack-targetbox,
+body.sh-modal-open .hub-stack-viewer,
+body.sh-modal-open .hub-chat-panel,
+body.sh-modal-open .hub-chat-chip,
+body.sh-modal-open .hub-fs-overlay,
+body.sh-modal-open .hub-media-preview-pop,
+body.sh-modal-open .hub-media-thumb-pop,
+body.sh-modal-open .hub-sh-note {
+    visibility: hidden !important;
+    pointer-events: none !important;
+}
+
+/* v90 font-scale overflow guards: extra safety for the rows the curated
+   conversions above cannot cover. Everything here is a no-op at scale 1. */
+/* settings rows: the box may shrink under a long label instead of pushing */
+.hub-cs-row > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* chat toolbar: many buttons + a wide model select must stay on one line */
+.hub-chat-toolbar .hub-chat-tbbtn {
+    flex: 0 0 auto;
+    min-width: 0;
+}
+/* hub toolbar buttons never push the tab bar wider than the panel */
+.hub-tab-bar {
+    flex-wrap: wrap;
+}
+/* floating pin panel: the body scrolls when scaled content outgrows a
+   user-fixed window (pinSize) instead of clipping silently */
+.hub-pin-panel .hub-pin-body {
+    overflow: auto;
+}
+
+/* v90: phantom-hub floating header extras.
+   .hub-pin-rename - the inline rename input of a virtual hub title;
+   .hub-pin-del-arm - the armed ("click again") state of the delete button. */
+.hub-pin-rename {
+    width: 130px;
+    min-width: 0;
+    font-size: calc(var(--sh-fs, 1) * 11px);
+    padding: 1px 4px;
+    border: 1px solid #5a5a9e;
+    border-radius: 3px;
+    background: #10101e;
+    color: #eef2ff;
+    outline: none;
+}
+.hub-pin-btn.hub-pin-del-arm {
+    background: #5a2a2a;
+    border-color: #a5533f;
+    color: #ffd9d9;
+}

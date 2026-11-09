@@ -56,6 +56,7 @@ function localToast(msg, ms = 2600) {
     try {
         const t = document.createElement("div");
         t.textContent = msg;
+        t.className = "hub-sh-note";   // v90: the modal guard hides it too
         Object.assign(t.style, {
             position: "fixed", left: "14px", bottom: "52px", zIndex: "999990",
             maxWidth: "440px", padding: "8px 12px", borderRadius: "8px",

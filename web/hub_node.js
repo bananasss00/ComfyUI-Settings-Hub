@@ -1,5 +1,5 @@
 import { app } from "../../scripts/app.js";
-import { getHubConfig, trackHubNode, forgetHubNode, isNodeInViewTree } from "./core.js";
+import { getHubConfig, trackHubNode, forgetHubNode, isNodeInViewTree, isPhantomHub } from "./core.js";
 import { syncNode } from "./sync.js";
 import { relayoutHub, disposeHubVisuals, pruneForeignHubs, installHubTabWatch, isHubUiMounted, forceHubRebuild, showHubToast } from "./hub_ui_renderer.js";
 import * as Pins from "./pins.js";
@@ -10,7 +10,7 @@ import * as Pins from "./pins.js";
 // browser-cached stale file is still NAMED in F12 while per-file build
 // guards are gone (owner: a release must not rewrite every file).
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["hub_node"] = "v67";
+globalThis.__SettingsHubLoaded["hub_node"] = "v90";
 
 export const NODE_NAME = "SettingsHub";
 
@@ -92,6 +92,13 @@ export function registerHubNode() {
 // Wraps LGraphCanvas.prototype.drawNode once; after the node is drawn the
 // badge is painted on top - equivalent to an onDrawForeground hook without
 // touching every registered node class.
+//
+// v90 VIRTUAL HUBS: the SAME wrapper is where phantom hubs disappear from
+// the canvas. drawNode is simply not called for them (their DOM widget is
+// floating in the pin window, so nothing visual is lost), and getNodeOnPos
+// (the litegraph hit-test behind click/drag/select) pretends they do not
+// exist - an invisible node must never swallow a click aimed at a node
+// underneath, never be draggable, never be selectable.
 
 function installBadgePainter() {
     if (badgeInstalled) return;
@@ -104,6 +111,13 @@ function installBadgePainter() {
 
     const origDrawNode = LGraphCanvasProto.drawNode;
     LGraphCanvasProto.drawNode = function (...args) {
+        try {
+            // v90: virtual hubs are canvas-invisible - skip the draw AND the
+            // badge (a phantom hub never carries pin badges worth painting:
+            // its whole UI lives in the floating window).
+            const n0 = args?.[0];
+            if (n0 && isPhantomHub(n0)) return undefined;
+        } catch (_) {}
         const result = origDrawNode.apply(this, args);
         try {
             const [node, ctx] = args;
@@ -130,6 +144,23 @@ function installBadgePainter() {
         } catch (_) {}
         return result;
     };
+
+    // v90: hit-test skip. getNodeOnPos returns the TOPMOST node under the
+    // cursor; if that is a phantom, no other node contains the point (the
+    // phantom is on top), so answering null is always the correct outcome:
+    // clicks on empty canvas fall through, clicks on real nodes still find
+    // them (the phantom never shadows anything - it is transparent).
+    if (typeof LGraphCanvasProto.getNodeOnPos === "function" &&
+        !LGraphCanvasProto.__hubPhantomHit) {
+        LGraphCanvasProto.__hubPhantomHit = true;
+        const origGetNodeOnPos = LGraphCanvasProto.getNodeOnPos;
+        LGraphCanvasProto.getNodeOnPos = function (...args) {
+            const hit = origGetNodeOnPos.apply(this, args);
+            try { if (hit && isPhantomHub(hit)) return null; } catch (_) {}
+            return hit;
+        };
+    }
+
     badgeInstalled = true;
 }
 

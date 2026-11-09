@@ -35,7 +35,7 @@
 // v89 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v89";
+globalThis.__SettingsHubLoaded["stack"] = "v90";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -223,6 +223,9 @@ globalThis.__SettingsHubLoaded["stack"] = "v89";
 
 import { app } from "../../scripts/app.js";
 import { stackBridge } from "./sync.js";
+// v90: the shared UI font scale - the stack ⚙ hosts the same row as the hub
+// ⚙ and the chat ⚙ (one localStorage value, one CSS variable --sh-fs).
+import { UI_FONT_SCALE_CHOICES, getUiFontScale, setUiFontScale, uiFontScaleLabel } from "./global_settings.js";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -285,6 +288,7 @@ function localToast(msg, ms = 2600) {
     try {
         const t = document.createElement("div");
         t.textContent = msg;
+        t.className = "hub-sh-note";   // v90: the modal guard hides it too
         Object.assign(t.style, {
             position: "fixed", left: "14px", bottom: "52px", zIndex: "999990",
             maxWidth: "440px", padding: "8px 12px", borderRadius: "8px",
@@ -600,6 +604,10 @@ const stkPopKey = (e) => {
 
 function openStkSettingsPop() {
     if (stkPop) { closeStkPop(); return; }
+    // v90: font-scale options = quick picks ∪ current (a custom 75..250
+    // value keeps its slot - same contract as the hub ⚙ row).
+    const curFs = getUiFontScale();
+    const fsChoices = [...new Set([...UI_FONT_SCALE_CHOICES, curFs])].sort((a, b) => a - b);
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-stk-setpop";
     pop.innerHTML =
@@ -621,6 +629,12 @@ function openStkSettingsPop() {
         `<select class="hub-cs-sel" data-stk="scope">` +
         `<option value="global">Shared - all workflows (default)</option>` +
         `<option value="workflow">Per-workflow</option>` +
+        `</select></label>` +
+        // v90: the shared interface font scale (the same value the hub ⚙ and
+        // the chat ⚙ edit; applies instantly through the --sh-fs CSS var).
+        `<label class="hub-cs-row"><span>Font size (hub · stack · chat)</span>` +
+        `<select class="hub-cs-sel" data-stk="font">` +
+        fsChoices.map((p) => `<option value="${p}">${esc(uiFontScaleLabel(p))}</option>`).join("") +
         `</select></label>` +
         `<div class="hub-cs-sect">Storage folder (v84)</div>` +
         `<div class="hub-cs-row"><span class="hub-cs-box">` +
@@ -656,6 +670,13 @@ function openStkSettingsPop() {
     scopeSel.addEventListener("change", () => {
         scopeSel.value = setStackScope(scopeSel.value);
         // setStackScope re-mounts on a change - this popup dies with the panel
+    });
+    // v90: the shared font scale (applies instantly via the --sh-fs var -
+    // the open popup reflows with the rest of the UI).
+    const fsSel = pop.querySelector('[data-stk="font"]');
+    fsSel.value = String(getUiFontScale());
+    fsSel.addEventListener("change", () => {
+        fsSel.value = String(setUiFontScale(fsSel.value));
     });
 
     const rootApply = async () => {
