@@ -163,7 +163,7 @@ function makeFakeApi() {
             calls.push({ method, url: p, body });
             let m;
             if (p === "/settings_hub/chat/health") {
-                return jres({ ok: true, has_ffmpeg: true, configured: true, writable: true, version: "v93" });
+                return jres({ ok: true, has_ffmpeg: true, configured: true, writable: true, version: "v94" });
             }
             if (p === "/settings_hub/chat/config") {
                 if (method === "POST") return jres({ ok: true, config: body || {} });
@@ -259,7 +259,7 @@ const appStub = {
 };
 appStub.api = makeFakeApi();
 globalThis.__HUB_APP_STUB__ = appStub;
-globalThis.__SettingsHubBuild = "v93";
+globalThis.__SettingsHubBuild = "v94";
 
 const sb = makeSandbox();
 const core = await import(sb.core);
@@ -268,20 +268,22 @@ const chat = await import(sb.chat);
 const hooks = chat.__chatTestHooks();
 
 // ---------------------------------------------------------------------------
-phase("PA build v93 + version manifest");
+phase("PA build v94 + version manifest");
 {
-    check("PA the entry reports v93", globalThis.__SettingsHubBuild === "v93");
-    check("PA chat self-reports v93", globalThis.__SettingsHubLoaded?.chat === "v93");
-    check("PA launcher self-reports v93", globalThis.__SettingsHubLoaded?.launcher === "v93");
-    check("PA core self-reports v93", globalThis.__SettingsHubLoaded?.core === "v93");
+    // v94: this round touched ONLY chat + hub_ui_renderer - the other
+    // modules keep their v93 self-reports (the manifest follows the truth)
+    check("PA the entry reports v94", globalThis.__SettingsHubBuild === "v94");
+    check("PA chat self-reports v94", globalThis.__SettingsHubLoaded?.chat === "v94");
+    check("PA launcher self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.launcher === "v93");
+    check("PA core self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.core === "v93");
     // the modules the boot does not import are checked in their sources
     // (the same approach smoke_v92 takes)
     const s93src = fs.readFileSync(sb.stack, "utf8");
     const m93src = fs.readFileSync(sb.menu, "utf8");
     const r93src = fs.readFileSync(sb.renderer, "utf8");
-    check("PA stack self-reports v93", s93src.includes('__SettingsHubLoaded["stack"] = "v93"'));
-    check("PA context_menu self-reports v93", m93src.includes('__SettingsHubLoaded["context_menu"] = "v93"'));
-    check("PA hub_ui_renderer self-reports v93", r93src.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v93"'));
+    check("PA stack self-reports v93 (unchanged)", s93src.includes('__SettingsHubLoaded["stack"] = "v93"'));
+    check("PA context_menu self-reports v93 (unchanged)", m93src.includes('__SettingsHubLoaded["context_menu"] = "v93"'));
+    check("PA hub_ui_renderer self-reports v94", r93src.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
 }
 
 // ---------------------------------------------------------------------------
@@ -478,7 +480,7 @@ phase("PD fix source markers (owner #2, #3, #4)");
     check("PD the floating title rename is a manual double-tap (the drag pointerdown kills dblclick)",
         rsrc.includes("pointerdown") && rsrc.includes("(now - lastTap) < 450"));
     check("PD the double-tap opens the shared hubRenameFlow",
-        /isDouble[\s\S]{0,200}hubRenameFlow\(node\)/.test(rsrc));
+        /isDouble[\s\S]{0,700}hubRenameFlow\(node\)/.test(rsrc));
     check("PD the floating window has its own contextmenu (no browser menu)",
         msrc.includes("function attachHubWindowMenu") &&
         msrc.includes('.hub-pin-panel') && msrc.includes("resolveHubNodeFromDom(t)"));

@@ -221,7 +221,7 @@ const appStub = {
 };
 appStub.api = makeFakeApi();
 globalThis.__HUB_APP_STUB__ = appStub;
-globalThis.__SettingsHubBuild = "v93";
+globalThis.__SettingsHubBuild = "v94";
 
 const sb = makeSandbox();
 const core = await import(sb.core);
@@ -232,17 +232,19 @@ const hooks = chat.__chatTestHooks();
 // ---------------------------------------------------------------------------
 phase("PA build v92 + version manifest");
 {
-    // v93: the pack moved on - the manifest expectations follow the truth
-    check("PA the entry reports v93", globalThis.__SettingsHubBuild === "v93");
-    check("PA chat self-reports v93", globalThis.__SettingsHubLoaded?.chat === "v93");
-    check("PA launcher self-reports v93", globalThis.__SettingsHubLoaded?.launcher === "v93");
-    check("PA core self-reports v93", globalThis.__SettingsHubLoaded?.core === "v93");
+    // v94: the pack moved on - the manifest expectations follow the truth
+    // (this round touched ONLY chat + hub_ui_renderer; stack/context_menu/
+    // launcher/core self-report v93 still)
+    check("PA the entry reports v94", globalThis.__SettingsHubBuild === "v94");
+    check("PA chat self-reports v94", globalThis.__SettingsHubLoaded?.chat === "v94");
+    check("PA launcher self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.launcher === "v93");
+    check("PA core self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.core === "v93");
     const rsrc = fs.readFileSync(sb.renderer, "utf8");
     const msrc = fs.readFileSync(sb.menu, "utf8");
     const ssrc = fs.readFileSync(sb.stack, "utf8");
-    check("PA renderer self-reports v93", rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v93"'));
-    check("PA context_menu self-reports v93", msrc.includes('__SettingsHubLoaded["context_menu"] = "v93"'));
-    check("PA stack self-reports v93", ssrc.includes('__SettingsHubLoaded["stack"] = "v93"'));
+    check("PA renderer self-reports v94", rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
+    check("PA context_menu self-reports v93 (unchanged)", msrc.includes('__SettingsHubLoaded["context_menu"] = "v93"'));
+    check("PA stack self-reports v93 (unchanged)", ssrc.includes('__SettingsHubLoaded["stack"] = "v93"'));
 }
 
 // ---------------------------------------------------------------------------

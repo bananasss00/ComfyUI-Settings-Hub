@@ -10,7 +10,7 @@
 // SUBMODULES are fresh.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v93";
+globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v94";
 
 // The whole hub interface lives inside a single LiteGraph DOM widget
 // (node.addDOMWidget), so the CSS in styles.css actually applies:
@@ -1177,6 +1177,11 @@ function ensurePinPanel(node, st) {
             if (!isDouble) return;
             lastTap = 0;
             e.stopPropagation();
+            // v94: cancel the pointer - without this the compatibility
+            // mousedown of the SECOND tap survives (stopPropagation above
+            // already kept the header's preventDefault from running) and the
+            // rename popup's outside-closer would kill it instantly.
+            try { e.preventDefault(); } catch (_) {}
             try { hubRenameFlow(node); } catch (_) {}
         });
     }
@@ -1570,12 +1575,31 @@ function hubRenameFlow(node) {
             const v = String(inp.value || "").replace(/\s+/g, " ").trim();
             if (ok && v) {
                 node.title = v;
+                // v94 (owner: "жму ентер - имя хаба остается прежним"): the
+                // value WAS saved (node.title serializes with the workflow),
+                // but the floating header paints its title ONCE at panel
+                // creation (ensurePinPanel) and renderHub() rebuilds only the
+                // hub root - so a virtual hub (no visible canvas node) kept
+                // showing the old name until a reload. Refresh it in place.
+                try {
+                    const ttlEl = pinPanels.get(node)?.panel?.querySelector(".hub-pin-title");
+                    if (ttlEl) ttlEl.textContent = v;
+                } catch (_) {}
                 try { node.setDirtyCanvas?.(true, true); } catch (_) {}
                 try { renderHub(node); } catch (_) {}
             }
             close();
         };
-        const onDown = (e) => { if (!pop.contains(e.target)) { commit(true); } };
+        // v94 (owner: "двойным кликом ничего не происходит"): the double-TAP
+        // opener runs on pointerdown and stops propagation BEFORE the header
+        // drag handler can preventDefault() the event - so the browser still
+        // fires the COMPATIBILITY mousedown for that same tap. It lands
+        // outside this popup (the title is not inside it) and onDown closed
+        // the popup ~1 frame after it opened - the rename looked dead. A
+        // short grace period ignores the whole opening gesture; a REAL
+        // outside click (which commits, by design) always comes later.
+        const born = Date.now();
+        const onDown = (e) => { if (Date.now() - born < 500) return; if (!pop.contains(e.target)) { commit(true); } };
         const onKey = (e) => {
             if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); commit(false); }
             else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); commit(true); }

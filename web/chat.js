@@ -149,7 +149,7 @@
 // v87 self-report (single-source version, docs/plan-versions.md): the last
 // FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["chat"] = "v93";
+globalThis.__SettingsHubLoaded["chat"] = "v94";
 
 import { app } from "../../scripts/app.js";
 // v90: the shared UI font scale - the chat ⚙ hosts the same row as the hub
@@ -2715,6 +2715,13 @@ async function sendRun() {
         streaming = { ctrl, os: true, text: "", thoughts: "" };
         cancelStreamPaint();      // a fresh paint state per stream
         streamHostEl = runEl;     // the live bubble paints into the runs list
+        // v94 (owner: "в этом огромном блоке получилась как история -
+        // рассуждения первого запроса + второго"): a stale bubble from the
+        // PREVIOUS run must never leak into a new stream - the paint state
+        // resets, the DOM does not, so paintStreamPart APPENDS the new
+        // reasoning after the old one. (chat mode never sees this: its
+        // renderMsgs() wipes the list; the runs list preserves the bubble.)
+        try { runEl?.querySelector(".hub-chat-msg-streaming")?.remove(); } catch (_) {}
         let fin = null;
         const r = await app.api.fetchApi("/settings_hub/chat/oneshot", {
             method: "POST",
@@ -2779,6 +2786,12 @@ async function sendRun() {
             localToast("Run failed: " + String(e?.message || e));
         }
     } finally {
+        // v94: drop the live bubble - the run is finished (a card now, or an
+        // error toast). renderRuns() preserves the bubble while the stream is
+        // up, so without this it survived the run AND the next run painted
+        // into it (the reasoning-of-both-runs accumulation bug).
+        try { runEl?.querySelector(".hub-chat-msg-streaming")?.remove(); } catch (_) {}
+        if (!runs.length) renderRuns();   // a failed first run: restore the hint
         streaming = null;
         streamHostEl = null;   // the paint host is back to the chat list
         cancelStreamPaint();

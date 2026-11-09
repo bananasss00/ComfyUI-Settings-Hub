@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v93 - ONE-SHOT INFERENCE + VRAM UI MOVE + HUB RENAME FIXES (owner requests 2026-11-10, 1 feature + 4 fixes): ONE-SHOT MODE: the chat panel gains a 💬/⚡ mode switch on the tabs row - ⚡ One-shot is single-message INFERENCE like the PolyStrata node but without creating nodes: one message in, one answer out, NO history/sessions/tree; the prompt comes from the SEPARATE oneshot_* config keys (same PolyStrata resolution: a catalog .txt preset wins over custom text, read fresh per run) via the same 📜 popup in one-shot mode; runs live in a flat server-side log (oneshot_runs.json, capped by oneshot_keep, GET /chat/oneshot/runs, POST /chat/oneshot/clear via the bar 🗑) and each card has a ⧉ copy button; the py route POST /settings_hub/chat/oneshot speaks the SAME SSE protocol as /send (delta/thoughts/note/error/done) so the v92 incremental ~10 Hz paint works unchanged; the same _pre_send_prep VRAM choreography (auto-free + wake notes) applies; attachments are a chat feature - one-shot is text-only (the 📎 button hides); FIX 1: the mini-panel taskbar is draggable from ANYWHERE now (the icon buttons fill the strip, the background-only handle was unreachable) - a 5px threshold separates a drag from a button click (the chat-chip mechanics); FIX 2: the two VRAM checkboxes (free ComfyUI models before request / unload the chat model on a ComfyUI queue start) MOVED from the chat ⚙ settings into the ⚡ GPU & memory popup - where a VRAM decision belongs; FIX 3: renaming a VIRTUAL hub works now: the floating title dblclick was DEAD because the header drag pointerdown canceled the compatibility mouse events (Pointer Events spec) - replaced by a manual double-tap detection; AND the floating window has its own right-click menu (✏ Rename hub / 📌 Materialize / 🪄 Dematerialize) instead of the browser native menu, resolved through the new core.js hub DOM resolver registry (no renderer import); FIX 4: drag-drop of text cards into a node widget under the CURSOR works: ComfyUI multiline widgets are REAL DOM textareas above the canvas - pointToGraph saw them as a foreign overlay and bailed (the highlight died exactly over the field); now the element resolves to its (node, widget) pair and the TEXTAREA itself highlights; textWidgetAt also gained a widget-DOM-rect layer; v92 (11 items: VRAM handoff, taskbar, hub materialization/rename, incremental stream, chip drags, visible paths) rides along unchanged. Stale-cache guard: EXPECTED manifest verifies every module.");
+console.info("[SettingsHub] web build: v94 - HUB RENAME APPLY + STACK CARD BUTTONS + ONE-SHOT BUBBLE FIXES (owner follow-up 2026-11-10, 3 fixes to v93): FIX 1 - the virtual hub RENAME now visibly APPLIES: Enter saved node.title all along, but the floating header painted its text only once at panel creation (renderHub rebuilds the hub root, never the pin panel) - the header refreshes in place on commit now; AND the double-tap rename really opens: the opener's stopPropagation kept the header drag handler from preventDefault()-ing the pointer, the browser fired the COMPATIBILITY mousedown for the same tap, and the popup's own outside-closed committed + closed it within one frame ('nothing happens') - the second tap now cancels the pointer AND the popup ignores its opening gesture for 500ms (a real outside click still commits); FIX 2 - the stack card action buttons (🔍 📌 ✎ ✕) were a VERTICAL column clipped by the card's overflow:hidden whenever the entry was short (a single-line text card is ~39px, the column ~73px) - the actions are a wrapping ROW now (grow sideways first, wrap downwards), right-aligned like before; FIX 3 - the one-shot runs list no longer accumulates the reasoning of SEVERAL runs into one giant 'history' block: renderRuns() preserves the live stream bubble while a run is up, but nobody removed it afterwards, so the NEXT run reset the paint state and APPENDED its thoughts/answer into the stale bubble (chat mode never saw this - its renderMsgs() wipes the list) - the bubble is dropped when a run starts and in the finally of every run; v93 (one-shot inference mode, taskbar drag, GPU-popup VRAM checkboxes, hub rename/RMB menu, DOM-widget drop target) rides along unchanged. Stale-cache guard: EXPECTED manifest verifies every module.");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v93 - ONE-SHOT INFERENCE + VRAM UI MOVE +
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=93", import.meta.url).href;
+    link.href = new URL("styles.css?v=94", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -51,7 +51,7 @@ console.info("[SettingsHub] web build: v93 - ONE-SHOT INFERENCE + VRAM UI MOVE +
 // ONE stale cached file silently removed every "Pin to Settings Hub" menu
 // item and the sync hooks. The detector keeps its diagnostic value but is
 // NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v93";
+globalThis.__SettingsHubBuild = "v94";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -98,11 +98,11 @@ const FILES = [
         "pins": "v70",            // badge counter cache
         "nav_points": "v69",      // nav points (zoom pinning)
         "hub_node": "v90",        // node registration + badge painter + phantom hiding (virtual hubs)
-        "hub_ui_renderer": "v93", // DOM widget rendering (+ v93 rename dblclick fix, window RMB menu)
+        "hub_ui_renderer": "v94", // DOM widget rendering (+ v94 rename commit refresh + popup grace)
         "sync_manager": "v70",    // reactive sync hooks
         "launcher": "v93",        // v93 TASKBAR (drag from anywhere with a 5px click threshold)
         "stack": "v93",           // Paste Stack (+ v93 DOM-widget drop target + textarea highlight)
-        "chat": "v93",            // LLM Chat (+ v93 ONE-SHOT mode, GPU-popup VRAM checkboxes, scoped 📜)
+        "chat": "v94",            // LLM Chat (+ v94 one-shot stale stream-bubble fix)
         "compare": "v83",         // Image Compare A/B panel (v83 display fix)
         "context_menu": "v93",    // "Pin to Settings Hub" menus (+ v93 hub window RMB Rename/Materialize)
         "core": "v93",            // (+ v93 hub DOM resolver registry for the window menu)

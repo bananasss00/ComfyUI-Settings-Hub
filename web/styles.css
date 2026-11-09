@@ -3171,8 +3171,17 @@ button.hub-pin-back {
     top: 3px;
     right: 3px;
     display: flex;
-    flex-direction: column;
+    /* v94 (owner: "когда в буфере одна строка текста, часть кнопок
+       скрываются за границами"): this used to be a COLUMN - four 16px
+       buttons stack ~73px tall, while a single-line text card is ~39px,
+       and the card's overflow:hidden clipped the lower buttons. A wrapping
+       ROW grows sideways first (cards are wide) and only then downwards. */
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    align-content: flex-start;
     gap: 3px;
+    max-width: calc(100% - 6px);
     opacity: 0;
     transition: opacity 0.12s;
 }
