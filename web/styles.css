@@ -4915,6 +4915,8 @@ body.sh-modal-open .hub-stack-targetbox,
 body.sh-modal-open .hub-stack-viewer,
 body.sh-modal-open .hub-chat-panel,
 body.sh-modal-open .hub-chat-chip,
+body.sh-modal-open .hub-lnch,
+body.sh-modal-open .hub-lnch-pop,
 body.sh-modal-open .hub-fs-overlay,
 body.sh-modal-open .hub-media-preview-pop,
 body.sh-modal-open .hub-media-thumb-pop,
@@ -4965,3 +4967,142 @@ body.sh-modal-open .hub-sh-note {
     border-color: #a5533f;
     color: #ffd9d9;
 }
+
+/* ===========================================================================
+   v91: THE MINI PANEL (launcher) - the small always-there bar with the
+   Chat/Stack buttons + on/off toggles, the + Hub button and the gear. The
+   collapse TARGET of both panels: an amber state marks a panel collapsed
+   INTO the bar. Geometry in localStorage; the Comfy modal guard hides it too.
+   ======================================================================== */
+.hub-lnch {
+    position: fixed;
+    z-index: 99902;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px;
+    background: rgba(22, 22, 38, 0.96);
+    border: 1px solid #3d4a80;
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    user-select: none;
+    font: calc(var(--sh-fs, 1) * 12px)/1.3 system-ui, sans-serif;
+    color: #dfe6f5;
+    max-width: calc(100vw - 16px);
+    flex-wrap: wrap;
+}
+.hub-lnch-drag {
+    cursor: grab;
+    color: #7d88b5;
+    padding: 2px 3px;
+    font-size: calc(var(--sh-fs, 1) * 13px);
+    letter-spacing: -2px;
+}
+.hub-lnch-drag:active { cursor: grabbing; }
+.hub-lnch-btn {
+    border: 1px solid #3d4a80;
+    background: #171b30;
+    color: #cfd8f2;
+    border-radius: 7px;
+    padding: 3px 8px;
+    cursor: pointer;
+    font: inherit;
+    white-space: nowrap;
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.hub-lnch-btn:hover { border-color: #6a7ac0; color: #fff; }
+.hub-lnch-btn.hub-lnch-on { border-color: #4a7a55; }
+.hub-lnch-btn.hub-lnch-min {
+    border-color: #b08a3e;
+    background: #2c2412;
+    color: #ffdf9e;
+}
+.hub-lnch-btn.hub-lnch-off {
+    opacity: 0.45;
+    cursor: pointer;
+}
+.hub-lnch-btn:disabled { cursor: default; opacity: 0.35; }
+.hub-lnch-tg {
+    display: inline-flex;
+    align-items: center;
+    margin-right: 4px;
+    cursor: pointer;
+}
+.hub-lnch-tg input {
+    accent-color: #6f86e0;
+    cursor: pointer;
+    margin: 0;
+}
+.hub-lnch-hub { color: #ffe9b8; }
+.hub-lnch-gear {
+    border: 1px solid transparent;
+    background: transparent;
+    color: #9aa6cf;
+    border-radius: 7px;
+    padding: 3px 6px;
+    cursor: pointer;
+    font: inherit;
+}
+.hub-lnch-gear:hover { color: #fff; border-color: #3d4a80; }
+.hub-lnch-pop { min-width: 280px; max-width: min(420px, calc(100vw - 16px)); }
+
+/* v91: chat message variant arrows (the branch navigation) */
+.hub-chat-vars {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin: 0 6px;
+}
+.hub-chat-var {
+    border: 1px solid #4a4a7a;
+    background: #1a1f36;
+    color: #cfd8f2;
+    border-radius: 4px;
+    width: 17px;
+    height: 16px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;
+    font-size: calc(var(--sh-fs, 1) * 11px);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.hub-chat-var:hover { border-color: #7d8ac9; color: #fff; }
+.hub-chat-var:disabled { opacity: 0.35; cursor: default; }
+.hub-chat-var-n {
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    color: #9aa6cf;
+    min-width: 24px;
+    text-align: center;
+}
+/* v91: the armed (click-again) state of the per-message delete */
+.hub-chat-mact.hub-chat-mact-armed {
+    background: #5a2a2a !important;
+    border-color: #a5533f !important;
+    color: #ffd9d9 !important;
+}
+
+/* v91: the ACTIVE system prompt banner on top of the prompt popup */
+.hub-cp-active {
+    flex: 0 0 auto;
+    margin: 0 0 6px;
+    padding: 5px 8px;
+    border: 1px solid #3d4a80;
+    border-radius: 6px;
+    background: #131a2e;
+    color: #9aa6cf;
+    font-size: calc(var(--sh-fs, 1) * 11px);
+    word-break: break-all;
+}
+.hub-cp-active.hub-cp-active-on {
+    border-color: #4a7a55;
+    color: #bfe6c8;
+    background: #12241612;
+}
+
+/* v91: the chat full-viewer image is pannable (the stack-viewer contract) */
+.hub-chat-view-img { cursor: grab; }
+.hub-chat-view-img:active { cursor: grabbing; }

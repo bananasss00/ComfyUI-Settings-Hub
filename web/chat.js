@@ -84,10 +84,10 @@
 //   refresh button and a live multi-word search" + "the model list shows only
 //   ONE active model - look how the PolyStrata nodes get the models"):
 //     * SELF-MANAGED PANEL: the hub no longer hosts the Chat On/Off - the
-//       chat ⚙ popup gains a Panel On/Off row, and the SAME switch is
-//       registered as a NATIVE ComfyUI setting (app.ui.settings.addSetting,
-//       id "SettingsHub.Chat.enabled" -> the SettingsHub group of ComfyUI's
-//       own Settings dialog). That dialog is reachable in EVERY workflow,
+//       chat ⚙ popup gains a Panel On/Off row. v91: the ComfyUI-settings
+//       switch moved into the MINI PANEL (web/launcher.js - "Mini panel
+//       (SettingsHub)" + the item rows); the per-panel row is gone. That
+//       dialog is reachable in EVERY workflow,
 //       with or without a hub node - so a hidden panel can always be brought
 //       back (the hub window used to be the only way back).
 //     * 📜 SYSTEM PROMPT = THE USER'S CATALOG: no invented presets. The popup
@@ -149,12 +149,15 @@
 // v87 self-report (single-source version, docs/plan-versions.md): the last
 // FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["chat"] = "v90";
+globalThis.__SettingsHubLoaded["chat"] = "v91";
 
 import { app } from "../../scripts/app.js";
 // v90: the shared UI font scale - the chat ⚙ hosts the same row as the hub
 // ⚙ and the stack ⚙ (one localStorage value, one CSS variable --sh-fs).
 import { UI_FONT_SCALE_CHOICES, getUiFontScale, setUiFontScale, uiFontScaleLabel } from "./global_settings.js";
+// v91: the MINI PANEL (launcher) - the collapse target of this panel and the
+// home of the only SettingsHub rows in ComfyUI's Settings dialog.
+import { launcherHostsMinimized, launcherSetCollapsed, registerLauncherPanel } from "./launcher.js";
 
 // ---------------------------------------------------------------------------
 // Constants & state
@@ -184,9 +187,8 @@ const CLEAR_ARM_MS = 2600, SESS_ARM_MS = 2600;
 let setPop = null, promptPop = null, gpuPop = null;
 // v87 page-zoom tracking (devicePixelRatio changes with Ctrl +/- / ctrl-pinch)
 let lastDpr = 0;
-// v88: the native ComfyUI setting that mirrors LS_ON (ComfyUI Settings ->
-// SettingsHub -> "LLM Chat panel") - the way back without a hub node
-let nativeChatSetting = null;
+// v91: the native ComfyUI "LLM Chat panel" switch was REMOVED - the MINI
+// PANEL (web/launcher.js) carries the only SettingsHub rows now.
 // v88: the model list comes from GET /chat/models as {id, status} items
 // (source registry = the PolyStrata /api/models registry)
 let models = [];          // [{id, status}]
@@ -281,51 +283,23 @@ export function isChatOn() {
 export function setChatOn(v, src) {
     const was = isChatOn();
     try { localStorage.setItem(LS_ON, v ? "1" : "0"); } catch (_) {}
-    // v88: keep the native ComfyUI setting in sync when the flip came from
-    // OUR ui (⚙ popup / code); a "native" flip already IS that setting.
-    if (src !== "native") {
-        try { nativeChatSetting?.set?.(!!v); } catch (_) {}
-    }
-    // v89: a hidden panel has NO ui of its own - always say WHERE the way
-    // back is (ComfyUI Settings -> SettingsHub), whatever flipped it.
+    // v91: the way back is the MINI PANEL (the launcher) - the old native
+    // ComfyUI "LLM Chat panel" switch is GONE (the launcher rows replaced
+    // the per-panel ones).
+    // v89 contract kept: a hidden panel has NO ui of its own - always say
+    // WHERE the way back is, whatever flipped it.
     if (was && !v) {
-        localToast("Chat hidden - bring it back: ComfyUI Settings → SettingsHub → 'LLM Chat panel'", 5200);
+        localToast("Chat hidden - bring it back: the mini panel (💬 toggle) or ComfyUI Settings → SettingsHub → 'Mini panel'", 5200);
     }
     if (v && !mounted) initChat();
     else if (!v) teardown();
 }
 
-// v88: register the panel switch in ComfyUI's OWN Settings dialog
-// (SettingsHub group). Unlike the old hub row it is reachable in EVERY
-// workflow - the way back when the panel (and its chip) is hidden. Fail-safe:
-// an old frontend without app.ui.settings simply gets no native row.
-function registerNativeChatSwitch() {
-    if (nativeChatSetting) return;
-    try {
-        const s = app?.ui?.settings;
-        if (!s || typeof s.addSetting !== "function") return;
-        nativeChatSetting = s.addSetting({
-            id: "SettingsHub.Chat.enabled",
-            name: "LLM Chat panel (SettingsHub)",
-            type: "boolean",
-            defaultValue: isChatOn(),
-            onChange: (value) => {
-                const v = !!value;
-                if (v !== isChatOn()) setChatOn(v, "native");
-            },
-        });
-        // converge ComfyUI's stored value with OUR truth (a flip from the
-        // panel ⚙ must be visible the next time the dialog opens; onChange
-        // fires with the same value and is a no-op)
-        try {
-            if (nativeChatSetting && typeof nativeChatSetting.set === "function") {
-                nativeChatSetting.set(isChatOn());
-            }
-        } catch (_) {}
-    } catch (e) {
-        console.warn("[SettingsHub] native chat setting unavailable:", e);
-    }
-}
+// v91: the native "LLM Chat panel" ComfyUI setting was REMOVED - the MINI
+// PANEL (web/launcher.js) carries the only SettingsHub rows now: "Mini panel
+// (SettingsHub)" + the item switches. The way back to a hidden chat is the
+// launcher's 💬 toggle; the way back to a hidden launcher is the ComfyUI
+// setting above. The old registerNativeChatSwitch is gone on purpose.
 
 /** Masked config + diagnostics for the settings rows (never throws). */
 export async function getChatUiState() {
@@ -470,12 +444,21 @@ function makeDraggable(handle, target, getPos, setPos) {
 
 function setMinimized(min, persist = true) {
     if (!panel || !chip) return;
+    // v91 (owner #1): [–] collapses the chat INTO the mini panel when it is
+    // shown and its chat item is visible; otherwise the historical own chip.
+    const host = min && launcherHostsMinimized("chat");
     panel.style.display = min ? "none" : "";
-    chip.style.display = min ? "" : "none";
+    chip.style.display = (min && host) ? "none" : (min ? "" : "none");
     if (min) {
-        closeAllChatPops();   // v87: a popup must not outlive the window
-        const ui = lsUi();
-        applyChipPos(ui.chipX ?? ui.x ?? 16, ui.chipY ?? ui.y ?? 16);
+        closeAllChatPops();   // a popup must not outlive the window
+        if (host) {
+            launcherSetCollapsed("chat", true);
+        } else {
+            const ui = lsUi();
+            applyChipPos(ui.chipX ?? ui.x ?? 16, ui.chipY ?? ui.y ?? 16);
+        }
+    } else {
+        launcherSetCollapsed("chat", false);
     }
     if (persist) saveUi({ min: !!min });
 }
@@ -515,7 +498,146 @@ function applySession(tab, sess) {
     if (!tab || !sess) return;
     tab.title = sess.title || "";
     tab.msgs = Array.isArray(sess.messages) ? sess.messages : [];
+    // v91: the branch tree travels with the session - the variant arrows
+    // (‹ i/n ›) read it at render time.
+    tab.tree = (sess.tree && typeof sess.tree === "object") ? sess.tree : null;
     if (tab.id === activeId) { renderTabs(); renderMsgs(); renderStatus(); }
+}
+
+/** v91 (owner 8a): sibling info of a message node - which variant is active
+ *  and how many exist. The arrows switch the WHOLE visible path under the
+ *  node (the answer branch follows its request). */
+function variantInfo(tab, nid) {
+    if (!tab || !nid || !tab.tree?.nodes) return null;
+    const n = tab.tree.nodes[nid];
+    if (!n || n.id === "__root__") return null;
+    const p = n.parent ? tab.tree.nodes[n.parent] : null;
+    if (!p) return null;
+    const kids = p.children || [];
+    if (kids.length < 2) return null;
+    const i = kids.indexOf(nid);
+    if (i < 0) return null;
+    return { index: i, count: kids.length };
+}
+
+/** v91: switch to the prev/next variant of a message (POST /chat/branch). */
+async function switchVariant(tab, nid, dir) {
+    if (!tab || !nid) return;
+    const res = await jfetch("/settings_hub/chat/branch", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sid: tab.id, nid, dir }),
+    });
+    if (res.json?.ok) applySession(tab, res.json.session);
+    else localToast("No variant in that direction");
+}
+
+/** v91 (owner 8b): delete a message WITH its subtree (armed two-click). */
+const DEL_ARM_MS = 2600;
+let delArm = null;   // {sid, nid, ts}
+
+async function deleteMsg(tab, nid) {
+    const res = await jfetch("/settings_hub/chat/session/" + tab.id + "/msg_delete", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nid }),
+    });
+    if (res.json?.ok) applySession(tab, res.json.session);
+    else localToast("Delete failed: " + (res.json?.error || "HTTP " + res.status));
+}
+
+/** v91 (owner 8b): save an edited message text in place (the model's replies
+ *  too; user edits that BRANCH go through /send edit_nid). */
+async function saveMsgText(tab, nid, text) {
+    const res = await jfetch("/settings_hub/chat/session/" + tab.id + "/msg", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nid, text }),
+    });
+    if (res.json?.ok) applySession(tab, res.json.session);
+    else localToast("Save failed: " + (res.json?.error || "HTTP " + res.status));
+}
+
+/** v91 (owner 8c): a NEW chat from a selected message - the message and
+ *  everything ABOVE it is copied into a fresh session (attachment blobs are
+ *  copied server-side while the source chat exists). */
+async function forkFromMessage(tab, idx) {
+    if (!tab) return;
+    const prefix = (tab.msgs || []).slice(0, idx + 1).map((m) => {
+        const { nid, ...rest } = m;
+        return rest;
+    });
+    if (!prefix.length) return;
+    const res = await jfetch("/settings_hub/chat/import", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            title: ("Fork: " + (tab.title || "chat")).slice(0, 80),
+            messages: prefix,
+            copy_blobs_from: tab.id,
+        }),
+    });
+    const sess = res.json?.session;
+    if (res.json?.ok && sess?.id) {
+        const nt = { id: sess.id, title: sess.title || "", msgs: sess.messages || [], tree: sess.tree || null, pending: [] };
+        tabs.push(nt);
+        activeId = nt.id;
+        saveOpenTabs();
+        renderTabs(); renderMsgs(); renderAttach(); renderStatus();
+        localToast("New chat created from this message");
+    } else {
+        localToast("Fork failed: " + (res.json?.error || "HTTP " + res.status));
+    }
+}
+
+/** v91 (owner 8d): download the ACTIVE chat as JSON (messages + the branch
+ *  tree). The browser builds the file - the proxy stays storage-only. */
+function exportSession(tab) {
+    if (!tab) { localToast("Open a chat first"); return; }
+    try {
+        const data = {
+            app: "ComfyUI-Settings-Hub chat export",
+            version: 1,
+            exported: new Date().toISOString(),
+            sid: tab.id,
+            title: tab.title || "",
+            messages: tab.msgs || [],
+            tree: tab.tree || null,
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "chat-" + String(tab.title || tab.id || "chat")
+            .replace(/[^\w\-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) + ".json";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => { try { URL.revokeObjectURL(a.href); } catch (_) {} }, 4000);
+        localToast("Chat exported (attachments live on the server - import them on the same install)");
+    } catch (e) { localToast("Export failed: " + e); }
+}
+
+/** v91 (owner 8d): create a new chat from an exported JSON file. */
+async function importSessionFile(file) {
+    if (!file) return;
+    let data = null;
+    try { data = JSON.parse(await file.text()); } catch (_) { localToast("Not a valid chat export (JSON parse failed)"); return; }
+    if (!data || !Array.isArray(data.messages)) { localToast("Not a chat export (no messages)"); return; }
+    const res = await jfetch("/settings_hub/chat/import", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            title: String(data.title || "Imported chat").slice(0, 80),
+            messages: data.messages,
+            copy_blobs_from: String(data.sid || ""),
+        }),
+    });
+    const sess = res.json?.session;
+    if (res.json?.ok && sess?.id) {
+        const nt = { id: sess.id, title: sess.title || "", msgs: sess.messages || [], tree: sess.tree || null, pending: [] };
+        tabs.push(nt);
+        activeId = nt.id;
+        saveOpenTabs();
+        renderTabs(); renderMsgs(); renderAttach(); renderStatus();
+        localToast("Chat imported" + (data.sid ? " - attachments restored when the source chat still exists" : ""));
+    } else {
+        localToast("Import failed: " + (res.json?.error || "HTTP " + res.status));
+    }
 }
 
 async function createTab(title) {
@@ -533,7 +655,7 @@ async function createTab(title) {
         if (!degraded) noteDegraded({ code: "create", why: res.json?.error || ("HTTP " + res.status) });
         return null;
     }
-    const tab = { id: sess.id, title: sess.title || "", msgs: sess.messages || [], pending: [] };
+    const tab = { id: sess.id, title: sess.title || "", msgs: sess.messages || [], tree: sess.tree || null, pending: [] };
     tabs.push(tab);
     activeId = tab.id;
     saveOpenTabs();
@@ -671,6 +793,12 @@ function openSessPop() {
         `title="Live multi-word search: every word must match the chat title OR its message text - together they cover both. A matched content line is shown under the title.">` +
         `<button type="button" class="hub-cs-chip" data-ss="refresh" title="Re-run the search">↻</button>` +
         `</div>` +
+        // v91 (owner 8d): export / import the ACTIVE chat as a JSON file.
+        `<div class="hub-cp-btns">` +
+        `<button type="button" class="hub-cs-chip" data-ss="export" title="Download the ACTIVE chat as a JSON file (the active path + the branch tree)">⤓ export chat</button>` +
+        `<button type="button" class="hub-cs-chip" data-ss="import" title="Create a NEW chat from an exported JSON file">⤒ import chat</button>` +
+        `<input type="file" data-ss="file" accept=".json,application/json" style="display:none">` +
+        `</div>` +
         `<div data-ss="list"><div class="hub-chat-sess-empty">loading…</div></div>`;
     document.body.appendChild(pop);
     const r = sessionsBtn?.getBoundingClientRect?.();
@@ -699,6 +827,16 @@ function openSessPop() {
         }
     });
     pop.querySelector('[data-ss="refresh"]').addEventListener("click", () => void renderSessList());
+    // v91 (owner 8d): export = download the ACTIVE chat; import = file picker
+    // -> POST /chat/import -> a new tab opens.
+    pop.querySelector('[data-ss="export"]').addEventListener("click", () => exportSession(activeTab()));
+    const fileIn = pop.querySelector('[data-ss="file"]');
+    pop.querySelector('[data-ss="import"]').addEventListener("click", () => { try { fileIn.click(); } catch (_) {} });
+    fileIn.addEventListener("change", () => {
+        const f = fileIn.files && fileIn.files[0];
+        if (f) void importSessionFile(f);
+        try { fileIn.value = ""; } catch (_) {}
+    });
     pop.addEventListener("mousedown", (e) => e.stopPropagation());
     pop.addEventListener("click", async (e) => {
         const del = e.target?.closest?.(".hub-chat-sess-del");
@@ -725,7 +863,7 @@ function openSessPop() {
             const res2 = await jfetch("/settings_hub/chat/session/" + sid);
             const sess = res2.json?.session;
             if (!res2.ok || !sess) { localToast("Could not open: " + (res2.json?.error || "HTTP " + res2.status)); return; }
-            const tab = { id: sess.id, title: sess.title || "", msgs: sess.messages || [], pending: [] };
+            const tab = { id: sess.id, title: sess.title || "", msgs: sess.messages || [], tree: sess.tree || null, pending: [] };
             tabs.push(tab);
             activeId = tab.id;
             saveOpenTabs();
@@ -888,17 +1026,17 @@ function openSetPop() {
     pop.innerHTML =
         `<div class="hub-menu-title">⚙ Chat settings</div>` +
         // v88: the panel On/Off moved here from the hub - the chat is a
-        // self-managed utility; the same switch is registered in ComfyUI's
-        // own Settings dialog (SettingsHub.Chat.enabled).
+        // self-managed utility. v91: the way back is the MINI PANEL; the
+        // per-panel ComfyUI settings row is gone (the launcher rows only).
         `<label class="hub-cs-row"><span>Chat panel</span>` +
         `<select class="hub-cs-sel" data-cs="panel">` +
         `<option value="1">On (default)</option>` +
-        `<option value="0">Off - hide the panel + chip</option>` +
+        `<option value="0">Off - hide the panel</option>` +
         `</select></label>` +
-        // v89: a hidden panel has NO ui of its own - spell the way back out.
-        `<div class="hub-cs-info">Off hides the panel AND its chip. Bring it ` +
-        `back: ComfyUI Settings → SettingsHub → 'LLM Chat panel' (reachable ` +
-        `in every workflow).</div>` +
+        // v91: a hidden panel has NO ui of its own - spell the way back out.
+        `<div class="hub-cs-info">Off hides the panel. Bring it back: the ` +
+        `mini panel (💬 toggle) or ComfyUI Settings → SettingsHub → 'Mini ` +
+        `panel' (reachable in every workflow).</div>` +
         `<label class="hub-cs-row"><span>LLM server URL</span>` +
         `<input type="text" class="hub-cs-in" data-cs="url" placeholder="http://127.0.0.1:8080/v1" spellcheck="false" autocomplete="off"></label>` +
         `<label class="hub-cs-row"><span>API key (optional)</span>` +
@@ -1172,6 +1310,28 @@ function renderPromptBtnState() {
                   : "System prompt: none - click to set");
 }
 
+// v91 (owner: "when there are many files and a custom one from the middle is
+// selected, it is not obvious WHICH prompt is in use - write somewhere which
+// system prompt is active"): the active prompt is (a) always visible as a 📜
+// segment in the status line (renderStatus), (b) spelled out in an ACTIVE
+// banner on top of the prompt popup, and (c) the popup scrolls the selected
+// file into view on open (renderPromptList).
+function activePromptLabel() {
+    const preset = (cfg?.prompt_preset || "").trim();
+    if (preset) return { text: "Active: " + preset, on: true };
+    if ((cfg?.system_prompt || "").trim()) return { text: "Active: custom text (no file selected)", on: true };
+    return { text: "Active: none - no system prompt is sent", on: false };
+}
+
+function renderActivePrompt() {
+    if (!promptPop) return;
+    const el = promptPop.querySelector('[data-cp="active"]');
+    if (!el) return;
+    const p = activePromptLabel();
+    el.textContent = p.text;
+    el.classList.toggle("hub-cp-active-on", p.on);
+}
+
 async function refreshPromptList(manual) {
     const res = await jfetch("/settings_hub/chat/prompts");
     if (res.json?.ok) {
@@ -1207,6 +1367,13 @@ function renderPromptList() {
         `<button type="button" class="hub-cp-item${f === sel ? " hub-cp-item-on" : ""}" ` +
         `data-cp-name="${esc(f)}" title="${esc(f)}">${esc(f)}</button>`).join("");
     listEl.innerHTML = html;
+    renderActivePrompt();
+    // v91: with a long catalog the selected file must be VISIBLE when the
+    // popup opens - scroll it into view (skipped while the user is typing a
+    // search filter, so the list never yanks mid-typing).
+    if (!promptQuery) {
+        try { listEl.querySelector(".hub-cp-item-on")?.scrollIntoView?.({ block: "center" }); } catch (_) {}
+    }
 }
 
 function openPromptPop() {
@@ -1216,6 +1383,9 @@ function openPromptPop() {
     pop.className = "hub-menu hub-chat-promptpop";
     pop.innerHTML =
         `<div class="hub-menu-title">📜 System prompt</div>` +
+        // v91: the ACTIVE prompt is spelled out on top of the popup - no
+        // guessing which file (or the custom text) is actually in use.
+        `<div class="hub-cp-active" data-cp="active"></div>` +
         `<div class="hub-cp-searchrow">` +
         `<input type="text" class="hub-cp-in hub-cp-search" data-cp="search" spellcheck="false" autocomplete="off" ` +
         `placeholder="search… (several words)" title="Live search: every word must match the file path">` +
@@ -1446,6 +1616,7 @@ function renderStatus() {
     // v89: the context fill - the last answer carries ctx {used, total, est}.
     // "ctx 3.2k/32k", "≈" when estimated (no usage.prompt_tokens), ⚠ past 90%.
     let ctxSeg = "";
+    let ctxTitle = "";
     if (tab && tab.msgs.length) {
         const a = [...tab.msgs].reverse().find((m) => m.role === "assistant" && m.ctx?.used);
         if (a) {
@@ -1461,7 +1632,7 @@ function renderStatus() {
             if (c.images) tail.push(c.images + " img");
             if (tail.length) seg += " (" + tail.join(", ") + ")";
             ctxSeg = seg;
-            statusEl.title = ctxSeg
+            ctxTitle = ctxSeg
                 ? "Context: the request size after the last answer" +
                   (total > 0 ? " of the model context" : " (the model context is unknown - set it in ⚙ 'context size')") +
                   ". ≈ = the proxy's estimate (the exact prompt_tokens arrives when the server reports usage); ⚠ = past 90% - the model starts forgetting the oldest messages (trim the history or raise 'history depth' limits)."
@@ -1470,9 +1641,23 @@ function renderStatus() {
     }
     // v87: the model moved into the toolbar dropdown - the status line keeps
     // the server url + the last-answer stats (degraded errors override it).
+    // v91: + a permanent 📜 segment naming the ACTIVE system prompt.
+    let prSeg = "";
+    const prPreset = (cfg?.prompt_preset || "").trim();
+    const prCustom = (cfg?.system_prompt || "").trim();
+    if (prPreset) {
+        const base = String(prPreset).split("/").pop() || prPreset;
+        prSeg = "📜 " + base;
+    } else if (prCustom) {
+        prSeg = "📜 custom";
+    }
     statusEl.textContent = (cfg?.url || "no LLM server") +
         (last ? " · " + last : "") +
-        (ctxSeg ? " · " + ctxSeg : "");
+        (ctxSeg ? " · " + ctxSeg : "") +
+        (prSeg ? " · " + prSeg : "");
+    // the title is rebuilt FRESH on every render - it must never grow
+    statusEl.title = (ctxTitle ? ctxTitle + "\n" : "") +
+        (prSeg ? "System prompt in use: " + (prPreset || "custom text (no file)") : "");
 }
 
 function noteDegraded(d) {
@@ -1567,30 +1752,51 @@ function partsHtml(msg) {
     }).join("") + `</div>`;
 }
 
-function bubbleHtml(msg, idx, sid) {
+function bubbleHtml(tab, msg, idx) {
     const role = msg.role === "assistant" ? "Model" : "You";
+    const sid = tab?.id || activeId || "";
     const m = { ...msg, _sid: sid };
     const meta = [];
     if (msg.usage?.completion_tokens) meta.push(msg.usage.completion_tokens + " tok");
     if (msg.ms) meta.push((msg.ms / 1000).toFixed(1) + " s");
     if (msg.stopped) meta.push("stopped");
+    // v91 (owner 8a): the variant arrows - ‹ i/n › when this message has
+    // sibling variants (edited wordings / regenerated answers). Switching
+    // the variant rebuilds the WHOLE path below it.
+    const v = variantInfo(tab, msg.nid);
+    const vars = (v && v.count > 1)
+        ? `<span class="hub-chat-vars">` +
+          `<button type="button" class="hub-chat-var" data-act="var-prev" data-nid="${esc(msg.nid)}" title="Previous variant of ${role === "You" ? "your request" : "this answer"}"${v.index <= 0 ? " disabled" : ""}>‹</button>` +
+          `<span class="hub-chat-var-n" title="Variant ${v.index + 1} of ${v.count}">${v.index + 1}/${v.count}</span>` +
+          `<button type="button" class="hub-chat-var" data-act="var-next" data-nid="${esc(msg.nid)}" title="Next variant of ${role === "You" ? "your request" : "this answer"}"${v.index >= v.count - 1 ? " disabled" : ""}>›</button>` +
+          `</span>`
+        : "";
     const acts = [];
     acts.push(`<button type="button" class="hub-chat-mact" data-act="copy" data-i="${idx}" title="Copy the text">📋</button>`);
     if (msg.role === "user") {
-        acts.push(`<button type="button" class="hub-chat-mact" data-act="edit" data-i="${idx}" title="Edit and re-send (cuts everything after it)">✎</button>`);
+        acts.push(`<button type="button" class="hub-chat-mact" data-act="edit" data-i="${idx}" title="Edit as a NEW branch - the old wording and its answers stay (walk them with ‹ ›)">✎</button>`);
+    } else {
+        acts.push(`<button type="button" class="hub-chat-mact" data-act="edit" data-i="${idx}" title="Edit this reply in place">✎</button>`);
     }
-    const editing = editState && editState.idx === idx && msg.role === "user";
+    // v91 (owner 8b): every message is deletable (with its subtree, armed);
+    // (owner 8c): every message can start a new chat from here.
+    acts.push(`<button type="button" class="hub-chat-mact" data-act="fork" data-i="${idx}" title="New chat from here (copies this message and everything above)">⑂</button>`);
+    acts.push(`<button type="button" class="hub-chat-mact" data-act="del" data-nid="${esc(msg.nid || "")}" title="Delete this message and everything under it - click twice">🗑</button>`);
+    const editing = editState && editState.idx === idx;
     const body = editing
         ? `<div class="hub-chat-edit">` +
           `<textarea class="hub-chat-edit-ta" rows="3">${esc(msg.text || "")}</textarea>` +
           `<span class="hub-chat-edit-acts">` +
-          `<button type="button" class="hub-chat-edit-send" data-act="edit-send" data-i="${idx}" title="Re-send (the tail after this message is cut)">▶ re-send</button>` +
+          (msg.role === "user"
+            ? `<button type="button" class="hub-chat-edit-send" data-act="edit-send" data-i="${idx}" title="Send as a NEW branch (the old wording + its answers stay)">▶ send</button>`
+            : `<button type="button" class="hub-chat-edit-send" data-act="edit-save" data-i="${idx}" title="Save the edited reply in place">✔ save</button>`) +
           `<button type="button" class="hub-chat-edit-cancel" data-act="edit-cancel" title="Cancel the edit">cancel</button>` +
           `</span></div>`
         : `<div class="hub-chat-msg-body">${mdLite(msg.text)}</div>`;
     return `<div class="hub-chat-msg hub-chat-msg-${msg.role === "assistant" ? "assistant" : "user"}" data-i="${idx}">` +
         `<div class="hub-chat-msg-head">` +
         `<span class="hub-chat-msg-role">${role}</span>` +
+        vars +
         (meta.length ? `<span class="hub-chat-msg-meta">${esc(meta.join(", "))}</span>` : "") +
         `<span class="hub-chat-msg-acts">${acts.join("")}</span>` +
         `</div>` +
@@ -1605,32 +1811,38 @@ function bubbleHtml(msg, idx, sid) {
 function renderMsgs() {
     if (!msgsEl) return;
     const tab = activeTab();
-    const sid = tab?.id || "";
     if (!tab) { msgsEl.innerHTML = ""; return; }
-    msgsEl.innerHTML = tab.msgs.map((m, i) => bubbleHtml(m, i, sid)).join("") +
+    const sid = tab.id || "";
+    msgsEl.innerHTML = tab.msgs.map((m, i) => bubbleHtml(tab, m, i)).join("") +
         (tab.msgs.length ? "" : `<div class="hub-chat-empty">Say something - the model answers here.<br>` +
             `📎 attaches an image (vision), 🎞 a video or a text file.</div>`);
     patchRegenButtons();
     msgsEl.scrollTop = msgsEl.scrollHeight;
 }
 
-// regenerate button only on the LAST assistant message - computed over the
-// rendered list (bubbleHtml is per-message), patched here after the map.
+// regenerate button on the LAST assistant message - and (v91) on a trailing
+// USER message whose answer never arrived (a failed/stopped send gets a
+// one-click retry hanging the answer under that same request).
 function patchRegenButtons() {
     if (!msgsEl) return;
     const tab = activeTab();
     if (!tab) return;
     let lastA = -1;
     tab.msgs.forEach((m, i) => { if (m.role === "assistant") lastA = i; });
+    const lastIdx = tab.msgs.length - 1;
+    const retryUser = lastIdx >= 0 && tab.msgs[lastIdx].role === "user";
     msgsEl.querySelectorAll(".hub-chat-msg").forEach((el) => {
         const i = parseInt(el.dataset.i, 10);
         const msg = tab.msgs[i];
         if (!msg) return;
-        if (msg.role === "assistant" && i === lastA && !streaming) {
+        const wantRegen = !streaming && (
+            (msg.role === "assistant" && i === lastA) ||
+            (msg.role === "user" && i === lastIdx && retryUser));
+        if (wantRegen) {
             if (!el.querySelector('[data-act="regen"]')) {
                 const span = el.querySelector(".hub-chat-msg-acts");
                 if (span) span.insertAdjacentHTML("beforeend",
-                    `<button type="button" class="hub-chat-mact" data-act="regen" data-i="${i}" title="Regenerate this answer">↻</button>`);
+                    `<button type="button" class="hub-chat-mact" data-act="regen" data-i="${i}" title="${msg.role === "user" ? "Generate the answer for this request" : "Regenerate this answer (the old one stays as a variant)"}">↻</button>`);
             }
         } else {
             el.querySelector('[data-act="regen"]')?.remove();
@@ -1692,16 +1904,61 @@ async function openChatViewer(tab, part) {
         img.src = src;
         img.alt = part.orig || "";
         img.className = "hub-chat-view-img";
+        img.draggable = false;
         stage.appendChild(img);
-        let zoom = 1;
-        img.addEventListener("wheel", (e) => {
+        // v91 (owner: "a picture opened from the chat does not MOVE with the
+        // mouse - only the wheel zooms it; in the stack moving works in the
+        // same mode"): the viewer now carries the EXACT stack-viewer
+        // mechanics - wheel zoom keeps the point under the cursor stationary,
+        // left-button drag PANS, double-click toggles fit <-> 1:1.
+        let zoom = 1, tx = 0, ty = 0, oneToOne = false, dimsShown = false;
+        const applyT = () => {
+            img.style.transform = "translate(" + tx + "px, " + ty + "px) scale(" + zoom + ")";
+        };
+        const resetView = (native) => {
+            zoom = 1; tx = 0; ty = 0; oneToOne = !!native;
+            img.style.maxWidth = native ? "none" : "";
+            img.style.maxHeight = native ? "none" : "";
+            applyT();
+        };
+        stage.addEventListener("wheel", (e) => {
             e.preventDefault();
-            zoom = Math.min(8, Math.max(0.2, zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
-            img.style.transform = "scale(" + zoom + ")";
+            const r = stage.getBoundingClientRect();
+            const cx = e.clientX - r.left - r.width / 2;
+            const cy = e.clientY - r.top - r.height / 2;
+            const old = zoom;
+            const nz = Math.min(8, Math.max(0.2, zoom * (e.deltaY < 0 ? 1.25 : 1 / 1.25)));
+            if (nz === old) return;
+            tx = cx - (cx - tx) * (nz / old);
+            ty = cy - (cy - ty) * (nz / old);
+            zoom = nz;
+            applyT();
         }, { passive: false });
-        img.addEventListener("dblclick", () => { zoom = 1; img.style.transform = ""; });
+        img.addEventListener("mousedown", (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const sx = e.clientX, sy = e.clientY, ox = tx, oy = ty;
+            stage.classList.add("hub-stack-viewer-panning");
+            const move = (ev) => {
+                tx = ox + (ev.clientX - sx);
+                ty = oy + (ev.clientY - sy);
+                applyT();
+            };
+            const up = () => {
+                window.removeEventListener("mousemove", move, true);
+                window.removeEventListener("mouseup", up, true);
+                stage.classList.remove("hub-stack-viewer-panning");
+            };
+            window.addEventListener("mousemove", move, true);
+            window.addEventListener("mouseup", up, true);
+        });
+        stage.addEventListener("dblclick", () => resetView(!oneToOne));
         img.addEventListener("load", () => {
-            metaEl.textContent = img.naturalWidth + "×" + img.naturalHeight + " · wheel zoom, dblclick resets";
+            if (dimsShown || !img.naturalWidth) return;
+            dimsShown = true;
+            metaEl.textContent = img.naturalWidth + "×" + img.naturalHeight +
+                " · wheel: zoom · drag: pan · double-click: 1:1 ↔ fit";
         });
         v.querySelector(".hub-stack-viewer-copy")?.addEventListener("click", async () => {
             try {
@@ -1984,6 +2241,9 @@ function toggleThink(btn) {
     const open = body.style.display !== "none";
     body.style.display = open ? "none" : "";
     btn.textContent = open ? "💭 thinking ▸" : "💭 thinking ▾";
+    // v91: a MANUAL toggle is respected while the stream runs - the
+    // auto-expand below never fights the user's own click.
+    box.dataset.thinkUser = "1";
 }
 
 function setBusy(b) {
@@ -2019,7 +2279,19 @@ function updateStreamBubble() {
     if (streaming.thoughts) {
         const th = el.querySelector(".hub-chat-think");
         th.style.display = "";
-        th.querySelector(".hub-chat-think-b").innerHTML = mdLite(streaming.thoughts);
+        const body = th.querySelector(".hub-chat-think-b");
+        body.innerHTML = mdLite(streaming.thoughts);
+        // v91 (owner: "the thinking block does not expand during generation"):
+        // it AUTO-OPENS as soon as reasoning tokens arrive and keeps following
+        // the text while the model thinks; after the answer lands the normal
+        // re-render collapses it again (the historical look), and a manual
+        // toggle during the stream always wins (toggleThink sets thinkUser).
+        if (el.dataset.thinkUser !== "1") {
+            body.style.display = "";
+            const btn = th.querySelector(".hub-chat-think-t");
+            if (btn) btn.textContent = "💭 thinking ▾";
+        }
+        try { body.scrollTop = body.scrollHeight; } catch (_) {}
     }
     msgsEl.scrollTop = msgsEl.scrollHeight;
 }
@@ -2043,7 +2315,12 @@ async function sendCurrent(opts = {}) {
     try {
         const body = { session: tab.id, stream: wantStream };
         if (isEdit) {
-            body.edit_index = opts.editIndex;
+            // v91: the edit lands as a NEW BRANCH (the old wording + answers
+            // stay) - edit_nid names the request; edit_index stays as the
+            // legacy fallback for an old py.
+            const nid = opts.editNid || (opts.editIndex != null ? tab.msgs[opts.editIndex]?.nid : null);
+            if (nid) body.edit_nid = nid;
+            else if (opts.editIndex != null) body.edit_index = opts.editIndex;
             body.text = opts.editText ?? text;
         } else if (isRegen) {
             body.regenerate = true;
@@ -2364,9 +2641,15 @@ function buildDom() {
                 } catch (_) { localToast("Copy failed"); }
             })();
         } else if (a === "regen") {
-            if (msg?.role === "assistant") void sendCurrent({ regenerate: true });
+            // v91: the model's answer (a NEW sibling - the old one stays as a
+            // variant) or a retry for a trailing user request.
+            if (msg && (msg.role === "assistant" || msg.role === "user")) {
+                void sendCurrent({ regenerate: true });
+            }
         } else if (a === "edit") {
-            if (msg?.role === "user") {
+            // v91 (owner 8b): user messages edit into a NEW branch; the
+            // model's replies edit IN PLACE.
+            if (msg && (msg.role === "user" || msg.role === "assistant")) {
                 editState = { idx: i };
                 renderMsgs();
                 try { msgsEl.querySelector(".hub-chat-edit-ta")?.focus(); } catch (_) {}
@@ -2376,7 +2659,34 @@ function buildDom() {
             renderMsgs();
         } else if (a === "edit-send") {
             const ta = msgsEl.querySelector('.hub-chat-msg[data-i="' + i + '"] .hub-chat-edit-ta');
-            void sendCurrent({ editIndex: i, editText: ta ? ta.value : msg?.text });
+            void sendCurrent({ editIndex: i, editNid: msg?.nid, editText: ta ? ta.value : msg?.text });
+        } else if (a === "edit-save") {
+            // v91: the model's reply edited in place.
+            const ta = msgsEl.querySelector('.hub-chat-msg[data-i="' + i + '"] .hub-chat-edit-ta');
+            editState = null;
+            void saveMsgText(tab, msg?.nid, ta ? ta.value : msg?.text);
+        } else if (a === "var-prev" || a === "var-next") {
+            // v91 (owner 8a): walk the variants; the branch switches WITH the
+            // request. Locked while a generation is running.
+            if (streaming) { localToast("Already generating - press ⏹ to stop first"); return; }
+            void switchVariant(tab, act.dataset.nid, a === "var-next" ? 1 : -1);
+        } else if (a === "fork") {
+            // v91 (owner 8c): a new chat from this message (+ everything above).
+            void forkFromMessage(tab, i);
+        } else if (a === "del") {
+            // v91 (owner 8b): armed two-click delete (message + subtree).
+            const nid = act.dataset.nid || msg?.nid;
+            if (!nid) { localToast("This message is too old to delete - reload the chat once"); return; }
+            const now = Date.now();
+            if (delArm && delArm.sid === tab.id && delArm.nid === nid && now - delArm.ts <= DEL_ARM_MS) {
+                delArm = null;
+                void deleteMsg(tab, nid);
+                return;
+            }
+            delArm = { sid: tab.id, nid, ts: now };
+            try { act.classList.add("hub-chat-mact-armed"); } catch (_) {}
+            localToast("Click 🗑 again to DELETE this message and everything under it");
+            setTimeout(() => { if (delArm?.nid === nid) delArm = null; }, DEL_ARM_MS);
         }
     });
 
@@ -2471,7 +2781,22 @@ async function panelClearAll(btn) {
 
 export function initChat() {
     if (!isChatOn()) return;
-    registerNativeChatSwitch();   // v88: the ComfyUI Settings dialog switch
+    // v91: the native "LLM Chat panel" ComfyUI switch is gone - the MINI
+    // PANEL (launcher) carries the SettingsHub rows now; register the panel
+    // with it so [–] can collapse the chat INTO the bar.
+    registerLauncherPanel("chat", {
+        isOn: () => isChatOn(),
+        setOn: (v) => setChatOn(v),
+        isMin: () => !!(panel && panel.style.display === "none"),
+        minimize: () => setMinimized(true),
+        restore: () => setMinimized(false),
+        showChip: () => {
+            if (!panel || !chip || !isChatOn()) return;
+            const ui = lsUi();
+            applyChipPos(ui.chipX ?? ui.x ?? 16, ui.chipY ?? ui.y ?? 16);
+            chip.style.display = "";
+        },
+    });
     teardown();
     const seq = ++initSeq; // capture AFTER teardown - teardown() bumps initSeq
     buildDom();
@@ -2489,7 +2814,7 @@ export function initChat() {
             const res = await jfetch("/settings_hub/chat/session/" + id);
             const sess = res.json?.session;
             if (res.ok && sess?.id) {
-                tabs.push({ id: sess.id, title: sess.title || "", msgs: sess.messages || [], pending: [] });
+                tabs.push({ id: sess.id, title: sess.title || "", msgs: sess.messages || [], tree: sess.tree || null, pending: [] });
                 if (!activeId) activeId = sess.id;
             }
         }
@@ -2529,6 +2854,7 @@ function teardown() {
     serverState = null;
     degraded = null;
     editState = null;
+    delArm = null;
     mounted = false;
 }
 
@@ -2578,6 +2904,17 @@ export function __chatTestHooks() {
         send: sendCurrent,
         stopStream: () => { try { streaming?.ctrl?.abort(); } catch (_) {} },
         streaming: () => (streaming ? { sid: streaming.sid, text: streaming.text, thoughts: streaming.thoughts } : null),
+        // v91: branch/edit/delete/fork/export introspection for the smoke tests
+        variantInfo,
+        switchVariant,
+        deleteMsg,
+        saveMsgText,
+        forkFromMessage,
+        exportSession,
+        importSessionFile,
+        applySession,
+        bubbleHtml,
+        activePromptLabel,
         mdLite,
         openViewer: openChatViewer,
         closeViewer,

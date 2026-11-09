@@ -7,11 +7,11 @@
 //   SELF-MANAGED PANEL: the hub settings lose the whole Stack section - the
 //   panel header gains a ⚙ button opening the STACK SETTINGS popup with the
 //   exact rows the hub used to host (Panel On/Off, Max saved entries, the
-//   v77 scope, the v84 storage folder - same Enter/Esc contract). The SAME
-//   On/Off switch is registered as a NATIVE ComfyUI setting
-//   (app.ui.settings.addSetting, id "SettingsHub.PasteStack.enabled" ->
-//   ComfyUI Settings → SettingsHub) - reachable in EVERY workflow, with or
-//   without a hub node, so an Off panel can always be brought back.
+//   v77 scope, the v84 storage folder - same Enter/Esc contract). v91: the
+//   ComfyUI-settings switch moved into the MINI PANEL (web/launcher.js -
+//   "Mini panel (SettingsHub)" + the item rows); the per-panel row is gone,
+//   the way back is the launcher or that dialog - reachable in EVERY
+//   workflow.
 // ============================================================================
 // v83 (owner report 2026-11-09: "the text can be viewed - now images, video
 //   and files must be viewable too, the small thumb hides the details that
@@ -35,7 +35,7 @@
 // v89 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v90";
+globalThis.__SettingsHubLoaded["stack"] = "v91";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -226,6 +226,13 @@ import { stackBridge } from "./sync.js";
 // v90: the shared UI font scale - the stack ⚙ hosts the same row as the hub
 // ⚙ and the chat ⚙ (one localStorage value, one CSS variable --sh-fs).
 import { UI_FONT_SCALE_CHOICES, getUiFontScale, setUiFontScale, uiFontScaleLabel } from "./global_settings.js";
+// v91: the MINI PANEL (launcher) - the collapse target of this panel and the
+// home of the only SettingsHub rows in ComfyUI's Settings dialog.
+import { launcherHostsMinimized, launcherSetCollapsed, registerLauncherPanel } from "./launcher.js";
+// v91: the broad media-loader detection for the drag&drop targets - custom
+// loader nodes are recognized through the SAME heuristics the pin menu uses
+// (options flags + real upload wiring), never through hardcoded node names.
+import { mediaLoaderInfo } from "./core.js";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -422,52 +429,27 @@ export function isStackOn() {
     catch (_) { return true; }
 }
 
-let nativeStackSetting = null; // v88: the ComfyUI Settings dialog mirror
+// v88: the native ComfyUI setting mirror is GONE in v91 (the launcher
+// carries the settings rows now)
+let nativeStackSetting = null; // v91: unused leftover - the native switch is gone
 
 export function setStackOn(v, src) {
     const was = isStackOn();
     try { localStorage.setItem(LS_ON, v ? "1" : "0"); } catch (_) {}
-    // v88: keep the native setting in sync when the flip came from OUR ui
-    // (the panel ⚙ popup); a "native" flip already IS that setting.
-    if (src !== "native") {
-        try { nativeStackSetting?.set?.(!!v); } catch (_) {}
-    }
-    // v89: a hidden panel has NO ui of its own - always say WHERE the way
-    // back is (ComfyUI Settings -> SettingsHub), whatever flipped it.
+    // v91: the way back is the MINI PANEL (the launcher) - the old native
+    // ComfyUI "Paste Stack panel" switch is GONE (the launcher rows replaced
+    // the per-panel ones).
     if (was && !v) {
-        localToast("Stack hidden - bring it back: ComfyUI Settings → SettingsHub → 'Paste Stack panel'", 5200);
+        localToast("Stack hidden - bring it back: the mini panel (📋 toggle) or ComfyUI Settings → SettingsHub → 'Mini panel'", 5200);
     }
     if (v && !mounted) initStack();
     else if (!v) teardown();
 }
 
-// v88: register the panel switch in ComfyUI's OWN Settings dialog (the
-// SettingsHub group) - the way back when the panel (and its chip) is hidden,
-// reachable in every workflow. Fail-safe on old frontends.
-function registerNativeStackSwitch() {
-    if (nativeStackSetting) return;
-    try {
-        const s = app?.ui?.settings;
-        if (!s || typeof s.addSetting !== "function") return;
-        nativeStackSetting = s.addSetting({
-            id: "SettingsHub.PasteStack.enabled",
-            name: "Paste Stack panel (SettingsHub)",
-            type: "boolean",
-            defaultValue: isStackOn(),
-            onChange: (value) => {
-                const v = !!value;
-                if (v !== isStackOn()) setStackOn(v, "native");
-            },
-        });
-        try {
-            if (nativeStackSetting && typeof nativeStackSetting.set === "function") {
-                nativeStackSetting.set(isStackOn());
-            }
-        } catch (_) {}
-    } catch (e) {
-        console.warn("[SettingsHub] native stack setting unavailable:", e);
-    }
-}
+// v91: the native "Paste Stack panel" ComfyUI setting was REMOVED - the MINI
+// PANEL (web/launcher.js) carries the only SettingsHub rows now: "Mini panel
+// (SettingsHub)" + the item switches. The old registerNativeStackSwitch is
+// gone on purpose.
 
 export function getStackMax() {
     try {
@@ -642,10 +624,11 @@ function openStkSettingsPop() {
         `placeholder="default: user/settings_hub/stack" spellcheck="false" autocomplete="off">` +
         `<button type="button" class="hub-cs-chip" data-stk-btn="rootdef">default</button></span></div>` +
         `<div class="hub-cs-info" data-stk="rootinfo"></div>` +
-        `<div class="hub-cs-hint">Enter applies the folder, Esc reverts it. Off hides the panel ` +
-        `and its chip; the switch is ALSO in ComfyUI Settings → SettingsHub (reachable in ` +
-        `every workflow). Switching the scope or the folder never moves entries - each ` +
-        `location/scope keeps its own. 🗑 in the panel header clears the entries.</div>`;
+        `<div class="hub-cs-hint">Enter applies the folder, Esc reverts it. Off hides the ` +
+        `panel; the way back is the mini panel (📋 toggle) or ComfyUI Settings → ` +
+        `SettingsHub → 'Mini panel'. Switching the scope or the folder never moves ` +
+        `entries - each location/scope keeps its own. 🗑 in the panel header clears ` +
+        `the entries.</div>`;
     document.body.appendChild(pop);
     stkPop = pop;
 
@@ -2012,11 +1995,20 @@ function applySize(w, h) {
 
 function setMinimized(min, persist = true) {
     if (!panel || !chip) return;
+    // v91 (owner #1): [–] collapses the stack INTO the mini panel when it is
+    // shown and its stack item is visible; otherwise the historical own chip.
+    const host = min && launcherHostsMinimized("stack");
     panel.style.display = min ? "none" : "";
-    chip.style.display = min ? "" : "none";
+    chip.style.display = (min && host) ? "none" : (min ? "" : "none");
     if (min) {
-        const ui = lsUi();
-        applyChipPos(ui.chipX ?? ui.x ?? 16, ui.chipY ?? ui.y ?? 16);
+        if (host) {
+            launcherSetCollapsed("stack", true);
+        } else {
+            const ui = lsUi();
+            applyChipPos(ui.chipX ?? ui.x ?? 16, ui.chipY ?? ui.y ?? 16);
+        }
+    } else {
+        launcherSetCollapsed("stack", false);
     }
     if (persist) saveUi({ min: !!min });
 }
@@ -2118,6 +2110,13 @@ function elemFromPoint(x, y) {
 // (LoadImage "image", VHS Load Video "video", LoadAudio "audio"); the
 // options flags cover the native LoadVideo, whose combo is just named
 // "file" but carries options.video_upload (same for audio_upload).
+// v91 (owner: "drag&drop from the stack into nodes does not work - do NOT
+// hardcode node names, it must work with ALL nodes and custom ones"): when
+// the name/flag scan misses, the broad mediaLoaderInfo() detection runs as
+// the fallback - the SAME heuristics the pin menu uses to recognize a media
+// loader (options flags + REAL upload wiring: own onDragOver/onDrop,
+// onDropFile, an upload button widget, pasteFiles). Custom loader nodes of
+// any pack qualify without a single hardcoded name.
 function uploadWidgetOf(node, kind) {
     if (!node || node.flags?.collapsed) return null;
     try {
@@ -2130,8 +2129,14 @@ function uploadWidgetOf(node, kind) {
             if (kind === "video" && (o.video_upload || w.name === "video" || w.name === "video_file")) return w;
             if (kind === "audio" && (o.audio_upload || w.name === "audio")) return w;
         }
-        return null;
-    } catch (_) { return null; }
+    } catch (_) { /* fall through to the broad detection */ }
+    if (kind === "image" || kind === "video" || kind === "audio") {
+        try {
+            const info = typeof mediaLoaderInfo === "function" ? mediaLoaderInfo(node) : null;
+            if (info?.combo && info.kind === kind) return info.combo;
+        } catch (_) { /* exotic getters must not kill the drag */ }
+    }
+    return null;
 }
 
 function imageWidgetOf(node) { return uploadWidgetOf(node, "image"); }
@@ -2165,13 +2170,39 @@ function pointToGraph(cx, cy) {
     try {
         const c = app.canvas;
         if (!c?.canvas) return null;
-        if (elemFromPoint(cx, cy) !== c.canvas) return null;
+        // v91: the point must sit on the canvas SURFACE - but the topmost
+        // element being a WRAPPER that CONTAINS the canvas is fine (Vue
+        // containers, view chrome); only a FOREIGN overlay (a dialog above
+        // the graph) must block the drop.
+        const el = elemFromPoint(cx, cy);
+        if (el && el !== c.canvas && !(typeof el.contains === "function" && el.contains(c.canvas))) return null;
         const rect = c.canvas.getBoundingClientRect();
         const ds = c.ds || { scale: 1, offset: [0, 0] };
         const gx = (cx - rect.left) / (ds.scale || 1) - (ds.offset?.[0] || 0);
         const gy = (cy - rect.top) / (ds.scale || 1) - (ds.offset?.[1] || 0);
-        const graph = app.graph ?? c.graph;
-        const node = graph?.getNodeOnPos?.(gx, gy, true) ?? null;
+        // v91 FIX (owner: "drag&drop from the stack into nodes does not
+        // work"): the third argument of LGraph.getNodeOnPos is the NODE
+        // LIST, not a flag - current frontends declare
+        // getNodeOnPos(x, y, nodeList?) and the historical
+        // getNodeOnPos(x, y, true) evaluated nodeList = true -> the
+        // iteration over `true.length` never ran -> this ALWAYS returned
+        // null and NO node ever qualified as a drop target. Called WITHOUT
+        // the third argument now (the default = the full node list), with a
+        // manual reverse scan as the safety net for exotic builds.
+        const graph = c.graph ?? app.graph;
+        let node = null;
+        try { node = graph?.getNodeOnPos?.(gx, gy) ?? null; } catch (_) { node = null; }
+        if (!node) {
+            try {
+                const list = Array.isArray(graph?._nodes) ? graph._nodes : [];
+                for (let i = list.length - 1; i >= 0; i--) {
+                    const n = list[i];
+                    let inside = false;
+                    try { inside = !!n?.isPointInside?.(gx, gy); } catch (_) {}
+                    if (inside) { node = n; break; }
+                }
+            } catch (_) {}
+        }
         return node ? { node, gx, gy } : null;
     } catch (_) { return null; }
 }
@@ -3277,7 +3308,22 @@ function hookWorkflowSwitch() {
 
 export function initStack() {
     if (!isStackOn()) return;
-    registerNativeStackSwitch();  // v88: the ComfyUI Settings dialog switch
+    // v91: the native "Paste Stack panel" ComfyUI switch is gone - the MINI
+    // PANEL (launcher) carries the SettingsHub rows now; register the panel
+    // with it so [–] can collapse the stack INTO the bar.
+    registerLauncherPanel("stack", {
+        isOn: () => isStackOn(),
+        setOn: (v) => setStackOn(v),
+        isMin: () => !!(panel && panel.style.display === "none"),
+        minimize: () => setMinimized(true),
+        restore: () => setMinimized(false),
+        showChip: () => {
+            if (!panel || !chip || !isStackOn()) return;
+            const ui = lsUi();
+            applyChipPos(ui.chipX ?? ui.x ?? 16, ui.chipY ?? ui.y ?? 16);
+            chip.style.display = "";
+        },
+    });
     const seq = ++initSeq;
     teardown();
     // v77: a fresh context - the list must never leak ACROSS scopes. In

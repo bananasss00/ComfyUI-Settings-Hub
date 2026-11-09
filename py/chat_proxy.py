@@ -167,7 +167,7 @@ try:
 except Exception:  # pragma: no cover - folder_paths always exists in ComfyUI
     folder_paths = None
 
-CHAT_SERVER_VERSION = "v89"
+CHAT_SERVER_VERSION = "v91"
 
 # ---------------------------------------------------------------------------
 # Limits (server-side absolute guards; the frontend may enforce smaller ones)
@@ -533,6 +533,181 @@ def _evict_sessions(keep):
             shutil.rmtree(_session_dir(brief["id"]), ignore_errors=True)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# v91: the message TREE (owner requests 8a-8d: "when I fix my request, the
+# old requests and their answer branches must STAY - with arrows to walk the
+# previous/next answers and the branch switches with the request"; "edit and
+# delete messages, mine and the model's"; "a new chat from a selected
+# message"; "export and import")
+# ---------------------------------------------------------------------------
+# The session keeps the LINEAR "messages" list it always had - it is the
+# ACTIVE path of a small tree stored next to it in sess["tree"]:
+#
+#   tree = {"nodes": {nid: {"id", "parent", "children": [nid..],
+#                            "activeChild": nid|None, "role", "text", "ts",
+#                            + the usual fields (parts/usage/model/ms/ctx/
+#                              stopped/thoughts)}},
+#           "activeLeaf": nid}
+#
+# A virtual ROOT node holds the top-level children (first-message variants).
+# Linearizing walks root -> activeLeaf through the per-node activeChild
+# pointers and rewrites sess["messages"] (plain dicts + "nid"), so every
+# EXISTING consumer - build_upstream_messages, the search, the briefs, the
+# eviction - keeps working UNCHANGED on the active path. Branching = adding
+# a sibling + moving the parent's activeChild pointer; nothing is destroyed.
+
+ROOT_ID = "__root__"
+
+_NODE_KEEP = ("role", "text", "parts", "ts", "usage", "model", "ms", "ctx",
+              "stopped", "thoughts")
+
+
+def _node_from_msg(m):
+    n = {"id": uuid.uuid4().hex[:8], "parent": None, "children": [],
+         "activeChild": None}
+    for k in _NODE_KEEP:
+        if m.get(k) is not None:
+            n[k] = m[k]
+    if not n.get("ts"):
+        n["ts"] = int(time.time())
+    return n
+
+
+def _msg_from_node(n):
+    m = {}
+    for k in _NODE_KEEP:
+        if n.get(k) is not None:
+            m[k] = n[k]
+    m["nid"] = n["id"]
+    return m
+
+
+def _ensure_tree(sess):
+    """Lazy migration: a session from an older build carries a linear
+    "messages" list only - seed the tree from it once. Idempotent + cheap."""
+    tree = sess.get("tree")
+    if isinstance(tree, dict) and isinstance(tree.get("nodes"), dict) \
+            and ROOT_ID in tree["nodes"]:
+        return tree
+    nodes = {ROOT_ID: {"id": ROOT_ID, "parent": None, "children": [],
+                       "activeChild": None}}
+    prev = ROOT_ID
+    for m in (sess.get("messages") or []):
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+            continue
+        n = _node_from_msg(m)
+        n["parent"] = prev
+        nodes[n["id"]] = n
+        p = nodes[prev]
+        p["children"].append(n["id"])
+        p["activeChild"] = n["id"]
+        prev = n["id"]
+    sess["tree"] = {"nodes": nodes,
+                    "activeLeaf": prev if prev != ROOT_ID else None}
+    _tree_linearize(sess)
+    return sess["tree"]
+
+
+def _tree_linearize(sess):
+    """Rewrite sess["messages"] from the active path (root -> activeLeaf
+    through the per-node activeChild pointers)."""
+    tree = sess.get("tree") or {}
+    nodes = tree.get("nodes") or {}
+    if ROOT_ID not in nodes:
+        return []
+    out = []
+    nid = nodes[ROOT_ID].get("activeChild")
+    seen = set()
+    while nid and nid in nodes and nid not in seen:
+        seen.add(nid)
+        out.append(_msg_from_node(nodes[nid]))
+        nid = nodes[nid].get("activeChild") or None
+    tree["activeLeaf"] = out[-1]["nid"] if out else None
+    sess["messages"] = out
+    return out
+
+
+def _tree_append(sess, parent_id, fields):
+    """Create a node under parent_id, make it the ACTIVE branch, linearize.
+    Returns the node id (or None when the tree is unusable)."""
+    tree = _ensure_tree(sess)
+    nodes = tree["nodes"]
+    if parent_id not in nodes:
+        parent_id = ROOT_ID
+    n = _node_from_msg(fields if isinstance(fields, dict) else {})
+    n["parent"] = parent_id
+    nodes[n["id"]] = n
+    p = nodes[parent_id]
+    p["children"].append(n["id"])
+    p["activeChild"] = n["id"]   # a new branch becomes the active one
+    _tree_linearize(sess)
+    return n["id"]
+
+
+def _tree_delete(sess, nid):
+    """Remove a node WITH its whole subtree; the parent's active pointer
+    falls back to the last surviving sibling. True when something went."""
+    tree = _ensure_tree(sess)
+    nodes = tree["nodes"]
+    if not nid or nid == ROOT_ID or nid not in nodes:
+        return False
+    doomed = []
+    stack = [nid]
+    while stack:
+        cur = stack.pop()
+        if cur in nodes:
+            doomed.append(cur)
+            stack.extend(nodes[cur].get("children") or [])
+    parent_id = nodes[nid].get("parent")
+    for d in doomed:
+        nodes.pop(d, None)
+    if parent_id in nodes:
+        p = nodes[parent_id]
+        p["children"] = [c for c in (p.get("children") or []) if c not in doomed]
+        if p.get("activeChild") not in p["children"]:
+            p["activeChild"] = p["children"][-1] if p["children"] else None
+    _tree_linearize(sess)
+    return True
+
+
+def _tree_switch(sess, nid, direction=None, index=None):
+    """Move the parent's activeChild to a SIBLING of nid (prev/next by
+    direction, or straight to index). True when the active path changed."""
+    tree = _ensure_tree(sess)
+    nodes = tree["nodes"]
+    n = nodes.get(nid)
+    if not n or nid == ROOT_ID:
+        return False
+    pid = n.get("parent")
+    if pid not in nodes:
+        return False
+    kids = nodes[pid].get("children") or []
+    if nid not in kids or len(kids) < 2:
+        return False
+    i = kids.index(nid)
+    if index is not None:
+        j = max(0, min(len(kids) - 1, int(index)))
+    else:
+        j = i + (1 if (direction or 0) > 0 else -1)
+        if j < 0 or j >= len(kids):
+            return False
+    nodes[pid]["activeChild"] = kids[j]
+    _tree_linearize(sess)
+    return True
+
+
+def _tree_path_upto(sess, nid):
+    """Plain (no nid) message dicts along the ACTIVE path truncated right
+    after nid - the payload source for regenerate and the fork-from-message
+    copy."""
+    out = []
+    for m in _tree_linearize(sess):
+        out.append({k: v for k, v in m.items() if k != "nid"})
+        if m.get("nid") == nid:
+            break
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1761,6 +1936,12 @@ async def chat_session_get(request):
     sess = _read_session(sid)
     if not sess:
         return _jerr("no such session", 404)
+    # v91: migrate + hand out the tree (nids in every message) so the UI can
+    # render the variant arrows for OLD chats too, without waiting for the
+    # first mutation.
+    async with _lock:
+        _ensure_tree(sess)
+        _write_session(sess)
     return web.json_response({"ok": True, "session": sess})
 
 
@@ -1803,8 +1984,186 @@ async def chat_session_clear(request):
         if not sess:
             return _jerr("no such session", 404)
         sess["messages"] = []
+        sess.pop("tree", None)
         sess["updated"] = int(time.time())
         _write_session(sess)
+    return web.json_response({"ok": True, "session": sess})
+
+
+# ---------------------------------------------------------------------------
+# v91: branch walking / in-place edit / delete / fork+import (owner 8a-8d)
+# ---------------------------------------------------------------------------
+
+@PromptServer.instance.routes.post("/settings_hub/chat/branch")
+async def chat_branch(request):
+    """Walk the variant siblings of a message: {"sid", "nid",
+    "dir": -1 | 1} or {"sid", "nid", "set": <0-based index>}. Switching the
+    active variant rebuilds the whole visible path under it (the answer
+    branch switches WITH its request). No generation happens."""
+    try:
+        body = await request.json()
+    except Exception:
+        return _jerr("bad json")
+    if not isinstance(body, dict):
+        return _jerr("bad body")
+    sid = _sid_from(request, body)
+    if not sid:
+        return _jerr("bad session id")
+    nid = str(body.get("nid") or "")
+    async with _lock:
+        sess = _read_session(sid)
+        if not sess:
+            return _jerr("no such session", 404)
+        _ensure_tree(sess)
+        try:
+            if body.get("set") is not None:
+                moved = _tree_switch(sess, nid, index=int(body.get("set")))
+            else:
+                moved = _tree_switch(sess, nid,
+                                     1 if int(body.get("dir") or 0) > 0 else -1)
+        except Exception:
+            moved = False
+        if not moved:
+            return _jerr("no variant in that direction")
+        sess["updated"] = int(time.time())
+        _write_session(sess)
+    return web.json_response({"ok": True, "session": sess})
+
+
+@PromptServer.instance.routes.put("/settings_hub/chat/session/{sid}/msg")
+async def chat_msg_edit(request):
+    """v91 (owner 8b): edit ANY message text IN PLACE - the model's replies
+    too. (A user message edit that must BRANCH goes through /send with
+    edit_nid.) Body: {"nid", "text"}."""
+    sid = request.match_info.get("sid") or ""
+    if not _SID_RE.match(sid):
+        return _jerr("bad session id")
+    try:
+        body = await request.json()
+    except Exception:
+        return _jerr("bad json")
+    if not isinstance(body, dict):
+        return _jerr("bad body")
+    nid = str(body.get("nid") or "")
+    text = str(body.get("text") if body.get("text") is not None else "")
+    if len(text) > MAX_MESSAGE_CHARS:
+        return _jerr("text too large", 413)
+    async with _lock:
+        sess = _read_session(sid)
+        if not sess:
+            return _jerr("no such session", 404)
+        _ensure_tree(sess)
+        n = sess["tree"]["nodes"].get(nid)
+        if not n or nid == ROOT_ID:
+            return _jerr("no such message")
+        n["text"] = text
+        _tree_linearize(sess)
+        sess["updated"] = int(time.time())
+        _write_session(sess)
+    return web.json_response({"ok": True, "session": sess})
+
+
+@PromptServer.instance.routes.post("/settings_hub/chat/session/{sid}/msg_delete")
+async def chat_msg_delete(request):
+    """v91 (owner 8b): delete a message WITH its whole subtree (the UI arms
+    the button - two clicks). Deleting a user request removes its answer
+    branch; the parent's active pointer falls back to the last surviving
+    sibling. Body: {"nid"}."""
+    sid = request.match_info.get("sid") or ""
+    if not _SID_RE.match(sid):
+        return _jerr("bad session id")
+    try:
+        body = await request.json()
+    except Exception:
+        return _jerr("bad json")
+    if not isinstance(body, dict):
+        return _jerr("bad body")
+    nid = str(body.get("nid") or "")
+    async with _lock:
+        sess = _read_session(sid)
+        if not sess:
+            return _jerr("no such session", 404)
+        _ensure_tree(sess)
+        if not _tree_delete(sess, nid):
+            return _jerr("no such message")
+        sess["updated"] = int(time.time())
+        _write_session(sess)
+    return web.json_response({"ok": True, "session": sess})
+
+
+@PromptServer.instance.routes.post("/settings_hub/chat/import")
+async def chat_import(request):
+    """v91 (owner 8c+8d): create a session from forked/exported data.
+    Body: {"title"?, "messages": [..], "copy_blobs_from"?: <sid>}.
+    Export (client-side, from GET /chat/session/{sid}) keeps the whole tree;
+    an import rebuilds the tree from the LINEAR active path (branches do not
+    survive a file round-trip - the messages themselves do). Attachment blobs
+    are COPIED from copy_blobs_from when that session still exists; a file
+    import on a fresh machine degrades to text-only messages."""
+    try:
+        body = await request.json()
+    except Exception:
+        return _jerr("bad json")
+    if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+        return _jerr("bad body")
+    title = str(body.get("title") or "")[:MAX_TITLE_CHARS]
+    src_sid = str(body.get("copy_blobs_from") or "")
+    if not _SID_RE.match(src_sid):
+        src_sid = ""
+    src_blobs = os.path.join(_sessions_dir(), src_sid, "blobs") if src_sid else None
+    msgs = []
+    for m in body["messages"][-400:]:
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+            continue
+        text = str(m.get("text") or "")
+        if len(text) > MAX_MESSAGE_CHARS:
+            text = text[:MAX_MESSAGE_CHARS]
+        parts = []
+        for p in (m.get("parts") or [])[:8]:
+            if not isinstance(p, dict):
+                continue
+            kind = str(p.get("kind") or "")
+            name = str(p.get("name") or "")
+            if kind not in _KIND_EXT or not _NAME_RE.match(name):
+                continue
+            if src_blobs and os.path.isfile(os.path.join(src_blobs, name)):
+                parts.append({"kind": kind, "name": name,
+                              "orig": _sanitize_orig(p.get("orig") or name),
+                              "size": int(p.get("size") or 0)})
+        if not text and not parts:
+            text = "(attachment unavailable - the source chat files are gone)"
+        entry = {"role": m.get("role"), "text": text, "parts": parts,
+                 "ts": int(m.get("ts") or time.time())}
+        for k in ("usage", "model", "ms", "stopped", "thoughts"):
+            if m.get(k) is not None:
+                entry[k] = m[k]
+        msgs.append(entry)
+    async with _lock:
+        sess = _new_session(title)
+        _ensure_dirs(sess["id"])
+        dst = _blobs_dir(sess["id"])
+        if src_blobs and any(m.get("parts") for m in msgs):
+            os.makedirs(dst, exist_ok=True)
+            for m in msgs:
+                for p in list(m.get("parts") or []):
+                    try:
+                        shutil.copyfile(os.path.join(src_blobs, p["name"]),
+                                        os.path.join(dst, p["name"]))
+                    except Exception:
+                        m["parts"] = [q for q in m["parts"] if q.get("name") != p["name"]]
+        for m in msgs:
+            m["parts"] = [p for p in (m.get("parts") or [])
+                          if os.path.isfile(os.path.join(dst, p.get("name") or ""))]
+        sess["messages"] = msgs
+        _ensure_tree(sess)
+        if not sess.get("title"):
+            for m in sess["messages"]:
+                if m.get("role") == "user" and (m.get("text") or "").strip():
+                    sess["title"] = m["text"].strip()[:MAX_TITLE_CHARS]
+                    break
+        sess["updated"] = int(time.time())
+        _write_session(sess)
+        _evict_sessions(_load_config().get("keep_sessions"))
     return web.json_response({"ok": True, "session": sess})
 
 
@@ -1896,27 +2255,61 @@ async def chat_send(request):
         if not sess:
             return _jerr("no such session", 404)
         now = int(time.time())
-        msgs = sess["messages"]
+        _ensure_tree(sess)
+        tree = sess["tree"]
+        nodes = tree["nodes"]
 
         # --- mutate the history per the request kind ------------------------
-        if body.get("edit_index") is not None:
-            try:
-                idx = int(body.get("edit_index"))
-            except Exception:
-                return _jerr("bad edit_index")
-            if idx < 0 or idx >= len(msgs) or msgs[idx].get("role") != "user":
-                return _jerr("edit_index does not point at a user message")
+        # v91: every mutation goes through the message TREE. user_nid is the
+        # node the answer will hang under; path_msgs (regenerate only) is an
+        # explicit payload source that stops BEFORE the answer being redone.
+        user_nid = None
+        path_msgs = None
+        if body.get("edit_nid") is not None or body.get("edit_index") is not None:
+            # v91 (owner 8a): EDIT = a NEW BRANCH. The old wording and its
+            # whole answer subtree stay reachable through the variant arrows
+            # (‹ 2/3 ›); the edited variant becomes the active one. The
+            # historical behavior ("cuts everything after it") destroyed the
+            # tail - exactly what the owner asked to keep.
+            if body.get("edit_nid") is not None:
+                src = nodes.get(str(body.get("edit_nid")))
+            else:
+                try:
+                    idx = int(body.get("edit_index"))
+                except Exception:
+                    return _jerr("bad edit_index")
+                if idx < 0 or idx >= len(sess["messages"]):
+                    return _jerr("edit_index out of range")
+                src = nodes.get((sess["messages"][idx] or {}).get("nid"))
+            if not src or src.get("role") != "user":
+                return _jerr("edit does not point at a user message")
             new_text = str(body.get("text") if body.get("text") is not None
-                           else msgs[idx].get("text") or "")
+                           else src.get("text") or "")
             if len(new_text) > MAX_MESSAGE_CHARS:
                 return _jerr("text too large", 413)
-            msgs[idx]["text"] = new_text
-            del msgs[idx + 1:]
-            for m in msgs:
+            fields = {"role": "user", "text": new_text, "ts": now}
+            if src.get("parts"):
+                fields["parts"] = src.get("parts")   # attachments travel with the variant
+            user_nid = _tree_append(sess, src.get("parent") or ROOT_ID, fields)
+            for m in sess["messages"]:
                 m.pop("stopped", None)
         elif body.get("regenerate"):
-            if msgs and msgs[-1].get("role") == "assistant":
-                msgs.pop()
+            # v91 (owner 8a): REGENERATE = a NEW SIBLING answer. The previous
+            # answers stay as variants under the same user node (the arrows
+            # walk them). A trailing USER node (a send whose answer failed or
+            # was stopped before any token) gets its answer retried.
+            last = sess["messages"][-1] if sess["messages"] else None
+            if last and last.get("role") == "assistant":
+                a = nodes.get(last.get("nid"))
+                if not a:
+                    return _jerr("regenerate: broken tree")
+                user_nid = a.get("parent")
+                path_msgs = _tree_path_upto(sess, user_nid)
+            elif last and last.get("role") == "user":
+                user_nid = last.get("nid")
+                path_msgs = _tree_path_upto(sess, user_nid)
+            else:
+                return _jerr("nothing to regenerate")
         else:
             text = str(body.get("text") or "").strip()
             atts = body.get("attachments") or []
@@ -1939,18 +2332,25 @@ async def chat_send(request):
                 return _jerr("empty message")
             if len(text) > MAX_MESSAGE_CHARS:
                 return _jerr("text too large", 413)
-            msgs.append({"role": "user", "text": text, "parts": parts, "ts": now})
+            leaf = tree.get("activeLeaf")
+            user_nid = _tree_append(sess, leaf or ROOT_ID,
+                                    {"role": "user", "text": text,
+                                     "parts": parts, "ts": now})
+        if not user_nid or user_nid not in nodes:
+            return _jerr("could not grow the chat tree")
 
-        # auto title from the first user text
+        # auto title from the first user text (walked over the ACTIVE path)
         if not sess.get("title"):
-            for m in msgs:
+            for m in sess["messages"]:
                 if m.get("role") == "user" and (m.get("text") or "").strip():
                     sess["title"] = m["text"].strip()[:MAX_TITLE_CHARS]
                     break
         sess["updated"] = now
         _write_session(sess)  # the user message survives an upstream error
 
-        payload = build_upstream_payload(sess["messages"], cfg, sid,
+        src_msgs = path_msgs if path_msgs is not None else [
+            {k: v for k, v in m.items() if k != "nid"} for m in sess["messages"]]
+        payload = build_upstream_payload(src_msgs, cfg, sid,
                                          stream=stream, model=model)
         url = cfg["url"] + "/chat/completions"
         headers = _upstream_headers(cfg)
@@ -2006,6 +2406,7 @@ async def chat_send(request):
         reply["ctx"] = ctx
         async with _lock:
             sess = _read_session(sid) or sess
+            _ensure_tree(sess)
             reply["ms"] = int((time.time() - now) * 1000)
             assistant = {"role": "assistant", "text": reply["text"], "ts": int(time.time())}
             if reply.get("thoughts"):
@@ -2015,7 +2416,12 @@ async def chat_send(request):
                     assistant[k] = reply[k]
             assistant["ctx"] = {"used": ctx["used"], "total": ctx.get("total", 0),
                                 "est": bool(ctx.get("est")), "images": ctx.get("images", 0)}
-            sess["messages"].append(assistant)
+            # v91: the answer hangs under the user node this send grew - or,
+            # when that node vanished meanwhile (a concurrent delete), under
+            # the current active leaf (never silently lost).
+            hang = user_nid if user_nid in sess["tree"]["nodes"] else \
+                (sess["tree"].get("activeLeaf") or ROOT_ID)
+            _tree_append(sess, hang, assistant)
             sess["updated"] = int(time.time())
             _write_session(sess)
             _evict_sessions(cfg.get("keep_sessions"))
@@ -2105,6 +2511,7 @@ async def chat_send(request):
                  "stopped": bool(stopped or not saw_done), "ctx": ctx}
         async with _lock:
             sess = _read_session(sid) or sess
+            _ensure_tree(sess)
             assistant = {"role": "assistant", "text": acc, "ts": int(time.time())}
             if th_acc:
                 assistant["thoughts"] = th_acc
@@ -2114,7 +2521,10 @@ async def chat_send(request):
                                 "est": bool(ctx.get("est")), "images": ctx.get("images", 0)}
             if reply["stopped"]:
                 assistant["stopped"] = True
-            sess["messages"].append(assistant)
+            # v91: same hang rule as the non-stream branch above.
+            hang = user_nid if user_nid in sess["tree"]["nodes"] else \
+                (sess["tree"].get("activeLeaf") or ROOT_ID)
+            _tree_append(sess, hang, assistant)
             sess["updated"] = int(time.time())
             _write_session(sess)
             _evict_sessions(cfg.get("keep_sessions"))

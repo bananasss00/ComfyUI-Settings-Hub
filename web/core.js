@@ -8,7 +8,7 @@ import * as Pins from "./pins.js";
 // browser-cached stale file is still NAMED in F12 while per-file build
 // guards are gone (owner: a release must not rewrite every file).
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["core"] = "v90";
+globalThis.__SettingsHubLoaded["core"] = "v91";
 
 export const HUB_NODE_NAME = "SettingsHub";
 
@@ -42,15 +42,45 @@ export function forgetHubNode(node) {
 
 /** Live hubs across ALL graphs, in stable insertion order.
  *
- *  The registry is the primary source, but it can be COLD through no fault
- *  of the user: extension nodeCreated may have been missed entirely on exotic
- *  load paths (stale-cached chunks mixing versions, hot-swapped bundles,
- *  loader races during configureGraph). A hub sitting right there on the
- *  canvas MUST never vanish from pin menus just because our bookkeeping
- *  missed it - so when the registry comes up empty we fall back to a live
- *  scan over every graph we can reach. Cheap (only when empty) and always
- *  truthful. */
+ *  v91 SELF-HEALING RECONCILE (owner reports: "a materialized virtual hub
+ *  whose node was deleted still shows in the pin menu" + "a freshly created
+ *  hub cannot receive pins until a workflow switch"): the registry used to
+ *  trust nodeCreated/onRemoved bookkeeping (plus an empty-only fallback
+ *  scan), so a missed lifecycle event left a dead entry (D2) or delayed a
+ *  live one (D3) until the next workflow configure. Every call now also:
+ *    * ADDS every hub a live scan over the reachable graphs finds (D3);
+ *    * DROPS a tracked hub on POSITIVE removal evidence (D2):
+ *        belt 1 - the current frontend nulls node.graph when the node
+ *                 leaves its graph (LGraph.remove: `node.graph = null`);
+ *        belt 2 - the hub's OWN graph object lists nodes and the hub is
+ *                 not among them anymore (a rebuilt workflow graph).
+ *  Strictly fail-open otherwise: a hub whose back-reference is undefined
+ *  (never-in-a-graph fixtures, exotic hosts) or whose subgraph the walker
+ *  could not reach STAYS in the registry - live state is never destroyed
+ *  on a tooling hiccup. */
 export function allHubs() {
+    try {
+        const live = [];
+        for (const g of allGraphs()) {
+            for (const n of nodeListOf(g)) {
+                if (n?.type === HUB_NODE_NAME && !live.includes(n)) live.push(n);
+            }
+        }
+        if (live.length || hubRegistry.size) {
+            for (const n of live) hubRegistry.add(n);
+            for (const n of [...hubRegistry]) {
+                try {
+                    if (n?.type !== HUB_NODE_NAME) { hubRegistry.delete(n); continue; }
+                    if (n.graph === null) { hubRegistry.delete(n); continue; }   // belt 1
+                    if (live.includes(n)) continue;                              // alive
+                    if (n.graph && Array.isArray(n.graph._nodes) &&
+                        n.graph._nodes.length > 0 && !n.graph._nodes.includes(n)) {
+                        hubRegistry.delete(n);                                   // belt 2
+                    }
+                } catch (_) { /* one hostile hub never kills the reconcile */ }
+            }
+        }
+    } catch (_) { /* enumeration must never kill a menu build */ }
     const found = [...hubRegistry].filter((n) => n?.type === HUB_NODE_NAME);
     if (found.length) return found;
     try {

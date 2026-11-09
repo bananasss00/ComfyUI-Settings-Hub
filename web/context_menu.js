@@ -13,7 +13,7 @@ import {
 // browser-cached stale file is still NAMED in F12 while per-file build
 // guards are gone (owner: a release must not rewrite every file).
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["context_menu"] = "v90";
+globalThis.__SettingsHubLoaded["context_menu"] = "v91";
 
 // ============================================================================
 // 1) Standard node menu hook (canvas widgets)
@@ -416,7 +416,9 @@ function buildPanelSubmenu(node, panels) {
 
 function buildPinSubmenu(node, widget) {
     // Global registry again: works identically on the root canvas and inside
-    // any subgraph.
+    // any subgraph. v91: allHubs() reconciles against the live graphs on
+    // EVERY call - a deleted hub node can never appear here again (D2) and
+    // a freshly created hub is available the moment it exists (D3).
     const hubs = allHubs();
     // Custom widgets (non-primitive values / unknown types) become live
     // portals - mark those entries so users know what to expect. Plain
@@ -425,6 +427,27 @@ function buildPinSubmenu(node, widget) {
     const portal = kind === "portal";
     const mark = portal ? "🪟 " : (kind === "button" ? "🔘 " : "📌 ");
     const btnNote = kind === "button" ? " · button" : "";
+
+    // v91 (D2 follow-up): the pin menu itself can CREATE a hub - a virtual
+    // one (floating, no canvas node) always, and the classic node when the
+    // list is empty (the historical "Create New Settings Hub").
+    const createEntries = [
+        {
+            content: "👻 ＋ New virtual hub (floating, no canvas node)",
+            callback: () => {
+                const vh = createVirtualHub();
+                if (!vh) return; // createVirtualHub alerts on failure
+                try {
+                    vhToast("👻 Virtual hub created - pin the widget again to land it there.");
+                } catch (_) {}
+                try {
+                    createBinding(vh, node, widget, getActiveTabId(getHubConfig(vh)));
+                } catch (err) {
+                    console.warn("[SettingsHub] pin into the fresh virtual hub failed:", err);
+                }
+            },
+        },
+    ];
 
     if (hubs.length === 0) {
         return [
@@ -437,6 +460,7 @@ function buildPinSubmenu(node, widget) {
                     createBinding(newHub, node, widget, getActiveTabId(getHubConfig(newHub)));
                 },
             },
+            ...createEntries,
         ];
     }
 
@@ -468,6 +492,8 @@ function buildPinSubmenu(node, widget) {
             },
         });
     }
+    // v91: hub creation lives IN the pin menu - no canvas detour needed.
+    entries.push(...createEntries);
     return entries;
 }
 
@@ -824,7 +850,11 @@ function attachCtrlRmbOverride() {
             if (typeof mx === "number" && typeof my === "number") {
                 let hit = null;
                 try {
-                    hit = (app.graph ?? app.canvas?.graph)?.getNodeOnPos?.(mx, my, true);
+                    // v91 FIX: the third argument of LGraph.getNodeOnPos is
+                    // the NODE LIST, not a flag - the historical
+                    // getNodeOnPos(x, y, true) iterated `true.length` and
+                    // ALWAYS answered null (same bug as the stack drop).
+                    hit = (app.graph ?? app.canvas?.graph)?.getNodeOnPos?.(mx, my);
                 } catch (_) {
                     hit = null;
                 }
