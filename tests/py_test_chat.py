@@ -651,6 +651,163 @@ r = run(chat.chat_config_get(FakeRequest()))
 check("config GET returns a masked key", "key" in resp_json(r)["config"])
 
 # ---------------------------------------------------------------------------
+# v87: GPU & memory - /chat/gpu routes + the send-time reserve
+# ---------------------------------------------------------------------------
+
+# the scripted upstream needs an ASYNC json() (the /status probe awaits it)
+async def _fake_upstream_json(self, content_type=None):
+    return json.loads(self._text)
+
+FakeUpstream.json = _fake_upstream_json
+
+# _upstream_unload passes params= to session.post - accept and record it
+_orig_fake_post = FakeClientSession.post
+
+def _fake_post_with_params(self, url, json=None, headers=None, params=None):
+    if params:
+        FakeClientSession.requests.append(("POST-PARAMS", url, params, headers))
+    return _orig_fake_post(self, url, json=json, headers=headers)
+
+FakeClientSession.post = _fake_post_with_params
+
+STATUS_JSON = json.dumps({
+    "model": "test-model", "loaded": True, "elastic": False,
+    "machine": {"gpu": {"total_mib": 24576, "free_mib": 1234}},
+    "vram": {"vram_free_mib": 20000},
+})
+
+phase("v87 config: vram_reserve_mib clamped + persisted")
+
+seed_config()
+r = run(chat.chat_config_set(FakeRequest(json_body={"vram_reserve_mib": 4096})))
+check("reserve 4096 accepted", resp_json(r)["config"]["vram_reserve_mib"] == 4096, resp_json(r)["config"])
+check("reserve persisted", chat._load_config()["vram_reserve_mib"] == 4096)
+r = run(chat.chat_config_set(FakeRequest(json_body={"vram_reserve_mib": -5})))
+check("negative reserve clamps to 0", resp_json(r)["config"]["vram_reserve_mib"] == 0)
+r = run(chat.chat_config_set(FakeRequest(json_body={"vram_reserve_mib": 99999999})))
+check("huge reserve clamps to 131072", resp_json(r)["config"]["vram_reserve_mib"] == 131072)
+
+phase("v87 gpu GET: the upstream status picture")
+
+seed_config(vram_reserve_mib=4096)
+FakeClientSession.script = [FakeUpstream(200, STATUS_JSON)]
+FakeClientSession.requests = []
+r = run(chat.chat_gpu_get(FakeRequest()))
+j = resp_json(r)
+check("gpu GET ok", j["ok"] is True, j)
+check("gpu GET carries the snapshot",
+      j["upstream"] and j["upstream"]["loaded"] is True and j["upstream"]["total_mib"] == 24576, j["upstream"])
+check("gpu GET reports the configured reserve", j["reserve_mib"] == 4096, j)
+check("gpu GET recorded the upstream /status probe",
+      any(q[0] == "GET" and q[1] == UPSTREAM + "/status" for q in FakeClientSession.requests))
+
+r = run(chat.chat_gpu_get(FakeRequest()))  # script exhausted -> upstream None
+check("gpu GET survives a dead upstream", resp_json(r)["ok"] is True and resp_json(r)["upstream"] is None)
+
+phase("v87 gpu POST reserve: /v1/vram + cfg + notes")
+
+seed_config(vram_reserve_mib=0)
+chat._COMFY_EXTRA_ORIG["bytes"] = None
+FakeClientSession.script = [
+    FakeUpstream(200, json.dumps({"reserve_mib": 4096, "vram_free_mib": 20000})),
+    FakeUpstream(200, STATUS_JSON),
+]
+FakeClientSession.requests = []
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "reserve", "mib": 4096})))
+j = resp_json(r)
+check("reserve ok", j["ok"] is True, j)
+check("reserve POSTed /v1/vram with the payload",
+      any(q[0] == "POST" and q[1] == UPSTREAM + "/vram" and q[2] == {"reserve_mib": 4096}
+          for q in FakeClientSession.requests), FakeClientSession.requests[:3])
+check("reserve note names target vs free",
+      any("4096" in n and "20000" in n for n in j["notes"]), j["notes"])
+check("reserve cfg persisted", chat._load_config()["vram_reserve_mib"] == 4096)
+check("comfy note honest without comfy",
+      any("comfy.model_management unavailable" in n for n in j["notes"]), j["notes"])
+check("reserve answer carries the snapshot", j["upstream"]["free_mib"] == 20000, j["upstream"])
+
+phase("v87 gpu POST release: /v1/vram null + cfg 0")
+
+FakeClientSession.script = [
+    FakeUpstream(200, "{}"),
+    FakeUpstream(200, STATUS_JSON),
+]
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "release"})))
+j = resp_json(r)
+check("release ok", j["ok"] is True, j)
+check("release POSTed /v1/vram with null",
+      any(q[0] == "POST" and q[1] == UPSTREAM + "/vram" and q[2] == {"reserve_mib": None}
+          for q in FakeClientSession.requests), FakeClientSession.requests[:3])
+check("release reset the cfg", chat._load_config()["vram_reserve_mib"] == 0)
+check("release note says so", any("released" in n for n in j["notes"]), j["notes"])
+
+phase("v87 gpu POST unload: /v1/unload + a full release")
+
+FakeClientSession.script = [
+    FakeUpstream(200, "{}"),          # POST /unload
+    FakeUpstream(200, "{}"),          # POST /vram null (the release)
+    FakeUpstream(200, STATUS_JSON),   # GET /status
+]
+FakeClientSession.requests = []
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "unload", "wait": 0})))
+j = resp_json(r)
+check("unload ok", j["ok"] is True, j)
+check("unload POSTed /v1/unload",
+      any(q[0] == "POST" and q[1] == UPSTREAM + "/unload" for q in FakeClientSession.requests),
+      FakeClientSession.requests[:3])
+check("unload note says the VRAM is back",
+      any("unloaded" in n for n in j["notes"]), j["notes"])
+check("unload released the reservation too",
+      any(q[0] == "POST" and q[1] == UPSTREAM + "/vram" and q[2] == {"reserve_mib": None}
+          for q in FakeClientSession.requests), FakeClientSession.requests[:4])
+check("unload reset the cfg", chat._load_config()["vram_reserve_mib"] == 0)
+
+phase("v87 gpu POST free_comfy / load / unknown")
+
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "free_comfy"})))
+j = resp_json(r)
+check("free_comfy ok without comfy", j["ok"] is True and "comfy.model_management unavailable" in j["notes"][0], j)
+
+FakeClientSession.script = [FakeUpstream(200, json.dumps({"status": "loaded"}))]
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "load", "model": "test-model"})))
+j = resp_json(r)
+check("load ok", j["ok"] is True, j)
+check("load POSTed /v1/load",
+      any(q[0] == "POST" and q[1] == UPSTREAM + "/load" and q[2] == {"model": "test-model"}
+          for q in FakeClientSession.requests), FakeClientSession.requests[:3])
+
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "explode"})))
+check("unknown action refused", r.status == 400, r.status)
+
+phase("v87 send: the reserve is applied BEFORE the upstream call")
+
+seed_config(vram_reserve_mib=4096, stream=False)
+sess8 = make_session()
+REPLY = json.dumps({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                    "model": "test-model",
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}})
+FakeClientSession.script = [
+    FakeUpstream(200, json.dumps({"reserve_mib": 4096})),  # POST /vram (auto reserve)
+    FakeUpstream(200, STATUS_JSON),                        # GET /status (consumption)
+    FakeUpstream(200, REPLY),                              # POST /chat/completions
+]
+FakeClientSession.requests = []
+r = run(chat.chat_send(FakeRequest(json_body={
+    "session": sess8["id"], "text": "hello reserve", "stream": False})))
+j = resp_json(r)
+check("send ok with the reserve on", j["ok"] is True, j if j.get("ok") else j.get("error"))
+urls = [(q[0], q[1]) for q in FakeClientSession.requests]
+ivram = next((i for i, (m_, u_) in enumerate(urls) if u_ == UPSTREAM + "/vram"), -1)
+icomp = next((i for i, (m_, u_) in enumerate(urls) if u_ == UPSTREAM + "/chat/completions"), -1)
+check("the reserve preceded the generation", 0 <= ivram < icomp, urls)
+check("the reserve payload carried the configured MiB",
+      any(q[0] == "POST" and q[1] == UPSTREAM + "/vram" and q[2] == {"reserve_mib": 4096}
+          for q in FakeClientSession.requests), urls)
+# reset for the remaining runs
+run(chat.chat_config_set(FakeRequest(json_body={"vram_reserve_mib": 0})))
+check("reserve reset after the send test", chat._load_config()["vram_reserve_mib"] == 0)
+
+# ---------------------------------------------------------------------------
 
 print()
 print("py_test_chat: %d passed, %d failed" % (PASS, FAIL))

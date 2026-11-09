@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - LLM Chat smoke test (v86)
+// SettingsHub - LLM Chat smoke test (v87)
 // ----------------------------------------------------------------------------
 // Node ESM + jsdom. Loads the REAL web/chat.js module exactly like the entry
 // does (a sandbox copies web/ and stubs ../../scripts/app.js with an in-memory
@@ -7,11 +7,14 @@
 // then drives the panel through its REAL UI paths.
 //
 //   SA  mount: the panel + chip appear, a first tab is created automatically,
-//       the status line shows the server url + model from the config.
+//       the status line shows the server url, the toolbar hosts the model
+//       dropdown + refresh + thinking + prompt + GPU buttons.
 //   SB  settings surface: getChatUiState echoes the (masked) config,
 //       applyChatSettings POSTs a patch (url validated, numbers clamped).
 //   SC  tabs: [＋] creates a second dialog, switching renders that dialog's
 //       messages, ✕ closes a tab, dblclick-rename PUTs a new title.
+//   SC2 (v87) a TYPED NAME + Enter in the [＋] field creates the tab under
+//       that name (POST /sessions {title}).
 //   SD  send (non-stream): the input text goes to POST /send, the session in
 //       the reply replaces the tab messages (user + assistant bubbles),
 //       the input is cleared.
@@ -28,7 +31,8 @@
 //       (with a copy button) / links render; [t](javascript:...) does not.
 //   SJ  geometry: a saved off-screen position is re-clamped on mount and on a
 //       window resize (the v85 refit contract), the position persists
-//       debounced.
+//       debounced; (v87) a devicePixelRatio change RESCALES the saved
+//       geometry by the zoom factor before the refit.
 //   SK  clear: 🗑 asks twice; the second click POSTs the clear and empties.
 //   SL  sessions popup: 🕘 lists saved dialogs, a click reopens one in a tab,
 //       🗑 deletes (armed, second click).
@@ -36,6 +40,13 @@
 //       tears the panel down, true re-mounts it.
 //   SN  entry integration: the entry FILES list + EXPECTED manifest carry
 //       chat.js, and the mount block calls initChat (source contract).
+//   SO  (v87) ⚙ in the chat header opens the CHAT SETTINGS popup: the URL
+//       row arrives from GET /config, Enter applies it via POST /config.
+//   SP  (v87) 📜 opens the PROMPT popup: a preset chip applies instantly,
+//       Save stores the custom text, Clear empties it.
+//   SQ  (v87) ⚡ opens the GPU popup: the state line renders from
+//       GET /chat/gpu, the buttons POST the actions (reserve/unload/load/
+//       free_comfy/release) and the notes render.
 //
 // Run from the extension root:  node tests/smoke_chat.mjs   (jsdom required)
 // ============================================================================
@@ -105,7 +116,7 @@ function makeFakeApi() {
         reasoning: "default", ctx_depth: 12, media_depth: 1,
         img_max_side: 1024, img_max_count: 4, video_frames: 16,
         video_max_side: 768, stream: true, keep_sessions: 20,
-        timeout_s: 600, max_file_mb: 20,
+        timeout_s: 600, max_file_mb: 20, vram_reserve_mib: 0,
     };
     let healthMode = "ok";        // "ok" | "missing" | "http"
     let sseMode = true;           // /send answers SSE (true) or JSON (false)
@@ -156,7 +167,7 @@ function makeFakeApi() {
                 if ("stream" in body) config.stream = !!body.stream;
                 for (const k of ["temperature", "top_p", "max_tokens", "ctx_depth", "media_depth",
                     "img_max_side", "img_max_count", "video_frames", "video_max_side",
-                    "keep_sessions", "timeout_s", "max_file_mb"]) {
+                    "keep_sessions", "timeout_s", "max_file_mb", "vram_reserve_mib"]) {
                     if (k in body && Number.isFinite(parseFloat(body[k]))) config[k] = parseFloat(body[k]);
                 }
                 for (const k of ["model", "system_prompt"]) if (k in body) config[k] = String(body[k] || "");
@@ -180,9 +191,55 @@ function makeFakeApi() {
                 return jsonResp({ ok: true, sessions: [...sessions.values()].sort((a, b) => b.updated - a.updated).map(sessBrief) });
             }
             if (p === "/settings_hub/chat/sessions" && method === "POST") {
-                const s = { id: uuid(), title: "", created: 1, updated: 1, messages: [] };
+                let body = opts.body;
+                try { body = JSON.parse(body); } catch (_) { body = {}; }
+                const s = { id: uuid(), title: String(body?.title || ""), created: 1, updated: 1, messages: [] };
                 sessions.set(s.id, s);
                 return jsonResp({ ok: true, session: s });
+            }
+            if (p === "/settings_hub/chat/gpu" && method === "GET") {
+                return jsonResp({
+                    ok: true, configured: !!config.url,
+                    upstream: { model: "qwen-vl", loaded: true, free_mib: 5120, total_mib: 24576, elastic: false },
+                    reserve_mib: config.vram_reserve_mib || 0,
+                    comfy_reserved: (config.vram_reserve_mib || 0) > 0,
+                });
+            }
+            if (p === "/settings_hub/chat/gpu" && method === "POST") {
+                let body = opts.body;
+                try { body = JSON.parse(body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                const act = String(body?.action || "");
+                if (act === "reserve") {
+                    config.vram_reserve_mib = Math.max(0, parseInt(body.mib, 10) || 0);
+                    return jsonResp({ ok: true, action: act, notes: ["target " + config.vram_reserve_mib + " MiB, free 5120 MiB - OK"],
+                        upstream: { model: "qwen-vl", loaded: true, free_mib: 5120, total_mib: 24576, elastic: false },
+                        reserve_mib: config.vram_reserve_mib });
+                }
+                if (act === "release") {
+                    config.vram_reserve_mib = 0;
+                    return jsonResp({ ok: true, action: act, notes: ["server reserve released", "ComfyUI reservation: nothing to release"],
+                        upstream: { model: "qwen-vl", loaded: true, free_mib: 5120, total_mib: 24576, elastic: false },
+                        reserve_mib: 0 });
+                }
+                if (act === "unload") {
+                    config.vram_reserve_mib = 0;
+                    return jsonResp({ ok: true, action: act, notes: ["model unloaded - all of its VRAM is back", "server reserve released"],
+                        upstream: { model: "qwen-vl", loaded: false, free_mib: 23000, total_mib: 24576, elastic: false },
+                        reserve_mib: 0 });
+                }
+                if (act === "load") {
+                    return jsonResp({ ok: true, action: act,
+                        notes: ["load " + (body.model || "?") + ": " + JSON.stringify({ status: "loaded" })] });
+                }
+                if (act === "free_comfy") {
+                    return jsonResp({ ok: true, action: act, notes: ["ComfyUI models unloaded; torch cache cleared"] });
+                }
+                if (act === "status") {
+                    return jsonResp({ ok: true, action: act, notes: [],
+                        upstream: { model: "qwen-vl", loaded: true, free_mib: 5120, total_mib: 24576, elastic: false },
+                        reserve_mib: config.vram_reserve_mib || 0 });
+                }
+                return jsonResp({ ok: false, error: "unknown action: " + act }, 400);
             }
             let m = p.match(/^\/settings_hub\/chat\/session\/([a-f0-9]+)\/clear$/);
             if (m && method === "POST") {
@@ -382,11 +439,13 @@ check("no ✕ close button (the v75 contract)", !panel.querySelector(".hub-chat-
 await settle();
 check("one tab auto-created", hooks.tabs().length === 1, JSON.stringify(hooks.tabs()));
 check("tab is active", hooks.activeId() === hooks.tabs()[0].id);
-check("status line shows url + model",
-    hooks.statusEl().textContent.includes("http://127.0.0.1:8080/v1") &&
-    hooks.statusEl().textContent.includes("qwen-vl"), hooks.statusEl().textContent);
-check("model dropdown populated", hooks.modelSelEl().textContent.includes("qwen-vl") ||
-    hooks.modelSelEl().innerHTML.includes("qwen-vl"), hooks.modelSelEl().innerHTML);
+check("status line shows the server url",
+    hooks.statusEl().textContent.includes("http://127.0.0.1:8080/v1"), hooks.statusEl().textContent);
+check("toolbar model dropdown populated", hooks.modelSelEl().innerHTML.includes("qwen-vl"), hooks.modelSelEl().innerHTML);
+check("toolbar carries refresh + thinking + prompt + gpu",
+    !!hooks.modelsBtnEl() && !!hooks.thinkSelEl() && !!hooks.promptBtnEl() && !!hooks.gpuBtnEl());
+check("header carries the settings gear + no model select in the header",
+    !!hooks.settingsBtnEl() && !panel.querySelector(".hub-chat-head .hub-chat-model"));
 check("tabs markup rendered", hooks.tabsEl().querySelectorAll(".hub-chat-tab").length === 1);
 check("input + send + attach present",
     !!hooks.inputEl() && !!hooks.sendBtnEl() && !!panel.querySelector(".hub-chat-attachbtn"));
@@ -424,6 +483,28 @@ await hooks.renameTab(t2.id, "Второй диалог");
 await settle();
 check("rename PUT applied", hooks.tabById(t2.id).title === "Второй диалог", hooks.tabById(t2.id).title);
 hooks.closeTab(t2.id);
+await settle();
+check("close removes the tab and re-activates tab1", hooks.tabs().length === 1 && hooks.activeId() === firstId);
+
+// ---------------------------------------------------------------------------
+phase("SC2 (v87) a typed tab name IS used");
+
+// drive the REAL UI path: [＋] -> type -> Enter (the v86 bug: the typed
+// name was dropped and the tab fell back to the auto-title)
+const addBtn = hooks.tabsEl().querySelector(".hub-chat-tab-add");
+addBtn.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await tick();
+const tabInp = hooks.tabsEl().querySelector(".hub-chat-tab-input");
+check("the [＋] field opened", !!tabInp);
+tabInp.value = "Мой новый чат";
+tabInp.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+await settle();
+const named = hooks.tabs().find((t) => t.title === "Мой новый чат");
+check("the tab carries the typed name", !!named, JSON.stringify(hooks.tabs()));
+check("POST /sessions carried the title",
+    fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/sessions" && c.method === "POST" &&
+        String(c.body).includes("Мой новый чат")));
+hooks.closeTab(named.id);
 await settle();
 check("close removes the tab and re-activates tab1", hooks.tabs().length === 1 && hooks.activeId() === firstId);
 
@@ -547,7 +628,7 @@ check("http link kept", html.includes('href="https://x.y"'));
 check("javascript: link neutralized", !html.includes('href="javascript:'), html);
 
 // ---------------------------------------------------------------------------
-phase("SJ geometry: refit on mount and on resize (the v85 contract)");
+phase("SJ geometry: refit on mount and on resize (the v85 contract) + the v87 page zoom");
 
 try { localStorage.setItem("settingshub.chat.ui", JSON.stringify({ x: 3000, y: 1600, w: 2800, h: 1200 })); } catch (_) {}
 chat.setChatOn(false);
@@ -573,6 +654,22 @@ check("resize re-clamps instantly", parseFloat(hooks.panelEl().style.left) <= 10
 await new Promise((r) => setTimeout(r, 250)); // the debounced persist
 const uiSaved = JSON.parse(localStorage.getItem("settingshub.chat.ui") || "{}");
 check("position persisted debounced", typeof uiSaved.x === "number" && uiSaved.x <= 1024 - 260 - 8 + 4, JSON.stringify(uiSaved));
+
+// v87 page zoom: a devicePixelRatio change rescales the SAVED geometry by
+// the zoom factor (before the refit clamps it) - 2x zoom doubles x/y/w/h.
+try { localStorage.setItem("settingshub.chat.ui", JSON.stringify({ x: 100, y: 80, w: 400, h: 300 })); } catch (_) {}
+hooks.setDpr(1);
+Object.defineProperty(dom.window, "devicePixelRatio", { value: 2, configurable: true });
+hooks.fireResize();
+await new Promise((r) => setTimeout(r, 250));
+const uiZoomed = JSON.parse(localStorage.getItem("settingshub.chat.ui") || "{}");
+check("page zoom rescales the saved geometry",
+    Math.abs(uiZoomed.w - 800) <= 1 && Math.abs(uiZoomed.h - 600) <= 1 && Math.abs(uiZoomed.x - 200) <= 1,
+    JSON.stringify(uiZoomed));
+Object.defineProperty(dom.window, "devicePixelRatio", { value: 1, configurable: true });
+hooks.setDpr(1);
+hooks.fireResize();
+await new Promise((r) => setTimeout(r, 250));
 
 // ---------------------------------------------------------------------------
 phase("SK clear: 🗑 asks twice");
@@ -644,13 +741,97 @@ check("On re-mounts", !!hooks.panelEl());
 // ---------------------------------------------------------------------------
 phase("SN entry integration (source contract)");
 
-check("entry FILES carries ./chat.js", /"\.\/chat\.js",\s*\/\/ v86/.test(ENTRY_SRC));
-check("entry EXPECTED carries chat", /"chat":\s*"v86"/.test(ENTRY_SRC));
+check("entry FILES carries ./chat.js", /"\.\/chat\.js",\s*\/\/ v87/.test(ENTRY_SRC));
+check("entry EXPECTED carries chat", /"chat":\s*"v87"/.test(ENTRY_SRC));
 check("entry mounts the chat extension", /initChat\(\)/.test(ENTRY_SRC) && /Comfy\.SettingsHub\.chat/.test(ENTRY_SRC));
 check("chat self-reports the pack version",
-    globalThis.__SettingsHubLoaded?.chat === "v86", globalThis.__SettingsHubLoaded?.chat);
+    globalThis.__SettingsHubLoaded?.chat === "v87", globalThis.__SettingsHubLoaded?.chat);
 check("the py module is wired in __init__.py",
     fs.readFileSync(path.join(ROOT, "__init__.py"), "utf8").includes("chat_proxy"));
+
+// ---------------------------------------------------------------------------
+phase("SO (v87) ⚙ opens the chat settings popup (URL applies)");
+
+hooks.openSetPop();
+await settle();
+const setPop = hooks.setPopEl();
+check("settings popup open", !!setPop && setPop.className.includes("hub-chat-setpop"));
+const urlIn2 = setPop.querySelector('[data-cs="url"]');
+check("URL row arrived from GET /config", urlIn2.value === "http://127.0.0.1:8080/v1", urlIn2.value);
+const nums2 = setPop.querySelectorAll("[data-cs-num]");
+check("sampling rows arrived", nums2.length === 10, nums2.length);
+urlIn2.value = "http://127.0.0.1:9999/v1";
+urlIn2.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+await settle();
+check("URL Enter applied via POST /config",
+    fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/config" && c.method === "POST" &&
+        String(c.body).includes("9999")));
+check("config in memory followed", hooks.cfg().url === "http://127.0.0.1:9999/v1", hooks.cfg().url);
+hooks.closeSetPop();
+check("settings popup closed", !hooks.setPopEl());
+// restore the url for the later phases
+await chat.applyChatSettings({ url: "http://127.0.0.1:8080/v1" });
+await settle();
+
+// ---------------------------------------------------------------------------
+phase("SP (v87) 📜 prompt popup: preset applies, Save/Clear work");
+
+hooks.openPromptPop();
+await settle();
+const prPop = hooks.promptPopEl();
+check("prompt popup open", !!prPop && prPop.className.includes("hub-chat-promptpop"));
+const chip2 = prPop.querySelector('[data-cp="concise"]');
+chip2.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("preset chip applied the system prompt", (hooks.cfg().system_prompt || "").includes("concise assistant"),
+    hooks.cfg().system_prompt);
+check("prompt button lit", hooks.promptBtnEl().classList.contains("hub-chat-tb-on"));
+const ta2 = prPop.querySelector(".hub-cp-ta");
+ta2.value = "Custom owner prompt";
+prPop.querySelector(".hub-cp-save").dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("Save stored the custom text", hooks.cfg().system_prompt === "Custom owner prompt", hooks.cfg().system_prompt);
+prPop.querySelector(".hub-cp-clear").dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("Clear emptied the prompt", hooks.cfg().system_prompt === "", JSON.stringify(hooks.cfg().system_prompt));
+check("prompt button unlit", !hooks.promptBtnEl().classList.contains("hub-chat-tb-on"));
+hooks.closePromptPop();
+check("prompt popup closed", !hooks.promptPopEl());
+
+// ---------------------------------------------------------------------------
+phase("SQ (v87) ⚡ GPU popup: state + actions");
+
+hooks.openGpuPop();
+await settle();
+const gPop = hooks.gpuPopEl();
+check("gpu popup open", !!gPop && gPop.className.includes("hub-chat-gpupop"));
+await settle(); // refreshGpuPop
+check("state line rendered", gPop.querySelector('[data-gpu="state"]').textContent.includes("LOADED"),
+    gPop.querySelector('[data-gpu="state"]').textContent);
+gPop.querySelector('[data-gpu="mib"]').value = "4096";
+gPop.querySelector('[data-gpu-btn="reserve"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("reserve action POSTed",
+    fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/gpu" && c.method === "POST" &&
+        String(c.body).includes('"action":"reserve"')));
+check("notes rendered", gPop.querySelector('[data-gpu="notes"]').textContent.includes("target 4096"),
+    gPop.querySelector('[data-gpu="notes"]').textContent);
+check("gpu button lit (reserve ON)", hooks.gpuBtnEl().classList.contains("hub-chat-tb-on"));
+gPop.querySelector('[data-gpu-btn="unload"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("unload action POSTed",
+    fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/gpu" && c.method === "POST" &&
+        String(c.body).includes('"action":"unload"')));
+check("unload note rendered", gPop.querySelector('[data-gpu="notes"]').textContent.includes("unloaded"),
+    gPop.querySelector('[data-gpu="notes"]').textContent);
+check("reserve dropped after unload", hooks.cfg().vram_reserve_mib === 0, hooks.cfg().vram_reserve_mib);
+gPop.querySelector('[data-gpu-btn="free"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("free_comfy action POSTed",
+    fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/gpu" && c.method === "POST" &&
+        String(c.body).includes('"action":"free_comfy"')));
+hooks.closeGpuPop();
+check("gpu popup closed", !hooks.gpuPopEl());
 
 // ---------------------------------------------------------------------------
 

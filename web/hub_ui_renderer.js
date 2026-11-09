@@ -10,7 +10,7 @@
 // SUBMODULES are fresh.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v86";
+globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v87";
 
 // The whole hub interface lives inside a single LiteGraph DOM widget
 // (node.addDOMWidget), so the CSS in styles.css actually applies:
@@ -72,10 +72,10 @@ import { firstMediaSpec } from "./viewer_gallery.js";
 // settings section (On/Off, max entries, clear). The panel itself mounts
 // from the entry's extension setup, independent of the hub renderer.
 import { isStackOn, setStackOn, getStackMax, setStackMax, getStackScope, setStackScope, getStackRootInfo, setStackRootPath, STACK_MAX_CHOICES } from "./stack.js";
-// v86: the LLM Chat panel (web/chat.js) - the gear popup hosts its settings
-// section (On/Off, server URL + key, model, sampling, depths, media, stream,
-// storage root). Same import contract as the stack section above.
-import { isChatOn, setChatOn, getChatUiState, applyChatSettings, testChatServer, getChatRootInfo, setChatRootPath } from "./chat.js";
+// v86/v87: the LLM Chat panel (web/chat.js) - since v87 the hub hosts ONLY
+// the On/Off switch; every other chat setting lives IN the chat panel
+// (⚙ in its header + the toolbar under the input). Same import contract.
+import { isChatOn, setChatOn } from "./chat.js";
 import {
     isNavItem, normalizeNav, createNavItem, navJump, armAim,
     enterOwnerGraph, markersVersionBump, resolveNavTarget,
@@ -893,6 +893,55 @@ function clampPinSize(w, h) {
     };
 }
 
+// --- v87: floating pin windows follow the browser PAGE ZOOM -----------------
+// pinPos/pinSize are CSS px; when the page zoom changes (Ctrl +/- /
+// ctrl-pinch = devicePixelRatio), the saved geometry would keep its OLD
+// physical size and the window could drift off-screen. ONE shared resize
+// listener rescales the persisted pinPos/pinSize of every LIVE pin window
+// by the zoom factor and re-clamps it (the stack and the chat do the same).
+// The in-canvas hubs need nothing: they are LiteGraph DOM widgets and scale
+// with the canvas exactly like every node does.
+
+let pinLastDpr = 0;
+
+function pinCurDpr() {
+    try {
+        const v = Number(window.devicePixelRatio);
+        return Number.isFinite(v) && v > 0 ? v : 1;
+    } catch (_) { return 1; }
+}
+
+function onPinWinResize() {
+    const dpr = pinCurDpr();
+    const f = pinLastDpr ? dpr / pinLastDpr : 1;
+    pinLastDpr = dpr;
+    if (!f || Math.abs(f - 1) < 0.01) return;
+    for (const rec of pinPanelRecords) {
+        try {
+            const node = rec?.hub, panel = rec?.panel;
+            if (!node || !panel?.isConnected) continue;
+            const cfg = getHubConfig(node);
+            if (cfg.pinPos) {
+                cfg.pinPos = clampPinPos(cfg.pinPos.x * f, cfg.pinPos.y * f);
+                panel.style.left = `${cfg.pinPos.x}px`;
+                panel.style.top = `${cfg.pinPos.y}px`;
+            }
+            if (cfg.pinSize) {
+                cfg.pinSize = clampPinSize(cfg.pinSize.w * f, cfg.pinSize.h * f);
+                applyPinSize(node, panel);
+            }
+        } catch (_) { /* a dying window must never break the sweep */ }
+    }
+}
+
+let pinResizeWired = false;
+function ensurePinResizeWired() {
+    if (pinResizeWired) return;
+    pinResizeWired = true;
+    pinLastDpr = pinCurDpr();
+    window.addEventListener("resize", onPinWinResize);
+}
+
 /** Materialize cfg.pinSize on the panel (or reset to the auto/hug mode).
  *  Explicit height turns the panel into a real flex column: the body fills
  *  the remaining space and scrolls (.hub-pin-sized CSS); without pinSize the
@@ -966,6 +1015,8 @@ function slimHubSlot(node, st) {
 function ensurePinPanel(node, st) {
     let p = pinPanels.get(node);
     if (p && p.panel?.isConnected !== false) return p;
+
+    ensurePinResizeWired();   // v87: the zoom-follow listener arms on first use
 
     const panel = document.createElement("div");
     panel.className = "hub-pin-panel";
@@ -2194,85 +2245,17 @@ function openSettingsPopup(node, trigger) {
         `<option value="1">On (default)</option>` +
         `<option value="0">Off</option>` +
         `</select></label>` +
-        `<label class="hub-set-row"><span>LLM server URL</span>` +
-        `<input type="text" class="hub-set-path" data-set-role="chatsrv" placeholder="http://127.0.0.1:8080/v1" spellcheck="false" autocomplete="off">` +
-        `</label>` +
-        `<label class="hub-set-row"><span>API key (optional)</span>` +
-        `<input type="password" class="hub-set-path" data-set-role="chatkey" placeholder="type + Enter to set, empty + Enter clears" spellcheck="false" autocomplete="off">` +
-        `</label>` +
-        `<label class="hub-set-row"><span>Model</span>` +
-        `<input type="text" class="hub-set-path" data-set-role="chatmodel" placeholder="pick it in the panel header, or type a name + Enter" spellcheck="false" autocomplete="off">` +
-        `</label>` +
-        `<div class="hub-set-row"><span>Connection</span>` +
-        `<span class="hub-set-pathbox"><button type="button" class="hub-set-path-def" data-set-role="chattest" title="Probe the LLM server through the proxy: /v1/models (+ /v1/status)">Test</button></span></div>` +
-        `<div class="hub-set-pathinfo" data-set-role="chattest-info"></div>` +
-        `<label class="hub-set-row"><span>System prompt</span>` +
-        `<input type="text" class="hub-set-path" data-set-role="chatsys" placeholder="empty = none (applies to every chat)" spellcheck="false" autocomplete="off">` +
-        `</label>` +
-        `<label class="hub-set-row"><span>Temperature / top_p / max_tokens</span>` +
-        `<span class="hub-set-pathbox hub-chat-set-trio">` +
-        `<input type="number" step="0.05" min="0" max="2" data-set-k="temperature" class="hub-set-path hub-chat-set-num" title="temperature (0-2)">` +
-        `<input type="number" step="0.01" min="0" max="1" data-set-k="top_p" class="hub-set-path hub-chat-set-num" title="top_p (0-1)">` +
-        `<input type="number" step="64" min="0" max="131072" data-set-k="max_tokens" class="hub-set-path hub-chat-set-num" title="max_tokens (0 = no limit)">` +
-        `</span></label>` +
-        `<label class="hub-set-row"><span>Reasoning effort</span>` +
-        `<select data-set-role="chatreason">` +
-        `<option value="default">default</option>` +
-        `<option value="none">none (enable_thinking = false)</option>` +
-        `<option value="low">low</option>` +
-        `<option value="medium">medium</option>` +
-        `<option value="high">high</option>` +
-        `</select></label>` +
-        `<label class="hub-set-row"><span>History depth / media depth</span>` +
-        `<span class="hub-set-pathbox hub-chat-set-trio">` +
-        `<input type="number" min="1" max="200" data-set-k="ctx_depth" class="hub-set-path hub-chat-set-num" title="how many last messages go into every request">` +
-        `<input type="number" min="0" max="50" data-set-k="media_depth" class="hub-set-path hub-chat-set-num" title="how many of them may carry real image/video parts (the rest become text notes)">` +
-        `</span></label>` +
-        `<label class="hub-set-row"><span>Image max side / per message</span>` +
-        `<span class="hub-set-pathbox hub-chat-set-trio">` +
-        `<input type="number" min="256" max="4096" step="64" data-set-k="img_max_side" class="hub-set-path hub-chat-set-num" title="the client downscales a pasted image to this side (px)">` +
-        `<input type="number" min="1" max="16" data-set-k="img_max_count" class="hub-set-path hub-chat-set-num" title="images per one message">` +
-        `</span></label>` +
-        `<label class="hub-set-row"><span>Video frames / frame side</span>` +
-        `<span class="hub-set-pathbox hub-chat-set-trio">` +
-        `<input type="number" min="2" max="64" data-set-k="video_frames" class="hub-set-path hub-chat-set-num" title="frames cut from one video (needs ffmpeg on the server)">` +
-        `<input type="number" min="256" max="4096" step="64" data-set-k="video_max_side" class="hub-set-path hub-chat-set-num" title="long side of a video frame (px)">` +
-        `</span></label>` +
-        `<label class="hub-set-row"><span>Streaming replies</span>` +
-        `<select data-set-role="chatstream">` +
-        `<option value="1">On (default) - the answer renders as it arrives</option>` +
-        `<option value="0">Off - wait for the full answer</option>` +
-        `</select></label>` +
-        `<label class="hub-set-row"><span>Keep last chats</span>` +
-        `<select data-set-role="chatkeep">` +
-        `<option value="10">10</option>` +
-        `<option value="20">20 · default</option>` +
-        `<option value="50">50</option>` +
-        `<option value="100">100</option>` +
-        `</select></label>` +
-        `<label class="hub-set-row"><span>Generation timeout (s)</span>` +
-        `<input type="number" min="30" max="86400" step="30" data-set-k="timeout_s" class="hub-set-path hub-chat-set-num hub-chat-set-one" title="a local model may think for minutes - keep it generous">` +
-        `</label>` +
-        `<label class="hub-set-row"><span>Storage folder</span>` +
-        `<span class="hub-set-pathbox">` +
-        `<input type="text" class="hub-set-path" data-set-role="chatroot" placeholder="default: user/settings_hub/chat" spellcheck="false" autocomplete="off">` +
-        `<button type="button" class="hub-set-path-def" data-set-role="chatroot-def" title="Back to the default folder (user/settings_hub/chat)">default</button>` +
-        `</span></label>` +
-        `<div class="hub-set-pathinfo" data-set-role="chatroot-info"></div>` +
         `<div class="hub-pop-hint">LLM chat panel (works alongside every hub): TABS = separate dialogs, ` +
         `🕘 reopens saved chats, dblclick a tab renames it, [–] minimizes to a chip, 🗑 clears the ` +
         `active chat (asks twice). There is NO ✕ on the panel - this On/Off switch is the only way ` +
-        `to remove it. The browser talks to the LLM ONLY through ComfyUI (py/chat_proxy.py): no CORS ` +
-        `setup on the LLM server, and the API key lives in user/settings_hub/chat/config.json on the ` +
-        `SERVER - it never enters the browser (F12 shows only a mask). The URL must include /v1 ` +
-        `(a local PolyStrata server: http://127.0.0.1:8080/v1; the same format works for llama.cpp, ` +
-        `LM Studio, Ollama /v1, vLLM, OpenRouter). Enter applies a text/number row, Esc reverts it. ` +
-        `Media depth = how many LAST messages may carry real image/video parts - older ones degrade ` +
-        `to text notes (frames eat the context window). Video needs ffmpeg on the ComfyUI machine; ` +
-        `without it the panel says so. The chat is NOT an agent: it never touches the queue, the ` +
-        `workflow or the nodes. History, attachments and this config live in ` +
-        `user/settings_hub/chat/ (a custom ABSOLUTE folder works like the stack one, entries are ` +
-        `never moved on a switch). Chats survive reloads and travel with the ComfyUI folder.</div>`;
+        `to remove it. v87: ALL other chat settings (server URL + key, model, thinking, system ` +
+        `prompt, sampling, limits, storage folder, GPU & memory with the VRAM reserve for ComfyUI ` +
+        `and the PolyStrata load/unload) live IN THE CHAT PANEL - ⚙ in the chat header opens them, ` +
+        `the model/thinking/prompt/GPU buttons sit right under its input. The browser talks to the ` +
+        `LLM ONLY through ComfyUI (py/chat_proxy.py): no CORS setup on the LLM server, and the API ` +
+        `key lives in user/settings_hub/chat/config.json on the SERVER - it never enters the ` +
+        `browser (F12 shows only a mask). The chat is NOT an agent: it never touches the queue, ` +
+        `the workflow or the nodes.</div>`;
     document.body.appendChild(pop);
 
     setPopState = { node, trigger, pop };
@@ -2476,10 +2459,11 @@ function openSettingsPopup(node, trigger) {
     // v74: the clear button lives in the STACK PANEL HEADER itself (owner:
     // destructive controls belong to the thing they destroy, not to settings).
 
-    // --- Chat (v86): panel On/Off + the LLM connection + sampling + media ---
-    // Text/number rows apply on Enter (the inline-editor contract) and revert
-    // on Esc; the initial values arrive from GET /chat/config asynchronously
-    // (the same getStackRootInfo().then pattern the stack rows use).
+    // --- Chat (v86/v87): the hub keeps ONLY the panel On/Off switch. Every
+    // other chat setting (server URL + key, model, thinking, system prompt,
+    // sampling, limits, storage folder) moved INTO the chat panel in v87 -
+    // ⚙ in the chat header + the toolbar under its input. Owner: "all LLM
+    // chat settings must be in the chat itself, not the hub".
     const chOnSel = pop.querySelector('[data-set-role="chaton"]');
     chOnSel.value = isChatOn() ? "1" : "0";
     chOnSel.addEventListener("change", () => {
@@ -2487,175 +2471,6 @@ function openSettingsPopup(node, trigger) {
         chOnSel.value = isChatOn() ? "1" : "0";
         flashBtn(trigger, "✓");
     });
-
-    const chSrv = pop.querySelector('[data-set-role="chatsrv"]');
-    const chKey = pop.querySelector('[data-set-role="chatkey"]');
-    const chModel = pop.querySelector('[data-set-role="chatmodel"]');
-    const chSys = pop.querySelector('[data-set-role="chatsys"]');
-    const chTestBtn = pop.querySelector('[data-set-role="chattest"]');
-    const chTestInfo = pop.querySelector('[data-set-role="chattest-info"]');
-    const chReasonSel = pop.querySelector('[data-set-role="chatreason"]');
-    const chStreamSel = pop.querySelector('[data-set-role="chatstream"]');
-    const chKeepSel = pop.querySelector('[data-set-role="chatkeep"]');
-    const chRootInput = pop.querySelector('[data-set-role="chatroot"]');
-    const chRootDef = pop.querySelector('[data-set-role="chatroot-def"]');
-    const chRootInfo = pop.querySelector('[data-set-role="chatroot-info"]');
-    const chNums = Array.from(pop.querySelectorAll("[data-set-k]"));
-
-    const chNumApply = async (inp) => {
-        const k = inp.dataset.setK;
-        const raw = inp.value.trim();
-        const res = await applyChatSettings({ [k]: raw === "" ? undefined : parseFloat(raw) });
-        if (res.ok) {
-            if (raw !== "") { inp.dataset.cur = inp.value; }
-            flashBtn(trigger, "✓");
-        } else {
-            inp.title = "Not applied: " + (res.error || "?");
-            showHubToast("Chat setting not applied: " + (res.error || "?"));
-        }
-    };
-    for (const inp of chNums) {
-        inp.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") {
-                e.preventDefault();
-                void chNumApply(inp);
-            } else if (e.key === "Escape") {
-                inp.value = inp.dataset.cur ?? "";
-                inp.blur();
-            }
-        });
-    }
-    const chTextBind = (inp, key, after) => {
-        inp.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") {
-                e.preventDefault();
-                const patch = { [key]: inp.value };
-                void applyChatSettings(patch).then((res) => {
-                    if (res.ok) {
-                        if (after) after(res.config);
-                        else { inp.dataset.cur = inp.value; }
-                        flashBtn(trigger, "✓");
-                    } else {
-                        showHubToast("Chat setting not applied: " + (res.error || "?"));
-                    }
-                });
-            } else if (e.key === "Escape") {
-                inp.value = inp.dataset.cur ?? "";
-                inp.blur();
-            }
-        });
-    };
-    chTextBind(chSrv, "url", (c) => { chSrv.value = (c && c.url) || ""; chSrv.dataset.cur = chSrv.value; });
-    chTextBind(chModel, "model", (c) => { chModel.value = (c && c.model) || ""; chModel.dataset.cur = chModel.value; });
-    chTextBind(chSys, "system_prompt", (c) => { chSys.value = (c && c.system_prompt) || ""; chSys.dataset.cur = chSys.value; });
-    // the KEY is special: typed text + Enter sets it; EMPTY + Enter clears it
-    // (the placeholder says so); the field itself never holds the stored key.
-    chKey.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-            e.preventDefault();
-            void applyChatSettings({ key: chKey.value }).then((res) => {
-                if (res.ok) {
-                    chKey.value = "";
-                    chKey.placeholder = res.config?.key
-                        ? ("saved: " + res.config.key + " - type + Enter to replace, empty + Enter clears")
-                        : "(no key) - type + Enter to set";
-                    flashBtn(trigger, "✓");
-                } else {
-                    showHubToast("Chat key not applied: " + (res.error || "?"));
-                }
-            });
-        } else if (e.key === "Escape") {
-            chKey.value = "";
-            chKey.blur();
-        }
-    });
-    chReasonSel.addEventListener("change", () => {
-        void applyChatSettings({ reasoning: chReasonSel.value }).then((res) => {
-            if (res.ok) flashBtn(trigger, "✓");
-        });
-    });
-    chStreamSel.addEventListener("change", () => {
-        void applyChatSettings({ stream: chStreamSel.value === "1" }).then((res) => {
-            if (res.ok) flashBtn(trigger, "✓");
-        });
-    });
-    chKeepSel.addEventListener("change", () => {
-        void applyChatSettings({ keep_sessions: parseInt(chKeepSel.value, 10) || 20 }).then((res) => {
-            if (res.ok) flashBtn(trigger, "✓");
-        });
-    });
-    chTestBtn.addEventListener("click", () => {
-        chTestInfo.classList.remove("hub-set-patherr");
-        chTestInfo.textContent = "Testing the LLM server…";
-        void testChatServer().then((res) => {
-            if (res.ok) {
-                const bits = ["OK - " + (res.current || res.models?.[0] || "no model reported")];
-                if (res.models?.length) bits.push("models: " + res.models.slice(0, 6).join(", "));
-                if (res.status?.context?.native) bits.push("ctx " + res.status.context.native);
-                chTestInfo.textContent = bits.join(" · ");
-                flashBtn(trigger, "✓");
-            } else {
-                chTestInfo.classList.add("hub-set-patherr");
-                chTestInfo.textContent = "FAIL: " + (res.error || "?");
-            }
-        });
-    });
-    const chRootApply = async () => {
-        const res = await setChatRootPath(chRootInput.value);
-        if (res.ok) {
-            chRootInput.value = res.custom || "";
-            chRootInput.dataset.cur = res.custom || "";
-            chRootInfo.classList.remove("hub-set-patherr");
-            chRootInfo.textContent = "Now: " + (res.root || "") +
-                (res.custom ? " (custom)" : " (default)") +
-                (res.saved === false ? " - could not save chat_root.json (folder works for this session only)" : "");
-            flashBtn(trigger, "✓");
-        } else {
-            chRootInfo.classList.add("hub-set-patherr");
-            chRootInfo.textContent = "Not applied: " + (res.error || "error") +
-                (res.stale ? " - the server has no /chat/root route (old py): update the FULL pack and RESTART ComfyUI." : "");
-        }
-    };
-    chRootInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-            e.preventDefault();
-            void chRootApply();
-        } else if (e.key === "Escape") {
-            chRootInput.value = chRootInput.dataset.cur || "";
-            chRootInput.blur();
-        }
-    });
-    chRootDef.addEventListener("click", () => {
-        chRootInput.value = "";
-        void chRootApply();
-    });
-    // async initial values (the popup is already open by then)
-    getChatUiState().then((st) => {
-        if (!st.cfg || !chSrv.isConnected) return; // popup closed / old py
-        chSrv.value = st.cfg.url || "";
-        chSrv.dataset.cur = chSrv.value;
-        chKey.placeholder = st.cfg.key
-            ? ("saved: " + st.cfg.key + " - type + Enter to replace, empty + Enter clears")
-            : "(no key) - type + Enter to set";
-        chModel.value = st.cfg.model || "";
-        chModel.dataset.cur = chModel.value;
-        chSys.value = st.cfg.system_prompt || "";
-        chSys.dataset.cur = chSys.value;
-        for (const inp of chNums) {
-            const k = inp.dataset.setK;
-            inp.value = String(st.cfg[k] ?? "");
-            inp.dataset.cur = inp.value;
-        }
-        chReasonSel.value = st.cfg.reasoning || "default";
-        chStreamSel.value = st.cfg.stream === false ? "0" : "1";
-        chKeepSel.value = String(st.cfg.keep_sessions || 20);
-        if (!chTestInfo.textContent) {
-            chTestInfo.textContent = st.configured
-                ? (st.has_ffmpeg ? "" : "ffmpeg NOT found - video attachments are unavailable")
-                : "no LLM server configured yet";
-            if (!st.configured) chTestInfo.classList.add("hub-set-patherr");
-        }
-    }).catch(() => {});
 
     positionNumPopup(pop, trigger);
     try { sel.focus(); } catch (_) {}

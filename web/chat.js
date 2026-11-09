@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - LLM Chat (v86): floating panel with TABS, OpenAI-compatible
+// SettingsHub - LLM Chat (v87): floating panel with TABS, OpenAI-compatible
 // upstream through the py proxy (py/chat_proxy.py)
 // ----------------------------------------------------------------------------
 // v86 (owner request 2026-11-09: "a simple LLM chat in the settings hub, just
@@ -39,12 +39,50 @@
 //       absolute folder is supported (the v84 stack-root mechanics).
 //   The chat is NOT an agent (owner decision): no tools, no queue control,
 //   no workflow access. ComfyUI integrations are parked for later.
+// ----------------------------------------------------------------------------
+// v87 (owner reports 2026-11-09: "all chat settings must live IN the chat,
+//   the hub keeps only the show/hide switch" + "the model picker belongs
+//   under the input as a dropdown with a refresh button - not a typed text
+//   field! - and the thinking mode + system prompt must be at hand" + "the
+//   system prompt opens in a small popup: presets or my own text" + "the
+//   PolyStrata memory features: unload buttons for ComfyUI models + a VRAM
+//   reservation for ComfyUI when a model loads in PolyStrata + a PolyStrata
+//   unload button that returns the memory" + "the tab name I type must be
+//   used" + "follow the browser page zoom"): ALL of it, in one pass:
+//     * the TOOLBAR under the input: [model ▾] fed by /v1/models with a [↻]
+//       refresh, [thinking ▾] (default/none/low/medium/high), [📜] system
+//       prompt, [⚡] GPU & memory - the header keeps 🕘 🗑 ⚙ – only;
+//     * [📜] opens the PROMPT popup: preset chips (concise, detailed,
+//       programmer, translator, SD-prompt engineer) + a custom textarea -
+//       a chip applies instantly, [Save] stores the custom text, [Clear]
+//       wipes it ("empty = none");
+//     * [⚡] opens the GPU popup (the v87 py /chat/gpu routes): live
+//       loaded/free-VRAM picture, the VRAM RESERVE for ComfyUI (MiB input,
+//       Apply / Release - the PolyStrata /v1/vram mechanics + the
+//       ComfyUI EXTRA_RESERVED sync, and cfg.vram_reserve_mib > 0 is
+//       re-applied by the SERVER before every send), [Unload model] (the
+//       engine stops, ALL of its VRAM + the reservation come back),
+//       [Load now] (/v1/load), [Free ComfyUI memory] (unload_all_models +
+//       soft_empty_cache + gc - ComfyUI's own button); every action
+//       prints its human note in the popup;
+//     * [⚙] in the HEADER opens the CHAT SETTINGS popup (moved out of the
+//       hub window): URL + key + [Test], sampling, depths, image/video
+//       limits, stream, keep-chats, timeout, storage folder - the Enter
+//       applies / Esc reverts contract, the same rows the hub used to
+//       host. The hub ⚙ keeps ONLY the Chat On/Off switch;
+//     * [＋] + a typed name + Enter creates the tab UNDER THAT NAME (the
+//       title used to be dropped and fell back to the auto-title);
+//     * PAGE ZOOM: a devicePixelRatio change (Ctrl +/-, ctrl-pinch) scales
+//       the saved geometry (x/y/w/h/chip) by the zoom factor before the
+//       usual refit, so the panel keeps its physical size and never drifts
+//       off-screen (the stack does the same); the v87 settings popups are
+//       viewport-clamped like the hub one.
 // ============================================================================
 
-// v86 self-report (single-source version, docs/plan-versions.md): the last
+// v87 self-report (single-source version, docs/plan-versions.md): the last
 // FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["chat"] = "v86";
+globalThis.__SettingsHubLoaded["chat"] = "v87";
 
 import { app } from "../../scripts/app.js";
 
@@ -61,7 +99,8 @@ const MIN_W = 320, MIN_H = 280;
 let panel = null, chip = null, mounted = false, initSeq = 0;
 let headEl = null, tabEl = null, msgsEl = null, attachEl = null;
 let inputEl = null, sendBtn = null, statusEl = null, noteEl = null;
-let grip = null, modelSel = null, sessionsBtn = null;
+let grip = null, modelSel = null, sessionsBtn = null, settingsBtn = null;
+let thinkSel = null, promptBtn = null, gpuBtn = null, modelsBtn = null;
 let tabs = [];            // open tabs: {id, title, msgs, pending:[part]}
 let activeId = null;      // active tab session id
 let streaming = null;     // {ctrl, sid}
@@ -71,6 +110,10 @@ let degraded = null;      // {code, why} - red note state
 let viewerEl = null;      // chat viewer overlay
 let clearArm = null, clearArmTs = 0, sessArm = null, sessArmTs = 0;
 const CLEAR_ARM_MS = 2600, SESS_ARM_MS = 2600;
+// v87 popups (single instance each, body-level fixed): settings ⚙, prompt 📜, GPU ⚡
+let setPop = null, promptPop = null, gpuPop = null;
+// v87 page-zoom tracking (devicePixelRatio changes with Ctrl +/- / ctrl-pinch)
+let lastDpr = 0;
 
 // ---------------------------------------------------------------------------
 // Small helpers (the stack.js patterns, chat flavor)
@@ -308,6 +351,7 @@ function setMinimized(min, persist = true) {
     panel.style.display = min ? "none" : "";
     chip.style.display = min ? "" : "none";
     if (min) {
+        closeAllChatPops();   // v87: a popup must not outlive the window
         const ui = lsUi();
         applyChipPos(ui.chipX ?? ui.x ?? 16, ui.chipY ?? ui.y ?? 16);
     }
@@ -330,21 +374,8 @@ function refitIntoView() {
 }
 
 let resizePersistT = null;
-function onWinResize() {
-    refitIntoView();
-    clearTimeout(resizePersistT);
-    resizePersistT = setTimeout(() => {
-        if (!panel || !chip) return;
-        const ui = lsUi();
-        const p = clampIntoView(ui.x ?? 16, ui.y ?? 90, panel);
-        const patch = { x: p.x, y: p.y };
-        if (ui.min) {
-            const c = clampIntoView(ui.chipX ?? p.x, ui.chipY ?? p.y, chip);
-            patch.chipX = c.x; patch.chipY = c.y;
-        }
-        saveUi(patch);
-    }, 150);
-}
+// v87: onWinResize (with the page-zoom geometry rescale) lives in the v87
+// section below - it uses lastDpr + refitIntoView defined here.
 
 // ---------------------------------------------------------------------------
 // Tabs (every tab = one server session)
@@ -365,9 +396,13 @@ function applySession(tab, sess) {
     if (tab.id === activeId) { renderTabs(); renderMsgs(); renderStatus(); }
 }
 
-async function createTab() {
+async function createTab(title) {
     const res = await jfetch("/settings_hub/chat/sessions", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        method: "POST", headers: { "Content-Type": "application/json" },
+        // v87: a typed name travels with the create - the owner names the
+        // tab in the [＋] field and Enter must USE it (it used to fall
+        // back to the auto-title from the first message).
+        body: JSON.stringify({ title: String(title || "").slice(0, 80) }),
     });
     const sess = res.json?.session;
     if (!res.ok || !sess?.id) {
@@ -528,6 +563,517 @@ async function openSessPop() {
 }
 
 // ---------------------------------------------------------------------------
+// v87 page zoom (devicePixelRatio): keep the panel's PHYSICAL size across
+// Ctrl +/- / ctrl-pinch. The saved geometry is CSS px; a zoom change rescales
+// it by the zoom factor BEFORE the normal refit clamps it into the viewport.
+// ---------------------------------------------------------------------------
+
+function curDpr() {
+    try {
+        const v = Number(window.devicePixelRatio);
+        return Number.isFinite(v) && v > 0 ? v : 1;
+    } catch (_) { return 1; }
+}
+
+function onWinResize() {
+    const ui = lsUi();
+    const dpr = curDpr();
+    const f = lastDpr ? dpr / lastDpr : 1;
+    lastDpr = dpr;
+    if (f && Math.abs(f - 1) >= 0.01) {
+        // page zoom changed - rescale the SAVED geometry and persist it (a
+        // zoom change is a persistent user action, like a drag)
+        const sc = {};
+        for (const k of ["x", "y", "w", "h", "chipX", "chipY"]) {
+            if (typeof ui[k] === "number" && Number.isFinite(ui[k])) sc[k] = ui[k] * f;
+        }
+        saveUi(sc);
+    }
+    refitIntoView();
+    clearTimeout(resizePersistT);
+    resizePersistT = setTimeout(() => {
+        if (!panel || !chip) return;
+        const u2 = lsUi();
+        const p = clampIntoView(u2.x ?? 16, u2.y ?? 90, panel);
+        const patch = { x: p.x, y: p.y };
+        if (u2.min) {
+            const c = clampIntoView(u2.chipX ?? p.x, u2.chipY ?? p.y, chip);
+            patch.chipX = c.x; patch.chipY = c.y;
+        }
+        saveUi(patch);
+    }, 150);
+}
+
+// ---------------------------------------------------------------------------
+// v87 popups (⚙ settings / 📜 prompt / ⚡ GPU) - body-level fixed, ONE
+// instance each, outside-mousedown + Esc close, clamped into the viewport.
+// ---------------------------------------------------------------------------
+
+function popupKeyCloser(closer) {
+    return (e) => {
+        if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closer(); }
+    };
+}
+
+function placePopup(pop, trigger) {
+    const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+    pop.style.maxHeight = Math.max(200, vh - 16) + "px";
+    let x = 12, y = 12;
+    try {
+        const r = trigger.getBoundingClientRect();
+        x = Math.max(8, Math.min(r.left, vw - (pop.offsetWidth || 300) - 8));
+        y = r.bottom + 6;
+        if (y + (pop.offsetHeight || 300) > vh - 8) {
+            y = Math.max(8, r.top - (pop.offsetHeight || 300) - 6);
+        }
+    } catch (_) {}
+    pop.style.left = x + "px";
+    pop.style.top = y + "px";
+}
+
+function closeSetPop() {
+    try { setPop?.remove(); } catch (_) {}
+    setPop = null;
+    try { window.removeEventListener("mousedown", onSetPopDown, true); } catch (_) {}
+    try { window.removeEventListener("keydown", setPopKey, true); } catch (_) {}
+}
+function onSetPopDown(e) {
+    if (!setPop || setPop.contains(e.target) || settingsBtn?.contains?.(e.target)) return;
+    closeSetPop();
+}
+const setPopKey = popupKeyCloser(closeSetPop);
+
+function closePromptPop() {
+    try { promptPop?.remove(); } catch (_) {}
+    promptPop = null;
+    try { window.removeEventListener("mousedown", onPromptPopDown, true); } catch (_) {}
+    try { window.removeEventListener("keydown", promptPopKey, true); } catch (_) {}
+}
+function onPromptPopDown(e) {
+    if (!promptPop || promptPop.contains(e.target) || promptBtn?.contains?.(e.target)) return;
+    closePromptPop();
+}
+const promptPopKey = popupKeyCloser(closePromptPop);
+
+function closeGpuPop() {
+    try { gpuPop?.remove(); } catch (_) {}
+    gpuPop = null;
+    try { window.removeEventListener("mousedown", onGpuPopDown, true); } catch (_) {}
+    try { window.removeEventListener("keydown", gpuPopKey, true); } catch (_) {}
+}
+function onGpuPopDown(e) {
+    if (!gpuPop || gpuPop.contains(e.target) || gpuBtn?.contains?.(e.target)) return;
+    closeGpuPop();
+}
+const gpuPopKey = popupKeyCloser(closeGpuPop);
+
+function closeAllChatPops() { closeSetPop(); closePromptPop(); closeGpuPop(); }
+
+// --- ⚙ Chat settings (moved out of the hub window in v87) -------------------
+
+const SET_NUM_KEYS = [
+    ["temperature", "temperature (0-2)", "0.05", "0", "2"],
+    ["top_p", "top_p (0-1)", "0.01", "0", "1"],
+    ["max_tokens", "max_tokens (0 = no limit)", "64", "0", "131072"],
+    ["ctx_depth", "how many last messages go into every request", "1", "1", "200"],
+    ["media_depth", "how many of them may carry real image/video parts", "1", "0", "50"],
+    ["img_max_side", "the client downscales a pasted image to this side (px)", "64", "256", "4096"],
+    ["img_max_count", "images per one message", "1", "1", "16"],
+    ["video_frames", "frames cut from one video (needs ffmpeg on the server)", "1", "2", "64"],
+    ["video_max_side", "long side of a video frame (px)", "64", "256", "4096"],
+    ["timeout_s", "generation timeout, seconds - a local model may think for minutes", "30", "30", "86400"],
+];
+
+function openSetPop() {
+    if (setPop) { closeSetPop(); return; }
+    closePromptPop(); closeGpuPop();
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-chat-setpop";
+    pop.innerHTML =
+        `<div class="hub-menu-title">⚙ Chat settings</div>` +
+        `<label class="hub-cs-row"><span>LLM server URL</span>` +
+        `<input type="text" class="hub-cs-in" data-cs="url" placeholder="http://127.0.0.1:8080/v1" spellcheck="false" autocomplete="off"></label>` +
+        `<label class="hub-cs-row"><span>API key (optional)</span>` +
+        `<input type="password" class="hub-cs-in" data-cs="key" placeholder="type + Enter to set, empty + Enter clears" spellcheck="false" autocomplete="off"></label>` +
+        `<div class="hub-cs-row"><span>Connection</span>` +
+        `<span class="hub-cs-box"><button type="button" class="hub-cs-chip" data-cs-btn="test">Test</button></span></div>` +
+        `<div class="hub-cs-info" data-cs="testinfo"></div>` +
+        `<div class="hub-cs-sect">Sampling</div>` +
+        `<div class="hub-cs-trio">` +
+        SET_NUM_KEYS.slice(0, 3).map(([k, t, step, min, max]) =>
+            `<input type="number" step="${step}" min="${min}" max="${max}" data-cs-num="${k}" class="hub-cs-in" title="${t}">`).join("") +
+        `</div>` +
+        `<div class="hub-cs-sect">History & media</div>` +
+        `<div class="hub-cs-trio">` +
+        SET_NUM_KEYS.slice(3, 5).map(([k, t, step, min, max]) =>
+            `<input type="number" step="${step}" min="${min}" max="${max}" data-cs-num="${k}" class="hub-cs-in" title="${t}">`).join("") +
+        `</div>` +
+        `<div class="hub-cs-trio">` +
+        SET_NUM_KEYS.slice(5, 9).map(([k, t, step, min, max]) =>
+            `<input type="number" step="${step}" min="${min}" max="${max}" data-cs-num="${k}" class="hub-cs-in" title="${t}">`).join("") +
+        `</div>` +
+        `<label class="hub-cs-row"><span>Streaming replies</span>` +
+        `<select class="hub-cs-sel" data-cs="stream">` +
+        `<option value="1">On (default)</option><option value="0">Off</option>` +
+        `</select></label>` +
+        `<label class="hub-cs-row"><span>Keep last chats</span>` +
+        `<select class="hub-cs-sel" data-cs="keep">` +
+        `<option value="10">10</option><option value="20">20 · default</option>` +
+        `<option value="50">50</option><option value="100">100</option>` +
+        `</select></label>` +
+        `<label class="hub-cs-row"><span>Timeout (s)</span>` +
+        `<input type="number" step="30" min="30" max="86400" data-cs-num="timeout_s" class="hub-cs-in" title="${SET_NUM_KEYS[9][1]}"></label>` +
+        `<div class="hub-cs-sect">Storage folder</div>` +
+        `<div class="hub-cs-row"><span class="hub-cs-box">` +
+        `<input type="text" class="hub-cs-in hub-cs-path" data-cs="root" placeholder="default: user/settings_hub/chat" spellcheck="false" autocomplete="off">` +
+        `<button type="button" class="hub-cs-chip" data-cs-btn="rootdef">default</button></span></div>` +
+        `<div class="hub-cs-info" data-cs="rootinfo"></div>` +
+        `<div class="hub-cs-hint">Enter applies a row, Esc reverts it. The key lives in ` +
+        `config.json on the SERVER - the browser only ever sees a mask. The URL must ` +
+        `include /v1 (PolyStrata: http://127.0.0.1:8080/v1). Model, thinking and the ` +
+        `system prompt sit under the input.</div>`;
+    document.body.appendChild(pop);
+    setPop = pop;
+
+    const urlIn = pop.querySelector('[data-cs="url"]');
+    const keyIn = pop.querySelector('[data-cs="key"]');
+    const info = pop.querySelector('[data-cs="testinfo"]');
+    const keepSel = pop.querySelector('[data-cs="keep"]');
+    const streamSel = pop.querySelector('[data-cs="stream"]');
+    const rootIn = pop.querySelector('[data-cs="root"]');
+    const rootInfo = pop.querySelector('[data-cs="rootinfo"]');
+    const nums = Array.from(pop.querySelectorAll("[data-cs-num]"));
+    const syncNums = (c) => {
+        for (const inp of nums) {
+            inp.value = String(c?.[inp.dataset.csNum] ?? "");
+            inp.dataset.cur = inp.value;
+        }
+    };
+
+    const applyPatch = async (patch, onOk) => {
+        const res = await applyChatSettings(patch);
+        if (res.ok) { if (onOk) onOk(res.config); else syncNums(cfg); }
+        else localToast("Not applied: " + (res.error || "?"));
+        return res;
+    };
+
+    for (const inp of nums) {
+        inp.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault(); e.stopPropagation();
+                const k = inp.dataset.csNum;
+                const raw = inp.value.trim();
+                void applyPatch({ [k]: raw === "" ? undefined : parseFloat(raw) });
+            } else if (e.key === "Escape") {
+                e.stopPropagation();
+                inp.value = inp.dataset.cur ?? "";
+                inp.blur();
+            }
+        });
+    }
+    urlIn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault(); e.stopPropagation();
+            void applyPatch({ url: urlIn.value }, (c) => { urlIn.value = c?.url || ""; urlIn.dataset.cur = urlIn.value; });
+        } else if (e.key === "Escape") {
+            e.stopPropagation(); urlIn.value = urlIn.dataset.cur ?? ""; urlIn.blur();
+        }
+    });
+    keyIn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault(); e.stopPropagation();
+            void applyPatch({ key: keyIn.value }, (c) => {
+                keyIn.value = "";
+                keyIn.placeholder = c?.key
+                    ? ("saved: " + c.key + " - type + Enter to replace, empty + Enter clears")
+                    : "(no key) - type + Enter to set";
+            });
+        } else if (e.key === "Escape") {
+            e.stopPropagation(); keyIn.value = ""; keyIn.blur();
+        }
+    });
+    streamSel.addEventListener("change", () => {
+        void applyPatch({ stream: streamSel.value === "1" });
+    });
+    keepSel.addEventListener("change", () => {
+        void applyPatch({ keep_sessions: parseInt(keepSel.value, 10) || 20 });
+    });
+    pop.querySelector('[data-cs-btn="test"]').addEventListener("click", async () => {
+        info.classList.remove("hub-cs-err");
+        info.textContent = "Testing the LLM server…";
+        const res = await testChatServer();
+        if (res.ok) {
+            const bits = ["OK - " + (res.current || res.models?.[0] || "no model reported")];
+            if (res.models?.length) bits.push("models: " + res.models.slice(0, 6).join(", "));
+            if (res.status?.context?.native) bits.push("ctx " + res.status.context.native);
+            info.textContent = bits.join(" · ");
+            void fillModels(false);
+        } else {
+            info.classList.add("hub-cs-err");
+            info.textContent = "FAIL: " + (res.error || "?");
+        }
+    });
+    const rootApply = async () => {
+        const res = await setChatRootPath(rootIn.value);
+        if (res.ok) {
+            rootIn.value = res.custom || "";
+            rootIn.dataset.cur = rootIn.value;
+            rootInfo.classList.remove("hub-cs-err");
+            rootInfo.textContent = "Now: " + (res.root || "") + (res.custom ? " (custom)" : " (default)") +
+                (res.saved === false ? " - could not save chat_root.json (this session only)" : "");
+        } else {
+            rootInfo.classList.add("hub-cs-err");
+            rootInfo.textContent = "Not applied: " + (res.error || "error") +
+                (res.stale ? " - old py: update the FULL pack and RESTART ComfyUI." : "");
+        }
+    };
+    rootIn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); void rootApply(); }
+        else if (e.key === "Escape") { e.stopPropagation(); rootIn.value = rootIn.dataset.cur || ""; rootIn.blur(); }
+    });
+    pop.querySelector('[data-cs-btn="rootdef"]').addEventListener("click", () => {
+        rootIn.value = "";
+        void rootApply();
+    });
+
+    // async initial values (the popup is already open)
+    void (async () => {
+        const st = await getChatUiState();
+        if (!st.cfg || !setPop || !urlIn.isConnected) return;
+        urlIn.value = st.cfg.url || "";
+        urlIn.dataset.cur = urlIn.value;
+        keyIn.placeholder = st.cfg.key
+            ? ("saved: " + st.cfg.key + " - type + Enter to replace, empty + Enter clears")
+            : "(no key) - type + Enter to set";
+        syncNums(st.cfg);
+        streamSel.value = st.cfg.stream === false ? "0" : "1";
+        keepSel.value = String(st.cfg.keep_sessions || 20);
+        if (!info.textContent) {
+            info.textContent = st.configured
+                ? (st.has_ffmpeg ? "" : "ffmpeg NOT found - video attachments are unavailable")
+                : "no LLM server configured yet";
+            if (!st.configured) info.classList.add("hub-cs-err");
+        }
+        const ri = await getChatRootInfo();
+        if (ri && rootIn.isConnected) {
+            rootInfo.textContent = "Now: " + (ri.root || "") + (ri.custom ? " (custom)" : " (default)") +
+                (ri.writable === false ? " - NOT writable" : "");
+            if (!rootIn.value) rootIn.value = ri.custom || "";
+            rootIn.dataset.cur = rootIn.value;
+        }
+    })();
+
+    placePopup(pop, settingsBtn);
+    pop.addEventListener("mousedown", (e) => e.stopPropagation());
+    try { urlIn.focus(); } catch (_) {}
+    window.addEventListener("mousedown", onSetPopDown, true);
+    window.addEventListener("keydown", setPopKey, true);
+}
+
+// --- 📜 System prompt (presets + custom) -------------------------------------
+
+const PROMPT_PRESETS = [
+    { id: "concise", label: "Concise assistant",
+      text: "You are a concise assistant. Answer directly in short paragraphs, no preambles, no disclaimers." },
+    { id: "detailed", label: "Detailed assistant",
+      text: "You are a thorough assistant. Explain step by step with concrete numbers and examples, and finish with a short summary." },
+    { id: "coder", label: "Programmer",
+      text: "You are an experienced programmer. Give complete working code with minimal prose; briefly name pitfalls and edge cases." },
+    { id: "translator", label: "Translator",
+      text: "You are a precise translator. Translate the user's text faithfully, preserving tone and formatting. Reply with the translation only." },
+    { id: "sd", label: "SD prompt engineer",
+      text: "You are an expert at Stable Diffusion / ComfyUI prompts. Turn the user's idea into a detailed comma-separated positive prompt (with quality terms) plus a short negative prompt. No extra commentary." },
+];
+
+function renderPromptBtnState() {
+    if (!promptBtn) return;
+    promptBtn.classList.toggle("hub-chat-tb-on", !!(cfg?.system_prompt || "").trim());
+    promptBtn.title = cfg?.system_prompt
+        ? "System prompt: set - click to edit"
+        : "System prompt: none - click to set";
+}
+
+function openPromptPop() {
+    if (promptPop) { closePromptPop(); return; }
+    closeSetPop(); closeGpuPop();
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-chat-promptpop";
+    pop.innerHTML =
+        `<div class="hub-menu-title">📜 System prompt</div>` +
+        `<div class="hub-cp-presets">` +
+        PROMPT_PRESETS.map((p) =>
+            `<button type="button" class="hub-cs-chip" data-cp="${p.id}" title="${esc(p.text)}">${esc(p.label)}</button>`).join("") +
+        `</div>` +
+        `<textarea class="hub-cp-ta" rows="6" spellcheck="false" ` +
+        `placeholder="Custom prompt (empty = none)…"></textarea>` +
+        `<div class="hub-cp-btns">` +
+        `<button type="button" class="hub-cs-chip hub-cp-save" title="Save the custom prompt">Save</button>` +
+        `<button type="button" class="hub-cs-chip hub-cp-clear" title="Remove the system prompt (empty = none)">Clear</button>` +
+        `</div>` +
+        `<div class="hub-cs-hint">A preset applies instantly. "Save" stores the typed text ` +
+        `(it replaces the preset), "Clear" sends empty = none. The prompt applies to ` +
+        `every chat.</div>`;
+    document.body.appendChild(pop);
+    promptPop = pop;
+    const ta = pop.querySelector(".hub-cp-ta");
+    ta.value = cfg?.system_prompt || "";
+    const commit = async (text) => {
+        const res = await applyChatSettings({ system_prompt: text });
+        if (res.ok) {
+            ta.value = res.config?.system_prompt ?? text;
+            renderPromptBtnState();
+            localToast(text.trim() ? "System prompt saved" : "System prompt cleared");
+        } else {
+            localToast("Not applied: " + (res.error || "?"));
+        }
+    };
+    pop.addEventListener("click", (e) => {
+        const chip = e.target?.closest?.("[data-cp]");
+        if (chip) {
+            const p = PROMPT_PRESETS.find((x) => x.id === chip.dataset.cp);
+            if (p) void commit(p.text);
+        }
+    });
+    pop.querySelector(".hub-cp-save").addEventListener("click", () => void commit(ta.value));
+    pop.querySelector(".hub-cp-clear").addEventListener("click", () => void commit(""));
+    ta.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault(); e.stopPropagation();
+            void commit(ta.value);
+        } else if (e.key === "Escape") {
+            e.preventDefault(); e.stopPropagation(); closePromptPop();
+        }
+    });
+    placePopup(pop, promptBtn);
+    pop.addEventListener("mousedown", (e) => e.stopPropagation());
+    try { ta.focus(); } catch (_) {}
+    window.addEventListener("mousedown", onPromptPopDown, true);
+    window.addEventListener("keydown", promptPopKey, true);
+}
+
+// --- ⚡ GPU & memory (the v87 /chat/gpu routes) -------------------------------
+
+function renderGpuBtnState() {
+    if (!gpuBtn) return;
+    const on = Number(cfg?.vram_reserve_mib || 0) > 0;
+    gpuBtn.classList.toggle("hub-chat-tb-on", on);
+    gpuBtn.title = on
+        ? "GPU & memory - VRAM reserve for ComfyUI: " + cfg.vram_reserve_mib + " MiB ON"
+        : "GPU & memory - model load/unload, VRAM reserve, ComfyUI cleanup";
+}
+
+async function gpuAction(body) {
+    const res = await jfetch("/settings_hub/chat/gpu", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+    });
+    return res.json || { ok: false, error: res.json?.error || "HTTP " + res.status };
+}
+
+function gpuStateLine(up) {
+    if (!up) return "no LLM server / status unavailable";
+    const bits = [];
+    bits.push(up.loaded ? "model LOADED" : "model not loaded");
+    if (up.model) bits.push(up.model);
+    if (up.free_mib != null && up.total_mib != null) {
+        bits.push("VRAM free " + up.free_mib + " / " + up.total_mib + " MiB");
+    } else if (up.free_mib != null) {
+        bits.push("VRAM free " + up.free_mib + " MiB");
+    }
+    return bits.join(" · ");
+}
+
+async function refreshGpuPop() {
+    if (!gpuPop) return;
+    const stateEl = gpuPop.querySelector('[data-gpu="state"]');
+    const planEl = gpuPop.querySelector('[data-gpu="plan"]');
+    const mibIn = gpuPop.querySelector('[data-gpu="mib"]');
+    const r = await jfetch("/settings_hub/chat/gpu");
+    if (!r.json?.ok) {
+        stateEl.textContent = "GPU status failed: " + (r.json?.error || "HTTP " + r.status);
+        return;
+    }
+    stateEl.textContent = gpuStateLine(r.json.upstream);
+    stateEl.classList.toggle("hub-cs-err", !r.json.upstream);
+    const reserve = Number(r.json.reserve_mib || 0);
+    if (cfg && cfg.vram_reserve_mib !== reserve) {
+        cfg.vram_reserve_mib = reserve;
+        renderGpuBtnState();
+    }
+    if (mibIn && document.activeElement !== mibIn) mibIn.value = reserve ? String(reserve) : "";
+    // the PERSISTENT planner state lives on its own line - the action notes
+    // element is never clobbered by a refresh
+    planEl.textContent = reserve
+        ? (r.json.comfy_reserved
+            ? "Reserve ON: " + reserve + " MiB - ComfyUI plans around the LLM (EXTRA_RESERVED_VRAM)"
+            : "Reserve ON: " + reserve + " MiB - re-applied before every chat message")
+        : "";
+}
+
+function openGpuPop() {
+    if (gpuPop) { closeGpuPop(); return; }
+    closeSetPop(); closePromptPop();
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-chat-gpupop";
+    pop.innerHTML =
+        `<div class="hub-menu-title">⚡ GPU & memory</div>` +
+        `<div class="hub-gp-state" data-gpu="state">reading…</div>` +
+        `<div class="hub-cs-info" data-gpu="plan"></div>` +
+        `<div class="hub-cs-info" data-gpu="notes"></div>` +
+        `<div class="hub-cp-btns">` +
+        `<button type="button" class="hub-cs-chip" data-gpu-btn="refresh" title="Re-read the upstream /v1/status">↻ status</button>` +
+        `<button type="button" class="hub-cs-chip" data-gpu-btn="load" title="Wake / switch the model now (POST /v1/load)">Load now</button>` +
+        `<button type="button" class="hub-cs-chip hub-gp-unload" data-gpu-btn="unload" title="Unload the LLM model - ALL of its VRAM + the reservation come back">Unload model</button>` +
+        `<button type="button" class="hub-cs-chip hub-gp-unload" data-gpu-btn="free" title="ComfyUI's own 'Free model and node cache': unload ITS models + torch cache + gc (the LLM is untouched)">Free ComfyUI memory</button>` +
+        `</div>` +
+        `<div class="hub-cs-sect">VRAM reserve for ComfyUI</div>` +
+        `<div class="hub-cp-btns">` +
+        `<input type="number" class="hub-cs-in hub-gp-mib" data-gpu="mib" min="0" step="256" placeholder="MiB, e.g. 4096" title="Keep this much VRAM free for ComfyUI (the PolyStrata /v1/vram mechanics; re-applied before every chat message while > 0)">` +
+        `<button type="button" class="hub-cs-chip" data-gpu-btn="reserve" title="Apply now and remember (ComfyUI plans its loads around the LLM)">Apply</button>` +
+        `<button type="button" class="hub-cs-chip" data-gpu-btn="release" title="Return the reserve to the startup state (both sides)">Release</button>` +
+        `</div>` +
+        `<div class="hub-cs-hint">While a reserve is set, EVERY chat message re-applies it before ` +
+        `the model wakes - ComfyUI keeps its VRAM and stops catching OOM. "Unload model" stops ` +
+        `the engine and returns ALL of its memory + the reservation. "Free ComfyUI memory" is ` +
+        `ComfyUI's own cache cleanup.</div>`;
+    document.body.appendChild(pop);
+    gpuPop = pop;
+    const notesEl = pop.querySelector('[data-gpu="notes"]');
+    const showNotes = (j) => {
+        notesEl.classList.remove("hub-cs-err");
+        notesEl.textContent = (j?.notes || []).join(" · ") || (j?.error ? "FAILED: " + j.error : "");
+        if (j?.error) notesEl.classList.add("hub-cs-err");
+        void refreshGpuPop();
+    };
+    const busy = async (fn) => {
+        notesEl.classList.remove("hub-cs-err");
+        notesEl.textContent = "…";
+        try { showNotes(await gpuAction(await fn())); }
+        catch (e) { notesEl.classList.add("hub-cs-err"); notesEl.textContent = String(e); }
+    };
+    pop.addEventListener("click", (e) => {
+        const b = e.target?.closest?.("[data-gpu-btn]");
+        if (!b) return;
+        const k = b.dataset.gpuBtn;
+        if (k === "refresh") { void refreshGpuPop().then(() => { if (gpuPop) notesEl.textContent = ""; }); }
+        else if (k === "load") void busy(async () => ({ action: "load", model: cfg?.model || "" }));
+        else if (k === "unload") void busy(async () => ({ action: "unload" }));
+        else if (k === "free") void busy(async () => ({ action: "free_comfy" }));
+        else if (k === "reserve") {
+            const mib = parseInt(pop.querySelector('[data-gpu="mib"]').value, 10);
+            if (!Number.isFinite(mib) || mib < 0) { localToast("Type the reserve in MiB (e.g. 4096)"); return; }
+            void busy(async () => ({ action: "reserve", mib }));
+        }
+        else if (k === "release") void busy(async () => ({ action: "release" }));
+    });
+    placePopup(pop, gpuBtn);
+    pop.addEventListener("mousedown", (e) => e.stopPropagation());
+    void refreshGpuPop();
+    window.addEventListener("mousedown", onGpuPopDown, true);
+    window.addEventListener("keydown", gpuPopKey, true);
+}
+
+// ---------------------------------------------------------------------------
 // Status line + degraded/config notes
 // ---------------------------------------------------------------------------
 
@@ -549,12 +1095,12 @@ function renderStatus() {
             if (a.usage?.completion_tokens) bits.push(a.usage.completion_tokens + " tok");
             if (a.ms) bits.push((a.ms / 1000).toFixed(1) + " s");
             if (a.stopped) bits.push("stopped");
-            if (a.model) bits.push(a.model);
-            last = bits.length ? " · last: " + bits.join(", ") : "";
+            last = bits.length ? "last: " + bits.join(", ") : "";
         }
     }
-    statusEl.textContent = (cfg?.url || "no LLM server") + " · " +
-        (cfg?.model || "(no model)") + last;
+    // v87: the model moved into the toolbar dropdown - the status line keeps
+    // the server url + the last-answer stats (degraded errors override it).
+    statusEl.textContent = (cfg?.url || "no LLM server") + (last ? " · " + last : "");
 }
 
 function noteDegraded(d) {
@@ -582,7 +1128,7 @@ function renderNote() {
         noteEl.style.display = "";
         noteEl.className = "hub-chat-note hub-chat-note-ok";
         noteEl.innerHTML = `<div class="hub-chat-note-head">No LLM server configured</div>` +
-            `<div class="hub-chat-note-why">Open ⚙ Hub settings → Chat and set the server URL ` +
+            `<div class="hub-chat-note-why">Press ⚙ in the chat header and set the server URL ` +
             `(e.g. http://127.0.0.1:8080/v1 for a local PolyStrata server), then press [Test].</div>`;
         return;
     }
@@ -974,7 +1520,7 @@ function renderModelSel() {
     const cur = cfg?.model || "";
     const opts = [];
     if (!models.length) {
-        opts.push(`<option value="${esc(cur)}">${cur ? esc(cur) : "(no model - [Test] in ⚙ → Chat)"}</option>`);
+        opts.push(`<option value="${esc(cur)}">${cur ? esc(cur) : "(no model - ↻ refreshes the list)"}</option>`);
     } else {
         if (cur && !models.includes(cur)) opts.push(`<option value="${esc(cur)}">${esc(cur)} (not in /models)</option>`);
         for (const m of models) {
@@ -1083,8 +1629,8 @@ async function sendCurrent(opts = {}) {
     const isRegen = !!opts.regenerate;
     if (!isEdit && !isRegen && !text && !tab.pending.length) return;
     if (!cfg?.url) {
-        setStatusErr("No LLM server configured - ⚙ Hub settings → Chat");
-        localToast("No LLM server configured - open ⚙ Hub settings → Chat");
+        setStatusErr("No LLM server configured - ⚙ in the chat header");
+        localToast("No LLM server configured - press ⚙ in the chat header");
         return;
     }
     const wantStream = !!(cfg?.stream ?? true);
@@ -1181,6 +1727,10 @@ async function ensureConfig() {
         cfg = res.json.config;
         renderModelSel();
         renderStatus();
+        renderPromptBtnState();
+        renderGpuBtnState();
+        const r = cfg?.reasoning || "default";
+        if (thinkSel) thinkSel.value = r;
     }
 }
 
@@ -1191,13 +1741,13 @@ function buildDom() {
     panel.innerHTML =
         `<div class="hub-chat-head" title="Drag to move">` +
         `<span class="hub-chat-ico">💬</span><span class="hub-chat-title">Chat</span>` +
-        `<select class="hub-chat-model" title="Model - the list comes from the LLM server ([Test] in ⚙ → Chat refreshes it)"></select>` +
         `<span class="hub-chat-hspace"></span>` +
+        `<button type="button" class="hub-btn hub-chat-settings" title="Chat settings (URL, key, sampling, limits, storage)">⚙</button>` +
         `<button type="button" class="hub-btn hub-chat-sessions" title="Saved chats - reopen or delete">🕘</button>` +
         `<button type="button" class="hub-btn hub-chat-clear" title="Clear THIS chat (click twice to confirm)">🗑</button>` +
         `<button type="button" class="hub-btn hub-chat-min" title="Minimize to chip">–</button>` +
         // v86: no [✕] close button - the panel is dismissed only via
-        // ⚙ Hub settings → Chat (the v75 stack contract).
+        // ⚙ Hub settings → Chat → Off (the v75 stack contract).
         `</div>` +
         `<div class="hub-chat-note" style="display:none"></div>` +
         `<div class="hub-chat-tabs"></div>` +
@@ -1207,6 +1757,22 @@ function buildDom() {
         `<button type="button" class="hub-chat-attachbtn" title="Attach an image (vision), a video or a text file">📎</button>` +
         `<textarea class="hub-chat-input" rows="1" placeholder="Message… (Enter - send, Shift+Enter - new line)"></textarea>` +
         `<button type="button" class="hub-chat-send" title="Send (Enter)">▶</button>` +
+        `</div>` +
+        // v87: the toolbar UNDER the input - model (dropdown + refresh),
+        // thinking mode, system prompt, GPU & memory - all "at hand".
+        `<div class="hub-chat-toolbar">` +
+        `<select class="hub-chat-model" title="Model - the list comes from the LLM server"></select>` +
+        `<button type="button" class="hub-chat-tbbtn hub-chat-models" title="Refresh the model list from the LLM server (/v1/models)">↻</button>` +
+        `<select class="hub-chat-think hub-chat-tbbtn" title="Thinking mode - none sends enable_thinking=false, low/medium/high send reasoning_effort">` +
+        `<option value="default" title="The model's own default">think: default</option>` +
+        `<option value="none" title="enable_thinking = false">think: off</option>` +
+        `<option value="low">think: low</option>` +
+        `<option value="medium">think: medium</option>` +
+        `<option value="high">think: high</option>` +
+        `</select>` +
+        `<span class="hub-chat-tspace"></span>` +
+        `<button type="button" class="hub-chat-tbbtn hub-chat-prompt" title="System prompt: none - click to set">📜</button>` +
+        `<button type="button" class="hub-chat-tbbtn hub-chat-gpu" title="GPU & memory - model load/unload, VRAM reserve, ComfyUI cleanup">⚡</button>` +
         `</div>` +
         `<div class="hub-chat-status"></div>` +
         `<div class="hub-chat-grip" title="Drag to resize"></div>` +
@@ -1232,8 +1798,14 @@ function buildDom() {
     grip = panel.querySelector(".hub-chat-grip");
     modelSel = panel.querySelector(".hub-chat-model");
     sessionsBtn = panel.querySelector(".hub-chat-sessions");
+    settingsBtn = panel.querySelector(".hub-chat-settings");
+    thinkSel = panel.querySelector(".hub-chat-think");
+    promptBtn = panel.querySelector(".hub-chat-prompt");
+    gpuBtn = panel.querySelector(".hub-chat-gpu");
+    modelsBtn = panel.querySelector(".hub-chat-models");
 
     // geometry
+    lastDpr = curDpr();   // v87: zoom tracking starts from the CURRENT dpr
     const ui = lsUi();
     applyPos(ui.x ?? Math.max(16, (window.innerWidth || 1600) - 560), ui.y ?? 90);
     applySize(ui.w ?? DEF_W, ui.h ?? DEF_H);
@@ -1246,14 +1818,24 @@ function buildDom() {
     chip.addEventListener("click", () => setMinimized(false));
     panel.querySelector(".hub-chat-clear").addEventListener("click", (e) => panelClearAll(e.currentTarget));
     sessionsBtn.addEventListener("click", () => void openSessPop());
+    settingsBtn.addEventListener("click", () => openSetPop());
     modelSel.addEventListener("change", () => {
         const v = modelSel.value;
         if (!v) return;
         void applyChatSettings({ model: v }).then((res) => {
-            if (res.ok) { localToast("Model: " + v); }
+            if (res.ok) { localToast("Model: " + v + " - it loads with the next message (⚡ can load it now)"); renderStatus(); }
             else localToast("Model not applied: " + (res.error || "?"));
         });
     });
+    modelsBtn.addEventListener("click", () => void fillModels(true));
+    thinkSel.addEventListener("change", () => {
+        void applyChatSettings({ reasoning: thinkSel.value }).then((res) => {
+            if (res.ok) localToast("Thinking: " + thinkSel.value);
+            else localToast("Not applied: " + (res.error || "?"));
+        });
+    });
+    promptBtn.addEventListener("click", () => openPromptPop());
+    gpuBtn.addEventListener("click", () => openGpuPop());
     makeDraggable(headEl, panel,
         () => ({ x: parseFloat(panel.style.left) || 0, y: parseFloat(panel.style.top) || 0 }),
         (x, y, persist) => {
@@ -1317,7 +1899,7 @@ function buildDom() {
             e.stopPropagation();
             const v = inp.value.trim();
             if (tabEdit?.mode === "rename") void renameTab(tabEdit.id, v);
-            else void createTab();
+            else void createTab(v);   // v87: the typed name IS the title
             tabEdit = null;
             renderTabs();
         } else if (e.key === "Escape") {
@@ -1519,11 +2101,13 @@ function teardown() {
     streaming = null;
     closeViewer();
     closeSessPop();
+    closeAllChatPops();   // v87: ⚙ / 📜 / ⚡ popups die with the panel
     try { panel?.remove(); } catch (_) {}
     try { chip?.remove(); } catch (_) {}
     try { window.removeEventListener("resize", onWinResize); } catch (_) {}
     panel = chip = headEl = tabEl = msgsEl = attachEl = inputEl = sendBtn = null;
     statusEl = noteEl = grip = modelSel = sessionsBtn = null;
+    settingsBtn = thinkSel = promptBtn = gpuBtn = modelsBtn = null;
     tabs = [];
     activeId = null;
     serverState = null;
@@ -1548,6 +2132,16 @@ export function __chatTestHooks() {
         statusEl: () => statusEl,
         noteEl: () => noteEl,
         modelSelEl: () => modelSel,
+        settingsBtnEl: () => settingsBtn,
+        thinkSelEl: () => thinkSel,
+        promptBtnEl: () => promptBtn,
+        gpuBtnEl: () => gpuBtn,
+        modelsBtnEl: () => modelsBtn,
+        setPopEl: () => setPop,
+        promptPopEl: () => promptPop,
+        gpuPopEl: () => gpuPop,
+        openSetPop, closeSetPop, openPromptPop, closePromptPop,
+        openGpuPop, closeGpuPop, refreshGpuPop, gpuAction,
         tabs: () => tabs.map((t) => ({ id: t.id, title: t.title, n: t.msgs.length, pending: t.pending.length })),
         tabById: (id) => tabs.find((t) => t.id === id) || null,
         activeId: () => activeId,
@@ -1575,6 +2169,7 @@ export function __chatTestHooks() {
         setServerState: (s) => { serverState = s; },
         mount: initChat,
         fireResize: onWinResize,
+        setDpr: (v) => { lastDpr = v; },
     };
 }
 

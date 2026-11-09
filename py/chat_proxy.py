@@ -55,6 +55,30 @@ py/stack_store.py):
                                                 payload, call the LLM, store the
                                                 reply; JSON or SSE (stream)
     POST   /settings_hub/chat/load              upstream /v1/load {model}
+    GET    /settings_hub/chat/gpu               upstream /v1/status + the reserve
+                                                state (v87 memory menu)
+    POST   /settings_hub/chat/gpu               actions (v87): reserve {mib} /
+                                                release / unload {wait?} /
+                                                load {model?} / free_comfy /
+                                                status - the PolyStrata VRAM
+                                                mechanics (/v1/vram, /v1/unload)
+                                                + ComfyUI-side cleanup
+
+v87 memory mechanics (the PolyStrata node logic, ported):
+  * POST /v1/vram {"reserve_mib": N} - the LLM server keeps N MiB of VRAM
+    FREE on the GPU (it re-applies the reserve itself after engine
+    restarts); {"reserve_mib": null} returns to the startup state.
+  * comfy.model_management.EXTRA_RESERVED_VRAM - ComfyUI plans its own
+    model loads around this many bytes (the llama.cpp-node method): when
+    the reserve is applied we measure the LLM's ACTUAL consumption
+    (gpu total - now free) and write it there, so ComfyUI never plans a
+    load into the LLM's memory; releasing restores the original value.
+  * cfg "vram_reserve_mib" > 0 makes EVERY /send re-apply the reserve
+    before the upstream call (best-effort, errors never fail the chat) -
+    that is the "reserve when a model loads in PolyStrata" guarantee.
+  * free_comfy = mm.unload_all_models() + soft_empty_cache() + gc -
+    ComfyUI's own "Free model and node cache" button; the LLM server is
+    NOT touched.
 """
 
 import asyncio
@@ -78,7 +102,7 @@ try:
 except Exception:  # pragma: no cover - folder_paths always exists in ComfyUI
     folder_paths = None
 
-CHAT_SERVER_VERSION = "v86"
+CHAT_SERVER_VERSION = "v87"
 
 # ---------------------------------------------------------------------------
 # Limits (server-side absolute guards; the frontend may enforce smaller ones)
@@ -154,6 +178,10 @@ DEFAULT_CONFIG = {
     "keep_sessions": 20,       # eviction for old sessions
     "timeout_s": DEFAULT_TIMEOUT_S,
     "max_file_mb": DEFAULT_MAX_FILE_MB,
+    "vram_reserve_mib": 0,     # v87: keep this much VRAM free for ComfyUI
+                               # (POST /v1/vram; 0 = touch nothing). Re-applied
+                               # before every send while > 0 (the "reserve when
+                               # a model loads in PolyStrata" guarantee).
 }
 
 _CONFIG_NUM_RANGES = {
@@ -162,7 +190,7 @@ _CONFIG_NUM_RANGES = {
     "img_max_side": (256, 4096), "img_max_count": (1, 16),
     "video_frames": (2, 64), "video_max_side": (256, 4096),
     "keep_sessions": (1, 500), "timeout_s": (30, 86400),
-    "max_file_mb": (1, 100),
+    "max_file_mb": (1, 100), "vram_reserve_mib": (0, 131072),
 }
 _REASONS = {"default", "none", "low", "medium", "high"}
 
@@ -635,6 +663,245 @@ def parse_upstream_response(j):
 
 
 # ---------------------------------------------------------------------------
+# v87 VRAM management - the PolyStrata node mechanics, ported to the proxy.
+# Two coordinated knobs:
+#   1) the LLM SERVER keeps `reserve_mib` MiB of VRAM free (POST /v1/vram;
+#      it remembers the value and re-applies it after engine restarts);
+#   2) ComfyUI plans its own loads around the LLM's ACTUAL consumption
+#      (comfy.model_management.EXTRA_RESERVED_VRAM - the llama.cpp-node
+#      method update_global_vram_reservation); releasing restores the
+#      original value. Both are best-effort: any failure degrades to a
+#      note, never to a broken chat/generation.
+# ---------------------------------------------------------------------------
+
+_COMFY_EXTRA_ORIG = {"bytes": None}   # EXTRA_RESERVED_VRAM before our booking
+
+
+def _comfy_mm():
+    """comfy.model_management or None (tests / odd installs)."""
+    try:
+        import comfy.model_management as mm
+        return mm
+    except Exception:
+        return None
+
+
+def _comfy_reserve_from_bytes(used_bytes):
+    """Tell ComfyUI's model planner about the LLM's consumption (bytes).
+    Returns a human note; never raises."""
+    try:
+        used = int(used_bytes or 0)
+    except Exception:
+        used = 0
+    if used <= 0:
+        return "LLM consumption unknown - ComfyUI reservation not set"
+    mm = _comfy_mm()
+    if mm is None:
+        return "comfy.model_management unavailable - reservation not set"
+    try:
+        if _COMFY_EXTRA_ORIG["bytes"] is None:
+            _COMFY_EXTRA_ORIG["bytes"] = int(getattr(mm, "EXTRA_RESERVED_VRAM", 0) or 0)
+        mm.EXTRA_RESERVED_VRAM = used
+        # DynamicVRAM (comfy-aimdo) headroom, best-effort like PolyStrata does
+        aimdo_note = ""
+        try:
+            enabled = False
+            for mod in ("comfy.memory_management", "comfy.model_management"):
+                try:
+                    m = __import__(mod, fromlist=["aimdo_enabled"])
+                    if getattr(m, "aimdo_enabled", False):
+                        enabled = True
+                        break
+                except Exception:
+                    pass
+            if enabled:
+                import comfy_aimdo.control as aimdo
+                if getattr(aimdo, "lib", None) is not None:
+                    aimdo.set_simple_vram_headroom(used)
+                    aimdo_note = " + DynamicVRAM headroom"
+        except Exception:
+            pass
+        return "ComfyUI plans around %d MiB (EXTRA_RESERVED_VRAM%s)" % (
+            used >> 20, aimdo_note)
+    except Exception as e:
+        return "ComfyUI reservation failed (%s)" % e
+
+
+def _comfy_reserve_release():
+    """Restore the ORIGINAL EXTRA_RESERVED_VRAM (after unload/release)."""
+    mm = _comfy_mm()
+    if mm is None or _COMFY_EXTRA_ORIG["bytes"] is None:
+        return "ComfyUI reservation: nothing to release"
+    try:
+        orig = _COMFY_EXTRA_ORIG["bytes"]
+        cur = int(getattr(mm, "EXTRA_RESERVED_VRAM", 0) or 0)
+        if cur != orig:
+            mm.EXTRA_RESERVED_VRAM = orig
+            note = "ComfyUI reservation restored (%d -> %d MiB)" % (cur >> 20, orig >> 20)
+        else:
+            note = "ComfyUI reservation already original"
+        _COMFY_EXTRA_ORIG["bytes"] = None
+        return note
+    except Exception as e:
+        return "ComfyUI reservation release failed (%s)" % e
+
+
+def _comfy_free_memory():
+    """ComfyUI's own 'Free model and node cache' button: unload its models,
+    empty the torch cache, gc. The LLM server is NOT touched. Returns a
+    human note; never raises."""
+    mm = _comfy_mm()
+    if mm is None:
+        return "comfy.model_management unavailable (not running inside ComfyUI?)"
+    notes = []
+    unload = getattr(mm, "unload_all_models", None)
+    if callable(unload):
+        try:
+            unload()
+            notes.append("ComfyUI models unloaded")
+        except Exception as e:
+            notes.append("unload failed: %s" % e)
+    else:
+        notes.append("unload_all_models missing in this ComfyUI")
+    cache_fn = getattr(mm, "soft_empty_cache", None) or getattr(mm, "empty_cache", None)
+    if callable(cache_fn):
+        try:
+            cache_fn()
+            notes.append("torch cache cleared")
+        except Exception as e:
+            notes.append("cache clear failed: %s" % e)
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+    return "; ".join(notes) or "nothing done"
+
+
+def _vram_status_snapshot(st):
+    """Extract a compact GPU picture from an upstream /v1/status dict."""
+    if not isinstance(st, dict):
+        return None
+    gpu = (st.get("machine") or {}).get("gpu") or {}
+    vram = st.get("vram") or {}
+    return {
+        "model": st.get("model") or "",
+        "loaded": bool(st.get("loaded")),
+        "free_mib": vram.get("vram_free_mib") if vram.get("vram_free_mib") is not None
+                    else gpu.get("free_mib"),
+        "total_mib": gpu.get("total_mib"),
+        "elastic": bool(vram.get("elastic")),
+    }
+
+
+async def _upstream_status(cfg, http=None):
+    """GET {base}/v1/status -> dict | None. When `http` (a ClientSession) is
+    given it is USED, not closed - the caller owns its lifetime."""
+    if aiohttp is None or not cfg.get("url"):
+        return None
+    try:
+        timeout = aiohttp.ClientTimeout(total=PROBE_TIMEOUT_S, sock_connect=10)
+        if http is not None:
+            async with http.get(cfg["url"] + "/status", headers=_upstream_headers(cfg)) as r:
+                return await r.json(content_type=None) if r.status == 200 else None
+        async with aiohttp.ClientSession(timeout=timeout) as http2:
+            async with http2.get(cfg["url"] + "/status", headers=_upstream_headers(cfg)) as r:
+                return await r.json(content_type=None) if r.status == 200 else None
+    except Exception:
+        return None
+
+
+async def _upstream_vram(cfg, mib_or_none, timeout_s=120):
+    """POST {base}/v1/vram {"reserve_mib": mib_or_none}. Returns
+    (ok, data|None, error|None)."""
+    if aiohttp is None or not cfg.get("url"):
+        return False, None, "no LLM server configured"
+    try:
+        timeout = aiohttp.ClientTimeout(total=timeout_s, sock_connect=15)
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            async with http.post(cfg["url"] + "/vram",
+                                 json={"reserve_mib": mib_or_none},
+                                 headers=_upstream_headers(cfg)) as r:
+                txt = await r.text()
+                if r.status != 200:
+                    return False, None, "HTTP %s - %s" % (r.status, txt[:200])
+                try:
+                    return True, json.loads(txt), None
+                except Exception:
+                    return True, None, None
+    except Exception as e:
+        return False, None, str(e)
+
+
+async def _upstream_unload(cfg, wait_s=0.0, timeout_s=300):
+    """POST {base}/v1/unload[?wait=N] - the engine stops, ALL of its VRAM is
+    freed, the server stays alive. Returns (ok, error|None)."""
+    if aiohttp is None or not cfg.get("url"):
+        return False, "no LLM server configured"
+    try:
+        params = {"wait": wait_s} if wait_s and float(wait_s) > 0 else None
+        timeout = aiohttp.ClientTimeout(total=timeout_s, sock_connect=15)
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            async with http.post(cfg["url"] + "/unload", params=params,
+                                 headers=_upstream_headers(cfg)) as r:
+                if r.status == 200:
+                    return True, None
+                return False, "HTTP %s - %s" % (r.status, (await r.text())[:200])
+    except Exception as e:
+        return False, str(e)
+
+
+def _apply_reserve_note(vram_ok, vram_data, vram_err, st):
+    """Human-readable result line for the GPU menu (the PolyStrata node
+    wording): the target vs the ACTUALLY free VRAM, partial eviction named."""
+    if not vram_ok:
+        return "RESERVE NOT APPLIED: %s" % (vram_err or "upstream error")
+    target = None
+    snap = _vram_status_snapshot(st) if st else None
+    free = snap.get("free_mib") if snap else None
+    try:
+        if isinstance(vram_data, dict):
+            target = vram_data.get("reserve_mib", vram_data.get("target_mib"))
+            free = vram_data.get("vram_free_mib", free)
+    except Exception:
+        pass
+    if isinstance(vram_data, dict) and vram_data.get("status") == "not loaded":
+        return "model asleep - %s MiB recorded, applies on the next load" % (target if target is not None else "?")
+    if free is not None and target is not None:
+        try:
+            if float(free) + 0.5 < float(target):
+                return "target %s MiB, free %s MiB - PARTIAL (expert cache exhausted; Unload gives it all back)" % (target, free)
+            return "target %s MiB, free %s MiB - OK" % (target, free)
+        except Exception:
+            pass
+    return "reserve applied"
+
+
+async def _auto_reserve_for_send(cfg):
+    """cfg.vram_reserve_mib > 0: re-apply the reserve before a generation and
+    sync ComfyUI's planner with the LLM's ACTUAL consumption. Best-effort:
+    every failure is swallowed (a reserve is a wish, never a condition)."""
+    mib = int(cfg.get("vram_reserve_mib") or 0)
+    if mib <= 0:
+        return
+    try:
+        ok, _data, _err = await _upstream_vram(cfg, mib, timeout_s=60)
+        if not ok:
+            return
+        st = await _upstream_status(cfg)
+        snap = _vram_status_snapshot(st)
+        total, free = (snap or {}).get("total_mib"), (snap or {}).get("free_mib")
+        if total and free is not None and not (snap or {}).get("loaded"):
+            return  # asleep - nothing on GPU to plan around
+        if total and free is not None:
+            used = max(0, (int(total) - int(free)) << 20)
+            if used > 0:
+                _comfy_reserve_from_bytes(used)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Upstream HTTP
 # ---------------------------------------------------------------------------
 
@@ -887,6 +1154,151 @@ async def chat_load(request):
         return _jerr("load failed: %s" % e, 502)
 
 
+@PromptServer.instance.routes.get("/settings_hub/chat/gpu")
+async def chat_gpu_get(request):
+    """v87 GPU menu state: the upstream /v1/status picture + the configured
+    reserve. Works even when the upstream is unreachable (upstream: null)."""
+    cfg = _load_config()
+    st = await _upstream_status(cfg)
+    return web.json_response({
+        "ok": True,
+        "configured": bool(cfg.get("url")),
+        "upstream": _vram_status_snapshot(st),
+        "reserve_mib": int(cfg.get("vram_reserve_mib") or 0),
+        "comfy_reserved": bool(_COMFY_EXTRA_ORIG["bytes"] is not None),
+    })
+
+
+@PromptServer.instance.routes.post("/settings_hub/chat/gpu")
+async def chat_gpu_post(request):
+    """v87 memory actions (the PolyStrata mechanics, no extra nodes needed):
+        reserve {mib}   - POST /v1/vram {reserve_mib} + persist cfg +
+                          ComfyUI EXTRA_RESERVED sync (actual consumption)
+        release         - POST /v1/vram {reserve_mib: null} + restore
+                          ComfyUI's original EXTRA_RESERVED + cfg = 0
+        unload {wait?}  - POST /v1/unload, then a full release (the model
+                          AND the reservation return their memory)
+        load {model?}   - POST /v1/load {model} (PolyStrata wakes/switches;
+                          may take minutes on a big model)
+        free_comfy      - ComfyUI's own 'Free model and node cache' (its
+                          models + torch cache + gc); the LLM is untouched
+        status          - refresh (same as GET)
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    action = str(body.get("action") or "")
+    cfg = _load_config()
+    notes = []
+
+    if action == "free_comfy":
+        notes.append(_comfy_free_memory())
+        return web.json_response({"ok": True, "action": action, "notes": notes})
+
+    if action == "status":
+        st = await _upstream_status(cfg)
+        return web.json_response({
+            "ok": True, "action": action, "notes": notes,
+            "upstream": _vram_status_snapshot(st),
+            "reserve_mib": int(cfg.get("vram_reserve_mib") or 0),
+        })
+
+    if not cfg.get("url"):
+        return _jerr("no LLM server configured - set the URL in the chat settings first")
+
+    if action == "load":
+        model = str(body.get("model") or cfg.get("model") or "")
+        if not model:
+            return _jerr("no model given")
+        if aiohttp is None:
+            return _jerr("aiohttp missing", 500)
+        timeout = aiohttp.ClientTimeout(total=PROBE_TIMEOUT_S, sock_connect=10)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as http:
+                async with http.post(cfg["url"] + "/load", json={"model": model},
+                                     headers=_upstream_headers(cfg)) as r:
+                    txt = (await r.text())[:300]
+                    ok = r.status == 200
+                    notes.append("load %s: %s" % (model, txt or ("HTTP %s" % r.status)))
+                    return web.json_response({"ok": ok, "action": action, "notes": notes})
+        except Exception as e:
+            return _jerr("load failed: %s" % e, 502)
+
+    if action == "reserve":
+        try:
+            mib = int(float(body.get("mib")))
+        except Exception:
+            return _jerr("bad mib")
+        mib = max(0, min(mib, 131072))
+        if mib <= 0:
+            return await _gpu_release(cfg, notes)
+        ok, data, err = await _upstream_vram(cfg, mib)
+        st = await _upstream_status(cfg)
+        notes.append(_apply_reserve_note(ok, data, err, st))
+        if ok:
+            cfg["vram_reserve_mib"] = mib
+            try:
+                _save_config(cfg)
+            except Exception:
+                notes.append("reserve remembered for this session only (config not saved)")
+            snap = _vram_status_snapshot(st)
+            total, free = (snap or {}).get("total_mib"), (snap or {}).get("free_mib")
+            if total and free is not None:
+                used = max(0, (int(total) - int(free)) << 20)
+                if used > 0:
+                    notes.append(_comfy_reserve_from_bytes(used))
+        return web.json_response({
+            "ok": ok, "action": action, "notes": notes,
+            "upstream": _vram_status_snapshot(st),
+            "reserve_mib": int(_load_config().get("vram_reserve_mib") or 0),
+        })
+
+    if action == "release":
+        return await _gpu_release(cfg, notes)
+
+    if action == "unload":
+        try:
+            wait_s = float(body.get("wait") or 0)
+        except Exception:
+            wait_s = 0.0
+        ok, err = await _upstream_unload(cfg, wait_s)
+        notes.append("model unloaded - all of its VRAM is back"
+                     if ok else "UNLOAD FAILED: %s" % (err or "?"))
+        if ok:
+            await _gpu_release(cfg, notes)  # the reservation returns too
+        st = await _upstream_status(cfg)
+        return web.json_response({
+            "ok": ok, "action": action, "notes": notes,
+            "upstream": _vram_status_snapshot(st),
+            "reserve_mib": int(_load_config().get("vram_reserve_mib") or 0),
+        })
+
+    return _jerr("unknown action: %s" % (action or "(none)"))
+
+
+async def _gpu_release(cfg, notes):
+    """Shared release path: /v1/vram null (the server reserve returns to the
+    startup state) + ComfyUI's EXTRA_RESERVED restored + cfg reset to 0."""
+    ok, _data, err = await _upstream_vram(cfg, None)
+    notes.append("server reserve released"
+                 if ok else "reserve release failed: %s" % (err or "?"))
+    notes.append(_comfy_reserve_release())
+    if cfg.get("vram_reserve_mib"):
+        cfg["vram_reserve_mib"] = 0
+        try:
+            _save_config(cfg)
+        except Exception:
+            pass
+    st = await _upstream_status(cfg)
+    return web.json_response({
+        "ok": ok, "action": "release", "notes": notes,
+        "upstream": _vram_status_snapshot(st),
+        "reserve_mib": int(_load_config().get("vram_reserve_mib") or 0),
+    })
+
+
 @PromptServer.instance.routes.get("/settings_hub/chat/sessions")
 async def chat_sessions_list(request):
     return web.json_response({"ok": True, "sessions": _list_sessions()})
@@ -1114,6 +1526,12 @@ async def chat_send(request):
                                         sock_connect=30)
 
     # --- upstream call (OUTSIDE the storage lock - generation is slow) -----
+    # v87: when a reserve is configured, re-apply it BEFORE waking the model
+    # (the "reserve when a model loads in PolyStrata" guarantee; best-effort).
+    try:
+        await _auto_reserve_for_send(cfg)
+    except Exception:
+        pass
     if not stream:
         async with aiohttp.ClientSession(timeout=timeout) as http:
             async def call():

@@ -1912,12 +1912,23 @@ button.hub-pin-back {
    --------------------------------------------------------------------------- */
 
 /* The settings popup itself reuses .hub-menu chrome; only the layout of the
-   rate row is specific. The select mirrors the combo search visuals. */
+   rate row is specific. The select mirrors the combo search visuals.
+   v87: the popup grew for years (Sync/Previews/Picker/Pin/Stack/Chat...) and
+   could exceed the viewport height - cap it and SCROLL (a slim styled bar). */
 .hub-set-pop {
     min-width: 240px;
     max-width: 300px;
+    max-height: min(92vh, calc(100vh - 12px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 8px;
 }
+
+.hub-set-pop::-webkit-scrollbar { width: 8px; }
+.hub-set-pop::-webkit-scrollbar-track { background: #191930; }
+.hub-set-pop::-webkit-scrollbar-thumb { background: #3d4460; border-radius: 4px; }
+.hub-set-pop::-webkit-scrollbar-thumb:hover { background: #4d5a80; }
+.hub-set-pop { scrollbar-width: thin; scrollbar-color: #3d4460 #191930; }
 
 /* v57: section headers inside the settings popup (Sync / Previews / Picker).
    Quiet uppercase divider - keeps the growing settings list scannable. */
@@ -4551,3 +4562,197 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 .hub-chat-set-num { width: 64px; }
 .hub-chat-set-one { width: 90px; }
 
+
+/* ===========================================================================
+   v87: CHAT TOOLBAR (under the input) + the in-chat popups (⚙ settings,
+   📜 system prompt, ⚡ GPU & memory). The hub ⚙ keeps only the On/Off
+   switch; every chat setting lives in the panel now.
+   =========================================================================== */
+
+.hub-chat-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px;
+    border-top: 1px solid #26263e;
+    background: #14142a;
+    flex: 0 0 auto;
+    min-width: 0;
+}
+
+.hub-chat-toolbar .hub-chat-model {
+    flex: 1 1 90px;
+    min-width: 70px;
+    max-width: 220px;
+    background: #10101e;
+    color: #cfe0ff;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font: 10px/1.5 "Inter", -apple-system, sans-serif;
+    padding: 1px 3px;
+    outline: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.hub-chat-toolbar .hub-chat-model:focus { border-color: #5a5a9e; }
+
+.hub-chat-tbbtn {
+    background: #1f1f36;
+    color: #a8b4d8;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font: 10px/1.5 "Inter", -apple-system, sans-serif;
+    padding: 1px 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    outline: none;
+}
+.hub-chat-tbbtn:hover { background: #2c2c48; color: #fff; border-color: #5a5a9e; }
+.hub-chat-toolbar select.hub-chat-tbbtn { padding: 1px 2px; color: #cfe0ff; }
+.hub-chat-toolbar select.hub-chat-tbbtn:focus { border-color: #5a5a9e; }
+
+.hub-chat-tspace { flex: 1 1 auto; }
+
+/* a lit toolbar button: system prompt set / VRAM reserve ON */
+.hub-chat-tbbtn.hub-chat-tb-on {
+    background: #24403a;
+    border-color: #3f7a6c;
+    color: #b8f0dd;
+}
+.hub-chat-tbbtn.hub-chat-tb-on:hover { background: #2c4f46; color: #e2fff4; }
+
+/* --- shared popup pieces (⚙ / 📜 / ⚡ are all .hub-menu instances) -------- */
+
+.hub-chat-setpop, .hub-chat-promptpop, .hub-chat-gpupop {
+    width: 300px;
+    max-width: calc(100vw - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 8px;
+    scrollbar-width: thin;
+    scrollbar-color: #3d4460 #191930;
+}
+.hub-chat-setpop::-webkit-scrollbar,
+.hub-chat-promptpop::-webkit-scrollbar,
+.hub-chat-gpupop::-webkit-scrollbar { width: 8px; }
+.hub-chat-setpop::-webkit-scrollbar-track,
+.hub-chat-promptpop::-webkit-scrollbar-track,
+.hub-chat-gpupop::-webkit-scrollbar-track { background: #191930; }
+.hub-chat-setpop::-webkit-scrollbar-thumb,
+.hub-chat-promptpop::-webkit-scrollbar-thumb,
+.hub-chat-gpupop::-webkit-scrollbar-thumb { background: #3d4460; border-radius: 4px; }
+
+.hub-cs-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin: 7px 2px;
+    font-size: 11px;
+    color: #c9c9e8;
+    white-space: nowrap;
+}
+.hub-cs-box { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+
+.hub-cs-in {
+    background: #10101e;
+    color: #e8e8ff;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font: 11px/1.5 "Inter", -apple-system, sans-serif;
+    padding: 2px 4px;
+    outline: none;
+    width: 148px;
+}
+.hub-cs-in:focus { border-color: #5a5a9e; }
+.hub-cs-in::placeholder { color: #55557a; }
+.hub-cs-path { width: 178px; }
+.hub-cs-trio { display: flex; gap: 4px; margin: 6px 2px; }
+.hub-cs-trio .hub-cs-in { width: 0; flex: 1 1 0; min-width: 56px; }
+
+.hub-cs-sel {
+    background: #10101e;
+    color: #e8e8ff;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font-size: 11px;
+    padding: 2px 4px;
+    outline: none;
+    max-width: 160px;
+}
+.hub-cs-sel:focus { border-color: #5a5a9e; }
+
+.hub-cs-sect {
+    margin: 10px 2px 2px;
+    padding-top: 7px;
+    border-top: 1px solid #26263e;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: #6f6f95;
+}
+
+.hub-cs-info {
+    margin: 3px 2px 6px;
+    font-size: 10px;
+    line-height: 1.45;
+    color: #8fa7d9;
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+.hub-cs-info.hub-cs-err { color: #ff9d9d; }
+
+.hub-cs-chip {
+    background: #1a1a2e;
+    color: #9a9ac0;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font: 10px/1.5 "Inter", -apple-system, sans-serif;
+    padding: 2px 7px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.hub-cs-chip:hover { color: #e8e8ff; border-color: #5a5a9e; background: #22223c; }
+
+.hub-cs-hint {
+    margin: 8px 2px 2px;
+    font-size: 9.5px;
+    line-height: 1.5;
+    color: #77779e;
+    overflow-wrap: anywhere;
+}
+
+/* --- 📜 system prompt popup ------------------------------------------------ */
+
+.hub-cp-presets { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 2px; }
+.hub-cp-ta {
+    width: calc(100% - 4px);
+    box-sizing: border-box;
+    background: #10101e;
+    color: #e8e8ff;
+    border: 1px solid #3a3a55;
+    border-radius: 3px;
+    font: 11px/1.5 "Inter", -apple-system, sans-serif;
+    padding: 4px 6px;
+    outline: none;
+    resize: vertical;
+    min-height: 84px;
+}
+.hub-cp-ta:focus { border-color: #5a5a9e; }
+.hub-cp-btns { display: flex; gap: 6px; margin: 7px 2px; flex-wrap: wrap; }
+
+/* --- ⚡ GPU & memory popup -------------------------------------------------- */
+
+.hub-gp-state {
+    margin: 6px 2px;
+    font-size: 11px;
+    color: #dfe6f5;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+.hub-gp-state.hub-cs-err { color: #ff9d9d; }
+.hub-gp-unload { border-color: #6a4040; color: #d8a8a8; }
+.hub-gp-unload:hover { background: #3a2226; border-color: #a5535f; color: #ffd9d9; }
+.hub-gp-mib { width: 120px; }

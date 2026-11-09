@@ -20,10 +20,10 @@
 //   stays the 🔍 of text cards; teardown() removes the overlay with the
 //   panel (same viewerEl channel).
 // ============================================================================
-// v85 self-report (single-source version, docs/plan-versions.md): the
+// v87 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v85";
+globalThis.__SettingsHubLoaded["stack"] = "v87";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -1840,16 +1840,38 @@ function refitIntoView() {
 }
 
 let resizePersistT = null;
+// v87 page zoom: a devicePixelRatio change (Ctrl +/- / ctrl-pinch) rescales
+// the saved CSS-px geometry by the zoom factor BEFORE the refit, so the
+// panel keeps its physical size and stays reachable (same contract as the
+// chat panel; stackLastDpr starts at 0 and latches on the first resize).
+let stackLastDpr = 0;
+function stackCurDpr() {
+    try {
+        const v = Number(window.devicePixelRatio);
+        return Number.isFinite(v) && v > 0 ? v : 1;
+    } catch (_) { return 1; }
+}
 function onWinResize() {
+    const ui = lsUi();
+    const dpr = stackCurDpr();
+    const f = stackLastDpr ? dpr / stackLastDpr : 1;
+    stackLastDpr = dpr;
+    if (f && Math.abs(f - 1) >= 0.01) {
+        const sc = {};   // persist the rescale - a zoom change is a user action
+        for (const k of ["x", "y", "w", "h", "chipX", "chipY"]) {
+            if (typeof ui[k] === "number" && Number.isFinite(ui[k])) sc[k] = ui[k] * f;
+        }
+        saveUi(sc);
+    }
     refitIntoView(); // instant - the panel never leaves the viewport
     clearTimeout(resizePersistT);
     resizePersistT = setTimeout(() => { // debounced persist of the new spot
         if (!panel || !chip) return;
-        const ui = lsUi();
-        const p = clampIntoView(ui.x ?? 16, ui.y ?? 120, panel);
+        const u2 = lsUi();
+        const p = clampIntoView(u2.x ?? 16, u2.y ?? 120, panel);
         const patch = { x: p.x, y: p.y };
-        if (ui.min) {
-            const c = clampIntoView(ui.chipX ?? p.x, ui.chipY ?? p.y, chip);
+        if (u2.min) {
+            const c = clampIntoView(u2.chipX ?? p.x, u2.chipY ?? p.y, chip);
             patch.chipX = c.x; patch.chipY = c.y;
         }
         saveUi(patch);
