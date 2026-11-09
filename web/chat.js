@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - LLM Chat (v87): floating panel with TABS, OpenAI-compatible
+// SettingsHub - LLM Chat (v88): floating panel with TABS, OpenAI-compatible
 // upstream through the py proxy (py/chat_proxy.py)
 // ----------------------------------------------------------------------------
 // v86 (owner request 2026-11-09: "a simple LLM chat in the settings hub, just
@@ -39,6 +39,37 @@
 //       absolute folder is supported (the v84 stack-root mechanics).
 //   The chat is NOT an agent (owner decision): no tools, no queue control,
 //   no workflow access. ComfyUI integrations are parked for later.
+// ----------------------------------------------------------------------------
+// v88 (owner corrections 2026-11-09: "the settingshub is not present in every
+//   workflow and managing the stacker and chat from it is inconvenient - they
+//   are SEPARATE useful utilities; how is it done right in ComfyUI?" + "I did
+//   not ask you to invent prompt presets - the PolyStrata nodes have a
+//   catalog of MY OWN prompts, the txt path is the same as the nodes', with a
+//   refresh button and a live multi-word search" + "the model list shows only
+//   ONE active model - look how the PolyStrata nodes get the models"):
+//     * SELF-MANAGED PANEL: the hub no longer hosts the Chat On/Off - the
+//       chat ⚙ popup gains a Panel On/Off row, and the SAME switch is
+//       registered as a NATIVE ComfyUI setting (app.ui.settings.addSetting,
+//       id "SettingsHub.Chat.enabled" -> the SettingsHub group of ComfyUI's
+//       own Settings dialog). That dialog is reachable in EVERY workflow,
+//       with or without a hub node - so a hidden panel can always be brought
+//       back (the hub window used to be the only way back).
+//     * 📜 SYSTEM PROMPT = THE USER'S CATALOG: no invented presets. The popup
+//       lists the .txt files of ComfyUI/models/LLM/prompts (prompt_root() of
+//       the PolyStrata nodes - the exact same folder, subdirs included), a
+//       [↻] refresh re-scans it, a LIVE SEARCH filters it (multi-word: every
+//       word must match the relative path), a click selects the file (stored
+//       as cfg.prompt_preset - the server reads the file FRESH on every send
+//       and the preset WINS over the custom text, exactly like the nodes'),
+//       "none (custom text)" + the textarea + Save/Clear stay for a custom
+//       prompt.
+//     * MODEL DROPDOWN = THE FULL LIST: [model ▾] + [↻] now read the new
+//       GET /chat/models, which tries /api/models FIRST - the PolyStrata
+//       registry of ALL installed models with their statuses (the nodes'
+//       way), then /v1/models, then /v1/status. Options show a status mark
+//       (● loaded/current, ◐ loading, ○ available); selecting a not-loaded
+//       registry model ALSO switches the server (POST /chat/load ->
+//       /api/models/load - may take minutes, the chat keeps working).
 // ----------------------------------------------------------------------------
 // v87 (owner reports 2026-11-09: "all chat settings must live IN the chat,
 //   the hub keeps only the show/hide switch" + "the model picker belongs
@@ -82,7 +113,7 @@
 // v87 self-report (single-source version, docs/plan-versions.md): the last
 // FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["chat"] = "v87";
+globalThis.__SettingsHubLoaded["chat"] = "v88";
 
 import { app } from "../../scripts/app.js";
 
@@ -114,6 +145,13 @@ const CLEAR_ARM_MS = 2600, SESS_ARM_MS = 2600;
 let setPop = null, promptPop = null, gpuPop = null;
 // v87 page-zoom tracking (devicePixelRatio changes with Ctrl +/- / ctrl-pinch)
 let lastDpr = 0;
+// v88: the native ComfyUI setting that mirrors LS_ON (ComfyUI Settings ->
+// SettingsHub -> "LLM Chat panel") - the way back without a hub node
+let nativeChatSetting = null;
+// v88: the model list comes from GET /chat/models as {id, status} items
+// (source registry = the PolyStrata /api/models registry)
+let models = [];          // [{id, status}]
+let modelsSource = "";    // registry | openai | status
 
 // ---------------------------------------------------------------------------
 // Small helpers (the stack.js patterns, chat flavor)
@@ -192,7 +230,7 @@ async function jfetch(path, opts) {
 }
 
 // ---------------------------------------------------------------------------
-// Settings surface (⚙ Hub settings -> Chat, hub_ui_renderer.js)
+// Settings surface (⚙ in the chat header since v87; the hub hosts nothing)
 // ---------------------------------------------------------------------------
 
 export function isChatOn() {
@@ -200,10 +238,47 @@ export function isChatOn() {
     catch (_) { return true; }
 }
 
-export function setChatOn(v) {
+export function setChatOn(v, src) {
     try { localStorage.setItem(LS_ON, v ? "1" : "0"); } catch (_) {}
+    // v88: keep the native ComfyUI setting in sync when the flip came from
+    // OUR ui (⚙ popup / code); a "native" flip already IS that setting.
+    if (src !== "native") {
+        try { nativeChatSetting?.set?.(!!v); } catch (_) {}
+    }
     if (v && !mounted) initChat();
     else if (!v) teardown();
+}
+
+// v88: register the panel switch in ComfyUI's OWN Settings dialog
+// (SettingsHub group). Unlike the old hub row it is reachable in EVERY
+// workflow - the way back when the panel (and its chip) is hidden. Fail-safe:
+// an old frontend without app.ui.settings simply gets no native row.
+function registerNativeChatSwitch() {
+    if (nativeChatSetting) return;
+    try {
+        const s = app?.ui?.settings;
+        if (!s || typeof s.addSetting !== "function") return;
+        nativeChatSetting = s.addSetting({
+            id: "SettingsHub.Chat.enabled",
+            name: "LLM Chat panel (SettingsHub)",
+            type: "boolean",
+            defaultValue: isChatOn(),
+            onChange: (value) => {
+                const v = !!value;
+                if (v !== isChatOn()) setChatOn(v, "native");
+            },
+        });
+        // converge ComfyUI's stored value with OUR truth (a flip from the
+        // panel ⚙ must be visible the next time the dialog opens; onChange
+        // fires with the same value and is a no-op)
+        try {
+            if (nativeChatSetting && typeof nativeChatSetting.set === "function") {
+                nativeChatSetting.set(isChatOn());
+            }
+        } catch (_) {}
+    } catch (e) {
+        console.warn("[SettingsHub] native chat setting unavailable:", e);
+    }
 }
 
 /** Masked config + diagnostics for the settings rows (never throws). */
@@ -244,8 +319,9 @@ export async function applyChatSettings(patch) {
     return out;
 }
 
-/** Probe the upstream LLM server through the proxy: /v1/models (+ /v1/status
- *  when it answers). Resolves {ok, models, current, status, error}. */
+/** Probe the upstream LLM server through the proxy: the FULL model list
+ *  (v88: /api/models registry first) + /v1/status when it answers.
+ *  Resolves {ok, models, current, status, source, error}. */
 export async function testChatServer() {
     const res = await jfetch("/settings_hub/chat/test", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
@@ -691,6 +767,14 @@ function openSetPop() {
     pop.className = "hub-menu hub-chat-setpop";
     pop.innerHTML =
         `<div class="hub-menu-title">⚙ Chat settings</div>` +
+        // v88: the panel On/Off moved here from the hub - the chat is a
+        // self-managed utility; the same switch is registered in ComfyUI's
+        // own Settings dialog (SettingsHub.Chat.enabled).
+        `<label class="hub-cs-row"><span>Chat panel</span>` +
+        `<select class="hub-cs-sel" data-cs="panel">` +
+        `<option value="1">On (default)</option>` +
+        `<option value="0">Off - hide the panel + chip</option>` +
+        `</select></label>` +
         `<label class="hub-cs-row"><span>LLM server URL</span>` +
         `<input type="text" class="hub-cs-in" data-cs="url" placeholder="http://127.0.0.1:8080/v1" spellcheck="false" autocomplete="off"></label>` +
         `<label class="hub-cs-row"><span>API key (optional)</span>` +
@@ -731,7 +815,8 @@ function openSetPop() {
         `<div class="hub-cs-hint">Enter applies a row, Esc reverts it. The key lives in ` +
         `config.json on the SERVER - the browser only ever sees a mask. The URL must ` +
         `include /v1 (PolyStrata: http://127.0.0.1:8080/v1). Model, thinking and the ` +
-        `system prompt sit under the input.</div>`;
+        `system prompt sit under the input. The panel switch above is also in ` +
+        `ComfyUI Settings → SettingsHub - reachable in every workflow.</div>`;
     document.body.appendChild(pop);
     setPop = pop;
 
@@ -742,6 +827,13 @@ function openSetPop() {
     const streamSel = pop.querySelector('[data-cs="stream"]');
     const rootIn = pop.querySelector('[data-cs="root"]');
     const rootInfo = pop.querySelector('[data-cs="rootinfo"]');
+    const panelSel = pop.querySelector('[data-cs="panel"]');
+    panelSel.value = isChatOn() ? "1" : "0";
+    panelSel.addEventListener("change", () => {
+        const on = panelSel.value === "1";
+        setChatOn(on);   // Off tears the panel down - this popup dies with it
+        if (on && setPop) panelSel.value = isChatOn() ? "1" : "0";
+    });
     const nums = Array.from(pop.querySelectorAll("[data-cs-num]"));
     const syncNums = (c) => {
         for (const inp of nums) {
@@ -870,27 +962,76 @@ function openSetPop() {
     window.addEventListener("keydown", setPopKey, true);
 }
 
-// --- 📜 System prompt (presets + custom) -------------------------------------
+// --- 📜 System prompt (v88: the user's OWN catalog - the PolyStrata path) ----
 
-const PROMPT_PRESETS = [
-    { id: "concise", label: "Concise assistant",
-      text: "You are a concise assistant. Answer directly in short paragraphs, no preambles, no disclaimers." },
-    { id: "detailed", label: "Detailed assistant",
-      text: "You are a thorough assistant. Explain step by step with concrete numbers and examples, and finish with a short summary." },
-    { id: "coder", label: "Programmer",
-      text: "You are an experienced programmer. Give complete working code with minimal prose; briefly name pitfalls and edge cases." },
-    { id: "translator", label: "Translator",
-      text: "You are a precise translator. Translate the user's text faithfully, preserving tone and formatting. Reply with the translation only." },
-    { id: "sd", label: "SD prompt engineer",
-      text: "You are an expert at Stable Diffusion / ComfyUI prompts. Turn the user's idea into a detailed comma-separated positive prompt (with quality terms) plus a short negative prompt. No extra commentary." },
-];
+// The catalog lives in ComfyUI/models/LLM/prompts (prompt_root() of the
+// PolyStrata nodes - the same folder the llama.cpp pack uses). The list IS
+// the user's files: NOTHING is invented here. The selection is stored as
+// cfg.prompt_preset; the SERVER reads the file fresh on every send and the
+// preset wins over the custom text (the nodes' resolve_system_prompt).
+let promptFiles = [];      // relative paths "sub/name.txt"
+let promptDir = "";        // the catalog folder, for the hint line
+let promptListError = "";  // "catalog folder does not exist yet" etc.
+let promptQuery = "";
+
+function promptFilter(files, q) {
+    // the catalog is *.txt server-side; the client re-filters too (defense in
+    // depth) and then applies the live multi-word search: EVERY
+    // whitespace-separated word must appear in the relative path
+    const toks = String(q || "").toLowerCase().split(/\s+/).filter(Boolean);
+    return (files || []).filter((f) => {
+        const lf = String(f).toLowerCase();
+        if (!lf.endsWith(".txt")) return false;
+        return toks.every((t) => lf.includes(t));
+    });
+}
 
 function renderPromptBtnState() {
     if (!promptBtn) return;
-    promptBtn.classList.toggle("hub-chat-tb-on", !!(cfg?.system_prompt || "").trim());
-    promptBtn.title = cfg?.system_prompt
-        ? "System prompt: set - click to edit"
-        : "System prompt: none - click to set";
+    const preset = (cfg?.prompt_preset || "").trim();
+    const custom = (cfg?.system_prompt || "").trim();
+    promptBtn.classList.toggle("hub-chat-tb-on", !!(preset || custom));
+    promptBtn.title = preset
+        ? "System prompt: file " + preset + " - click to change"
+        : (custom ? "System prompt: custom text - click to change"
+                  : "System prompt: none - click to set");
+}
+
+async function refreshPromptList(manual) {
+    const res = await jfetch("/settings_hub/chat/prompts");
+    if (res.json?.ok) {
+        promptFiles = Array.isArray(res.json.files) ? res.json.files : [];
+        promptDir = res.json.dir || "";
+        promptListError = res.json.error || "";
+        if (manual) {
+            localToast("Prompt catalog: " + promptFiles.length + " file(s)" +
+                (promptDir ? " - " + promptDir : ""));
+        }
+    } else if (manual) {
+        localToast("Prompt catalog failed: " + (res.json?.error || "HTTP " + res.status));
+    }
+    renderPromptList();
+}
+
+function renderPromptList() {
+    if (!promptPop) return;
+    const listEl = promptPop.querySelector('[data-cp="list"]');
+    if (!listEl) return;
+    const sel = (cfg?.prompt_preset || "").trim();
+    const files = promptFilter(promptFiles, promptQuery);
+    let html =
+        `<button type="button" class="hub-cp-item${!sel ? " hub-cp-item-on" : ""}" ` +
+        `data-cp-name="" title="No catalog file - the custom text below is used">none (custom text)</button>`;
+    if (!promptFiles.length) {
+        html += `<div class="hub-cp-empty">${esc(promptListError || "no .txt files in the catalog yet")}` +
+            `${promptDir ? ": " + esc(promptDir) : ""}</div>`;
+    } else if (!files.length) {
+        html += `<div class="hub-cp-empty">nothing matches the search</div>`;
+    }
+    html += files.map((f) =>
+        `<button type="button" class="hub-cp-item${f === sel ? " hub-cp-item-on" : ""}" ` +
+        `data-cp-name="${esc(f)}" title="${esc(f)}">${esc(f)}</button>`).join("");
+    listEl.innerHTML = html;
 }
 
 function openPromptPop() {
@@ -900,40 +1041,60 @@ function openPromptPop() {
     pop.className = "hub-menu hub-chat-promptpop";
     pop.innerHTML =
         `<div class="hub-menu-title">📜 System prompt</div>` +
-        `<div class="hub-cp-presets">` +
-        PROMPT_PRESETS.map((p) =>
-            `<button type="button" class="hub-cs-chip" data-cp="${p.id}" title="${esc(p.text)}">${esc(p.label)}</button>`).join("") +
+        `<div class="hub-cp-searchrow">` +
+        `<input type="text" class="hub-cp-in hub-cp-search" data-cp="search" spellcheck="false" autocomplete="off" ` +
+        `placeholder="search… (several words)" title="Live search: every word must match the file path">` +
+        `<button type="button" class="hub-cs-chip" data-cp="refresh" title="Re-scan the catalog folder">↻</button>` +
         `</div>` +
+        `<div class="hub-cp-list" data-cp="list"></div>` +
         `<textarea class="hub-cp-ta" rows="6" spellcheck="false" ` +
-        `placeholder="Custom prompt (empty = none)…"></textarea>` +
+        `placeholder="Custom prompt (used while no file is selected)…"></textarea>` +
         `<div class="hub-cp-btns">` +
-        `<button type="button" class="hub-cs-chip hub-cp-save" title="Save the custom prompt">Save</button>` +
-        `<button type="button" class="hub-cs-chip hub-cp-clear" title="Remove the system prompt (empty = none)">Clear</button>` +
+        `<button type="button" class="hub-cs-chip hub-cp-save" title="Use THIS custom text (a selected file is deselected)">Save</button>` +
+        `<button type="button" class="hub-cs-chip hub-cp-clear" title="No system prompt at all">Clear</button>` +
         `</div>` +
-        `<div class="hub-cs-hint">A preset applies instantly. "Save" stores the typed text ` +
-        `(it replaces the preset), "Clear" sends empty = none. The prompt applies to ` +
-        `every chat.</div>`;
+        `<div class="hub-cs-hint">Your OWN .txt prompts from ` +
+        `<span class="hub-cp-mono" data-cp="dir">…</span> - the same folder the ` +
+        `PolyStrata / llama.cpp nodes use. A selected file is read fresh on EVERY ` +
+        `message and WINS over the custom text; "Save" switches to the custom text; ` +
+        `"Clear" sends none. Applies to every chat.</div>`;
     document.body.appendChild(pop);
     promptPop = pop;
     const ta = pop.querySelector(".hub-cp-ta");
     ta.value = cfg?.system_prompt || "";
+    const dirEl = pop.querySelector('[data-cp="dir"]');
+    if (dirEl) dirEl.textContent = promptDir || "ComfyUI/models/LLM/prompts";
+    const searchIn = pop.querySelector('[data-cp="search"]');
+    searchIn.value = promptQuery;
+    searchIn.addEventListener("input", () => {
+        promptQuery = searchIn.value;
+        renderPromptList();
+    });
+    pop.querySelector('[data-cp="refresh"]').addEventListener("click", () => void refreshPromptList(true));
+    pop.querySelector('[data-cp="list"]').addEventListener("click", async (e) => {
+        const item = e.target?.closest?.("[data-cp-name]");
+        if (!item) return;
+        const name = item.dataset.cpName || "";
+        const res = await applyChatSettings({ prompt_preset: name });
+        if (res.ok) {
+            renderPromptList();
+            renderPromptBtnState();
+            localToast(name ? "System prompt: " + name : "System prompt: none (custom text)");
+        } else {
+            localToast("Not applied: " + (res.error || "?"));
+        }
+    });
     const commit = async (text) => {
-        const res = await applyChatSettings({ system_prompt: text });
+        const res = await applyChatSettings({ system_prompt: text, prompt_preset: "" });
         if (res.ok) {
             ta.value = res.config?.system_prompt ?? text;
+            renderPromptList();
             renderPromptBtnState();
-            localToast(text.trim() ? "System prompt saved" : "System prompt cleared");
+            localToast(text.trim() ? "System prompt: custom text saved" : "System prompt cleared");
         } else {
             localToast("Not applied: " + (res.error || "?"));
         }
     };
-    pop.addEventListener("click", (e) => {
-        const chip = e.target?.closest?.("[data-cp]");
-        if (chip) {
-            const p = PROMPT_PRESETS.find((x) => x.id === chip.dataset.cp);
-            if (p) void commit(p.text);
-        }
-    });
     pop.querySelector(".hub-cp-save").addEventListener("click", () => void commit(ta.value));
     pop.querySelector(".hub-cp-clear").addEventListener("click", () => void commit(""));
     ta.addEventListener("keydown", (e) => {
@@ -944,9 +1105,11 @@ function openPromptPop() {
             e.preventDefault(); e.stopPropagation(); closePromptPop();
         }
     });
+    renderPromptList();
+    void refreshPromptList(false);   // fresh scan on every open
     placePopup(pop, promptBtn);
     pop.addEventListener("mousedown", (e) => e.stopPropagation());
-    try { ta.focus(); } catch (_) {}
+    try { searchIn.focus(); } catch (_) {}
     window.addEventListener("mousedown", onPromptPopDown, true);
     window.addEventListener("keydown", promptPopKey, true);
 }
@@ -1494,25 +1657,36 @@ function clearPending() {
 }
 
 // ---------------------------------------------------------------------------
-// Header model dropdown
+// Header model dropdown (v88: the FULL list - the PolyStrata /api/models
+// registry first, per-model status marks, a select SWITCHES the server)
 // ---------------------------------------------------------------------------
 
-let models = [];
+function modelMark(status, id) {
+    if (id && id === (cfg?.model || "")) return "● ";
+    if (status === "loaded") return "● ";
+    if (status === "loading") return "◐ ";
+    return "○ ";
+}
 
 async function fillModels(manual) {
-    const res = await testChatServer();
-    if (res.ok) {
-        models = Array.isArray(res.models) ? res.models : [];
-        if (res.current && !models.includes(res.current)) models.unshift(res.current);
-        if (cfg?.model && !models.includes(cfg.model)) models.unshift(cfg.model);
+    // v88: GET /chat/models tries the PolyStrata /api/models registry FIRST
+    // (ALL installed models + statuses - the way the NODES fill their
+    // dropdowns), then /v1/models, then at least the current model.
+    const res = await jfetch("/settings_hub/chat/models");
+    if (res.json?.ok) {
+        models = Array.isArray(res.json.models) ? res.json.models : [];
+        modelsSource = res.json.source || "";
+        const cur = cfg?.model || "";
+        if (cur && !models.some((m) => m.id === cur)) {
+            models.unshift({ id: cur, status: "" });
+        }
         renderModelSel();
-        renderNote();
         degraded = null; renderNote();
-        if (manual) localToast("Models: " + (models.join(", ") || "(none)"));
+        if (manual) localToast("Models: " + (models.map((m) => m.id).join(", ") || "(none)"));
     } else if (manual) {
-        localToast("Model list failed: " + (res.error || "?"));
+        localToast("Model list failed: " + (res.json?.error || "HTTP " + res.status));
     }
-    return res;
+    return res.json || { ok: false, error: "HTTP " + res.status };
 }
 
 function renderModelSel() {
@@ -1522,12 +1696,33 @@ function renderModelSel() {
     if (!models.length) {
         opts.push(`<option value="${esc(cur)}">${cur ? esc(cur) : "(no model - ↻ refreshes the list)"}</option>`);
     } else {
-        if (cur && !models.includes(cur)) opts.push(`<option value="${esc(cur)}">${esc(cur)} (not in /models)</option>`);
+        if (cur && !models.some((m) => m.id === cur)) {
+            opts.push(`<option value="${esc(cur)}">${esc(cur)} (not in the list)</option>`);
+        }
         for (const m of models) {
-            opts.push(`<option value="${esc(m)}"${m === cur ? " selected" : ""}>${esc(m)}</option>`);
+            const tail = m.id === cur ? " · selected"
+                : (m.status === "loaded" ? " · loaded" : "");
+            opts.push(`<option value="${esc(m.id)}"${m.id === cur ? " selected" : ""}>${modelMark(m.status, m.id)}${esc(m.id)}${tail}</option>`);
         }
     }
     modelSel.innerHTML = opts.join("");
+}
+
+/** v88: switch the upstream to an installed (not loaded) registry model -
+ *  the /chat/load route speaks /api/models/load first (the node way; may
+ *  take MINUTES on a big model), /v1/load on plain llama.cpp servers. */
+async function switchModel(id) {
+    const res = await jfetch("/settings_hub/chat/load", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: id }),
+    });
+    if (res.json?.ok) {
+        localToast("Model switched: " + id);
+        void fillModels(false);
+    } else {
+        localToast("Switch failed: " + (res.json?.error || "HTTP " + res.status));
+    }
+    return res.json;
 }
 
 // ---------------------------------------------------------------------------
@@ -1761,8 +1956,8 @@ function buildDom() {
         // v87: the toolbar UNDER the input - model (dropdown + refresh),
         // thinking mode, system prompt, GPU & memory - all "at hand".
         `<div class="hub-chat-toolbar">` +
-        `<select class="hub-chat-model" title="Model - the list comes from the LLM server"></select>` +
-        `<button type="button" class="hub-chat-tbbtn hub-chat-models" title="Refresh the model list from the LLM server (/v1/models)">↻</button>` +
+        `<select class="hub-chat-model" title="Model - the full list comes from the LLM server (PolyStrata: ALL installed models)"></select>` +
+        `<button type="button" class="hub-chat-tbbtn hub-chat-models" title="Refresh the model list (/api/models registry on a PolyStrata server, /v1/models otherwise)">↻</button>` +
         `<select class="hub-chat-think hub-chat-tbbtn" title="Thinking mode - none sends enable_thinking=false, low/medium/high send reasoning_effort">` +
         `<option value="default" title="The model's own default">think: default</option>` +
         `<option value="none" title="enable_thinking = false">think: off</option>` +
@@ -1822,9 +2017,20 @@ function buildDom() {
     modelSel.addEventListener("change", () => {
         const v = modelSel.value;
         if (!v) return;
+        const item = models.find((m) => m.id === v);
         void applyChatSettings({ model: v }).then((res) => {
-            if (res.ok) { localToast("Model: " + v + " - it loads with the next message (⚡ can load it now)"); renderStatus(); }
-            else localToast("Model not applied: " + (res.error || "?"));
+            if (!res.ok) { localToast("Model not applied: " + (res.error || "?")); return; }
+            renderStatus(); renderModelSel();
+            // v88: a PolyStrata registry model that is NOT loaded must be
+            // SWITCHED (the nodes' POST /api/models/load) - the chat stays
+            // usable meanwhile; plain /v1/models servers just take the name.
+            if (modelsSource === "registry" && item && item.status
+                && item.status !== "loaded" && item.status !== "loading") {
+                localToast("Switching to " + v + " - may take minutes…");
+                void switchModel(v);
+            } else {
+                localToast("Model: " + v + " - it loads with the next message (⚡ can load it now)");
+            }
         });
     });
     modelsBtn.addEventListener("click", () => void fillModels(true));
@@ -2056,6 +2262,7 @@ async function panelClearAll(btn) {
 
 export function initChat() {
     if (!isChatOn()) return;
+    registerNativeChatSwitch();   // v88: the ComfyUI Settings dialog switch
     teardown();
     const seq = ++initSeq; // capture AFTER teardown - teardown() bumps initSeq
     buildDom();
@@ -2162,8 +2369,15 @@ export function __chatTestHooks() {
         closeViewer,
         viewerEl: () => viewerEl,
         cfg: () => (cfg ? { ...cfg } : null),
-        models: () => models.slice(),
+        models: () => models.map((m) => ({ ...m })),
+        modelsSource: () => modelsSource,
         fillModels,
+        switchModel,
+        promptFiles: () => promptFiles.slice(),
+        promptDir: () => promptDir,
+        refreshPromptList,
+        setPromptQuery: (q) => { promptQuery = q; renderPromptList(); },
+        renderPromptList,
         probe: probeServer,
         setCfg: (c) => { cfg = c; },
         setServerState: (s) => { serverState = s; },

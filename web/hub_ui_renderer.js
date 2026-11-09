@@ -10,7 +10,7 @@
 // SUBMODULES are fresh.
 // ============================================================================
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v87";
+globalThis.__SettingsHubLoaded["hub_ui_renderer"] = "v88";
 
 // The whole hub interface lives inside a single LiteGraph DOM widget
 // (node.addDOMWidget), so the CSS in styles.css actually applies:
@@ -68,14 +68,13 @@ import { REFRESH_CHOICES, getRefreshMs, setRefreshMs, refreshLabel,
          getNavMenuOn, setNavMenuOn,
          getNavHotkeysOn, setNavHotkeysOn } from "./global_settings.js";
 import { firstMediaSpec } from "./viewer_gallery.js";
-// v70: the Paste Stack panel (web/stack.js) - the gear popup hosts its
-// settings section (On/Off, max entries, clear). The panel itself mounts
-// from the entry's extension setup, independent of the hub renderer.
-import { isStackOn, setStackOn, getStackMax, setStackMax, getStackScope, setStackScope, getStackRootInfo, setStackRootPath, STACK_MAX_CHOICES } from "./stack.js";
-// v86/v87: the LLM Chat panel (web/chat.js) - since v87 the hub hosts ONLY
-// the On/Off switch; every other chat setting lives IN the chat panel
-// (⚙ in its header + the toolbar under the input). Same import contract.
-import { isChatOn, setChatOn } from "./chat.js";
+// v70: the Paste Stack panel (web/stack.js) - v88: it is a SELF-MANAGED
+// utility: the panel ⚙ hosts its settings (On/Off, max, scope, storage
+// folder), the hub popup no longer carries a Stack section (no imports
+// needed here anymore - the panels mount from the entry).
+// v86/v88: the LLM Chat panel (web/chat.js) - the same contract: all chat
+// settings live IN the chat panel (⚙ in its header + the toolbar under the
+// input), the hub hosts NOTHING for it anymore.
 import {
     isNavItem, normalizeNav, createNavItem, navJump, armAim,
     enterOwnerGraph, markersVersionBump, resolveNavTarget,
@@ -2192,70 +2191,16 @@ function openSettingsPopup(node, trigger) {
         `click the ⌨ chip) - pressing it jumps to the point from anywhere. This switch turns the ` +
         `hotkey engine ON/OFF globally (assignments are kept). Global for every hub.</div>` +
 
-        `<div class="hub-set-section">Stack</div>` +
-        `<label class="hub-set-row"><span>Paste Stack panel</span>` +
-        `<select data-set-role="stackon">` +
-        `<option value="1">On (default)</option>` +
-        `<option value="0">Off</option>` +
-        `</select></label>` +
-        `<label class="hub-set-row"><span>Max saved entries</span>` +
-        `<select data-set-role="stackmax">` +
-        STACK_MAX_CHOICES.map((n) =>
-            `<option value="${n}">${n}${n === 100 ? " · default" : ""}</option>`).join("") +
-        `</select></label>` +
-        `<label class="hub-set-row"><span>Stack scope (v77)</span>` +
-        `<select data-set-role="stackscope">` +
-        `<option value="global">Shared - all workflows (default)</option>` +
-        `<option value="workflow">Per-workflow</option>` +
-        `</select></label>` +
-        `<label class="hub-set-row"><span>Storage folder (v84)</span>` +
-        `<span class="hub-set-pathbox">` +
-        `<input type="text" class="hub-set-path" data-set-role="stackroot" ` +
-        `placeholder="default: user/settings_hub/stack" spellcheck="false" ` +
-        `autocomplete="off">` +
-        `<button type="button" class="hub-set-path-def" data-set-role="stackroot-def" ` +
-        `title="Back to the default folder (user/settings_hub/stack)">default</button>` +
-        `</span></label>` +
-        `<div class="hub-set-pathinfo" data-set-role="stackroot-info"></div>` +
-        `<div class="hub-pop-hint">Floating clipboard panel (works alongside every hub): click its paste ` +
-        `area or press Ctrl+V over it to save text and images; click a card to copy it back; drag it by ` +
-        `the header, [–] minimizes to a chip. There is NO close button on the panel (v75) - this ` +
-        `On/Off switch is the only way to remove it. Entries live in ComfyUI's user folder ` +
-        `(user/settings_hub/stack/) - they survive page reloads, are shared by every browser and move ` +
-        `with the ComfyUI folder. Max = the panel drops the oldest entries beyond it (server hard caps ` +
-        `apply regardless). The 🗑 button in the PANEL HEADER wipes the whole stack (asks twice). ` +
-        `Scope: Shared = one stack for every workflow (as it always was). Per-workflow = every ` +
-        `workflow keeps its OWN stack: the binding id is saved INTO the workflow file ` +
-        `(extra_data.settingshubStackId) and the entries live in ` +
-        `user/settings_hub/stack/workflows/<id>/; text snippets are also mirrored into the workflow ` +
-        `file, so they come back on another machine even if the server store is empty. The panel ` +
-        `header shows an @workflow badge in this mode; switching the scope never moves entries - ` +
-        `each scope keeps its own. Storage folder (v84): by default the entries live in ` +
-        `user/settings_hub/stack - type another ABSOLUTE folder (e.g. D:\\gen\\stack or ` +
-        `/home/me/comfy_stack) and press Enter to move the storage there (the server creates the ` +
-        `folder and checks writability first, then remembers the choice across restarts in ` +
-        `user/settings_hub/stack_root.json); the 'default' chip returns the built-in folder. ` +
-        `Changing the folder NEVER moves entries: the new location starts empty, the old one ` +
-        `keeps its files (copy or move them yourself while ComfyUI is stopped, if needed). ` +
-        `The line under the input shows the folder that is active right now.</div>` +
-
-        `<div class="hub-set-section">Chat (v86)</div>` +
-        `<label class="hub-set-row"><span>Chat panel</span>` +
-        `<select data-set-role="chaton">` +
-        `<option value="1">On (default)</option>` +
-        `<option value="0">Off</option>` +
-        `</select></label>` +
-        `<div class="hub-pop-hint">LLM chat panel (works alongside every hub): TABS = separate dialogs, ` +
-        `🕘 reopens saved chats, dblclick a tab renames it, [–] minimizes to a chip, 🗑 clears the ` +
-        `active chat (asks twice). There is NO ✕ on the panel - this On/Off switch is the only way ` +
-        `to remove it. v87: ALL other chat settings (server URL + key, model, thinking, system ` +
-        `prompt, sampling, limits, storage folder, GPU & memory with the VRAM reserve for ComfyUI ` +
-        `and the PolyStrata load/unload) live IN THE CHAT PANEL - ⚙ in the chat header opens them, ` +
-        `the model/thinking/prompt/GPU buttons sit right under its input. The browser talks to the ` +
-        `LLM ONLY through ComfyUI (py/chat_proxy.py): no CORS setup on the LLM server, and the API ` +
-        `key lives in user/settings_hub/chat/config.json on the SERVER - it never enters the ` +
-        `browser (F12 shows only a mask). The chat is NOT an agent: it never touches the queue, ` +
-        `the workflow or the nodes.</div>`;
+        `<div class="hub-set-section">Panels (v88)</div>` +
+        `<div class="hub-pop-hint">The Paste Stack and the LLM Chat are STANDALONE utilities now - ` +
+        `the hub (this window) is not needed to run or configure them, so this settings popup no ` +
+        `longer hosts their rows. The STACK is configured by ⚙ in the PANEL HEADER (On/Off, max ` +
+        `entries, scope, storage folder); the CHAT - by ⚙ in its header plus the toolbar under its ` +
+        `input (server URL + key, model, thinking, system prompt, sampling, limits, GPU &amp; memory ` +
+        `with the PolyStrata VRAM reserve). Both panel On/Off switches are ALSO registered in ` +
+        `ComfyUI's own Settings dialog (Settings → SettingsHub), reachable in EVERY workflow - ` +
+        `a hidden panel can always be brought back even when no hub node is in the workflow. ` +
+        `The chat is NOT an agent: it never touches the queue, the workflow or the nodes.</div>`;
     document.body.appendChild(pop);
 
     setPopState = { node, trigger, pop };
@@ -2377,100 +2322,12 @@ function openSettingsPopup(node, trigger) {
         flashBtn(trigger, "✓");
     });
 
-    // --- Stack: panel On/Off + max entries + clear (v70) ---------------------
-    // The panel reads isStackOn()/getStackMax() at event/refresh time, so a
-    // flip here applies immediately (Off tears the panel down, On re-mounts
-    // it and re-reads the server index).
-    const stOnSel = pop.querySelector('[data-set-role="stackon"]');
-    stOnSel.value = isStackOn() ? "1" : "0";
-    stOnSel.addEventListener("change", () => {
-        setStackOn(stOnSel.value === "1");
-        stOnSel.value = isStackOn() ? "1" : "0";
-        flashBtn(trigger, "✓");
-    });
-
-    const stMaxSel = pop.querySelector('[data-set-role="stackmax"]');
-    stMaxSel.value = String(getStackMax());
-    stMaxSel.addEventListener("change", () => {
-        stMaxSel.value = String(setStackMax(stMaxSel.value));
-        flashBtn(trigger, "✓");
-    });
-
-    // v77: stack scope - shared vs per-workflow. A flip re-mounts the panel
-    // (the right store is loaded, the @workflow badge appears/disappears);
-    // entries are NEVER migrated - each scope keeps its own.
-    const stScopeSel = pop.querySelector('[data-set-role="stackscope"]');
-    stScopeSel.value = getStackScope();
-    stScopeSel.addEventListener("change", () => {
-        stScopeSel.value = setStackScope(stScopeSel.value);
-        flashBtn(trigger, "✓");
-    });
-
-    // v84: custom storage folder. Enter applies (inline-editor contract,
-    // AGENTS.md 5.1 rule 4), Esc reverts to the applied value, the
-    // "default" chip applies the empty path (back to user/settings_hub/stack)
-    // immediately. The status line mirrors the SERVER truth (root + custom
-    // marker) once GET /settings_hub/stack/root answers; on an old py it
-    // stays quiet (v78 philosophy - the panel health note already names the
-    // half-updated install). The server refusal (relative path / not
-    // writable) is shown in the same line - the field keeps the typed text
-    // so it can be fixed in place.
-    const stRootInput = pop.querySelector('[data-set-role="stackroot"]');
-    const stRootDef = pop.querySelector('[data-set-role="stackroot-def"]');
-    const stRootInfo = pop.querySelector('[data-set-role="stackroot-info"]');
-    const stRootApply = async () => {
-        const res = await setStackRootPath(stRootInput.value);
-        if (res.ok) {
-            stRootInput.value = res.custom || "";
-            stRootInput.dataset.cur = res.custom || "";
-            stRootInfo.classList.remove("hub-set-patherr");
-            stRootInfo.textContent = "Now: " + (res.root || "") +
-                (res.custom ? " (custom)" : " (default)") +
-                (res.saved === false ? " - could not save stack_root.json (folder works for this session only)" : "");
-            flashBtn(trigger, "✓");
-        } else {
-            stRootInfo.classList.add("hub-set-patherr");
-            stRootInfo.textContent = "Not applied: " + (res.error || "error") +
-                (res.stale ? " - the server has no /stack/root route (old py): update the FULL pack and RESTART ComfyUI." : "");
-        }
-    };
-    stRootInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-            e.preventDefault();
-            stRootApply();
-        } else if (e.key === "Escape") {
-            stRootInput.value = stRootInput.dataset.cur || "";
-            stRootInput.blur();
-        }
-    });
-    stRootDef.addEventListener("click", () => {
-        stRootInput.value = "";
-        stRootApply();
-    });
-    getStackRootInfo().then((info) => {
-        if (!info || !stRootInfo.isConnected) return; // popup closed / old py
-        stRootInput.dataset.cur = info.custom || "";
-        if (!stRootInput.value) stRootInput.value = info.custom || "";
-        stRootInfo.classList.remove("hub-set-patherr");
-        stRootInfo.textContent = "Now: " + (info.root || "") +
-            (info.custom ? " (custom)" : " (default)") +
-            (info.writable === false ? " - NOT writable" : "");
-    }).catch(() => {});
-    // v74: the clear button lives in the STACK PANEL HEADER itself (owner:
-    // destructive controls belong to the thing they destroy, not to settings).
-
-    // --- Chat (v86/v87): the hub keeps ONLY the panel On/Off switch. Every
-    // other chat setting (server URL + key, model, thinking, system prompt,
-    // sampling, limits, storage folder) moved INTO the chat panel in v87 -
-    // ⚙ in the chat header + the toolbar under its input. Owner: "all LLM
-    // chat settings must be in the chat itself, not the hub".
-    const chOnSel = pop.querySelector('[data-set-role="chaton"]');
-    chOnSel.value = isChatOn() ? "1" : "0";
-    chOnSel.addEventListener("change", () => {
-        setChatOn(chOnSel.value === "1");
-        chOnSel.value = isChatOn() ? "1" : "0";
-        flashBtn(trigger, "✓");
-    });
+    // v88: the Stack and Chat sections are GONE from this popup - both panels
+    // are self-managed utilities now (⚙ in each panel header) and both On/Off
+    // switches live as NATIVE ComfyUI settings (Settings → SettingsHub), so
+    // they are reachable in every workflow without a hub node. The rows that
+    // used to sit here moved into web/stack.js (openStkSettingsPop) and
+    // web/chat.js (the ⚙ popup's Panel row) 1:1, contracts unchanged.
 
     positionNumPopup(pop, trigger);
     try { sel.focus(); } catch (_) {}

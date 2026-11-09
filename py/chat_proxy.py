@@ -40,8 +40,22 @@ py/stack_store.py):
     GET    /settings_hub/chat/config            config with a MASKED key
     POST   /settings_hub/chat/config            partial update (key: absent
                                                 = keep, "" = clear, else set)
-    POST   /settings_hub/chat/test              probe the upstream: /v1/models
-                                                (+ /v1/status when present)
+    POST   /settings_hub/chat/test              probe the upstream: the FULL model
+                                                list (/api/models registry, then
+                                                /v1/models) + /v1/status
+    GET    /settings_hub/chat/models            v88: the model dropdown list -
+                                                ALL installed models + statuses
+                                                (the PolyStrata /api/models
+                                                registry), fallback /v1/models,
+                                                fallback the current model
+    GET    /settings_hub/chat/prompts           v88: the user's system-prompt
+                                                catalog - ComfyUI/models/LLM/
+                                                prompts (the SAME path the
+                                                PolyStrata / llama.cpp nodes
+                                                scan), fresh recursive *.txt list
+    GET    /settings_hub/chat/prompt?name=      v88: read ONE catalog prompt
+                                                (relative path, jailed inside
+                                                the folder)
     GET    /settings_hub/chat/sessions          session list (id,title,dates,n)
     POST   /settings_hub/chat/sessions          create {title?}
     GET    /settings_hub/chat/session/{sid}     full session
@@ -54,7 +68,9 @@ py/stack_store.py):
                                                 message, build the upstream
                                                 payload, call the LLM, store the
                                                 reply; JSON or SSE (stream)
-    POST   /settings_hub/chat/load              upstream /v1/load {model}
+    POST   /settings_hub/chat/load              switch the model - POST {root}/
+                                                api/models/load first (the
+                                                PolyStrata way), fallback /v1/load
     GET    /settings_hub/chat/gpu               upstream /v1/status + the reserve
                                                 state (v87 memory menu)
     POST   /settings_hub/chat/gpu               actions (v87): reserve {mib} /
@@ -63,6 +79,25 @@ py/stack_store.py):
                                                 status - the PolyStrata VRAM
                                                 mechanics (/v1/vram, /v1/unload)
                                                 + ComfyUI-side cleanup
+
+v88 owner corrections (2026-11-09):
+  * "the model list shows only ONE active model - look how the PolyStrata
+    nodes get the models": they call GET /api/models - the server registry
+    of ALL installed models (strata-*.json) with per-model status
+    (available/loaded/unloaded/loading/unavailable). /v1/models on a
+    PolyStrata server is only the OpenAI shim for the CURRENT engine, so
+    the proxy now tries /api/models first and falls back to /v1/models.
+    Model switching goes through POST /api/models/load exactly like the
+    nodes do (a fallback to /v1/load stays for plain llama.cpp servers).
+  * "I did not ask you to invent system prompt presets - the PolyStrata
+    nodes have a catalog of the user's OWN prompts": the catalog is the
+    folder ComfyUI/models/LLM/prompts (prompt_root() of the PolyStrata
+    nodes - the same path the llama.cpp pack uses), one preset = one .txt
+    file, subdirs allowed, relative paths shown. This module only READS it
+    (fresh scan per request, nothing created/registered/cached) and
+    resolves cfg "prompt_preset" at send time with the node semantics: the
+    preset WINS over the custom text; unreadable file -> empty prompt + a
+    console note.
 
 v87 memory mechanics (the PolyStrata node logic, ported):
   * POST /v1/vram {"reserve_mib": N} - the LLM server keeps N MiB of VRAM
@@ -102,7 +137,7 @@ try:
 except Exception:  # pragma: no cover - folder_paths always exists in ComfyUI
     folder_paths = None
 
-CHAT_SERVER_VERSION = "v87"
+CHAT_SERVER_VERSION = "v88"
 
 # ---------------------------------------------------------------------------
 # Limits (server-side absolute guards; the frontend may enforce smaller ones)
@@ -110,6 +145,10 @@ CHAT_SERVER_VERSION = "v87"
 
 MAX_MESSAGE_CHARS = 100_000
 MAX_TITLE_CHARS = 80
+PROMPT_FILE_CAP = 512 * 1024   # one catalog .txt may be read up to this
+PROMPT_LIST_CAP = 2000         # catalog entries listed at most
+MODELS_TIMEOUT_S = 25          # /api/models + /v1/models listing
+SWITCH_TIMEOUT_S = 1800        # /api/models/load - a switch may take MINUTES
 MAX_BLOB_BYTES_HARD = 100 * 1024 * 1024   # absolute cap regardless of config
 DEFAULT_MAX_FILE_MB = 20
 TEXT_INLINE_LIMIT = 300 * 1024            # text files enter the prompt capped
@@ -164,6 +203,9 @@ DEFAULT_CONFIG = {
     "key": "",                 # api key (Bearer); optional
     "model": "",
     "system_prompt": "",
+    "prompt_preset": "",       # v88: relative .txt in models/LLM/prompts;
+                               # non-empty WINS over system_prompt (the
+                               # PolyStrata node semantics), read fresh per send
     "temperature": 0.8,
     "top_p": 0.95,
     "max_tokens": 1024,        # 0 = no limit (send nothing)
@@ -348,6 +390,7 @@ def _load_config():
     cfg["key"] = str(cfg.get("key") or "")
     cfg["model"] = str(cfg.get("model") or "")[:200]
     cfg["system_prompt"] = str(cfg.get("system_prompt") or "")[:8000]
+    cfg["prompt_preset"] = str(cfg.get("prompt_preset") or "").replace("\\", "/")[:300]
     return cfg
 
 
@@ -619,13 +662,103 @@ def build_upstream_messages(session_msgs, cfg, sid):
     return out
 
 
+# ---------------------------------------------------------------------------
+# v88 system-prompt catalog - the user's OWN presets, the PolyStrata node way
+# ---------------------------------------------------------------------------
+
+def _prompt_catalog_dir():
+    """The catalog folder - EXACTLY the PolyStrata nodes' prompt_root(): the
+    llama.cpp-node path <ComfyUI>/models/LLM/prompts (one preset = one .txt
+    file, subdirs allowed). READ-ONLY here: nothing is created, nothing is
+    registered in folder_paths, nothing is cached - the PolyStrata / llama.cpp
+    packs own this folder and its default files."""
+    md = None
+    try:
+        if folder_paths is not None:
+            md = getattr(folder_paths, "models_dir", None)
+    except Exception:
+        md = None
+    if isinstance(md, str) and md:
+        return os.path.join(md, "LLM", "prompts")
+    return os.path.join(os.getcwd(), "models", "LLM", "prompts")
+
+
+def _prompt_catalog_list():
+    """Fresh scan on EVERY call (the nodes re-scan on every /object_info for
+    the same reason - a cache never invalidates on manual file drops).
+    Returns (dir, [relative paths "sub/name.txt"], error|None)."""
+    root = _prompt_catalog_dir()
+    files = []
+    try:
+        if not os.path.isdir(root):
+            return root, [], "catalog folder does not exist yet"
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            for fn in sorted(filenames):
+                if not fn.lower().endswith(".txt"):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, fn), root)
+                files.append(rel.replace(os.sep, "/"))
+                if len(files) >= PROMPT_LIST_CAP:
+                    return root, files, None
+        return root, files, None
+    except Exception as e:
+        return root, files, str(e)
+
+
+def _safe_prompt_rel(name):
+    """Validate a catalog-relative path: forward slashes, no .., .txt only."""
+    s = str(name or "").strip().replace("\\", "/").lstrip("/")
+    if not s or len(s) > 300:
+        return None
+    parts = s.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return None
+    if not s.lower().endswith(".txt"):
+        return None
+    return s
+
+
+def _read_prompt_file(rel):
+    """Read one catalog file, jailed inside the folder. Returns (text, error)."""
+    root_abs = os.path.abspath(_prompt_catalog_dir())
+    p_abs = os.path.abspath(os.path.join(root_abs, *rel.split("/")))
+    if p_abs != root_abs and not p_abs.startswith(root_abs + os.sep):
+        return None, "path escapes the catalog folder"
+    try:
+        if not os.path.isfile(p_abs):
+            return None, "file not found: " + rel
+        if os.path.getsize(p_abs) > PROMPT_FILE_CAP:
+            return None, "file is larger than %d KB" % (PROMPT_FILE_CAP // 1024)
+        with open(p_abs, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(), None
+    except Exception as e:
+        return None, str(e)
+
+
+def _resolve_system_prompt(cfg):
+    """The PolyStrata resolve_system_prompt semantics: a selected catalog
+    preset WINS over the custom text and is read FRESH on every send; an
+    unreadable preset degrades to an EMPTY prompt + a console note (never an
+    exception, never the custom text sneaking in). Returns (text, error)."""
+    preset = str(cfg.get("prompt_preset") or "").strip()
+    if preset:
+        text, err = _read_prompt_file(preset)
+        if err is not None:
+            print("[SettingsHub-chat] prompt preset '%s' not used: %s"
+                  % (preset, err), flush=True)
+            return "", err
+        return (text or "").strip(), ""
+    return str(cfg.get("system_prompt") or "").strip(), ""
+
+
 def build_upstream_payload(session_msgs, cfg, sid, stream=False, model=""):
     """The full /chat/completions body: history + sampling + reasoning knobs.
     reasoning 'none' maps to chat_template_kwargs.enable_thinking=false (the
     llama.cpp / vLLM convention PolyStrata speaks); low/medium/high map to
     the OpenAI-style reasoning_effort field."""
     msgs = build_upstream_messages(session_msgs, cfg, sid)
-    sp = str(cfg.get("system_prompt") or "").strip()
+    sp, _note = _resolve_system_prompt(cfg)
     if sp:
         msgs.insert(0, {"role": "system", "content": sp})
     body = {
@@ -851,6 +984,116 @@ async def _upstream_unload(cfg, wait_s=0.0, timeout_s=300):
         return False, str(e)
 
 
+def _server_root(cfg):
+    """{base}/v1 -> {base}: the PolyStrata control endpoints (/api/models,
+    /api/models/load) live at the SERVER ROOT, not under /v1."""
+    u = _clean_url(cfg.get("url") or "")
+    root = re.sub(r"/v\d+[a-z0-9]*$", "", u, flags=re.IGNORECASE)
+    return root or u
+
+
+async def _upstream_models_full(cfg):
+    """The AVAILABLE models, the way the PolyStrata NODES get them (owner:
+    'the list shows only one active model - look how the nodes do it'):
+      1) GET {root}/api/models - the PolyStrata registry of ALL installed
+         models: {"models": [{id, status, ...}], "current": id}; entries with
+         status "unavailable" (broken configs) are hidden exactly like the
+         nodes hide them; -> source "registry"
+      2) GET {base}/v1/models - the OpenAI-style list (llama.cpp / LM Studio /
+         vLLM / Ollama list all their models here); -> source "openai"
+      3) GET {base}/v1/status - at least the CURRENT model; -> source "status"
+    Returns {ok, source, models: [{id, status}], current, error}."""
+    out = {"ok": False, "source": "", "models": [], "current": "", "error": None}
+    if aiohttp is None or not cfg.get("url"):
+        out["error"] = "no LLM server configured"
+        return out
+    headers = _upstream_headers(cfg)
+    timeout = aiohttp.ClientTimeout(total=MODELS_TIMEOUT_S, sock_connect=8)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            # 1) the PolyStrata registry (server root, NOT under /v1)
+            try:
+                async with http.get(_server_root(cfg) + "/api/models",
+                                    headers=headers) as r:
+                    if r.status == 200:
+                        j = await r.json(content_type=None)
+                        items = []
+                        for e in ((j or {}).get("models") or []):
+                            if (isinstance(e, dict) and e.get("id")
+                                    and e.get("status") != "unavailable"):
+                                items.append({"id": str(e["id"]),
+                                              "status": str(e.get("status") or "")})
+                        cur = str((j or {}).get("current") or "")
+                        if items or cur:
+                            out.update(ok=True, source="registry", models=items,
+                                       current=cur)
+                            return out
+            except Exception:
+                pass
+            # 2) the OpenAI-style list under the configured base
+            try:
+                async with http.get(cfg["url"] + "/models", headers=headers) as r:
+                    if r.status == 200:
+                        j = await r.json(content_type=None)
+                        data = j.get("data") if isinstance(j, dict) else None
+                        items = []
+                        for e in (data or []):
+                            if isinstance(e, dict) and e.get("id"):
+                                items.append({"id": str(e["id"]), "status": ""})
+                            elif isinstance(e, str) and e:
+                                items.append({"id": e, "status": ""})
+                        if items:
+                            out.update(ok=True, source="openai", models=items)
+                            return out
+            except Exception:
+                pass
+            # 3) at least the currently loaded model
+            st = await _upstream_status(cfg, http=http)
+            snap = _vram_status_snapshot(st) if st else None
+            if snap and snap.get("model"):
+                out.update(ok=True, source="status",
+                           models=[{"id": str(snap["model"]),
+                                    "status": "loaded" if snap.get("loaded") else ""}],
+                           current=str(snap["model"]))
+                return out
+            out["error"] = "the server answers, but reports no models"
+            return out
+    except asyncio.TimeoutError:
+        out["error"] = "timeout reaching " + (cfg.get("url") or "")
+        return out
+    except Exception as e:
+        out["error"] = "connect failed: %s" % e
+        return out
+
+
+async def _upstream_switch(cfg, model):
+    """Wake/switch the upstream model: POST {root}/api/models/load FIRST (the
+    PolyStrata-node way - works with ANY installed model, unloads the current
+    engine and loads the target's config; may take MINUTES), fallback to
+    POST /v1/load for plain llama.cpp-style servers. Returns
+    (ok, http_status, answer_text, via)."""
+    if aiohttp is None or not cfg.get("url"):
+        return False, 0, "", "none"
+    headers = _upstream_headers(cfg)
+    timeout = aiohttp.ClientTimeout(total=SWITCH_TIMEOUT_S, sock_connect=15)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            try:
+                async with http.post(_server_root(cfg) + "/api/models/load",
+                                     json={"model": model}, headers=headers) as r:
+                    txt = (await r.text())[:300]
+                    if r.status == 200:
+                        return True, r.status, txt, "registry"
+            except Exception:
+                pass
+            async with http.post(cfg["url"] + "/load", json={"model": model},
+                                 headers=headers) as r:
+                txt = (await r.text())[:300]
+                return (r.status == 200), r.status, txt, "openai"
+    except Exception as e:
+        return False, 0, str(e), "error"
+
+
 def _apply_reserve_note(vram_ok, vram_data, vram_err, st):
     """Human-readable result line for the GPU menu (the PolyStrata node
     wording): the target vs the ACTUALLY free VRAM, partial eviction named."""
@@ -1065,6 +1308,8 @@ async def chat_config_set(request):
     for k in ("model", "system_prompt"):
         if k in body:
             cfg[k] = str(body.get(k) or "")[:8000]
+    if "prompt_preset" in body:
+        cfg["prompt_preset"] = str(body.get("prompt_preset") or "").replace("\\", "/").strip()[:300]
     for k, (lo, hi) in _CONFIG_NUM_RANGES.items():
         if k in body:
             try:
@@ -1081,55 +1326,72 @@ async def chat_config_set(request):
     return web.json_response({"ok": True, "config": _masked_config(cfg)})
 
 
+@PromptServer.instance.routes.get("/settings_hub/chat/models")
+async def chat_models_list(request):
+    """v88: the model dropdown list. A PolyStrata server reports ALL installed
+    models through /api/models (the registry the NODES use - statuses
+    available/loaded/unloaded/loading); a plain OpenAI-style server answers
+    /v1/models; otherwise at least the current model from /v1/status."""
+    cfg = _load_config()
+    if not cfg.get("url"):
+        return _jerr("no LLM server configured - set the URL first")
+    out = await _upstream_models_full(cfg)
+    out["model"] = str(cfg.get("model") or "")
+    return web.json_response(out)
+
+
 @PromptServer.instance.routes.post("/settings_hub/chat/test")
 async def chat_test(request):
+    """Probe the upstream: the FULL model list (the v88 registry-first path)
+    + /v1/status when present (the settings ⚙ Test line shows ctx)."""
     cfg = _load_config()
-    base = cfg.get("url") or ""
-    if not base:
+    if not cfg.get("url"):
         return _jerr("no LLM server configured - set the URL first")
-    if aiohttp is None:
-        return _jerr("aiohttp missing", 500)
-    out = {"ok": False, "models": [], "current": "", "status": None}
-    try:
-        timeout = aiohttp.ClientTimeout(total=PROBE_TIMEOUT_S, sock_connect=10)
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            async with http.get(base + "/models", headers=_upstream_headers(cfg)) as r:
-                txt = await r.text()
-                if r.status != 200:
-                    return web.json_response(dict(out, ok=False, error=(
-                        "HTTP %s from %s/models - %s" % (r.status, base, txt[:200]))))
-                try:
-                    j = json.loads(txt)
-                except Exception:
-                    return web.json_response(dict(out, ok=False, error="not JSON from /models"))
-                data = j.get("data") if isinstance(j, dict) else None
-                for m in (data or []):
-                    if isinstance(m, dict) and m.get("id"):
-                        out["models"].append(str(m["id"]))
-                    elif isinstance(m, str):
-                        out["models"].append(m)
-            try:
-                async with http.get(base + "/status", headers=_upstream_headers(cfg)) as r:
-                    if r.status == 200:
-                        out["status"] = await r.json(content_type=None)
-                        st = out["status"]
-                        if isinstance(st, dict) and st.get("model"):
-                            out["current"] = str(st.get("model"))
-            except Exception:
-                pass
-    except asyncio.TimeoutError:
-        return web.json_response(dict(out, ok=False, error="timeout reaching " + base))
-    except Exception as e:
-        return web.json_response(dict(out, ok=False, error="connect failed: %s" % e))
+    out = {"ok": False, "models": [], "current": "", "status": None, "source": ""}
+    mm = await _upstream_models_full(cfg)
+    if not mm.get("ok"):
+        return web.json_response(dict(out, ok=False,
+                                      error=mm.get("error") or "probe failed"))
     out["ok"] = True
+    out["source"] = mm.get("source") or ""
+    out["models"] = [m["id"] for m in (mm.get("models") or [])]
+    out["current"] = mm.get("current") or ""
+    out["status"] = await _upstream_status(cfg)
     return web.json_response(out)
+
+
+@PromptServer.instance.routes.get("/settings_hub/chat/prompts")
+async def chat_prompts_list(request):
+    """v88: the owner's prompt catalog - <ComfyUI>/models/LLM/prompts, the
+    SAME folder the PolyStrata / llama.cpp nodes scan (owner: 'the path for
+    the txt search is the same as the nodes'). Fresh recursive *.txt scan on
+    every call; nothing is created, cached or registered."""
+    root, files, err = _prompt_catalog_list()
+    return web.json_response({"ok": True, "dir": root,
+                              "exists": os.path.isdir(root),
+                              "files": files, "error": err})
+
+
+@PromptServer.instance.routes.get("/settings_hub/chat/prompt")
+async def chat_prompt_read(request):
+    """v88: read ONE catalog prompt (relative path, jailed inside the
+    folder, .txt only, size-capped). The popup shows its text as a preview."""
+    rel = _safe_prompt_rel(request.query.get("name", ""))
+    if not rel:
+        return _jerr("bad prompt name")
+    text, err = _read_prompt_file(rel)
+    if err is not None:
+        return _jerr(err)
+    return web.json_response({"ok": True, "name": rel,
+                              "text": (text or "").strip()})
 
 
 @PromptServer.instance.routes.post("/settings_hub/chat/load")
 async def chat_load(request):
-    """Switch the upstream model (PolyStrata: POST /v1/load - may take MINUTES
-    with a big model; the client shows its own progress and keeps the typed
-    text)."""
+    """Switch the upstream model. v88: a PolyStrata server is switched the way
+    its own nodes do it - POST {root}/api/models/load {model} (the engine
+    restarts on the target's strata-*.json config; may take MINUTES with a
+    big model). Servers without the registry fall back to POST /v1/load."""
     cfg = _load_config()
     if not cfg.get("url"):
         return _upstream_unconfigured()
@@ -1140,18 +1402,11 @@ async def chat_load(request):
     model = str((body or {}).get("model") or cfg.get("model") or "")
     if not model:
         return _jerr("no model given")
-    if aiohttp is None:
-        return _jerr("aiohttp missing", 500)
-    timeout = aiohttp.ClientTimeout(total=PROBE_TIMEOUT_S, sock_connect=10)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            async with http.post(cfg["url"] + "/load", json={"model": model},
-                                 headers=_upstream_headers(cfg)) as r:
-                txt = (await r.text())[:300]
-                return web.json_response({"ok": r.status == 200,
-                                          "status": r.status, "answer": txt})
-    except Exception as e:
-        return _jerr("load failed: %s" % e, 502)
+    ok, status, txt, via = await _upstream_switch(cfg, model)
+    if via == "error":
+        return _jerr("load failed: %s" % txt, 502)
+    return web.json_response({"ok": ok, "status": status, "answer": txt,
+                              "via": via})
 
 
 @PromptServer.instance.routes.get("/settings_hub/chat/gpu")
@@ -1212,19 +1467,11 @@ async def chat_gpu_post(request):
         model = str(body.get("model") or cfg.get("model") or "")
         if not model:
             return _jerr("no model given")
-        if aiohttp is None:
-            return _jerr("aiohttp missing", 500)
-        timeout = aiohttp.ClientTimeout(total=PROBE_TIMEOUT_S, sock_connect=10)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as http:
-                async with http.post(cfg["url"] + "/load", json={"model": model},
-                                     headers=_upstream_headers(cfg)) as r:
-                    txt = (await r.text())[:300]
-                    ok = r.status == 200
-                    notes.append("load %s: %s" % (model, txt or ("HTTP %s" % r.status)))
-                    return web.json_response({"ok": ok, "action": action, "notes": notes})
-        except Exception as e:
-            return _jerr("load failed: %s" % e, 502)
+        ok, status, txt, via = await _upstream_switch(cfg, model)
+        if via == "error":
+            return _jerr("load failed: %s" % txt, 502)
+        notes.append("load %s (%s): %s" % (model, via, txt or ("HTTP %s" % status)))
+        return web.json_response({"ok": ok, "action": action, "notes": notes})
 
     if action == "reserve":
         try:

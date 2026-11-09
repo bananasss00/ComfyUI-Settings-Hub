@@ -768,11 +768,14 @@ r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "free_comfy"})))
 j = resp_json(r)
 check("free_comfy ok without comfy", j["ok"] is True and "comfy.model_management unavailable" in j["notes"][0], j)
 
-FakeClientSession.script = [FakeUpstream(200, json.dumps({"status": "loaded"}))]
+FakeClientSession.script = [
+    FakeUpstream(404, "no registry"),                      # POST /api/models/load (v88: tried first)
+    FakeUpstream(200, json.dumps({"status": "loaded"})),   # POST /v1/load fallback
+]
 r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "load", "model": "test-model"})))
 j = resp_json(r)
 check("load ok", j["ok"] is True, j)
-check("load POSTed /v1/load",
+check("load falls back to /v1/load when the registry is absent",
       any(q[0] == "POST" and q[1] == UPSTREAM + "/load" and q[2] == {"model": "test-model"}
           for q in FakeClientSession.requests), FakeClientSession.requests[:3])
 
@@ -806,6 +809,153 @@ check("the reserve payload carried the configured MiB",
 # reset for the remaining runs
 run(chat.chat_config_set(FakeRequest(json_body={"vram_reserve_mib": 0})))
 check("reserve reset after the send test", chat._load_config()["vram_reserve_mib"] == 0)
+
+# ---------------------------------------------------------------------------
+phase("v88 prompt catalog: list, read, jail, the preset wins in the payload")
+
+# point the catalog at a fake models dir (the PolyStrata prompt_root path)
+CAT = tempfile.mkdtemp(prefix="shub-models-")
+fp_stub.models_dir = CAT
+PROMPTS_DIR = os.path.join(CAT, "LLM", "prompts")
+os.makedirs(os.path.join(PROMPTS_DIR, "sub"), exist_ok=True)
+
+
+def _wp(rel, text):
+    p = os.path.join(PROMPTS_DIR, *rel.split("/"))
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+_wp("cinematic.txt", "  Cinematic one-paragraph prompt.  ")
+_wp("sub/deep.txt", "Deep prompt")
+_wp("notes.md", "not a preset")
+
+r = run(chat.chat_prompts_list(FakeRequest(method="GET", path="/settings_hub/chat/prompts")))
+j = resp_json(r)
+check("catalog lists ONLY .txt recursively with / separators",
+      j["ok"] and j["files"] == ["cinematic.txt", "sub/deep.txt"], j)
+check("catalog reports the models/LLM/prompts dir",
+      j["dir"].endswith(os.path.join("LLM", "prompts")), j["dir"])
+
+r = run(chat.chat_prompt_read(FakeRequest(
+    method="GET", path="/settings_hub/chat/prompt", query={"name": "cinematic.txt"})))
+j = resp_json(r)
+check("prompt read returns the stripped text",
+      j["ok"] and j["text"] == "Cinematic one-paragraph prompt.", j)
+
+r = run(chat.chat_prompt_read(FakeRequest(
+    method="GET", path="/x", query={"name": "../../secret.txt"})))
+check("path traversal refused", r.status == 400, r.status)
+r = run(chat.chat_prompt_read(FakeRequest(
+    method="GET", path="/x", query={"name": "sub/../../../etc/passwd.txt"})))
+check("nested traversal refused too", r.status == 400, r.status)
+r = run(chat.chat_prompt_read(FakeRequest(
+    method="GET", path="/x", query={"name": "notes.md"})))
+check("non-txt refused", r.status == 400, r.status)
+r = run(chat.chat_prompt_read(FakeRequest(
+    method="GET", path="/x", query={"name": "missing.txt"})))
+check("missing file refused", r.status == 400, r.status)
+
+# the preset WINS over the custom text and is read FRESH per payload
+seed_config(prompt_preset="sub/deep.txt", system_prompt="custom-wins-when-no-preset")
+sess = make_session("cat")
+_msgs = [{"role": "user", "text": "hi", "ts": 1, "parts": []}]
+body = chat.build_upstream_payload(_msgs, chat._load_config(), sess["id"])
+check("preset wins: the FILE text is the system message",
+      body["messages"][0] == {"role": "system", "content": "Deep prompt"},
+      body["messages"][0])
+os.remove(os.path.join(PROMPTS_DIR, "sub", "deep.txt"))
+body = chat.build_upstream_payload(_msgs, chat._load_config(), sess["id"])
+check("unreadable preset -> EMPTY prompt, the custom text does NOT sneak in",
+      not any(m.get("role") == "system" for m in body["messages"]), body["messages"][:2])
+seed_config(prompt_preset="")
+body = chat.build_upstream_payload(_msgs, chat._load_config(), sess["id"])
+check("no preset -> the custom text is used",
+      body["messages"][0] == {"role": "system", "content": "custom-wins-when-no-preset"},
+      body["messages"][0])
+
+r = run(chat.chat_config_set(FakeRequest(json_body={"prompt_preset": "cinematic.txt"})))
+j = resp_json(r)
+check("config POST stores prompt_preset",
+      j["ok"] and j["config"]["prompt_preset"] == "cinematic.txt", j.get("config"))
+seed_config(prompt_preset="")
+
+# ---------------------------------------------------------------------------
+phase("v88 model list: /api/models registry first, /v1/models fallback, switch route")
+
+FakeClientSession.requests.clear()
+FakeClientSession.script = [
+    FakeUpstream(200, json.dumps({"models": [
+        {"id": "m-loaded", "status": "loaded"},
+        {"id": "m-avail", "status": "available"},
+        {"id": "m-broken", "status": "unavailable"},
+        {"id": "m-loading", "status": "loading"},
+    ], "current": "m-loaded"})),
+]
+r = run(chat.chat_models_list(FakeRequest(method="GET", path="/settings_hub/chat/models")))
+j = resp_json(r)
+check("registry list: unavailable hidden, statuses kept",
+      j["ok"] and j["source"] == "registry" and
+      [(m["id"], m["status"]) for m in j["models"]] ==
+      [("m-loaded", "loaded"), ("m-avail", "available"), ("m-loading", "loading")], j)
+check("registry is read at the SERVER ROOT (not /v1)",
+      FakeClientSession.requests and
+      FakeClientSession.requests[-1][1] == "http://127.0.0.1:8080/api/models",
+      FakeClientSession.requests[-1][1] if FakeClientSession.requests else None)
+
+FakeClientSession.script = [
+    FakeUpstream(404, "no registry here"),                      # GET /api/models
+    FakeUpstream(200, json.dumps({"data": [{"id": "openai-m"}]})),  # GET /v1/models
+]
+r = run(chat.chat_models_list(FakeRequest(method="GET", path="/settings_hub/chat/models")))
+j = resp_json(r)
+check("registry 404 -> /v1/models fallback answers",
+      j["ok"] and j["source"] == "openai" and
+      j["models"] == [{"id": "openai-m", "status": ""}], j)
+
+FakeClientSession.script = [
+    FakeUpstream(500, "boom"),       # GET /api/models
+    FakeUpstream(500, "boom"),       # GET /v1/models
+    FakeUpstream(200, STATUS_JSON),  # GET /v1/status
+]
+r = run(chat.chat_models_list(FakeRequest(method="GET", path="/settings_hub/chat/models")))
+j = resp_json(r)
+check("no registry + no /v1/models -> the current model from /v1/status",
+      j["ok"] and j["source"] == "status" and
+      j["models"] == [{"id": "test-model", "status": "loaded"}], j)
+
+FakeClientSession.script = [
+    FakeUpstream(200, json.dumps({"status": "loaded", "model": {"id": "m-avail"}})),
+]
+r = run(chat.chat_load(FakeRequest(json_body={"model": "m-avail"})))
+j = resp_json(r)
+check("switch goes through POST /api/models/load (the node way)",
+      j["ok"] and j["via"] == "registry", j)
+check("switch hit the server root",
+      FakeClientSession.requests[-1] == ("POST", "http://127.0.0.1:8080/api/models/load",
+                                         {"model": "m-avail"}, FakeClientSession.requests[-1][3]),
+      FakeClientSession.requests[-1][:3])
+
+FakeClientSession.script = [
+    FakeUpstream(404, "no registry"),                      # /api/models/load
+    FakeUpstream(200, json.dumps({"status": "loaded"})),   # /v1/load fallback
+]
+r = run(chat.chat_load(FakeRequest(json_body={"model": "m-avail"})))
+j = resp_json(r)
+check("registry 404 -> /v1/load fallback", j["ok"] and j["via"] == "openai", j)
+
+FakeClientSession.script = [
+    FakeUpstream(200, json.dumps({"models": [
+        {"id": "m-loaded", "status": "loaded"},
+        {"id": "m-avail", "status": "available"},
+    ], "current": "m-loaded"})),
+]
+r = run(chat.chat_test(FakeRequest(method="POST", path="/settings_hub/chat/test",
+                                    json_body={})))
+j = resp_json(r)
+check("test probe now reports the registry source + ids",
+      j["ok"] and j["source"] == "registry" and j["models"] == ["m-loaded", "m-avail"], j)
 
 # ---------------------------------------------------------------------------
 

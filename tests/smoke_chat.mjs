@@ -42,8 +42,17 @@
 //       chat.js, and the mount block calls initChat (source contract).
 //   SO  (v87) ⚙ in the chat header opens the CHAT SETTINGS popup: the URL
 //       row arrives from GET /config, Enter applies it via POST /config.
-//   SP  (v87) 📜 opens the PROMPT popup: a preset chip applies instantly,
-//       Save stores the custom text, Clear empties it.
+//   SP  (v88) 📜 opens the PROMPT popup = the user's CATALOG: the .txt files
+//       of models/LLM/prompts (the PolyStrata path), a live MULTI-WORD
+//       search, [↻] re-scan, a click stores cfg.prompt_preset, Save switches
+//       to the custom text (and deselects the file), Clear = none.
+//   SP2 (v88) [model ▾] reads GET /chat/models: the FULL registry list with
+//       statuses (unavailable hidden), ● / ◐ / ○ marks; selecting a
+//       not-loaded registry model fires POST /chat/load; an openai-source
+//       list does not.
+//   SP3 (v88) the panel manages itself: the ⚙ popup carries the Panel
+//       On/Off row (Off tears the panel + popup down, On re-mounts) and the
+//       native ComfyUI setting (SettingsHub.Chat.enabled) is registered.
 //   SQ  (v87) ⚡ opens the GPU popup: the state line renders from
 //       GET /chat/gpu, the buttons POST the actions (reserve/unload/load/
 //       free_comfy/release) and the notes render.
@@ -112,8 +121,8 @@ function makeFakeApi() {
     const blobs = new Map();      // "<sid>/<name>" -> {bytes, mime, kind, orig}
     let config = {
         url: "http://127.0.0.1:8080/v1", key: "", model: "qwen-vl",
-        system_prompt: "", temperature: 0.8, top_p: 0.95, max_tokens: 1024,
-        reasoning: "default", ctx_depth: 12, media_depth: 1,
+        system_prompt: "", prompt_preset: "", temperature: 0.8, top_p: 0.95,
+        max_tokens: 1024, reasoning: "default", ctx_depth: 12, media_depth: 1,
         img_max_side: 1024, img_max_count: 4, video_frames: 16,
         video_max_side: 768, stream: true, keep_sessions: 20,
         timeout_s: 600, max_file_mb: 20, vram_reserve_mib: 0,
@@ -121,6 +130,16 @@ function makeFakeApi() {
     let healthMode = "ok";        // "ok" | "missing" | "http"
     let sseMode = true;           // /send answers SSE (true) or JSON (false)
     let hangSend = false;         // SF: the send request hangs until aborted
+    // v88: the model registry (the PolyStrata /api/models shape) + the prompt
+    // catalog (the models/LLM/prompts scan) - scriptable per phase
+    let modelItems = [
+        { id: "qwen-vl", status: "loaded" },
+        { id: "glm-4b-air", status: "available" },
+        { id: "qwen3-8b", status: "unavailable" },   // must be HIDDEN (the nodes hide it too)
+    ];
+    let modelSource = "registry";
+    let promptFiles = ["analysis/detailed.txt", "cinematic.txt", "short_story.txt", "notes.md"];
+    let promptDir = "/comfy/models/LLM/prompts";
     const uuid = () => Math.floor(Math.random() * 0xffffffffffff).toString(16).padStart(12, "0");
 
     const jsonResp = (data, status = 200) => ({
@@ -170,12 +189,37 @@ function makeFakeApi() {
                     "keep_sessions", "timeout_s", "max_file_mb", "vram_reserve_mib"]) {
                     if (k in body && Number.isFinite(parseFloat(body[k]))) config[k] = parseFloat(body[k]);
                 }
-                for (const k of ["model", "system_prompt"]) if (k in body) config[k] = String(body[k] || "");
+                for (const k of ["model", "system_prompt"])
+                    if (k in body) config[k] = String(body[k] || "");
+                if ("prompt_preset" in body) config.prompt_preset = String(body.prompt_preset || "");
                 const masked = { ...config, key: config.key ? config.key.slice(0, 2) + "****" + config.key.slice(-4) : "" };
                 return jsonResp({ ok: true, config: masked });
             }
             if (p === "/settings_hub/chat/test" && method === "POST") {
-                return jsonResp({ ok: true, models: ["qwen-vl", "glm-flash"], current: config.model || "qwen-vl", status: null });
+                return jsonResp({ ok: true, source: modelSource,
+                    models: modelItems.filter((m) => m.status !== "unavailable").map((m) => m.id),
+                    current: config.model || "qwen-vl", status: null });
+            }
+            if (p === "/settings_hub/chat/models" && method === "GET") {
+                return jsonResp({ ok: true, source: modelSource,
+                    models: modelItems.filter((m) => m.status !== "unavailable"),
+                    current: config.model || "qwen-vl", model: config.model || "" });
+            }
+            if (p === "/settings_hub/chat/load" && method === "POST") {
+                let body = opts.body;
+                try { body = JSON.parse(body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                const m = String(body?.model || "");
+                config.model = m;
+                modelItems = modelItems.map((x) => x.id === m ? { ...x, status: "loaded" } : { ...x, status: x.status === "loaded" ? "unloaded" : x.status });
+                return jsonResp({ ok: true, status: 200, answer: "{\"status\":\"loaded\"}", via: "registry" });
+            }
+            if (p === "/settings_hub/chat/prompts" && method === "GET") {
+                return jsonResp({ ok: true, dir: promptDir, exists: true, files: promptFiles, error: null });
+            }
+            if (p === "/settings_hub/chat/prompt" && method === "GET") {
+                const name = query.get("name") || "";
+                if (!name.toLowerCase().endsWith(".txt")) return jsonResp({ ok: false, error: "bad prompt name" }, 400);
+                return jsonResp({ ok: true, name, text: "PROMPT-TEXT(" + name + ")" });
             }
             if (p === "/settings_hub/chat/root" && method === "GET") {
                 return jsonResp({ ok: true, root: "user/settings_hub/chat", custom: "", writable: true });
@@ -354,6 +398,8 @@ function makeFakeApi() {
         __sessions: () => sessions,
         __blobs: () => blobs,
         __setHealth: (m) => { healthMode = m; },
+        __setModels: (items, source) => { modelItems = items; modelSource = source || "registry"; },
+        __setPrompts: (files, dir) => { promptFiles = files; if (dir) promptDir = dir; },
         __setSse: (v) => { sseMode = !!v; },
         __setHang: (v) => { hangSend = !!v; },
         __config: () => config,
@@ -741,11 +787,11 @@ check("On re-mounts", !!hooks.panelEl());
 // ---------------------------------------------------------------------------
 phase("SN entry integration (source contract)");
 
-check("entry FILES carries ./chat.js", /"\.\/chat\.js",\s*\/\/ v87/.test(ENTRY_SRC));
-check("entry EXPECTED carries chat", /"chat":\s*"v87"/.test(ENTRY_SRC));
+check("entry FILES carries ./chat.js", /"\.\/chat\.js",\s*\/\/ v88/.test(ENTRY_SRC));
+check("entry EXPECTED carries chat", /"chat":\s*"v88"/.test(ENTRY_SRC));
 check("entry mounts the chat extension", /initChat\(\)/.test(ENTRY_SRC) && /Comfy\.SettingsHub\.chat/.test(ENTRY_SRC));
 check("chat self-reports the pack version",
-    globalThis.__SettingsHubLoaded?.chat === "v87", globalThis.__SettingsHubLoaded?.chat);
+    globalThis.__SettingsHubLoaded?.chat === "v88", globalThis.__SettingsHubLoaded?.chat);
 check("the py module is wired in __init__.py",
     fs.readFileSync(path.join(ROOT, "__init__.py"), "utf8").includes("chat_proxy"));
 
@@ -774,29 +820,126 @@ await chat.applyChatSettings({ url: "http://127.0.0.1:8080/v1" });
 await settle();
 
 // ---------------------------------------------------------------------------
-phase("SP (v87) 📜 prompt popup: preset applies, Save/Clear work");
+phase("SP (v88) 📜 prompt popup: the user's CATALOG - list, live multi-word search, refresh, select");
 
+fakeApi.__setPrompts(["analysis/detailed.txt", "cinematic.txt", "short_story.txt", "notes.md"]);
 hooks.openPromptPop();
 await settle();
 const prPop = hooks.promptPopEl();
 check("prompt popup open", !!prPop && prPop.className.includes("hub-chat-promptpop"));
-const chip2 = prPop.querySelector('[data-cp="concise"]');
-chip2.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+check("GET /chat/prompts fetched the catalog",
+    fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/prompts" && c.method === "GET"));
+check("no invented presets left", !prPop.querySelector('[data-cp="concise"]') && !prPop.innerHTML.includes("Concise assistant"));
+const listEl = prPop.querySelector('[data-cp="list"]');
+check("catalog listed (txt only, relative paths)", listEl.innerHTML.includes("cinematic.txt") &&
+    listEl.innerHTML.includes("analysis/detailed.txt") && !listEl.innerHTML.includes("notes.md"), listEl.innerHTML);
+check("none (custom text) is listed first", listEl.querySelector('[data-cp-name=""]') != null);
+
+// live multi-word search: EVERY word must match the relative path
+const searchIn = prPop.querySelector('[data-cp="search"]');
+searchIn.value = "detailed txt";
+searchIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+check("multi-word search narrows the list",
+    listEl.querySelectorAll("[data-cp-name]").length === 2, listEl.innerHTML); // none + the one match
+searchIn.value = "zzz-nothing";
+searchIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+check("empty result shows the search note", listEl.innerHTML.includes("nothing matches"));
+searchIn.value = "";
+searchIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+
+// select a catalog file -> cfg.prompt_preset
+const fileBtn = listEl.querySelector('[data-cp-name="cinematic.txt"]');
+fileBtn.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
 await settle();
-check("preset chip applied the system prompt", (hooks.cfg().system_prompt || "").includes("concise assistant"),
-    hooks.cfg().system_prompt);
+check("selecting a file stores cfg.prompt_preset", hooks.cfg().prompt_preset === "cinematic.txt",
+    hooks.cfg().prompt_preset);
+check("the file is highlighted in the list",
+    listEl.querySelector('[data-cp-name="cinematic.txt"]').classList.contains("hub-cp-item-on"));
 check("prompt button lit", hooks.promptBtnEl().classList.contains("hub-chat-tb-on"));
+check("button title names the file", hooks.promptBtnEl().title.includes("cinematic.txt"), hooks.promptBtnEl().title);
+
+// [↻] refresh re-fetches the catalog (fresh scan)
+fakeApi.__setPrompts(["only_one.txt"]);
+prPop.querySelector('[data-cp="refresh"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("refresh re-scanned the catalog", listEl.innerHTML.includes("only_one.txt"), listEl.innerHTML);
+
+// Save switches to the custom text (and deselects the preset)
 const ta2 = prPop.querySelector(".hub-cp-ta");
 ta2.value = "Custom owner prompt";
 prPop.querySelector(".hub-cp-save").dispatchEvent(new dom.window.Event("click", { bubbles: true }));
 await settle();
 check("Save stored the custom text", hooks.cfg().system_prompt === "Custom owner prompt", hooks.cfg().system_prompt);
+check("Save DESELECTED the preset", hooks.cfg().prompt_preset === "", hooks.cfg().prompt_preset);
+check("none is highlighted again", listEl.querySelector('[data-cp-name=""]').classList.contains("hub-cp-item-on"));
 prPop.querySelector(".hub-cp-clear").dispatchEvent(new dom.window.Event("click", { bubbles: true }));
 await settle();
 check("Clear emptied the prompt", hooks.cfg().system_prompt === "", JSON.stringify(hooks.cfg().system_prompt));
 check("prompt button unlit", !hooks.promptBtnEl().classList.contains("hub-chat-tb-on"));
 hooks.closePromptPop();
 check("prompt popup closed", !hooks.promptPopEl());
+
+// ---------------------------------------------------------------------------
+phase("SP2 (v88) model dropdown: the FULL registry list, status marks, select = switch");
+
+check("fillModels used GET /chat/models",
+    fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/models" && c.method === "GET"));
+check("models carry statuses (the registry shape)",
+    JSON.stringify(hooks.models()) === JSON.stringify([
+        { id: "qwen-vl", status: "loaded" }, { id: "glm-4b-air", status: "available" }]),
+    JSON.stringify(hooks.models()));
+check("unavailable registry entries are HIDDEN", !hooks.models().some((m) => m.id === "qwen3-8b"));
+check("dropdown shows the loaded mark for the current model",
+    hooks.modelSelEl().innerHTML.includes("● qwen-vl"), hooks.modelSelEl().innerHTML);
+check("dropdown shows the available mark for the other model",
+    hooks.modelSelEl().innerHTML.includes("○ glm-4b-air"), hooks.modelSelEl().innerHTML);
+
+// selecting the not-loaded registry model SWITCHES the server (the node way)
+hooks.modelSelEl().value = "glm-4b-air";
+hooks.modelSelEl().dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+await settle();
+check("selection saved cfg.model", hooks.cfg().model === "glm-4b-air", hooks.cfg().model);
+check("POST /chat/load fired (registry switch)",
+    fakeApi.__calls().some((c) => c.url === "/settings_hub/chat/load" && c.method === "POST" &&
+        String(c.body).includes("glm-4b-air")));
+check("switch marked the model loaded",
+    hooks.models().find((m) => m.id === "glm-4b-air").status === "loaded",
+    JSON.stringify(hooks.models()));
+
+// an openai-style server (no registry) just takes the name - no switch call
+const loadCallsBefore = fakeApi.__calls().filter((c) => c.url === "/settings_hub/chat/load").length;
+fakeApi.__setModels([{ id: "llama-3", status: "" }], "openai");
+await hooks.fillModels(false);
+await settle();
+check("openai fallback list rendered with the plain mark",
+    hooks.modelSelEl().innerHTML.includes("○ llama-3"), hooks.modelSelEl().innerHTML);
+hooks.modelSelEl().value = "llama-3";
+hooks.modelSelEl().dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+await settle();
+check("openai source does NOT fire the switch",
+    fakeApi.__calls().filter((c) => c.url === "/settings_hub/chat/load").length === loadCallsBefore);
+fakeApi.__setModels([
+    { id: "qwen-vl", status: "loaded" }, { id: "glm-4b-air", status: "available" }], "registry");
+
+// ---------------------------------------------------------------------------
+phase("SP3 (v88) the chat panel manages itself: Panel On/Off in ⚙ + the native setting");
+
+hooks.openSetPop();
+await settle();
+const setPop3 = hooks.setPopEl();
+const panelSel3 = setPop3.querySelector('[data-cs="panel"]');
+check("⚙ popup carries the Panel row", !!panelSel3, setPop3.innerHTML.slice(0, 400));
+check("Panel row shows On", panelSel3.value === "1");
+panelSel3.value = "0";
+panelSel3.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+await settle();
+check("Panel Off tore the panel down (incl. the popup)", !hooks.panelEl() && !hooks.setPopEl());
+chat.setChatOn(true);
+await settle();
+check("Panel On re-mounted the chat", !!hooks.panelEl());
+check("source-level: the native ComfyUI setting is registered",
+    fs.readFileSync(path.join(ROOT, "web", "chat.js"), "utf8").includes('id: "SettingsHub.Chat.enabled"'));
+await settle();
 
 // ---------------------------------------------------------------------------
 phase("SQ (v87) ⚡ GPU popup: state + actions");

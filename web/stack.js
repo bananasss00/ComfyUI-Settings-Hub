@@ -1,6 +1,18 @@
 // ============================================================================
 // SettingsHub - Paste Stack (v83): standalone floating clipboard panel
 // ----------------------------------------------------------------------------
+// v88 (owner correction 2026-11-09: "the settingshub is not present in every
+//   workflow and managing the stacker and chat from it is inconvenient - they
+//   are SEPARATE useful utilities; how is it done right in ComfyUI?"):
+//   SELF-MANAGED PANEL: the hub settings lose the whole Stack section - the
+//   panel header gains a ⚙ button opening the STACK SETTINGS popup with the
+//   exact rows the hub used to host (Panel On/Off, Max saved entries, the
+//   v77 scope, the v84 storage folder - same Enter/Esc contract). The SAME
+//   On/Off switch is registered as a NATIVE ComfyUI setting
+//   (app.ui.settings.addSetting, id "SettingsHub.PasteStack.enabled" ->
+//   ComfyUI Settings → SettingsHub) - reachable in EVERY workflow, with or
+//   without a hub node, so an Off panel can always be brought back.
+// ============================================================================
 // v83 (owner report 2026-11-09: "the text can be viewed - now images, video
 //   and files must be viewable too, the small thumb hides the details that
 //   matter"): MEDIA VIEWER - every image/video/audio/file card carries a 🔍
@@ -20,10 +32,10 @@
 //   stays the 🔍 of text cards; teardown() removes the overlay with the
 //   panel (same viewerEl channel).
 // ============================================================================
-// v87 self-report (single-source version, docs/plan-versions.md): the
+// v88 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v87";
+globalThis.__SettingsHubLoaded["stack"] = "v88";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -406,10 +418,45 @@ export function isStackOn() {
     catch (_) { return true; }
 }
 
-export function setStackOn(v) {
+let nativeStackSetting = null; // v88: the ComfyUI Settings dialog mirror
+
+export function setStackOn(v, src) {
     try { localStorage.setItem(LS_ON, v ? "1" : "0"); } catch (_) {}
+    // v88: keep the native setting in sync when the flip came from OUR ui
+    // (the panel ⚙ popup); a "native" flip already IS that setting.
+    if (src !== "native") {
+        try { nativeStackSetting?.set?.(!!v); } catch (_) {}
+    }
     if (v && !mounted) initStack();
     else if (!v) teardown();
+}
+
+// v88: register the panel switch in ComfyUI's OWN Settings dialog (the
+// SettingsHub group) - the way back when the panel (and its chip) is hidden,
+// reachable in every workflow. Fail-safe on old frontends.
+function registerNativeStackSwitch() {
+    if (nativeStackSetting) return;
+    try {
+        const s = app?.ui?.settings;
+        if (!s || typeof s.addSetting !== "function") return;
+        nativeStackSetting = s.addSetting({
+            id: "SettingsHub.PasteStack.enabled",
+            name: "Paste Stack panel (SettingsHub)",
+            type: "boolean",
+            defaultValue: isStackOn(),
+            onChange: (value) => {
+                const v = !!value;
+                if (v !== isStackOn()) setStackOn(v, "native");
+            },
+        });
+        try {
+            if (nativeStackSetting && typeof nativeStackSetting.set === "function") {
+                nativeStackSetting.set(isStackOn());
+            }
+        } catch (_) {}
+    } catch (e) {
+        console.warn("[SettingsHub] native stack setting unavailable:", e);
+    }
 }
 
 export function getStackMax() {
@@ -518,6 +565,144 @@ export async function setStackRootPath(raw) {
             : "Stack storage back to the default (user/settings_hub/stack)");
     }
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// v88: ⚙ STACK SETTINGS POPUP - the panel manages itself. The rows are the
+// exact ones the hub ⚙ used to host (Panel On/Off, Max saved entries, the
+// v77 scope, the v84 storage folder); the hub no longer carries them. The
+// popup is a body-level .hub-menu (the chat popup pattern): ONE instance,
+// outside-mousedown + Esc close, clamped into the viewport.
+// ---------------------------------------------------------------------------
+
+let stkPop = null;
+
+function closeStkPop() {
+    try { stkPop?.remove(); } catch (_) {}
+    stkPop = null;
+    try { window.removeEventListener("mousedown", onStkPopDown, true); } catch (_) {}
+    try { window.removeEventListener("keydown", stkPopKey, true); } catch (_) {}
+}
+function onStkPopDown(e) {
+    if (!stkPop || stkPop.contains(e.target)
+        || panel?.querySelector(".hub-stack-sett")?.contains?.(e.target)) return;
+    closeStkPop();
+}
+const stkPopKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeStkPop(); }
+};
+
+function openStkSettingsPop() {
+    if (stkPop) { closeStkPop(); return; }
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-stk-setpop";
+    pop.innerHTML =
+        `<div class="hub-menu-title">⚙ Stack settings</div>` +
+        `<label class="hub-cs-row"><span>Stack panel</span>` +
+        `<select class="hub-cs-sel" data-stk="on">` +
+        `<option value="1">On (default)</option>` +
+        `<option value="0">Off - hide the panel + chip</option>` +
+        `</select></label>` +
+        `<label class="hub-cs-row"><span>Max saved entries</span>` +
+        `<select class="hub-cs-sel" data-stk="max">` +
+        STACK_MAX_CHOICES.map((n) => `<option value="${n}">${n}${n === STACK_MAX_DEFAULT ? " · default" : ""}</option>`).join("") +
+        `</select></label>` +
+        `<label class="hub-cs-row"><span>Stack scope (v77)</span>` +
+        `<select class="hub-cs-sel" data-stk="scope">` +
+        `<option value="global">Shared - all workflows (default)</option>` +
+        `<option value="workflow">Per-workflow</option>` +
+        `</select></label>` +
+        `<div class="hub-cs-sect">Storage folder (v84)</div>` +
+        `<div class="hub-cs-row"><span class="hub-cs-box">` +
+        `<input type="text" class="hub-cs-in hub-cs-path" data-stk="root" ` +
+        `placeholder="default: user/settings_hub/stack" spellcheck="false" autocomplete="off">` +
+        `<button type="button" class="hub-cs-chip" data-stk-btn="rootdef">default</button></span></div>` +
+        `<div class="hub-cs-info" data-stk="rootinfo"></div>` +
+        `<div class="hub-cs-hint">Enter applies the folder, Esc reverts it. Off hides the panel ` +
+        `and its chip; the switch is ALSO in ComfyUI Settings → SettingsHub (reachable in ` +
+        `every workflow). Switching the scope or the folder never moves entries - each ` +
+        `location/scope keeps its own. 🗑 in the panel header clears the entries.</div>`;
+    document.body.appendChild(pop);
+    stkPop = pop;
+
+    const onSel = pop.querySelector('[data-stk="on"]');
+    const maxSel = pop.querySelector('[data-stk="max"]');
+    const scopeSel = pop.querySelector('[data-stk="scope"]');
+    const rootIn = pop.querySelector('[data-stk="root"]');
+    const rootInfo = pop.querySelector('[data-stk="rootinfo"]');
+
+    onSel.value = isStackOn() ? "1" : "0";
+    onSel.addEventListener("change", () => {
+        const on = onSel.value === "1";
+        setStackOn(on);   // Off tears the panel down - this popup dies with it
+        if (on && stkPop) onSel.value = isStackOn() ? "1" : "0";
+    });
+    maxSel.value = String(getStackMax());
+    maxSel.addEventListener("change", () => {
+        maxSel.value = String(setStackMax(maxSel.value));
+        renderAll();
+    });
+    scopeSel.value = getStackScope();
+    scopeSel.addEventListener("change", () => {
+        scopeSel.value = setStackScope(scopeSel.value);
+        // setStackScope re-mounts on a change - this popup dies with the panel
+    });
+
+    const rootApply = async () => {
+        const res = await setStackRootPath(rootIn.value);
+        if (res.ok) {
+            rootIn.value = res.custom || "";
+            rootIn.dataset.cur = rootIn.value;
+            rootInfo.classList.remove("hub-cs-err");
+            rootInfo.textContent = "Now: " + (res.root || "") +
+                (res.custom ? " (custom)" : " (default)") +
+                (res.saved === false ? " - could not save stack_root.json (folder works for this session only)" : "");
+        } else {
+            rootInfo.classList.add("hub-cs-err");
+            rootInfo.textContent = "Not applied: " + (res.error || "error") +
+                (res.stale ? " - the server has no /stack/root route (old py): update the FULL pack and RESTART ComfyUI." : "");
+        }
+    };
+    rootIn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); void rootApply(); }
+        else if (e.key === "Escape") {
+            e.stopPropagation();
+            rootIn.value = rootIn.dataset.cur || "";
+            rootIn.blur();
+        }
+    });
+    pop.querySelector('[data-stk-btn="rootdef"]').addEventListener("click", () => {
+        rootIn.value = "";
+        void rootApply();
+    });
+    void (async () => {
+        const info = await getStackRootInfo();
+        if (!info || !rootInfo.isConnected) return; // popup closed / old py
+        rootIn.dataset.cur = info.custom || "";
+        if (!rootIn.value) rootIn.value = info.custom || "";
+        rootInfo.classList.remove("hub-cs-err");
+        rootInfo.textContent = "Now: " + (info.root || "") +
+            (info.custom ? " (custom)" : " (default)") +
+            (info.writable === false ? " - NOT writable" : "");
+    })();
+
+    // place near the panel's ⚙ (viewport-clamped like the chat popups)
+    try {
+        const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+        pop.style.maxHeight = Math.max(200, vh - 16) + "px";
+        const btn = panel?.querySelector(".hub-stack-sett");
+        const r = btn?.getBoundingClientRect?.();
+        let x = r ? Math.max(8, Math.min(r.left, vw - (pop.offsetWidth || 300) - 8)) : 12;
+        let y = r ? r.bottom + 6 : 12;
+        if (y + (pop.offsetHeight || 300) > vh - 8) {
+            y = Math.max(8, (r?.top || 40) - (pop.offsetHeight || 300) - 6);
+        }
+        pop.style.left = x + "px";
+        pop.style.top = y + "px";
+    } catch (_) {}
+    pop.addEventListener("mousedown", (e) => e.stopPropagation());
+    window.addEventListener("mousedown", onStkPopDown, true);
+    window.addEventListener("keydown", stkPopKey, true);
 }
 
 /** The current workflow's stack id - resolved FRESH at every call so a
@@ -2640,6 +2825,7 @@ function openMediaViewer(item, kind) {
 // ---------------------------------------------------------------------------
 
 function teardown() {
+    closeStkPop();  // v88: the ⚙ settings popup must not outlive the panel
     closeViewer(); // v79: the full-text overlay must not outlive the panel
     try { panel?.remove(); } catch (_) {}
     try { chip?.remove(); } catch (_) {}
@@ -2663,10 +2849,13 @@ function buildDom() {
         `<span class="hub-stack-ico">📋</span><span class="hub-stack-title">Stack</span>` +
         `<span class="hub-stack-scope" style="display:none"></span>` +
         `<span class="hub-stack-count">0</span>` +
+        // v88: the stack manages itself - ⚙ opens ITS OWN settings popup
+        // (the rows the hub ⚙ used to host)
+        `<button type="button" class="hub-btn hub-stack-sett" title="Stack settings (On/Off, max entries, scope, storage folder)">⚙</button>` +
         `<button type="button" class="hub-btn hub-stack-clear" title="Clear ALL entries (click twice to confirm)">🗑</button>` +
         `<button type="button" class="hub-btn hub-stack-min" title="Minimize to chip">–</button>` +
-        // v75: no [✕] close button - the panel is dismissed only via
-        // ⚙ Hub settings → Stack → Off (setStackOn(false) from the renderer).
+        // v75: no [✕] close button - the panel is dismissed via its OWN ⚙
+        // popup (v88) or ComfyUI Settings → SettingsHub (the native switch).
         `</div>` +
         `<div class="hub-stack-note" style="display:none"></div>` +
         `<div class="hub-stack-tabs"></div>` +
@@ -2716,6 +2905,7 @@ function buildDom() {
 
     // wiring
     pasteEl.addEventListener("click", () => captureFromRead());
+    panel.querySelector(".hub-stack-sett").addEventListener("click", () => openStkSettingsPop());
     panel.querySelector(".hub-stack-clear").addEventListener("click", (e) => panelClearAll(e.currentTarget));
     panel.querySelector(".hub-stack-min").addEventListener("click", () => setMinimized(true));
     // v75: the hide/close wiring is intentionally absent - see buildDom().
@@ -3056,6 +3246,7 @@ function hookWorkflowSwitch() {
 
 export function initStack() {
     if (!isStackOn()) return;
+    registerNativeStackSwitch();  // v88: the ComfyUI Settings dialog switch
     const seq = ++initSeq;
     teardown();
     // v77: a fresh context - the list must never leak ACROSS scopes. In
@@ -3140,6 +3331,10 @@ export function __stackTestHooks() {
         panelEl: () => panel,
         chipEl: () => chip,
         listEl: () => listEl,
+        // v88: the own settings popup introspection
+        openStkSettingsPop,
+        closeStkPop,
+        stkPopEl: () => stkPop,
         setPasteHover: (v) => { pasteHover = !!v; },
         viewFilter: () => ({ ...viewFilter }),
         dragState: () => (dragCtx ? { started: !!dragCtx.started, target: dragCtx.target } : null),

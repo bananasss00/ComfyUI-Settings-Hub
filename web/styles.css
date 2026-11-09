@@ -4726,7 +4726,63 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 
 /* --- 📜 system prompt popup ------------------------------------------------ */
 
-.hub-cp-presets { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 2px; }
+/* v88: the catalog (the user's own .txt files in models/LLM/prompts):
+   a search row, a scrollable file list, selected/empty states */
+.hub-cp-searchrow {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 7px 2px 4px;
+}
+.hub-cp-search { flex: 1 1 auto; min-width: 0; }
+.hub-cp-list {
+    margin: 4px 2px;
+    max-height: 180px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid #2c2c44;
+    border-radius: 4px;
+    background: #0d0d18;
+    padding: 3px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    scrollbar-width: thin;
+    scrollbar-color: #3d4460 #191930;
+}
+.hub-cp-list::-webkit-scrollbar { width: 8px; }
+.hub-cp-list::-webkit-scrollbar-track { background: #191930; }
+.hub-cp-list::-webkit-scrollbar-thumb { background: #3d4460; border-radius: 4px; }
+.hub-cp-item {
+    text-align: left;
+    background: transparent;
+    color: #c9c9e8;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    font: 11px/1.4 "Inter", -apple-system, sans-serif;
+    padding: 3px 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    outline: none;
+}
+.hub-cp-item:hover { background: #1f1f36; color: #fff; border-color: #3a3a55; }
+.hub-cp-item.hub-cp-item-on {
+    background: #24403a;
+    border-color: #3f7a6c;
+    color: #b8f0dd;
+}
+.hub-cp-item.hub-cp-item-on:hover { background: #2c4f46; color: #e2fff4; }
+.hub-cp-empty {
+    font-size: 10px;
+    line-height: 1.45;
+    color: #8a8ab0;
+    padding: 5px 4px;
+    overflow-wrap: anywhere;
+}
+.hub-cp-mono { font-family: ui-monospace, Consolas, monospace; color: #dfe6f5; }
+
 .hub-cp-ta {
     width: calc(100% - 4px);
     box-sizing: border-box;
@@ -4742,6 +4798,22 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 }
 .hub-cp-ta:focus { border-color: #5a5a9e; }
 .hub-cp-btns { display: flex; gap: 6px; margin: 7px 2px; flex-wrap: wrap; }
+
+/* --- ⚙ stack settings popup (v88) ------------------------------------------ */
+
+.hub-stk-setpop {
+    width: 320px;
+    max-width: calc(100vw - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 8px;
+    scrollbar-width: thin;
+    scrollbar-color: #3d4460 #191930;
+}
+.hub-stk-setpop::-webkit-scrollbar { width: 8px; }
+.hub-stk-setpop::-webkit-scrollbar-track { background: #191930; }
+.hub-stk-setpop::-webkit-scrollbar-thumb { background: #3d4460; border-radius: 4px; }
+.hub-stk-setpop .hub-cs-in.hub-cs-path { flex: 1 1 auto; }
 
 /* --- ⚡ GPU & memory popup -------------------------------------------------- */
 

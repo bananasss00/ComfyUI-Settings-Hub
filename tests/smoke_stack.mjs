@@ -619,9 +619,9 @@ phase("SI window states — minimize to chip, restore; NO close button (v75), se
     await settle();
     check("SI: no [✕] close button in the header (v75: removed)",
         !panel().querySelector(".hub-stack-hide"));
-    check("SI: header buttons are exactly 🗑 + [–] (no third button)",
+    check("SI: header buttons are exactly ⚙ + 🗑 + [–] (v88: the own settings popup)",
         [...panel().querySelectorAll(".hub-stack-head button")].map((b) => b.className).join(",") ===
-            "hub-btn hub-stack-clear,hub-btn hub-stack-min",
+            "hub-btn hub-stack-sett,hub-btn hub-stack-clear,hub-btn hub-stack-min",
         [...panel().querySelectorAll(".hub-stack-head button")].map((b) => b.className).join(","));
     panel().querySelector(".hub-stack-min").click();
     await settle();
@@ -634,10 +634,28 @@ phase("SI window states — minimize to chip, restore; NO close button (v75), se
     // v75: the ONLY way to remove the panel is the settings switch (the gear
     // popup calls setStackOn(false); the ✕ route no longer exists).
     check("SI: isStackOn still true before the settings toggle", stack.isStackOn() === true);
-    stack.setStackOn(false);
+
+    // v88: the panel's OWN ⚙ settings popup (the rows the hub used to host)
+    panel().querySelector(".hub-stack-sett").click();
     await settle();
-    check("SI: settings Off removes the panel entirely", !panel());
-    check("SI: settings Off flips isStackOn off", stack.isStackOn() === false);
+    const stkPop = hooks.stkPopEl();
+    check("SI: ⚙ opens the stack's own settings popup", !!stkPop && stkPop.className.includes("hub-stk-setpop"));
+    check("SI: the popup carries the four rows",
+        !!stkPop.querySelector('[data-stk="on"]') && !!stkPop.querySelector('[data-stk="max"]') &&
+        !!stkPop.querySelector('[data-stk="scope"]') && !!stkPop.querySelector('[data-stk="root"]'));
+    check("SI: Panel row shows On", stkPop.querySelector('[data-stk="on"]').value === "1");
+    const maxSelSi = stkPop.querySelector('[data-stk="max"]');
+    maxSelSi.value = "200";
+    maxSelSi.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    check("SI: max row applies via setStackMax", stack.getStackMax() === 200, stack.getStackMax());
+    stack.setStackMax(100);
+    // Panel Off THROUGH THE POPUP tears the panel + popup down
+    const onSelSi = stkPop.querySelector('[data-stk="on"]');
+    onSelSi.value = "0";
+    onSelSi.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    check("SI: popup Off removes the panel AND the popup", !panel() && !hooks.stkPopEl());
+    check("SI: popup Off flipped isStackOn off", stack.isStackOn() === false);
     stack.setStackOn(true);
     await settle();
     check("SI: setStackOn(true) re-mounts the panel", !!panel());
@@ -755,28 +773,34 @@ phase("SL v76 probe — health classification, green notes, retry recovers");
 }
 
 // ===========================================================================
-// SJ - gear popup integration (source-level, same wiring pattern as v57+)
+// SJ - settings integration (source-level). v88: the hub renderer hosts NO
+// Stack rows anymore - the panel manages itself via its OWN ⚙ popup, and
+// the On/Off switch is registered as a NATIVE ComfyUI setting.
 // ===========================================================================
 
-phase("SJ gear popup — Stack section wired in the renderer");
+phase("SJ stack settings — own ⚙ popup since v88, the hub hosts nothing");
 {
     const src = fs.readFileSync(path.join(ROOT, "web", "hub_ui_renderer.js"), "utf8");
-    check("SJ: Stack section exists in the settings popup", src.includes('<div class="hub-set-section">Stack</div>'));
-    check("SJ: On/Off select wired", src.includes('data-set-role="stackon"') && src.includes("setStackOn("));
-    check("SJ: max entries select wired", src.includes('data-set-role="stackmax"') && src.includes("setStackMax("));
-    check("SJ: v74 - the clear button LEFT the settings popup",
-        !src.includes('data-set-role="stackclear"') && !src.includes("stackClearAllFlow"));
-    check("SJ: v75 - the hint documents the no-close-button contract",
-        src.includes("There is NO close button on the panel (v75)"));
-    check("SJ: v77 - the Stack scope select is wired",
-        src.includes('data-set-role="stackscope"') && src.includes("setStackScope("));
-    check("SJ: v84 - the storage-folder row is wired (input + default chip + status line)",
-        src.includes('data-set-role="stackroot"') &&
-        src.includes('data-set-role="stackroot-def"') &&
-        src.includes('data-set-role="stackroot-info"') &&
-        src.includes("setStackRootPath(") && src.includes("getStackRootInfo("));
-    check("SJ: renderer imports the stack module", src.includes('from "./stack.js"'));
+    check("SJ: v88 - the Stack section LEFT the hub settings popup",
+        !src.includes('<div class="hub-set-section">Stack</div>'));
+    check("SJ: v88 - the Chat section LEFT the hub settings popup too",
+        !src.includes('data-set-role="chaton"') && !src.includes('<div class="hub-set-section">Chat'));
+    check("SJ: v88 - the hint names both panels as standalone + the native switch",
+        src.includes("Panels (v88)") && src.includes("Settings → SettingsHub"));
+    check("SJ: v88 - the renderer imports nothing from the panels anymore",
+        !src.includes('import { isStackOn') && !src.includes('import { isChatOn'));
     const ssrc = fs.readFileSync(path.join(ROOT, "web", "stack.js"), "utf8");
+    check("SJ: v88 - the panel ⚙ button exists in the header",
+        ssrc.includes("hub-stack-sett") && ssrc.includes("openStkSettingsPop"));
+    check("SJ: v88 - the own popup carries the four rows (On/Off, max, scope, folder)",
+        ssrc.includes('data-stk="on"') && ssrc.includes('data-stk="max"') &&
+        ssrc.includes('data-stk="scope"') && ssrc.includes('data-stk="root"') &&
+        ssrc.includes("setStackRootPath(") && ssrc.includes("getStackRootInfo("));
+    check("SJ: v88 - the popup dies with the panel (teardown closes it)",
+        ssrc.includes("closeStkPop();") && ssrc.includes("closeStkPop();  // v88"));
+    check("SJ: v88 - the native ComfyUI setting is registered",
+        ssrc.includes("SettingsHub.PasteStack.enabled") &&
+        ssrc.includes("app?.ui?.settings") && ssrc.includes('s.addSetting('));
     check("SJ: v74 - the clear button lives in the PANEL HEADER",
         ssrc.includes("hub-stack-clear") && ssrc.includes("panelClearAll"));
     check("SJ: v75 - the hide button is gone from stack.js entirely",
