@@ -221,7 +221,7 @@ const appStub = {
 };
 appStub.api = makeFakeApi();
 globalThis.__HUB_APP_STUB__ = appStub;
-globalThis.__SettingsHubBuild = "v94";
+globalThis.__SettingsHubBuild = "v95";
 
 const sb = makeSandbox();
 const core = await import(sb.core);
@@ -232,10 +232,10 @@ const hooks = chat.__chatTestHooks();
 // ---------------------------------------------------------------------------
 phase("PA build v92 + version manifest");
 {
-    // v94: the pack moved on - the manifest expectations follow the truth
-    // (this round touched ONLY chat + hub_ui_renderer; stack/context_menu/
-    // launcher/core self-report v93 still)
-    check("PA the entry reports v94", globalThis.__SettingsHubBuild === "v94");
+    // v95: the pack moved on - the manifest expectations follow the truth
+    // (this round touched ONLY styles.css; every module keeps its
+    // self-report of the last functional change)
+    check("PA the entry reports v95", globalThis.__SettingsHubBuild === "v95");
     check("PA chat self-reports v94", globalThis.__SettingsHubLoaded?.chat === "v94");
     check("PA launcher self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.launcher === "v93");
     check("PA core self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.core === "v93");

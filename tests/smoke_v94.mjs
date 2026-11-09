@@ -2,8 +2,8 @@
 // tests/smoke_v94.mjs - v94 regression suite (3 owner follow-up fixes to v93)
 // ----------------------------------------------------------------------------
 // Covers the owner requests that shipped in v94:
-//   PA  build/manifest: the entry reports v94; chat + hub_ui_renderer
-//       self-report v94; the styles.css stamp query moved;
+//   PA  build/manifest: the entry reports v95 (v95 CSS-only fix round); chat
+//       + hub_ui_renderer self-report v94; the styles.css stamp query moved;
 //   PB  ONE-SHOT ACCUMULATION (owner: "в этом огромном блоке получилась
 //       как история - рассуждения первого запроса + второго"): the live
 //       stream bubble is DROPPED when a run finishes and when the next run
@@ -262,7 +262,7 @@ const appStub = {
 };
 appStub.api = makeFakeApi();
 globalThis.__HUB_APP_STUB__ = appStub;
-globalThis.__SettingsHubBuild = "v94";
+globalThis.__SettingsHubBuild = "v95";
 
 const sb = makeSandbox();
 const core = await import(sb.core);
@@ -271,9 +271,9 @@ const chat = await import(sb.chat);
 const hooks = chat.__chatTestHooks();
 
 // ---------------------------------------------------------------------------
-phase("PA build v94 + version manifest");
+phase("PA build v95 + version manifest");
 {
-    check("PA the entry reports v94", globalThis.__SettingsHubBuild === "v94");
+    check("PA the entry reports v95", globalThis.__SettingsHubBuild === "v95");
     check("PA chat self-reports v94", globalThis.__SettingsHubLoaded?.chat === "v94");
     check("PA launcher self-reports v93 (unchanged this round)",
         globalThis.__SettingsHubLoaded?.launcher === "v93");
@@ -285,8 +285,8 @@ phase("PA build v94 + version manifest");
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat + renderer v94",
         entrySrc.includes('"chat": "v94"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the v94 fix round",
-        entrySrc.includes("web build: v94 - HUB RENAME APPLY + STACK CARD BUTTONS + ONE-SHOT BUBBLE FIXES"));
+    check("PA the banner names the v95 fix round",
+        entrySrc.includes("web build: v95 - HUB RENAME POPUP ABOVE THE HUB WINDOW"));
 }
 
 // ---------------------------------------------------------------------------

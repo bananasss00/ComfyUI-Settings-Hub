@@ -5193,10 +5193,16 @@ body.sh-modal-open .hub-sh-note {
     0%, 100% { transform: scale(1); opacity: 1; }
     50% { transform: scale(1.35); opacity: 0.65; }
 }
-/* v92: the hub rename popup (the ✏ Rename hub right-click action) */
+/* v92: the hub rename popup (the ✏ Rename hub right-click action).
+   v95 (owner: "сам попап находится под хабом и приходится сам хаб
+   отодвигать"): it stacked at 99920 - BELOW the floating hub window
+   (.hub-pin-panel, 99990) - and it is anchored to the window's top-left
+   corner, so whenever the two overlapped the window covered the input.
+   100002 puts it above the hub window and every other hub floating layer;
+   the v90 modal guard still hides it when a ComfyUI modal is open. */
 .hub-hub-rename-pop {
     position: fixed;
-    z-index: 99920;
+    z-index: 100002;
     min-width: 280px;
     max-width: min(420px, calc(100vw - 16px));
     padding: 10px 12px;
