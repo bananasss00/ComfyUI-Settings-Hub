@@ -492,7 +492,7 @@ async def stack_get(request):
 # (the web panel compares it against globalThis.__SettingsHubBuild and warns
 # about a half-updated install: web/ replaced while py/ stayed old, or the
 # page reloaded before ComfyUI restarted). AGENTS.md release checklist line.
-STACK_SERVER_VERSION = "v96"
+STACK_SERVER_VERSION = "v97"
 
 
 @PromptServer.instance.routes.get("/settings_hub/stack/health")
@@ -749,7 +749,12 @@ async def stack_add_file(request):
 async def stack_patch(request):
     """v72: edit ONE entry's metadata: rename, tags, pin, usage counter.
     Body: JSON {id, name?, tags?, pinned?, uses?, bumpUses?, tab?} (v79 adds
-    tab: set/clear the display group). Missing keys leave the entry
+    tab: set/clear the display group). v97 adds `text`: edit the content of
+    a TEXT entry (the Full text view editor). Only type:"text" accepts it -
+    media blobs and node fragments stay immutable here; a file-backed text
+    (>100 KB at creation) rewrites its .txt blob in place, an inline text
+    that grew past TEXT_INLINE_LIMIT is promoted to a blob; size+hash follow
+    the new content so dedupe stays honest. Missing keys leave the entry
     untouched. The response carries the updated entry so the client can
     mirror the server truth instead of guessing."""
     try:
@@ -799,6 +804,38 @@ async def stack_patch(request):
                 it["tab"] = tb
             else:
                 it.pop("tab", None)  # v79: empty string = back to "All"
+        # v97: edit the CONTENT of a text entry (the Full text view editor).
+        # Refusals answer with an error so the client can keep the textarea
+        # open (a silent ignore would look like a lost save).
+        if "text" in body:
+            if it.get("type") != "text":
+                return web.json_response(
+                    {"ok": False, "error": "text edit allowed for text entries only"},
+                    status=400)
+            nt = body.get("text")
+            if not isinstance(nt, str) or not nt.strip():
+                return web.json_response({"ok": False, "error": "empty text"}, status=400)
+            if len(nt) > MAX_TEXT_CHARS:
+                return web.json_response({"ok": False, "error": "text too large"}, status=413)
+            data = nt.encode("utf-8", "ignore")
+            if it.get("file"):
+                # file-backed text (>TEXT_INLINE_LIMIT at creation): rewrite
+                # the .txt blob in place, keep the backing
+                _ensure_dirs(wf)
+                with open(os.path.join(_items_dir(wf), it["file"]), "wb") as f:
+                    f.write(data)
+            elif len(data) > TEXT_INLINE_LIMIT:
+                # inline text grew past the limit - promote to a blob
+                _ensure_dirs(wf)
+                blob_name = it["id"] + ".txt"
+                with open(os.path.join(_items_dir(wf), blob_name), "wb") as f:
+                    f.write(data)
+                it["file"] = blob_name
+                it.pop("text", None)
+            else:
+                it["text"] = nt
+            it["size"] = len(data)
+            it["hash"] = _hash_bytes(data)
         if "uses" in body:
             try:
                 it["uses"] = max(0, min(1_000_000, int(body.get("uses"))))

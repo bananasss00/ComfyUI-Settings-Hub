@@ -67,6 +67,17 @@
 //       300 KB; binary: "no preview" + download) and the COMPARE DISPLAY
 //       FIX contract (explicit display values - slots/divider/canvas are
 //       never hidden by an inline "" again) in SU/SV.
+//   UG  v97: the UNIVERSAL inline editor - ✎ opens name/tags/tab for EVERY
+//       kind (image and nodes cards included; the edit branch used to be
+//       reachable for text only); cancel sends no PATCH.
+//   UH  v97: TEXT EDIT in the Full text view - ✎ swaps the read view for a
+//       textarea, ✓ saves through PATCH {text} (server truth mirrored into
+//       the card excerpt), ✕/Esc discards (Esc first cancels the edit,
+//       second Esc closes the viewer); media viewers carry no text editor.
+//   UI  v97: TAB-STRIP WHEEL - the vertical wheel scrolls the hidden-
+//       scrollbar strip horizontally (deltaMode 0/1/2, a horizontal delta
+//       wins), the event is consumed only when the strip overflows, and
+//       revealActiveTab keeps the opened chip inside the visible strip.
 //
 // Run from the extension root:  node tests/smoke_stack.mjs   (jsdom required)
 // ============================================================================
@@ -294,6 +305,18 @@ function makeFakeApi() {
                     if (clean.length) it.tags = clean; else delete it.tags;
                 }
                 if ("pinned" in body) it.pinned = !!body.pinned;
+                if ("tab" in body) {
+                    const tb = String(body.tab ?? "").trim().slice(0, 48);
+                    if (tb) it.tab = tb; else delete it.tab;
+                }
+                // v97: text edit mirrors py semantics - text entries only
+                if ("text" in body) {
+                    if (it.type !== "text") return jsonResp({ ok: false, error: "text edit allowed for text entries only" }, 400);
+                    const nt = body.text;
+                    if (typeof nt !== "string" || !nt.trim()) return jsonResp({ ok: false, error: "empty text" }, 400);
+                    it.text = nt;
+                    it.size = Buffer.byteLength(nt, "utf8");
+                }
                 if ("uses" in body) it.uses = Math.max(0, parseInt(body.uses, 10) || 0);
                 if (body.bumpUses) it.uses = (it.uses || 0) + 1;
                 return jsonResp({ ok: true, item: { ...it } });
@@ -2265,6 +2288,214 @@ phase("UF node fragments — legacy fallback copy (no return value) is captured 
     await settle();
     check("UF: a non-fragment clipboard value is ignored",
         hooks.items().filter((x) => x.type === "nodes").length === nNow);
+}
+
+// ===========================================================================
+// UG-UI - v97: UNIVERSAL CARD EDITING + TEXT EDIT IN THE FULL TEXT VIEW +
+//         TAB-STRIP WHEEL SCROLL
+// ===========================================================================
+
+phase("UG universal inline editor — name/tags/tab on EVERY kind (✎ of media/nodes cards used to do nothing)");
+{
+    // an image entry through the REAL capture path
+    await hooks.addImageBlob(new dom.window.Blob([new Uint8Array([1, 2, 3, 4, 5, 6, 7])], { type: "image/png" }), "shot one");
+    await settle();
+    const img = imgCards()[0]; // newest first
+    check("UG: an image card exists", !!img);
+    img.querySelector('[data-act="edit"]').click();
+    await settle();
+    let editCard = document.querySelector(".hub-stack-card-edit");
+    check("UG: the IMAGE card opened the inline editor",
+        !!editCard && editCard.dataset.type === "image");
+    check("UG: the editor carries name/tags/tab inputs",
+        !!editCard?.querySelector(".hub-stack-edit-name") &&
+        !!editCard?.querySelector(".hub-stack-edit-tags") &&
+        !!editCard?.querySelector(".hub-stack-edit-tab"));
+    editCard.querySelector(".hub-stack-edit-name").value = "my render";
+    editCard.querySelector(".hub-stack-edit-tags").value = "render, hero";
+    editCard.querySelector(".hub-stack-edit-tab").value = "";
+    editCard.querySelector('[data-act="edit-save"]').click();
+    await settle();
+    check("UG: PATCH carried name+tags for the IMAGE entry",
+        fakeApi.__calls.some((c) => c.url === "/settings_hub/stack/patch" &&
+            String(c.body).includes('"name":"my render"') && String(c.body).includes("hero")),
+        JSON.stringify(fakeApi.__calls.filter((c) => c.url === "/settings_hub/stack/patch").map((c) => c.body)));
+    const imgAfter = imgCards()[0];
+    check("UG: the image card shows the new name and the tag chips",
+        imgAfter.textContent.includes("my render") &&
+        imgAfter.querySelector(".hub-stack-tags")?.textContent.includes("render"),
+        imgAfter.textContent.slice(0, 140));
+    check("UG: the editor closed after save", !document.querySelector(".hub-stack-card-edit"));
+
+    // a NODES entry: the editor must open the same way
+    await hooks.addNodesFragment(JSON.stringify({ nodes: [{ id: 1, type: "KSampler", pos: [0, 0] }], links: [] }), "frag");
+    await settle();
+    const nod = document.querySelector('.hub-stack-card[data-type="nodes"]');
+    nod.querySelector('[data-act="edit"]').click();
+    await settle();
+    editCard = document.querySelector(".hub-stack-card-edit");
+    check("UG: the NODES card opened the inline editor",
+        !!editCard && editCard.dataset.type === "nodes");
+    editCard.querySelector(".hub-stack-edit-name").value = "sampler frag";
+    editCard.querySelector(".hub-stack-edit-tags").value = "block-a";
+    editCard.querySelector('[data-act="edit-save"]').click();
+    await settle();
+    check("UG: PATCH carried name+tags for the NODES entry",
+        fakeApi.__calls.some((c) => c.url === "/settings_hub/stack/patch" &&
+            String(c.body).includes('"name":"sampler frag"') && String(c.body).includes("block-a")));
+    check("UG: the nodes card shows the new name",
+        document.querySelector('.hub-stack-card[data-type="nodes"]')?.textContent.includes("sampler frag"));
+
+    // cancel: the editor closes and sends nothing
+    const patchCount0 = fakeApi.__calls.filter((c) => c.url === "/settings_hub/stack/patch").length;
+    textCards()[0].querySelector('[data-act="edit"]').click();
+    await settle();
+    editCard = document.querySelector(".hub-stack-card-edit");
+    check("UG: the TEXT card still opens the editor (unchanged)", !!editCard);
+    editCard.querySelector('[data-act="edit-cancel"]').click();
+    await settle();
+    check("UG: cancel closes the editor without a PATCH",
+        !document.querySelector(".hub-stack-card-edit") &&
+        fakeApi.__calls.filter((c) => c.url === "/settings_hub/stack/patch").length === patchCount0);
+}
+
+phase("UH text edit in the Full text view — ✎ -> textarea -> ✓ saves through PATCH {text}");
+{
+    await hooks.addText("original prompt text for editing", "edit me");
+    await settle();
+    const card = textCards()[0];
+    check("UH: a fresh text card exists", !!card && card.textContent.includes("original prompt text"));
+    card.querySelector('[data-act="view"]').click();
+    await settle();
+    const v = document.querySelector(".hub-stack-viewer");
+    check("UH: the Full text view opened", !!v);
+    check("UH: the viewer carries ✎ edit (text entries are editable)",
+        !!v?.querySelector(".hub-stack-viewer-edit"));
+    check("UH: save/cancel are hidden in the read mode",
+        v.querySelector(".hub-stack-viewer-save").style.display === "none" &&
+        v.querySelector(".hub-stack-viewer-cancel").style.display === "none");
+    v.querySelector(".hub-stack-viewer-edit").click();
+    await settle();
+    const ta = v.querySelector(".hub-stack-viewer-edit-area");
+    check("UH: edit swaps the body for a textarea with the full text",
+        !!ta && ta.value === "original prompt text for editing");
+    check("UH: copy/insert hidden while editing",
+        v.querySelector(".hub-stack-viewer-copy").style.display === "none" &&
+        v.querySelector(".hub-stack-viewer-ins").style.display === "none");
+    ta.value = "edited prompt text v2";
+    const before = fakeApi.__calls.filter((c) => c.url === "/settings_hub/stack/patch").length;
+    v.querySelector(".hub-stack-viewer-save").click();
+    await settle();
+    const patchBodies = fakeApi.__calls.filter((c) => c.url === "/settings_hub/stack/patch").slice(before)
+        .map((c) => { try { return JSON.parse(c.body); } catch (_) { return null; } });
+    check("UH: PATCH carried {id, text} with the edited content",
+        patchBodies.some((b) => b && b.text === "edited prompt text v2"),
+        JSON.stringify(patchBodies));
+    check("UH: the server stored the new text",
+        fakeApi.__items().some((x) => x.text === "edited prompt text v2"));
+    check("UH: the viewer returned to the read mode with the new text",
+        !v.querySelector(".hub-stack-viewer-edit-area") &&
+        v.querySelector(".hub-stack-viewer-body").textContent === "edited prompt text v2");
+    check("UH: the char count updated",
+        v.querySelector(".hub-stack-viewer-n").textContent.includes("21"),
+        v.querySelector(".hub-stack-viewer-n").textContent);
+    check("UH: the card excerpt updated too",
+        textCards()[0]?.textContent.includes("edited prompt text v2"));
+
+    // Esc while editing cancels the EDIT (the viewer stays open), the next
+    // Esc closes the viewer
+    const esc = () => window.dispatchEvent(new dom.window.KeyboardEvent("keydown",
+        { key: "Escape", bubbles: true, cancelable: true }));
+    v.querySelector(".hub-stack-viewer-edit").click();
+    await settle();
+    v.querySelector(".hub-stack-viewer-edit-area").value = "must be discarded";
+    esc();
+    await settle();
+    check("UH: Esc in the edit mode returns to the read view (edits discarded)",
+        !!document.querySelector(".hub-stack-viewer") &&
+        v.querySelector(".hub-stack-viewer-body").textContent === "edited prompt text v2");
+    esc();
+    await settle();
+    check("UH: the second Esc closes the viewer", !document.querySelector(".hub-stack-viewer"));
+
+    // ✕ cancel: no PATCH
+    textCards()[0].querySelector('[data-act="view"]').click();
+    await settle();
+    const v2 = document.querySelector(".hub-stack-viewer");
+    v2.querySelector(".hub-stack-viewer-edit").click();
+    await settle();
+    v2.querySelector(".hub-stack-viewer-edit-area").value = "also discarded";
+    const before2 = fakeApi.__calls.filter((c) => c.url === "/settings_hub/stack/patch").length;
+    v2.querySelector(".hub-stack-viewer-cancel").click();
+    await settle();
+    check("UH: ✕ cancel returns to the read view with the ORIGINAL text",
+        v2.querySelector(".hub-stack-viewer-body").textContent === "edited prompt text v2");
+    check("UH: ✕ cancel sent no PATCH",
+        fakeApi.__calls.filter((c) => c.url === "/settings_hub/stack/patch").length === before2);
+    v2.querySelector(".hub-stack-viewer-x").click();
+    await settle();
+
+    // the media viewer has NO text editor (text edits belong to text entries)
+    imgCards()[0].querySelector('[data-act="view"]').click();
+    await settle();
+    const mv = document.querySelector(".hub-stack-viewer");
+    check("UH: the media viewer carries no text editor",
+        !!mv && !mv.querySelector(".hub-stack-viewer-edit"));
+    mv.querySelector(".hub-stack-viewer-x").click();
+    await settle();
+}
+
+phase("UI tab-strip wheel — the vertical wheel scrolls the hidden-scrollbar strip");
+{
+    for (let i = 1; i <= 8; i++) hooks.createTab("Wheel tab " + i);
+    const strip = hooks.tabEl();
+    check("UI: the strip holds All + 8 tabs",
+        strip.querySelectorAll(".hub-stack-tab").length === 9);
+    // jsdom has no layout engine: simulate the overflow metrics on THIS element
+    const stub = (el, k, v) => Object.defineProperty(el, k, { value: v, writable: true, configurable: true });
+    stub(strip, "scrollWidth", 900);
+    stub(strip, "clientWidth", 260);
+    let sl = 0;
+    Object.defineProperty(strip, "scrollLeft", { get: () => sl, set: (x) => { sl = x; }, configurable: true });
+    const wheelAt = (el, dx, dy, mode) => {
+        const ev = new dom.window.Event("wheel", { bubbles: true, cancelable: true });
+        ev.deltaX = dx; ev.deltaY = dy; ev.deltaMode = mode || 0;
+        el.dispatchEvent(ev);
+        return ev.defaultPrevented;
+    };
+    check("UI: wheelTabs(0,120) scrolled the strip and reported the scroll",
+        hooks.wheelTabs(0, 120, 0) === true && sl === 120, String(sl));
+    check("UI: a wheel EVENT over the strip is consumed (preventDefault)",
+        wheelAt(strip, 0, 120, 0) === true && sl === 240, String(sl));
+    check("UI: deltaMode 1 (lines) scales x16",
+        hooks.wheelTabs(0, 2, 1) === true && sl === 272, String(sl));
+    check("UI: deltaMode 2 (pages) scales by the visible width",
+        hooks.wheelTabs(0, 1, 2) === true && sl === 532, String(sl));
+    check("UI: a horizontal (trackpad) delta wins over the vertical one",
+        hooks.wheelTabs(-50, 10, 0) === true && sl === 482, String(sl));
+    check("UI: a zero delta is a no-op", hooks.wheelTabs(0, 0, 0) === false && sl === 482);
+    // no overflow -> the event passes through untouched
+    stub(strip, "scrollWidth", 200);
+    check("UI: without overflow nothing scrolls and the event bubbles",
+        hooks.wheelTabs(0, 120, 0) === false && sl === 482 &&
+        wheelAt(strip, 0, 120, 0) === false);
+    // revealActiveTab: the active chip sits beyond the right edge -> scrolled into view
+    stub(strip, "scrollWidth", 900);
+    const activeChip = strip.querySelector(".hub-stack-tab-on");
+    stub(activeChip, "offsetLeft", 620);
+    stub(activeChip, "offsetWidth", 90);
+    sl = 0;
+    hooks.revealActiveTab();
+    check("UI: revealActiveTab scrolls the active chip into view",
+        sl === 620 + 90 - 260 + 4, String(sl));
+    activeChip.offsetLeft = 0; // left edge: scroll back to the start
+    sl = 500;
+    hooks.revealActiveTab();
+    check("UI: revealActiveTab scrolls BACK when the chip is left of the view",
+        sl === 0, String(sl));
+    // cleanup: drop the layout stubs (the prototype getters come back)
+    for (const k of ["scrollWidth", "clientWidth", "offsetLeft", "offsetWidth", "scrollLeft"]) delete strip[k];
+    for (const k of ["offsetLeft", "offsetWidth"]) delete activeChip[k];
 }
 
 // ---------------------------------------------------------------------------

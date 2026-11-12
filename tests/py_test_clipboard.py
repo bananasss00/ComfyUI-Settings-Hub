@@ -424,6 +424,67 @@ r = call(("POST", "/settings_hub/stack/patch"),
          FakeRequest(json_body={"id": "nope", "name": "x"}))
 check("patch: bad id -> 400", r.status == 400, str(r.status))
 
+# v97: patch text - edit the CONTENT of a text entry (the Full text view
+# editor). Text entries only; size+hash follow the new content; a file-backed
+# text rewrites its blob in place, an inline text past TEXT_INLINE_LIMIT is
+# promoted to a blob.
+r = call(("POST", "/settings_hub/stack/item"),
+         FakeRequest(json_body={"text": "before edit"}))
+tid = r.json()["item"]["id"]
+r = call(("POST", "/settings_hub/stack/patch"),
+         FakeRequest(json_body={"id": tid, "text": "after edit"}))
+j = r.json()
+check("patch text: ok", r.status == 200 and j.get("ok") is True, str(r.status))
+check("patch text: content replaced", j["item"]["text"] == "after edit", str(j["item"]))
+check("patch text: size follows", j["item"]["size"] == len("after edit".encode()),
+      str(j["item"].get("size")))
+check("patch text: hash follows",
+      j["item"]["hash"] == stack_store._hash_bytes(b"after edit"),
+      str(j["item"].get("hash"))[:16])
+r = call(("POST", "/settings_hub/stack/patch"),
+         FakeRequest(json_body={"id": tid, "text": "   "}))
+check("patch text: empty refused 400", r.status == 400, str(r.status))
+r = call(("POST", "/settings_hub/stack/patch"),
+         FakeRequest(json_body={"id": tid, "text": "after edit"}))
+check("patch text: same content still ok (no dedupe on patch)", r.status == 200, str(r.status))
+# media blobs refuse the text edit
+r = add_file(b"pngbytes", "png", "pic.png")
+pid = r.json()["item"]["id"]
+r = call(("POST", "/settings_hub/stack/patch"),
+         FakeRequest(json_body={"id": pid, "text": "nope"}))
+check("patch text: image entry refused 400",
+      r.status == 400 and bool(r.json().get("error")), str(r.status))
+# node fragments refuse too (raw JSON is not the text editor's business)
+r = call(("POST", "/settings_hub/stack/item"),
+         FakeRequest(json_body={"text": json.dumps({"nodes": [{"id": 1, "type": "KSampler"}], "links": []}),
+                                "type": "nodes"}))
+nid = r.json()["item"]["id"]
+r = call(("POST", "/settings_hub/stack/patch"),
+         FakeRequest(json_body={"id": nid, "text": "{}"}))
+check("patch text: nodes fragment refused 400", r.status == 400, str(r.status))
+# an inline text that grows past TEXT_INLINE_LIMIT is promoted to a blob;
+# a file-backed text rewrites its blob in place
+_old_limit = stack_store.TEXT_INLINE_LIMIT
+try:
+    stack_store.TEXT_INLINE_LIMIT = 16
+    r = call(("POST", "/settings_hub/stack/patch"),
+             FakeRequest(json_body={"id": tid, "text": "x" * 40}))
+    j = r.json()
+    check("patch text: promotion to blob",
+          j["item"].get("file") == tid + ".txt" and "text" not in j["item"], str(j["item"]))
+    check("patch text: promoted blob written",
+          os.path.isfile(os.path.join(stack_store._items_dir(), j["item"]["file"])))
+    check("patch text: promoted size", j["item"]["size"] == 40, str(j["item"].get("size")))
+    r = call(("POST", "/settings_hub/stack/patch"),
+             FakeRequest(json_body={"id": tid, "text": "y" * 20}))
+    j = r.json()
+    check("patch text: file-backed rewrite keeps the blob",
+          j["item"].get("file") == tid + ".txt", str(j["item"]))
+    with open(os.path.join(stack_store._items_dir(), j["item"]["file"]), "rb") as f:
+        check("patch text: file-backed content rewritten", f.read() == b"y" * 20)
+finally:
+    stack_store.TEXT_INLINE_LIMIT = _old_limit
+
 # eviction skips pinned: shrink the caps, push junk, the pinned entry lives
 old_items, old_total = stack_store.MAX_ITEMS, stack_store.MAX_TOTAL_BYTES
 try:

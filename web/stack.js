@@ -1,6 +1,36 @@
 // ============================================================================
 // SettingsHub - Paste Stack (v83): standalone floating clipboard panel
 // ----------------------------------------------------------------------------
+// v97 (owner request 2026-11-12: "когда в стаке много вкладок, они вылезают
+//   за границы - надо чтобы они могли скролиться колесом мыши" + "редактиро-
+//   вание работает только для текстовых записей; надо добавить возможность
+//   редактировать текст для текстовых элементов - в режиме просмотра Full
+//   text view; картинки и остальные элементы стака тоже должны получать
+//   теги, имена и т.д."): STACK UX ROUND -
+//   * TAB-STRIP WHEEL SCROLL: the strip is overflow-x:auto with a HIDDEN
+//     scrollbar, so a long tab list was unreachable. The mouse wheel is the
+//     scroller now: the vertical delta maps to scrollLeft (deltaMode 1 =
+//     lines x16px, 2 = pages x clientWidth; a trackpad deltaX wins when
+//     present), the event is consumed ONLY when the strip really overflows,
+//     and revealActiveTab() keeps the OPENED chip inside the visible strip
+//     after every re-render (open / arm the ✕ / rename).
+//   * UNIVERSAL INLINE EDITOR: the ✎ (name / tags / tab) now opens for EVERY
+//     kind. Root cause of "editing works only for text": the editId branch
+//     in cardHtml sat AFTER the type branches, so image/video/audio/file/
+//     nodes cards never rendered it and their ✎ did nothing. The branch moved
+//     to the TOP of the chain - same fields for all kinds; PATCH {name,tags,
+//     tab} was already type-agnostic on the server.
+//   * TEXT EDIT IN THE FULL TEXT VIEW: the 🔍 overlay of text cards gains
+//     ✎ edit -> a textarea (Esc inside cancels the edit via the capture-phase
+//     hook __shViewerCancelEdit, Ctrl+Enter saves), ✓ save -> PATCH {text}.
+//     Session-only entries patch in memory. The read view refreshes in place
+//     (char count + body), the card excerpt follows through applyPatched.
+//     py v97: PATCH accepts `text` for type:"text" entries ONLY (media blobs
+//     and node fragments refuse with 400); a file-backed text (>100 KB at
+//     creation) rewrites its .txt blob in place, an inline text that grew
+//     past TEXT_INLINE_LIMIT is promoted to a blob; size+hash follow the new
+//     content so dedupe stays honest; empty/oversized text refused.
+// ============================================================================
 // v96 (owner request 2026-11-12: "надо сделать возможность добавлять в стак
 //   буфера скопированные ноды с группами. полезно для копирования-вставки
 //   между разными рабочими процессами"): NODE FRAGMENTS - the stack now holds
@@ -75,7 +105,7 @@
 // v89 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v96";
+globalThis.__SettingsHubLoaded["stack"] = "v97";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -1934,7 +1964,28 @@ function cardHtml(item) {
         : "Inspect large: full-size view (images: wheel zoom, drag pan, double-click 1:1)";
     const viewAct = `<button type="button" class="hub-stack-act" data-act="view" title="${viewTitle}">🔍</button>`;
     const pinAct = `<button type="button" class="hub-stack-act hub-stack-pin${item.pinned ? " hub-stack-pin-on" : ""}" data-act="pin" title="${item.pinned ? "Unpin (it will age out again)" : "Pin: survives max-eviction"}">📌</button>`;
-    const editAct = `<button type="button" class="hub-stack-act" data-act="edit" title="Rename / tags">✎</button>`;
+    // v97: the ✎ of EVERY kind opens the inline editor (name / tags / tab) -
+    // the edit branch used to sit after the type branches and was reachable
+    // for text cards only (the owner: "картинкам и остальным элементам стака
+    // тоже можно давать теги, имена").
+    const editAct = `<button type="button" class="hub-stack-act" data-act="edit" title="Edit name / tags / tab">✎</button>`;
+
+    // v97: the inline editor opens for EVERY kind. The branch must come
+    // BEFORE the type branches (it used to sit between the nodes and text
+    // branches, so image/video/audio/file/nodes cards never rendered it and
+    // their ✎ did nothing). Same fields for all kinds: name / tags / tab;
+    // the TEXT CONTENT itself is edited in the Full text view (v97).
+    if (item.id === editId) {
+        return `<div class="hub-stack-card hub-stack-card-edit" data-id="${esc(item.id)}" data-type="${item.type}">` +
+            `<div class="hub-stack-edit">` +
+            `<input class="hub-stack-edit-name" data-hub-focus value="${esc(item.name || "")}" placeholder="Name (optional)">` +
+            `<input class="hub-stack-edit-tags" data-hub-focus value="${esc((item.tags || []).join(", "))}" placeholder="tags, comma separated">` +
+            `<input class="hub-stack-edit-tab" data-hub-focus value="${esc(item.tab || "")}" placeholder="tab (empty = All)" list="hub-stack-tab-list">` +
+            `<div class="hub-stack-edit-btns">` +
+            `<button type="button" class="hub-stack-act" data-act="edit-save" title="Save">✓</button>` +
+            `<button type="button" class="hub-stack-act" data-act="edit-cancel" title="Cancel">✕</button>` +
+            `</div></div></div>`;
+    }
     let acts = viewAct + pinAct + editAct;
     if (item.type === "image") {
         preview = `<img class="hub-stack-thumb" loading="lazy" alt="" src="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">`;
@@ -1983,17 +2034,6 @@ function cardHtml(item) {
         acts = viewAct +
             `<button type="button" class="hub-stack-act" data-act="insg" title="Paste into the CURRENT workflow - nodes, wires and groups">→🧩</button>` +
             pinAct + editAct;
-    } else if (item.id === editId) {
-        // v72: inline snippet editor (rename + tags); v79 adds the tab field
-        return `<div class="hub-stack-card hub-stack-card-edit" data-id="${esc(item.id)}" data-type="${item.type}">` +
-            `<div class="hub-stack-edit">` +
-            `<input class="hub-stack-edit-name" data-hub-focus value="${esc(item.name || "")}" placeholder="Name (optional)">` +
-            `<input class="hub-stack-edit-tags" data-hub-focus value="${esc((item.tags || []).join(", "))}" placeholder="tags, comma separated">` +
-            `<input class="hub-stack-edit-tab" data-hub-focus value="${esc(item.tab || "")}" placeholder="tab (empty = All)" list="hub-stack-tab-list">` +
-            `<div class="hub-stack-edit-btns">` +
-            `<button type="button" class="hub-stack-act" data-act="edit-save" title="Save">✓</button>` +
-            `<button type="button" class="hub-stack-act" data-act="edit-cancel" title="Cancel">✕</button>` +
-            `</div></div></div>`;
     } else {
         preview = `<div class="hub-stack-text">${esc(excerptOf(item))}</div>`;
         meta = `${(item.text != null ? item.text.length : item.size || 0).toLocaleString()} chars`;
@@ -2212,6 +2252,47 @@ function renderNote() {
 /** v79: the tab bar - [All (total)] [Task A (n)] ... [+]. A tab chip opens
  *  the view (click), renames (double-click) or removes (its small ✕, armed
  *  like 🗑 - removal never deletes entries, they fall back to All). */
+// ---------------------------------------------------------------------------
+// v97: TAB-STRIP WHEEL SCROLL (owner: "когда в стаке много вкладок, они
+// вылезают за границы - надо чтобы они могли скролиться колесом мыши").
+// The strip is overflow-x:auto with a HIDDEN scrollbar (the panel stays
+// clean); the mouse wheel is the scroller: the vertical delta maps to
+// scrollLeft (deltaMode 1 = lines -> ×16px, 2 = pages -> ×clientWidth; a
+// real horizontal delta - trackpads - wins when present). The event is
+// consumed ONLY when the strip actually overflows - otherwise it bubbles
+// untouched (nothing else wants it, but the contract stays honest).
+// ---------------------------------------------------------------------------
+
+/** One wheel tick over the tab strip. Returns true when the strip overflows
+ *  and the delta was applied (the caller then swallows the event). jsdom has
+ *  no layout engine - zero metrics simply mean "nothing to scroll". */
+function wheelTabs(dx, dy, mode) {
+    const el = tabEl;
+    if (!el) return false;
+    const max = el.scrollWidth - el.clientWidth;
+    if (max <= 0) return false;
+    const d = Math.abs(dx) > Math.abs(dy) ? dx : dy;
+    if (!d) return false;
+    const k = mode === 1 ? 16 : (mode === 2 ? el.clientWidth : 1);
+    el.scrollLeft += d * k;
+    return true;
+}
+
+/** v97: keep the ACTIVE tab visible after every re-render (opening a tab,
+ *  arming its ✕, renaming) - with many tabs the active chip can sit beyond
+ *  the strip's right edge and the user would not see what they opened. */
+function revealActiveTab() {
+    try {
+        const el = tabEl;
+        if (!el || el.scrollWidth <= el.clientWidth) return;
+        const on = el.querySelector(".hub-stack-tab-on");
+        if (!on) return;
+        const l = on.offsetLeft, r = l + on.offsetWidth;
+        if (l - 4 < el.scrollLeft) el.scrollLeft = Math.max(0, l - 4);
+        else if (r + 4 > el.scrollLeft + el.clientWidth) el.scrollLeft = r - el.clientWidth + 4;
+    } catch (_) {}
+}
+
 function renderTabs() {
     if (!tabEl) return;
     const tabs = knownTabs();
@@ -2230,6 +2311,7 @@ function renderTabs() {
         html += `<button type="button" class="hub-stack-tab-add" title="New tab - captures land in the OPEN tab">\uff0b</button>`;
     }
     tabEl.innerHTML = html;
+    revealActiveTab(); // v97: many tabs - the opened chip must stay visible
 }
 
 function renderAll() {
@@ -3204,6 +3286,14 @@ function onViewerKey(e) {
     if (e.key === "Escape" && viewerEl) {
         e.preventDefault();
         e.stopPropagation();
+        // v97: while the text editor is open Esc first RETURNS to the read
+        // view (edits discarded) - the viewer itself closes on the NEXT Esc
+        // (the editor is capture-phase on window; the textarea's own
+        // bubbling listener never sees the key first).
+        if (typeof viewerEl.__shViewerCancelEdit === "function") {
+            viewerEl.__shViewerCancelEdit();
+            return;
+        }
         closeViewer();
     }
 }
@@ -3311,6 +3401,13 @@ async function openTextViewer(item) {
     closeViewer();
     const text = await itemText(item);
     if (seq !== viewerSeq) return null; // a newer open superseded this one
+    // v97: the text of a text entry is EDITABLE right here (owner: "надо
+    // добавить возможность редактировать текст для текстовых элементов - в
+    // режиме просмотра Full text view"). ✎ swaps the read view for a
+    // textarea; ✓ saves (PATCH {text} / in-memory for session entries),
+    // ✕ (or Esc inside the textarea) returns to the read view.
+    const editable = item.type === "text";
+    let currentText = text; // updated on a successful save
     const v = document.createElement("div");
     v.className = "hub-stack-viewer";
     v.innerHTML =
@@ -3318,22 +3415,101 @@ async function openTextViewer(item) {
         `<div class="hub-stack-viewer-head">` +
         `<span class="hub-stack-viewer-ico">📄</span>` +
         `<span class="hub-stack-viewer-title" title="${esc(item.name || "")}">${esc(item.name || "Text entry")}</span>` +
-        `<span class="hub-stack-viewer-n">${text.length.toLocaleString()} chars${item.tab ? " · " + esc(item.tab) : ""}</span>` +
+        `<span class="hub-stack-viewer-n"></span>` +
+        (editable
+            ? `<button type="button" class="hub-btn hub-stack-viewer-edit" title="Edit this text (Esc inside = back to the read view, Ctrl+Enter = save)">✎ edit</button>` +
+            `<button type="button" class="hub-btn hub-stack-viewer-save" title="Save the edited text (Ctrl+Enter)" style="display:none">✓ save</button>` +
+            `<button type="button" class="hub-btn hub-stack-viewer-cancel" title="Discard the edits (Esc)" style="display:none">✕</button>`
+            : "") +
         `<button type="button" class="hub-btn hub-stack-viewer-copy" title="Copy the FULL text to the clipboard">📋 copy</button>` +
         `<button type="button" class="hub-btn hub-stack-viewer-ins" title="Insert into the last focused hub text field">→📝</button>` +
         `<button type="button" class="hub-btn hub-stack-viewer-x" title="Close (Esc)">✕</button>` +
         `</div>` +
         `<div class="hub-stack-viewer-body"></div>` +
         `</div>`;
-    v.querySelector(".hub-stack-viewer-body").textContent = text; // textContent - never HTML
     document.body.appendChild(v);
     viewerEl = v;
+    const body = v.querySelector(".hub-stack-viewer-body");
+    const countEl = v.querySelector(".hub-stack-viewer-n");
+    const showCount = () => {
+        countEl.textContent = `${currentText.length.toLocaleString()} chars${item.tab ? " · " + item.tab : ""}`;
+    };
+    let editing = false;
+    const setMode = (on) => {
+        editing = on;
+        // v97: the window-capture Esc handler consults this hook - while the
+        // editor is open Esc cancels the EDIT, otherwise it closes the viewer
+        if (on) v.__shViewerCancelEdit = () => setMode(false);
+        else delete v.__shViewerCancelEdit;
+        const swap = (sel, show) => {
+            const el = v.querySelector(sel);
+            if (el) el.style.display = show ? "" : "none";
+        };
+        swap(".hub-stack-viewer-edit", !on);
+        swap(".hub-stack-viewer-save", on);
+        swap(".hub-stack-viewer-cancel", on);
+        swap(".hub-stack-viewer-copy", !on);
+        swap(".hub-stack-viewer-ins", !on);
+        if (on) {
+            body.textContent = "";
+            const ta = document.createElement("textarea");
+            ta.className = "hub-stack-viewer-edit-area";
+            ta.spellcheck = false;
+            ta.value = currentText;
+            ta.addEventListener("keydown", (e) => {
+                // (Esc is handled by the window-capture onViewerKey via
+                // __shViewerCancelEdit - it never reaches this listener)
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    void saveBtn?.click();
+                }
+            });
+            body.appendChild(ta);
+            setTimeout(() => {
+                try { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } catch (_) {}
+            }, 0);
+        } else {
+            body.textContent = currentText; // textContent - never HTML
+        }
+        showCount();
+    };
+    body.textContent = currentText; // v97: the initial READ mode (setMode(false) without the button swaps)
+    showCount();
     v.addEventListener("mousedown", (e) => { if (e.target === v) closeViewer(); });
     v.querySelector(".hub-stack-viewer-x").addEventListener("click", closeViewer);
+    const editBtn = v.querySelector(".hub-stack-viewer-edit");
+    const saveBtn = v.querySelector(".hub-stack-viewer-save");
+    if (editBtn) editBtn.addEventListener("click", () => setMode(!editing));
+    const cancelBtn = v.querySelector(".hub-stack-viewer-cancel");
+    if (cancelBtn) cancelBtn.addEventListener("click", () => setMode(false));
+    if (saveBtn) saveBtn.addEventListener("click", async () => {
+        const ta = body.querySelector(".hub-stack-viewer-edit-area");
+        if (!ta || !editing) return;
+        const nv = String(ta.value ?? "");
+        if (!nv.trim()) { localToast("Text is empty - delete the card with its ✕ instead"); return; }
+        if (nv.length > MAX_TEXT_CHARS) { localToast("Text too large (1,000,000 chars max)"); return; }
+        if (item.local) {
+            // session-only entry (server down): patch the in-memory object
+            item.text = nv;
+            currentText = nv;
+            renderAll();
+            localToast("Text saved (session entry)");
+            setMode(false);
+            return;
+        }
+        saveBtn.disabled = true;
+        const it = await apiPatch(item.id, { text: nv });
+        saveBtn.disabled = false;
+        if (!it) { localToast("Save failed - server unreachable"); return; }
+        currentText = nv;
+        applyPatched(it); // server truth into the list (+ workflow text backup)
+        localToast("Text saved");
+        setMode(false);
+    });
     v.querySelector(".hub-stack-viewer-copy").addEventListener("click", async () => {
         try {
             if (!navigator.clipboard?.writeText) { localToast("Clipboard write unavailable"); return; }
-            await navigator.clipboard.writeText(text);
+            await navigator.clipboard.writeText(currentText);
             localToast("Copied - Ctrl+V where you need it");
             bumpUses(item);
         } catch (_) { localToast("Copy failed"); }
@@ -3682,6 +3858,15 @@ function buildDom() {
             renderTabs();
         }
     });
+    // v97: the mouse wheel scrolls the tab strip horizontally (the strip has
+    // a hidden scrollbar - the wheel is the only scroller); consumed only
+    // when the strip really overflows
+    tabEl.addEventListener("wheel", (e) => {
+        if (wheelTabs(e.deltaX, e.deltaY, e.deltaMode)) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+    }, { passive: false });
 
     // v76: retry button inside the degraded note - re-probe + re-sync without
     // a page reload (fixing the server side, e.g. reinstalling the pack, takes
@@ -4086,6 +4271,10 @@ export function __stackTestHooks() {
         isJustDragged: () => justDragged,
         refresh: () => refreshFromServer(initSeq),
         mount: initStack,
+        // v97: tab-strip wheel scroll + universal editor introspection
+        tabEl: () => tabEl,
+        wheelTabs,
+        revealActiveTab,
         // v77: scope introspection for the smoke tests
         scope: () => getStackScope(),
         workflowId: () => workflowStackId(),

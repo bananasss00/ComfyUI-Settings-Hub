@@ -3454,6 +3454,29 @@ button.hub-pin-back {
     user-select: text;
 }
 
+/* v97: the text editor inside the Full text view - the read-only body
+   content is swapped for this textarea (✎ edit -> ✓ save / ✕ cancel). */
+.hub-stack-viewer-edit-area {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 260px;
+    box-sizing: border-box;
+    resize: none;
+    background: #101022;
+    border: 1px solid #3d5a80;
+    border-radius: 6px;
+    color: #dfe6f5;
+    font: inherit;
+    line-height: 1.5;
+    padding: 8px 9px;
+    outline: none;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+.hub-stack-viewer-edit-area:focus { border-color: #58c470; }
+
 /* ===========================================================================
    v83: LARGE MEDIA VIEWER - the 🔍 of image/video/audio/file stack cards.
    The card stretches to most of the viewport; the stage keeps the media
