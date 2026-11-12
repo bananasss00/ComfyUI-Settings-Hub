@@ -91,6 +91,14 @@ const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), ".."
 const WEB = path.join(ROOT, "web");
 const ENTRY_SRC = fs.readFileSync(path.join(WEB, "settings_hub.js"), "utf8");
 const PACK_VERSION = (ENTRY_SRC.match(/__SettingsHubBuild\s*=\s*"(v\d+)"/) || [])[1] || "v0";
+// v96: the EXPECTED manifest of the entry (single-source version rule,
+// docs/plan-versions.md) - module self-reports are checked against IT.
+const EXPECTED_MANIFEST = (() => {
+    const m = ENTRY_SRC.match(/const EXPECTED = \{([\s\S]*?)\};/);
+    const out = {};
+    if (m) for (const mm of m[1].matchAll(/"(\w+)":\s*"(v\d+)"/g)) out[mm[1]] = mm[2];
+    return out;
+})();
 
 // ---------------------------------------------------------------------------
 // DOM globals BEFORE chat.js evaluates
@@ -838,8 +846,13 @@ phase("SN entry integration (source contract)");
 check("entry FILES carries ./chat.js", /"\.\/chat\.js",\s*\/\/ v\d+/.test(ENTRY_SRC));
 check("entry EXPECTED carries chat", /"chat":\s*"v\d+"/.test(ENTRY_SRC));
 check("entry mounts the chat extension", /initChat\(\)/.test(ENTRY_SRC) && /Comfy\.SettingsHub\.chat/.test(ENTRY_SRC));
-check("chat self-reports the pack version",
-    globalThis.__SettingsHubLoaded?.chat === PACK_VERSION, globalThis.__SettingsHubLoaded?.chat);
+// v96: aligned with the v82 single-source version convention (the README
+// carried this check as known-stale since v95): a module self-reports the
+// version of its LAST FUNCTIONAL CHANGE, and the entry manifest must name
+// exactly that value - not the pack version.
+check("chat self-reports the version the entry EXPECTS (v82 convention)",
+    globalThis.__SettingsHubLoaded?.chat === EXPECTED_MANIFEST.chat,
+    String(globalThis.__SettingsHubLoaded?.chat) + " vs " + String(EXPECTED_MANIFEST.chat));
 check("the py module is wired in __init__.py",
     fs.readFileSync(path.join(ROOT, "__init__.py"), "utf8").includes("chat_proxy"));
 

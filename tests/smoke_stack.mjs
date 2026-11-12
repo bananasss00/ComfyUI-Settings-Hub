@@ -235,7 +235,10 @@ function makeFakeApi() {
                 const h = djb2(text);
                 const dup = touchDup(h);
                 if (dup) return jsonResp({ ok: true, item: { ...dup }, moved: true });
-                const item = { id: "srv" + (++seq), type: "text", text, hash: h, size: text.length, created: Math.floor(Date.now() / 1000) };
+                // v96: optional entry type - "nodes" = a node-fragment JSON
+                // (allowlist mirrors py/stack_store.py stack_add_text)
+                const entryType = body?.type === "nodes" ? "nodes" : "text";
+                const item = { id: "srv" + (++seq), type: entryType, text, hash: h, size: text.length, created: Math.floor(Date.now() / 1000) };
                 items.unshift(item);
                 return jsonResp({ ok: true, item: { ...item }, moved: false });
             }
@@ -1574,13 +1577,13 @@ phase("TX v83 media viewer — 🔍 opens a large preview for every non-text kin
     // ---- source + css contracts ----
     const stackSrc = fs.readFileSync(path.join(ROOT, "web", "stack.js"), "utf8");
     // v85: ONE magnifier per card - the base set carries the single viewAct
-    // button literal and all four kind branches (video/audio/file/text) start
-    // their acts with it: base(1) + 4 = 5. A reintroduced duplicate (the v83
-    // `viewAct + ... + acts` prepend) would push the count to 6, a second
-    // inline button literal would break the === 1 below.
-    check("TX source: the 🔍 view act is wired ONCE per card, all four kind branches use it (v85: no duplicate magnifier)",
+    // button literal and every kind branch starts its acts with it: base(1)
+    // + 4 = 5 (v96 adds the nodes branch: 6). A reintroduced duplicate (the
+    // v83 `viewAct + ... + acts` prepend) would push the count past that, a
+    // second inline button literal would break the === 1 below.
+    check("TX source: the 🔍 view act is wired ONCE per card, every kind branch uses it (v85: no duplicate magnifier; v96 adds nodes)",
         (stackSrc.match(/class="hub-stack-act" data-act="view"/g) || []).length === 1 &&
-        (stackSrc.match(/acts = viewAct/g) || []).length === 5,
+        (stackSrc.match(/acts = viewAct/g) || []).length === 6,
         String((stackSrc.match(/acts = viewAct/g) || []).length));
     check("TX source: openViewer dispatches by type (text keeps v79 overlay)",
         /if \(item\.type === "image"\) return openMediaViewer\(item, "image"\)/.test(stackSrc) &&
@@ -2032,6 +2035,236 @@ phase("TE v77 embed — text backup inside the workflow file + auto-restore");
         graph.extra.settingshubStack.length === 1 &&
         graph.extra.settingshubStack[0].text === "shared-mode marker",
         JSON.stringify(graph.extra.settingshubStack));
+}
+
+// ===========================================================================
+// UA-UF - v96: NODE FRAGMENTS (copied graph selections with groups)
+// ===========================================================================
+
+phase("UA node fragments — auto-capture: wrapped copyToClipboard stacks the selection");
+{
+    const frag = JSON.stringify({
+        nodes: [
+            { id: 1, type: "KSampler", pos: [100, 100], size: [270, 262], widgets_values: [42] },
+            { id: 2, type: "CheckpointLoaderSimple", pos: [300, 100], size: [315, 106] },
+        ],
+        groups: [
+            { id: "g1", title: "Sampler block", bounding: [60, 40, 620, 380], color: "#3f7899" },
+            { id: "g2", title: "Sources", bounding: [60, 40, 300, 200] },
+        ],
+        links: [], reroutes: [], subgraphs: [],
+    });
+    // Fake canvas with the TS-rewrite copy contract: writes localStorage and
+    // RETURNS the serialized string (the legacy lib returns undefined - the
+    // fallback read covers that shape, see UF).
+    appStub.canvas = {
+        canvas: document.createElement("div"),
+        ds: { scale: 1, offset: [0, 0] },
+        setDirty: () => {},
+        selectedItems: { size: 3 },
+        copyToClipboard: function () {
+            localStorage.setItem(hooks.canvasClipboardKey, frag);
+            return frag;
+        },
+    };
+    hooks.installCanvasCopyHook(); // idempotent - initStack already armed it
+    check("UA: the hook wraps copyToClipboard ONCE",
+        appStub.canvas.__shStackCopyHook === true &&
+        typeof appStub.canvas.copyToClipboard === "function" &&
+        appStub.canvas.copyToClipboard !== undefined);
+
+    const before = cards().length;
+    const postsBefore = postTexts().length;
+    const ret = appStub.canvas.copyToClipboard(); // the Ctrl+C contract
+    await settle();
+    check("UA: copy returns the fragment unchanged (ComfyUI behavior intact)",
+        ret === frag);
+    const nodeCards = () => [...document.querySelectorAll('.hub-stack-card[data-type="nodes"]')];
+    check("UA: a nodes card appeared", cards().length === before + 1 && nodeCards().length === 1);
+    const card = nodeCards()[0];
+    check("UA: the POST body carried type:'nodes'",
+        postTexts().length === postsBefore + 1 &&
+        JSON.parse(fakeApi.__calls.filter((c) => c.method === "POST" && c.url === "/settings_hub/stack/item").pop().body).type === "nodes");
+    check("UA: the card shows the node count", /2\s*nodes/.test(card.textContent), card.textContent.slice(0, 120));
+    check("UA: the card shows the group titles as chips",
+        card.textContent.includes("Sampler block") && card.textContent.includes("Sources"));
+    check("UA: the card carries the →🧩 paste action", !!card.querySelector('[data-act="insg"]'));
+    check("UA: the server stored the entry as type nodes",
+        fakeApi.__items().some((x) => x.type === "nodes" && x.text === frag));
+
+    // dedupe: re-copying the SAME selection moves the card, never duplicates
+    const nBefore = cards().length;
+    appStub.canvas.copyToClipboard();
+    await settle();
+    check("UA: re-copying the same selection does not duplicate",
+        cards().length === nBefore &&
+        fakeApi.__items().filter((x) => x.text === frag).length === 1);
+
+    // the ⚙ toggle silences the AUTO path
+    hooks.setNodeCapture(false);
+    appStub.canvas.copyToClipboard();
+    await settle();
+    check("UA: capture OFF - no new entry", cards().length === nBefore);
+    check("UA: the toggle persisted",
+        hooks.isNodeCaptureEnabled() === false &&
+        localStorage.getItem("settingshub.stack.nodecap") === "0");
+    hooks.setNodeCapture(true);
+}
+
+phase("UB node fragments — manual ⧩ grab works with the toggle OFF; empty selection refuses");
+{
+    hooks.setNodeCapture(false);
+    // a DIFFERENT selection than UA's (identical content would dedupe-move
+    // the existing card instead of adding a new one)
+    const fragB = JSON.stringify({
+        nodes: [
+            { id: 11, type: "CLIPTextEncode", pos: [10, 10], size: [210, 60] },
+            { id: 12, type: "EmptyLatentImage", pos: [10, 120], size: [210, 106] },
+            { id: 13, type: "VAEDecode", pos: [10, 280], size: [210, 60] },
+        ],
+        groups: [{ id: "gb", title: "Sampler block", bounding: [0, 0, 260, 380] }],
+        links: [], reroutes: [], subgraphs: [],
+    });
+    appStub.canvas.copyToClipboard = function () {
+        localStorage.setItem(hooks.canvasClipboardKey, fragB);
+        return fragB;
+    };
+    const postsBefore = postTexts().length;
+    const nBefore = cards().length;
+    const ok = await hooks.captureCanvasSelection();
+    await settle();
+    check("UB: the explicit grab stacks the selection regardless of the toggle",
+        ok === true && cards().length === nBefore + 1 && postTexts().length === postsBefore + 1);
+    // the newest entry is named after the first group of the selection
+    const firstCard = document.querySelector(".hub-stack-card");
+    check("UB: auto-name from the first group title", (firstCard?.textContent || "").includes("Sampler block"),
+        (firstCard?.textContent || "").slice(0, 80));
+
+    appStub.canvas.selectedItems = { size: 0 };
+    const postsMid = postTexts().length;
+    const ok2 = await hooks.captureCanvasSelection();
+    await settle();
+    check("UB: an empty selection is refused (no copy, no POST)",
+        ok2 === false && postTexts().length === postsMid);
+    appStub.canvas.selectedItems = { size: 3 };
+    hooks.setNodeCapture(true);
+}
+
+phase("UC node fragments — →🧩 pastes through the native paste, the canvas clipboard is restored");
+{
+    // pick the newest nodes entry from the client mirror
+    const item = hooks.items().find((x) => x.type === "nodes");
+    check("UC: a nodes entry exists to paste", !!item);
+    let pasteCalls = 0;
+    let sawKeyDuringPaste = null;
+    let sawMouseDuringPaste = null;
+    appStub.canvas.pasteFromClipboard = function () {
+        pasteCalls++;
+        sawKeyDuringPaste = localStorage.getItem(hooks.canvasClipboardKey);
+        sawMouseDuringPaste = [appStub.canvas.graph_mouse[0], appStub.canvas.graph_mouse[1]];
+    };
+    appStub.canvas.graph_mouse = [111, 222];
+    localStorage.setItem(hooks.canvasClipboardKey, "prev-canvas-clipboard");
+    // click the card's →🧩 (the REAL UI path)
+    const card = document.querySelector('.hub-stack-card[data-type="nodes"]');
+    card.querySelector('[data-act="insg"]').click();
+    await settle();
+    check("UC: the native paste was called exactly once", pasteCalls === 1);
+    check("UC: the fragment was on the canvas clipboard DURING the paste",
+        sawKeyDuringPaste === item.text,
+        String(sawKeyDuringPaste || "").slice(0, 60));
+    check("UC: the paste ran at the current mouse position (native behavior)",
+        Array.isArray(sawMouseDuringPaste) && sawMouseDuringPaste[0] === 111 && sawMouseDuringPaste[1] === 222,
+        JSON.stringify(sawMouseDuringPaste));
+    check("UC: the canvas clipboard is restored after the paste",
+        localStorage.getItem(hooks.canvasClipboardKey) === "prev-canvas-clipboard");
+    // renderAll replaced the card element (applyPatched) - re-query it
+    const cardAfter = document.querySelector('.hub-stack-card[data-type="nodes"]');
+    check("UC: the use counter bumped (uses chip on the card)",
+        (cardAfter?.querySelector(".hub-stack-uses")?.textContent || "").includes("×1"));
+}
+
+phase("UD node fragments — drop at a graph point aims graph_mouse and restores it");
+{
+    const item = hooks.items().find((x) => x.type === "nodes");
+    let sawMouse = null;
+    appStub.canvas.pasteFromClipboard = function () {
+        sawMouse = [appStub.canvas.graph_mouse[0], appStub.canvas.graph_mouse[1]];
+    };
+    appStub.canvas.graph_mouse = [500, 700];
+    const ok = await hooks.pasteNodesIntoCanvas(item, { x: 55, y: 66 });
+    await settle();
+    check("UD: the drop-paste succeeded", ok === true);
+    check("UD: graph_mouse was aimed at the drop point during the paste",
+        Array.isArray(sawMouse) && sawMouse[0] === 55 && sawMouse[1] === 66, JSON.stringify(sawMouse));
+    check("UD: graph_mouse was restored afterwards",
+        appStub.canvas.graph_mouse[0] === 500 && appStub.canvas.graph_mouse[1] === 700);
+    // the drag pipeline source contract: the gcanvas target kind exists
+    const src = fs.readFileSync(path.join(WEB, "stack.js"), "utf8");
+    check("UD: the drag pipeline routes nodes cards to the canvas (gcanvas target + drop handler)",
+        src.includes('kind: "gcanvas"') && src.includes('t?.kind === "gcanvas"') &&
+        src.includes('graphPointAt(e.clientX, e.clientY)'));
+}
+
+phase("UE node fragments — structure viewer + fragment parser edge cases");
+{
+    // parser: a full WORKFLOW FILE is rejected (its link shape pastes broken)
+    const wfJson = JSON.stringify({ last_node_id: 3, last_link_id: 2, nodes: [{ id: 1, type: "KSampler", pos: [0, 0] }], links: [[1, 1, 0, 2, 0, "POINT"]], groups: [], config: {}, extra: {}, version: 0.4 });
+    check("UE: a workflow file is NOT a fragment", hooks.parseGraphFragment(wfJson) === null);
+    check("UE: plain text is not a fragment", hooks.parseGraphFragment("just a prompt idea") === null);
+    check("UE: a fragment without nodes is rejected",
+        hooks.parseGraphFragment(JSON.stringify({ nodes: [], groups: [] })) === null);
+    const legacyFrag = JSON.stringify({ nodes: [{ id: 1, type: "CLIPTextEncode", pos: [10, 10] }], links: [[0, 0, 0, 0]] });
+    const lm = hooks.parseGraphFragment(legacyFrag);
+    check("UE: a legacy {nodes, links} fragment parses with zero groups",
+        !!lm && lm.nodeCount === 1 && lm.groupCount === 0 && lm.types[0][0] === "CLIPTextEncode");
+
+    // the viewer: 🔍 on a nodes card opens the census + raw JSON (the newest
+    // entry is UB's fragB - CLIPTextEncode/EmptyLatentImage/VAEDecode)
+    const card = document.querySelector('.hub-stack-card[data-type="nodes"]');
+    card.querySelector('[data-act="view"]').click();
+    await settle();
+    const v = document.querySelector(".hub-stack-viewer");
+    check("UE: the structure viewer opened", !!v && !!v.querySelector(".hub-stack-viewer-body-nodes"));
+    check("UE: the viewer shows the node-type census",
+        v.textContent.includes("CLIPTextEncode") && v.textContent.includes("EmptyLatentImage") &&
+        v.textContent.includes("VAEDecode"));
+    check("UE: the viewer lists the groups", v.textContent.includes("Groups") && v.textContent.includes("Sampler block"));
+    check("UE: the viewer carries 📋 copy and →🧩 insert",
+        !!v.querySelector(".hub-stack-viewer-copy") && !!v.querySelector(".hub-stack-viewer-ins"));
+    check("UE: the raw JSON is collapsed by default",
+        v.querySelector(".hub-stack-vnodes-raw")?.open === false);
+    v.querySelector(".hub-stack-viewer-x").click();
+    await settle();
+    check("UE: the viewer closed", !document.querySelector(".hub-stack-viewer"));
+}
+
+phase("UF node fragments — legacy fallback copy (no return value) is captured via the storage key");
+{
+    // emulate the LEGACY litegraph copyToClipboard: writes localStorage,
+    // returns undefined - onCanvasCopied falls back to the storage key
+    const frag2 = JSON.stringify({ nodes: [{ id: 9, type: "Reroute", pos: [5, 5] }], links: [] });
+    appStub.canvas.copyToClipboard = function () {
+        localStorage.setItem(hooks.canvasClipboardKey, frag2);
+        return undefined;
+    };
+    delete appStub.canvas.__shStackCopyHook;
+    hooks.installCanvasCopyHook();
+    const nBefore = hooks.items().filter((x) => x.type === "nodes").length;
+    appStub.canvas.copyToClipboard();
+    await settle();
+    check("UF: the legacy-shaped copy still stacked a nodes entry",
+        hooks.items().filter((x) => x.type === "nodes").length === nBefore + 1);
+    // a non-fragment clipboard value (plain prompt text) must NOT stack
+    const nNow = hooks.items().filter((x) => x.type === "nodes").length;
+    appStub.canvas.copyToClipboard = function () {
+        localStorage.setItem(hooks.canvasClipboardKey, "plain prompt, not json");
+        return undefined;
+    };
+    appStub.canvas.copyToClipboard();
+    await settle();
+    check("UF: a non-fragment clipboard value is ignored",
+        hooks.items().filter((x) => x.type === "nodes").length === nNow);
 }
 
 // ---------------------------------------------------------------------------

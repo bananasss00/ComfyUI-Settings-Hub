@@ -1,6 +1,46 @@
 // ============================================================================
 // SettingsHub - Paste Stack (v83): standalone floating clipboard panel
 // ----------------------------------------------------------------------------
+// v96 (owner request 2026-11-12: "надо сделать возможность добавлять в стак
+//   буфера скопированные ноды с группами. полезно для копирования-вставки
+//   между разными рабочими процессами"): NODE FRAGMENTS - the stack now holds
+//   COPIED GRAPH SELECTIONS (nodes + their GROUPS, reroutes, subgraphs) and
+//   pastes them into any workflow:
+//   * SOURCE OF TRUTH - ComfyUI's own canvas clipboard. Both graph libraries
+//     (legacy litegraph and the TypeScript rewrite) keep the copy in
+//     localStorage["litegrapheditor_clipboard"] as JSON {nodes, links,
+//     groups?, reroutes?, subgraphs?} - groups included on every build that
+//     can copy them at all. The stack stores that RAW string (zero format
+//     knowledge) and re-inserts it by SWAPPING the key and calling the
+//     native canvas.pasteFromClipboard() - whatever this exact ComfyUI
+//     version copies is exactly what comes back: nodes, wires, widget
+//     values, GROUP BOXES (title/bounds/color), reroutes, subgraphs.
+//   * CAPTURE (two paths):
+//       - AUTO: canvas.copyToClipboard is wrapped once - every Ctrl+C on the
+//         graph lands in the stack (a ⚙ toggle, default ON; dedupe is the
+//         server's content-hash move-to-top, re-copying the same selection
+//         never duplicates);
+//       - MANUAL: the ⧩ button in the tools row copies the CURRENT selection
+//         (through the same wrapped copyToClipboard) and stacks it
+//         regardless of the toggle.
+//   * CARDS: a 🧩 preview with the node count and the GROUP TITLES as chips
+//     (the meta is parsed from the fragment at capture time), meta line
+//     "N nodes · M groups · KB". Actions: 🔍 (structure viewer: node-type
+//     census + group list + raw JSON, 📋 copies the JSON), →🧩 (paste into
+//     the CURRENT workflow at the mouse position via the native paste -
+//     works across workflows, the original use case), 📌 ✎ ✕ as always;
+//     a plain click copies the fragment JSON to the system clipboard.
+//   * DRAG: a nodes card drags onto the CANVAS like a media card drags onto
+//     a node - a crosshair marker follows the graph position and the drop
+//     pastes the fragment THERE (graph_mouse is pointed at the drop spot for
+//     the duration of the native paste, then restored).
+//   * FILTER: the tools row gains a "Nod" kind chip (text/image/nodes/file).
+//   * STORAGE: a fragment is a text payload - the SAME /settings_hub/stack/
+//     item route carries it with type:"nodes" (py v96 allowlist; an old py
+//     stores it as a plain text card - graceful degradation under the
+//     existing mismatch note). Tabs / pins / search / eviction apply as for
+//     every other kind.
+// ============================================================================
 // v88 (owner correction 2026-11-09: "the settingshub is not present in every
 //   workflow and managing the stacker and chat from it is inconvenient - they
 //   are SEPARATE useful utilities; how is it done right in ComfyUI?"):
@@ -35,7 +75,7 @@
 // v89 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v93";
+globalThis.__SettingsHubLoaded["stack"] = "v96";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -244,6 +284,13 @@ const LS_MAX = "settingshub.stack.max";    // client eviction threshold
 const LS_SCOPE = "settingshub.stack.scope"; // v77: "global" | "workflow"
 const LS_NOTE = "settingshub.stack.noteSeen"; // v78: {code,key} - green self-diagnosis notes show ONCE per state
 const LS_TABS = "settingshub.stack.tabs";   // v79: {global:{order:[],active},workflow:{...}}
+// v96: "1"/"0" - auto-capture of canvas copies (Ctrl+C on the graph) into the stack
+const LS_NODECAP = "settingshub.stack.nodecap";
+// v96: ComfyUI's own canvas-clipboard storage key. BOTH graph libraries write
+// the copy here: the legacy litegraph (copyToClipboard -> localStorage) and
+// the TypeScript rewrite (CANVAS_CLIPBOARD_KEY in clipboardStorage.ts). It is
+// the ONLY version-stable contract we need: capture reads it, insert swaps it.
+const CANVAS_CLIPBOARD_KEY = "litegrapheditor_clipboard";
 
 export const STACK_MAX_CHOICES = [25, 50, 100, 200, 500];
 const STACK_MAX_DEFAULT = 100;
@@ -282,7 +329,7 @@ function loadFilter() {
     const ui = lsUi();
     viewFilter = {
         q: typeof ui.filterQ === "string" ? ui.filterQ : "",
-        kind: ["all", "text", "image", "file"].includes(ui.filterKind) ? ui.filterKind : "all",
+        kind: ["all", "text", "image", "nodes", "file"].includes(ui.filterKind) ? ui.filterKind : "all",
         tag: typeof ui.filterTag === "string" && ui.filterTag ? ui.filterTag : null,
     };
 }
@@ -470,6 +517,25 @@ export function setStackMax(v) {
 }
 
 // ---------------------------------------------------------------------------
+// v96: node-fragment capture toggle. ON by default (the owner asked for the
+// capture itself); turning it off silences the AUTO path only - the manual
+// ⧩ grab button and card →🧩 paste work regardless.
+// ---------------------------------------------------------------------------
+
+export function isNodeCaptureEnabled() {
+    try { const v = localStorage.getItem(LS_NODECAP); return v == null ? true : v === "1"; }
+    catch (_) { return true; }
+}
+
+export function setNodeCapture(v) {
+    try { localStorage.setItem(LS_NODECAP, v ? "1" : "0"); } catch (_) {}
+    localToast(v
+        ? "Node capture ON - every Ctrl+C on the graph lands in the stack"
+        : "Node capture OFF - use the ⧩ button to stack a selection manually");
+    return !!v;
+}
+
+// ---------------------------------------------------------------------------
 // v77: stack scope - shared (one stack for every workflow, the pre-v77
 // behavior and the default) vs per-workflow (every workflow keeps its own
 // entries). The mode is a client setting; switching it NEVER migrates data
@@ -613,6 +679,12 @@ function openStkSettingsPop() {
         `<option value="global">Shared - all workflows (default)</option>` +
         `<option value="workflow">Per-workflow</option>` +
         `</select></label>` +
+        // v96: auto-capture of canvas copies (nodes + groups) into the stack
+        `<label class="hub-cs-row"><span>Capture canvas copies (nodes)</span>` +
+        `<select class="hub-cs-sel" data-stk="nodecap">` +
+        `<option value="1">On (default) - Ctrl+C on the graph stacks the selection</option>` +
+        `<option value="0">Off - stack a selection only via the ⧩ button</option>` +
+        `</select></label>` +
         // v90: the shared interface font scale (the same value the hub ⚙ and
         // the chat ⚙ edit; applies instantly through the --sh-fs CSS var).
         `<label class="hub-cs-row"><span>Font size (hub · stack · chat)</span>` +
@@ -656,6 +728,12 @@ function openStkSettingsPop() {
     scopeSel.addEventListener("change", () => {
         scopeSel.value = setStackScope(scopeSel.value);
         // setStackScope re-mounts on a change - this popup dies with the panel
+    });
+    // v96: the node-capture toggle (affects the AUTO Ctrl+C path only)
+    const nodecapSel = pop.querySelector('[data-stk="nodecap"]');
+    nodecapSel.value = isNodeCaptureEnabled() ? "1" : "0";
+    nodecapSel.addEventListener("change", () => {
+        nodecapSel.value = setNodeCapture(nodecapSel.value === "1") ? "1" : "0";
     });
     // v90: the shared font scale (applies instantly via the --sh-fs var -
     // the open popup reflows with the rest of the UI).
@@ -1057,11 +1135,14 @@ async function apiGet() {
     } catch (_) { return null; }
 }
 
-async function apiAddText(text, name, tab) {
+async function apiAddText(text, name, tab, type) {
     try {
         const body = { text };
         if (name) body.name = String(name);
         if (tab) body.tab = String(tab);
+        // v96: "nodes" fragments ride the same text route; an old py ignores
+        // the unknown key and stores a text card (graceful degradation).
+        if (type === "nodes") body.type = "nodes";
         const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/item"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1287,8 +1368,8 @@ function applyServerAdd(res, localFallback) {
     return true;
 }
 
-function localTextItem(text, name) {
-    const it = { id: "local-" + (++localSeq), type: "text", text, created: Math.floor(Date.now() / 1000), local: true };
+function localTextItem(text, name, type) {
+    const it = { id: "local-" + (++localSeq), type: type || "text", text, created: Math.floor(Date.now() / 1000), local: true };
     if (name) it.name = String(name);
     return it;
 }
@@ -1344,14 +1425,14 @@ async function evictLoop() {
 // Capture paths
 // ---------------------------------------------------------------------------
 
-async function addText(text, name) {
+async function addText(text, name, type) {
     const t = String(text ?? "");
     if (!t.trim()) return false;
     if (t.length > MAX_TEXT_CHARS) { localToast("Text too large (1M char limit)"); return false; }
     // v79: a capture lands in the OPEN tab ("" on All = ungrouped)
-    const fallback = localTextItem(t, name);
+    const fallback = localTextItem(t, name, type);
     if (activeTab) fallback.tab = activeTab;
-    applyServerAdd(await apiAddText(t, name, activeTab), fallback);
+    applyServerAdd(await apiAddText(t, name, activeTab, type), fallback);
     if (serverOk === false) localToast("Stack not persisted - restart ComfyUI to enable storage");
     return true;
 }
@@ -1521,11 +1602,257 @@ function onPasteEvent(e) {
 }
 
 // ---------------------------------------------------------------------------
+// v96: NODE FRAGMENTS - copied graph selections (nodes + groups) in the stack
+// ---------------------------------------------------------------------------
+// Contract with ComfyUI (verified against both graph libraries):
+//   * legacy litegraph copyToClipboard(): JSON {nodes, links} ->
+//     localStorage["litegrapheditor_clipboard"];
+//   * the TypeScript rewrite (ComfyUI_frontend, src/lib/litegraph): JSON
+//     {nodes, groups, reroutes, links, subgraphs} -> the SAME key, and the
+//     function RETURNS the serialized string;
+//   * pasteFromClipboard() on both reads ONLY that key and rebuilds nodes,
+//     wires, groups, reroutes and subgraphs natively.
+// So the stack stores the RAW clipboard string (no format knowledge, no
+// version-specific re-serialization) and re-inserts it by swapping the key
+// for the duration of one native pasteFromClipboard() call.
+
+/** Parse + summarize a canvas-clipboard fragment. Returns null when the text
+ *  is not a node selection (plain text, workflow JSON without nodes, junk).
+ *  {ok, nodeCount, groupCount, groups:[title...], types:[[type,count]...]} */
+function parseGraphFragment(text) {
+    try {
+        const t = String(text ?? "").trim();
+        if (!t.startsWith("{") || t.length < 12 || t.length > MAX_TEXT_CHARS) return null;
+        const j = JSON.parse(t);
+        if (!j || typeof j !== "object" || Array.isArray(j)) return null;
+        // A full WORKFLOW FILE also carries .nodes, but its shape is a graph
+        // dump (last_node_id / last_link_id + id-based link tuples) - the
+        // native pasteFromClipboard would misread its links as relative ids.
+        // The canvas clipboard never looks like that; reject the impostor.
+        if ("last_node_id" in j && "last_link_id" in j) return null;
+        const nodes = Array.isArray(j.nodes) ? j.nodes : [];
+        if (!nodes.length) return null;
+        // A fragment node carries objects with `type` (+ pos, id, ...).
+        // Both link shapes are legitimately pastable, so no rejection here -
+        // only the meta differs.
+        const types = [];
+        const byType = new Map();
+        for (const n of nodes) {
+            if (!n || typeof n !== "object") return null;
+            const ty = String(n.type || "?");
+            byType.set(ty, (byType.get(ty) || 0) + 1);
+        }
+        for (const [ty, c] of byType) types.push([ty, c]);
+        types.sort((a, b) => b[1] - a[1]);
+        const groups = (Array.isArray(j.groups) ? j.groups : [])
+            .map((g) => String((g && (g.title || g.name)) || "").trim())
+            .filter(Boolean);
+        return {
+            ok: true,
+            nodeCount: nodes.length,
+            groupCount: (Array.isArray(j.groups) ? j.groups.length : 0),
+            groups,
+            types,
+        };
+    } catch (_) { return null; }
+}
+
+/** Capture a RAW canvas-clipboard string as a "nodes" entry. Returns the
+ *  meta when it really is a fragment (null otherwise - the caller decides
+ *  whether that is an error). Name it after the first group when the
+ *  selection lives inside one, else "N nodes". */
+async function addNodesFragment(raw, name) {
+    const meta = parseGraphFragment(raw);
+    if (!meta) return null;
+    const auto = name || (meta.groupCount === 1 && meta.groups[0]
+        ? meta.groups[0]
+        : meta.nodeCount + " node" + (meta.nodeCount === 1 ? "" : "s"));
+    const ok = await addText(String(raw), auto, "nodes");
+    if (ok) localToast(`Stacked: ${meta.nodeCount} nodes` +
+        (meta.groupCount ? `, ${meta.groupCount} group${meta.groupCount === 1 ? "" : "s"}` : ""));
+    return ok ? meta : null;
+}
+
+/** The selection size across graph libraries: the TS rewrite keeps a Set
+ *  (selectedItems, Positionable = nodes AND groups), the legacy one a
+ *  plain object map (selected_nodes). 0 = nothing to copy. */
+function canvasSelectionCount(c) {
+    try {
+        if (c?.selectedItems && typeof c.selectedItems.size === "number") return c.selectedItems.size;
+        if (c?.selected_nodes && typeof c.selected_nodes === "object") {
+            return Object.keys(c.selected_nodes).length;
+        }
+        if (c?.selectedGroups && c.selectedGroups.length) return c.selectedGroups.length;
+    } catch (_) {}
+    return 0;
+}
+
+/** Called after EVERY canvas.copyToClipboard() (the wrapper below). `ret` is
+ *  the returned string on the TS rewrite; both libraries also mirror the
+ *  copy into localStorage[CANVAS_CLIPBOARD_KEY] - that is the fallback.
+ *  No-op unless the fragment is real and auto-capture is on. */
+async function onCanvasCopied(ret) {
+    if (!mounted || !isStackOn()) return;
+    if (fragmentGrabBusy) return; // the manual grab does its own explicit capture
+    let raw = (typeof ret === "string" && ret.startsWith("{")) ? ret : "";
+    if (!raw) {
+        try { raw = localStorage.getItem(CANVAS_CLIPBOARD_KEY) || ""; } catch (_) { return; }
+    }
+    if (!parseGraphFragment(raw)) return; // copies without nodes stay out
+    if (!isNodeCaptureEnabled()) return;
+    await addNodesFragment(raw);
+}
+
+// v96: true while captureCanvasSelection is mid-flight - its copyToClipboard
+// call fires the wrapper too, and the fragment must not be added twice
+// (the server dedupe would hide it, but the toast would double and a dead
+// server would get two session fallbacks).
+let fragmentGrabBusy = false;
+
+/** Install the capture hook on the canvas ONCE per canvas instance (guarded
+ *  by a flag - re-init must not wrap the wrapper). The original runs first
+ *  and its result is ALWAYS returned: ComfyUI's own copy behavior is
+ *  untouched, the stack only watches. `app.canvas` may not exist yet when
+ *  the panel mounts (extension setup races app.setup on some frontends) -
+ *  a bounded poll catches up without leaking timers. */
+function installCanvasCopyHook() {
+    let tries = 0;
+    const arm = () => {
+        try {
+            const c = app?.canvas;
+            if (!c) return false;
+            if (c.__shStackCopyHook) return true;
+            if (typeof c.copyToClipboard !== "function") return false;
+            c.__shStackCopyHook = true;
+            const orig = c.copyToClipboard.bind(c);
+            c.copyToClipboard = function (...args) {
+                // NO finally-capture: if the original throws (exotic node
+                // clone failures), a failed copy must not stack the PREVIOUS
+                // fragment that still sits in the storage key. The error
+                // propagates untouched; only a successful copy is watched.
+                const ret = orig(...args);
+                try { void onCanvasCopied(ret); } catch (_) {}
+                return ret;
+            };
+            return true;
+        } catch (_) { return false; }
+    };
+    if (arm()) return;
+    const poll = setInterval(() => {
+        if (arm() || ++tries > 240) clearInterval(poll); // ~2 min, then give up quietly
+    }, 500);
+}
+
+/** v96: the manual grab - the ⧩ tools button. Copies the CURRENT canvas
+ *  selection through the (wrapped) copyToClipboard - the same contract as
+ *  Ctrl+C - and stacks the fragment regardless of the auto-capture toggle.
+ *  The wrapper fires onCanvasCopied, but that path respects the toggle, so
+ *  this function does its own explicit capture to stay toggle-independent. */
+async function captureCanvasSelection() {
+    if (fragmentGrabBusy) return false;
+    fragmentGrabBusy = true;
+    try {
+        const c = app?.canvas;
+        if (!c || typeof c.copyToClipboard !== "function") {
+            localToast("Canvas is not ready - the graph has not loaded yet");
+            return false;
+        }
+        const sel = canvasSelectionCount(c);
+        if (!sel) { localToast("Nothing selected - select nodes / groups on the canvas first"); return false; }
+        const ret = c.copyToClipboard();
+        let raw = (typeof ret === "string" && ret) ? ret : "";
+        if (!raw) {
+            try { raw = localStorage.getItem(CANVAS_CLIPBOARD_KEY) || ""; } catch (_) {}
+        }
+        if (!parseGraphFragment(raw)) { localToast("The selection produced no nodes to stack"); return false; }
+        return !!(await addNodesFragment(raw));
+    } catch (e) {
+        localToast("Grab failed - see F12 for details");
+        return false;
+    } finally {
+        // release on the NEXT microtask so the wrapper's void onCanvasCopied
+        // (fired synchronously inside copyToClipboard) always sees the flag
+        Promise.resolve().then(() => { fragmentGrabBusy = false; });
+    }
+}
+
+/** v96: paste a stored fragment into the CURRENT workflow. The native
+ *  pasteFromClipboard() does all the work - we only lend it OUR clipboard:
+ *  the localStorage key is swapped for the duration of the call and restored
+ *  afterwards (ComfyUI's own copy-paste flow stays intact even on failure).
+ *  `at` {x,y} (graph coords, from a card drop) temporarily aims graph_mouse
+ *  at that spot; without it the fragment lands at the last mouse position -
+ *  exactly where Ctrl+V would put it. */
+async function pasteNodesIntoCanvas(item, at) {
+    try {
+        const c = app?.canvas;
+        if (!c || typeof c.pasteFromClipboard !== "function") {
+            localToast("Canvas is not ready - the graph has not loaded yet");
+            return false;
+        }
+        const raw = await itemText(item);
+        const meta = parseGraphFragment(raw);
+        if (!meta) { localToast("This entry is not a node fragment anymore"); return false; }
+        let prev = null;
+        try { prev = localStorage.getItem(CANVAS_CLIPBOARD_KEY); } catch (_) {}
+        let mouse = null;
+        try {
+            if (at && c.graph_mouse && typeof c.graph_mouse.length === "number") {
+                mouse = [c.graph_mouse[0], c.graph_mouse[1]];
+                c.graph_mouse[0] = at.x;
+                c.graph_mouse[1] = at.y;
+            }
+        } catch (_) { mouse = null; }
+        let done = false;
+        try {
+            try { localStorage.setItem(CANVAS_CLIPBOARD_KEY, raw); } catch (_) {}
+            c.pasteFromClipboard();
+            done = true;
+        } finally {
+            try {
+                if (prev != null) localStorage.setItem(CANVAS_CLIPBOARD_KEY, prev);
+                else localStorage.removeItem(CANVAS_CLIPBOARD_KEY);
+            } catch (_) {}
+            try {
+                if (mouse && c.graph_mouse && typeof c.graph_mouse.length === "number") {
+                    c.graph_mouse[0] = mouse[0];
+                    c.graph_mouse[1] = mouse[1];
+                }
+            } catch (_) {}
+        }
+        try { c.setDirty?.(true, true); } catch (_) {}
+        if (done) {
+            localToast(`Pasted ${meta.nodeCount} nodes` +
+                (meta.groupCount ? `, ${meta.groupCount} group${meta.groupCount === 1 ? "" : "s"}` : "") +
+                " into this workflow");
+            bumpUses(item);
+        }
+        return done;
+    } catch (_) {
+        localToast("Paste failed - see F12 for details");
+        return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Copy-back (card click)
 // ---------------------------------------------------------------------------
 
 async function copyBack(item) {
     try {
+        if (item.type === "nodes") {
+            // v96: the fragment JSON goes back to the SYSTEM clipboard - it
+            // can be archived in a text editor, shared, or pasted into
+            // another ComfyUI via the stack itself. Canvas insertion is the
+            // card's [→🧩] action (the native paste reads the canvas
+            // clipboard, not this one).
+            const raw = await itemText(item);
+            if (!raw) { localToast("Entry has no content"); return; }
+            if (!navigator.clipboard?.writeText) { localToast("Clipboard write unavailable"); return; }
+            await navigator.clipboard.writeText(raw);
+            localToast("Fragment JSON copied - insert into the canvas with →🧩");
+            return;
+        }
         if (item.type === "text") {
             const text = item.local || item.text != null
                 ? item.text
@@ -1631,6 +1958,31 @@ function cardHtml(item) {
         acts = viewAct +
             `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
             `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + pinAct + editAct;
+    } else if (item.type === "nodes") {
+        // v96: a NODE FRAGMENT - node count + group chips parsed from the
+        // stored JSON (inline texts parse synchronously; a >100 KB fragment
+        // is file-backed and shows only the size - the 🔍 viewer parses it
+        // asynchronously). The →🧩 action pastes through the native
+        // pasteFromClipboard, groups and wires included.
+        const m = fragMetaOf(item);
+        const n = m ? m.nodeCount : null;
+        const gc = m ? m.groupCount : 0;
+        const chips = m && m.groups.length
+            ? `<div class="hub-stack-nodes-groups">` +
+                m.groups.slice(0, 3).map((g) =>
+                    `<span class="hub-stack-nodes-group" title="Group: ${esc(g)}">▦ ${esc(g.length > 24 ? g.slice(0, 23) + "…" : g)}</span>`).join("") +
+                (m.groups.length > 3 ? `<span class="hub-stack-nodes-group">+${m.groups.length - 3}</span>` : "") +
+                `</div>`
+            : "";
+        preview = `<div class="hub-stack-nodes">` +
+            `<div class="hub-stack-nodes-head"><span class="hub-stack-nodes-ico">🧩</span>` +
+            `<span class="hub-stack-nodes-count">${n != null ? n + " node" + (n === 1 ? "" : "s") : "node fragment"}</span>` +
+            (gc ? `<span class="hub-stack-nodes-g">${gc} group${gc === 1 ? "" : "s"}</span>` : "") +
+            `</div>${chips}</div>`;
+        meta = `nodes${item.size ? " · " + fmtBytes(item.size) : ""}`;
+        acts = viewAct +
+            `<button type="button" class="hub-stack-act" data-act="insg" title="Paste into the CURRENT workflow - nodes, wires and groups">→🧩</button>` +
+            pinAct + editAct;
     } else if (item.id === editId) {
         // v72: inline snippet editor (rename + tags); v79 adds the tab field
         return `<div class="hub-stack-card hub-stack-card-edit" data-id="${esc(item.id)}" data-type="${item.type}">` +
@@ -1650,7 +2002,9 @@ function cardHtml(item) {
     }
     const mainTitle = item.type === "text" || item.type === "image"
         ? "Click: copy back to clipboard"
-        : (item.type === "video" ? "Video entry (player controls below)" : "File entry");
+        : (item.type === "nodes"
+            ? "Click: copy the fragment JSON · →🧩: paste into this workflow · drag onto the canvas: paste there"
+            : (item.type === "video" ? "Video entry (player controls below)" : "File entry"));
     // v80: in move mode every card shows its grab handle (the whole card drags)
     const handle = moveMode && item.id !== editId
         ? `<span class="hub-stack-handle" title="Drag to reorder">\u283F</span>`
@@ -1670,11 +2024,27 @@ function excerptOf(item) {
     return t.length > TEXT_EXCERPT ? t.slice(0, TEXT_EXCERPT) + "…" : t;
 }
 
+/** v96: fragment meta of a nodes entry, parsed once per item object (the
+ *  WeakMap survives re-renders; applyPatched replaces objects and the cache
+ *  recomputes). File-backed fragments (>100 KB, text lives in a blob) return
+ *  null - the viewer parses those asynchronously. */
+const fragMetaCache = new WeakMap();
+function fragMetaOf(item) {
+    try {
+        if (typeof item?.text !== "string") return null;
+        const hit = fragMetaCache.get(item);
+        if (hit !== undefined) return hit;
+        const m = parseGraphFragment(item.text);
+        try { fragMetaCache.set(item, m); } catch (_) {}
+        return m;
+    } catch (_) { return null; }
+}
+
 /** v72: view filter (search + kind + tag) - purely visual, server truth is
- *  untouched. kind "file" covers video/audio/binary cards. */
+ *  untouched. kind "file" covers video/audio/binary cards; v96 adds "nodes". */
 function passesFilter(it) {
     if (viewFilter.kind !== "all") {
-        const k = it.type === "image" ? "image" : (it.type === "text" ? "text" : "file");
+        const k = it.type === "image" ? "image" : (it.type === "text" ? "text" : (it.type === "nodes" ? "nodes" : "file"));
         if (k !== viewFilter.kind) return false;
     }
     if (viewFilter.tag) {
@@ -2311,6 +2681,43 @@ function pointToGraph(cx, cy) {
 
 function nodeFromPoint(cx, cy) { return pointToGraph(cx, cy)?.node ?? null; }
 
+/** v96: the GRAPH POINT under the cursor (no node required) - the drop
+ *  target of a nodes-card drag onto the canvas surface. Mirrors pointToGraph's
+ *  surface guard (foreign overlays block, wrappers don't) and coordinate
+ *  math, just without the node hit-test. */
+function graphPointAt(cx, cy) {
+    try {
+        const c = app.canvas;
+        if (!c?.canvas) return null;
+        const el = elemFromPoint(cx, cy);
+        if (el && el !== c.canvas && !(typeof el.contains === "function" && el.contains(c.canvas))) return null;
+        const rect = c.canvas.getBoundingClientRect();
+        const ds = c.ds || { scale: 1, offset: [0, 0] };
+        const gx = (cx - rect.left) / (ds.scale || 1) - (ds.offset?.[0] || 0);
+        const gy = (cy - rect.top) / (ds.scale || 1) - (ds.offset?.[1] || 0);
+        return { gx, gy };
+    } catch (_) { return null; }
+}
+
+/** v96: the crosshair drop marker for a nodes-card drag over the canvas
+ *  (a small ring at the cursor; the paste will land at THIS graph point). */
+let dropMark = null;
+function showDropMark(cx, cy) {
+    try {
+        if (!dropMark) {
+            dropMark = document.createElement("div");
+            dropMark.className = "hub-stack-dropmark";
+            document.body.appendChild(dropMark);
+        }
+        dropMark.style.display = "block";
+        dropMark.style.left = cx + "px";
+        dropMark.style.top = cy + "px";
+    } catch (_) {}
+}
+function hideDropMark() {
+    try { if (dropMark) dropMark.style.display = "none"; } catch (_) {}
+}
+
 function showTargetBox(node, wkind) {
     try {
         const c = app.canvas;
@@ -2357,6 +2764,7 @@ function setDragTarget(target) {
     if (prev?.kind === "slot" && prev.el) {
         try { prev.el.classList.remove("hub-stack-ins-above", "hub-stack-ins-below"); } catch (_) {}
     }
+    if (prev?.kind === "gcanvas") hideDropMark(); // v96: the paste-here marker
     dragCtx.target = target || null;
     if (target?.kind === "mirror" && target.el) {
         try { target.el.classList.add("hub-stack-drop-hot"); } catch (_) {}
@@ -2384,6 +2792,10 @@ function setDragTarget(target) {
         } else {
             showTargetBox(target.node, target.wkind);
         }
+    } else if (target?.kind === "gcanvas") {
+        // v96: a nodes card hovers the CANVAS - the paste-here crosshair
+        showDropMark(target.cx, target.cy);
+        hideTargetBox();
     } else {
         hideTargetBox();
     }
@@ -2417,6 +2829,7 @@ function endDragSession(keepClickBlock) {
     if (prev?.kind === "slot" && prev.el) {
         try { prev.el.classList.remove("hub-stack-ins-above", "hub-stack-ins-below"); } catch (_) {}
     }
+    if (prev?.kind === "gcanvas") hideDropMark(); // v96: the paste-here marker
     try { dragCtx?.ghost?.remove(); } catch (_) {}
     hideTargetBox();
     const wasStarted = !!dragCtx?.started;
@@ -2500,6 +2913,12 @@ function onCardDragMove(e) {
         const own = domWidgetOwnerAt(el);
         if (own) target = { kind: "node", node: own.node, widget: own.widget, wkind: "text", el: own.el };
     }
+    if (!target && t === "nodes") {
+        // v96: a NODES card over the CANVAS SURFACE - the drop will paste
+        // the fragment at that graph point (crosshair marker follows).
+        const gp = graphPointAt(e.clientX, e.clientY);
+        if (gp) target = { kind: "gcanvas", gx: gp.gx, gy: gp.gy, cx: e.clientX, cy: e.clientY };
+    }
     if (!target) {
         // v74: REAL GRAPH NODES as targets - image/video/audio cards need a
         // kind-matched upload combo, text cards a string widget.
@@ -2541,6 +2960,7 @@ function onCardDragUp(e) {
     if (ctx.target?.kind === "slot" && ctx.target.el) {
         try { ctx.target.el.classList.remove("hub-stack-ins-above", "hub-stack-ins-below"); } catch (_) {}
     }
+    if (ctx.target?.kind === "gcanvas") hideDropMark(); // v96: the paste-here marker
     try { ctx.ghost?.remove(); } catch (_) {}
     hideTargetBox();
     if (!ctx.started) { dragCtx = null; return; }
@@ -2560,6 +2980,10 @@ function onCardDragUp(e) {
         // v74: the target carries the widget picked during the drag
         if (t.wkind === "text") dropOnTextNode(ctx, t.node, t.widget);
         else dropOnLoaderNode(ctx, t.node, t.widget);
+    }
+    else if (t?.kind === "gcanvas") {
+        // v96: the fragment lands at the drop point (graph coords)
+        void pasteNodesIntoCanvas(ctx.item, { x: t.gx, y: t.gy });
     }
     else if (t?.kind === "mirror") dropOnMirror(ctx, t.el);
     else if (t?.kind === "text") dropOnTextMirror(ctx, t.el);
@@ -2585,9 +3009,10 @@ function onCardMouseDown(e) {
     }
     // v71/v74: images drag onto loader nodes / media mirrors; TEXT cards drag
     // onto hub text mirrors or REAL prompt nodes; video/audio onto matching
-    // loaders (VHS Load Video, LoadAudio) or media mirrors.
+    // loaders (VHS Load Video, LoadAudio) or media mirrors; v96: NODES cards
+    // drag onto the CANVAS (paste the fragment at the drop point).
     const kind = card.dataset.type;
-    if (kind !== "image" && kind !== "text" && kind !== "video" && kind !== "audio") return;
+    if (kind !== "image" && kind !== "text" && kind !== "video" && kind !== "audio" && kind !== "nodes") return;
     const item = stackItems.find((x) => x.id === card.dataset.id);
     if (!item) return;
     e.preventDefault();
@@ -2795,7 +3220,89 @@ function openViewer(item) {
     if (item.type === "video") return openMediaViewer(item, "video");
     if (item.type === "audio") return openMediaViewer(item, "audio");
     if (item.type === "file") return openMediaViewer(item, "file");
+    if (item.type === "nodes") return openNodesViewer(item); // v96: structure view
     return openTextViewer(item); // v79: the text overlay, unchanged
+}
+
+/** v96: the NODE-FRAGMENT viewer - what is inside this fragment, without
+ *  dumping raw JSON at the user first: a node-type census, the group list
+ *  (+ colors when the build carries them), the size, then the RAW JSON in a
+ *  collapsed <details> (capped at the media-viewer's 300 KB text budget).
+ *  Buttons: 📋 copy the raw JSON, →🧩 paste into the current workflow. */
+async function openNodesViewer(item) {
+    if (!item) return null;
+    const seq = ++viewerSeq;
+    closeViewer();
+    const raw = await itemText(item);
+    if (seq !== viewerSeq) return null; // a newer open superseded this one
+    const m = parseGraphFragment(raw);
+    const v = document.createElement("div");
+    v.className = "hub-stack-viewer";
+    const title = String(item.name || "Node fragment");
+    v.innerHTML =
+        `<div class="hub-stack-viewer-card">` +
+        `<div class="hub-stack-viewer-head">` +
+        `<span class="hub-stack-viewer-ico">🧩</span>` +
+        `<span class="hub-stack-viewer-title" title="${esc(title)}">${esc(title)}</span>` +
+        `<span class="hub-stack-viewer-n hub-stack-viewer-meta"></span>` +
+        `<button type="button" class="hub-btn hub-stack-viewer-copy" title="Copy the raw fragment JSON to the clipboard">📋 copy</button>` +
+        `<button type="button" class="hub-btn hub-stack-viewer-ins" title="Paste into the current workflow (nodes, wires, groups)">→🧩</button>` +
+        `<button type="button" class="hub-btn hub-stack-viewer-x" title="Close (Esc)">✕</button>` +
+        `</div>` +
+        `<div class="hub-stack-viewer-body hub-stack-viewer-body-nodes"></div>` +
+        `</div>`;
+    const body = v.querySelector(".hub-stack-viewer-body");
+    const metaEl = v.querySelector(".hub-stack-viewer-meta");
+    if (metaEl) {
+        metaEl.textContent = m
+            ? `${m.nodeCount} nodes · ${m.groupCount} group${m.groupCount === 1 ? "" : "s"} · ${fmtBytes(raw.length)}`
+            : "node fragment";
+    }
+    if (m) {
+        const types = document.createElement("div");
+        types.className = "hub-stack-vnodes-types";
+        types.innerHTML = m.types.map(([ty, c]) =>
+            `<span class="hub-stack-vnodes-type">${esc(ty)}${c > 1 ? ` <b>×${c}</b>` : ""}</span>`).join("");
+        body.appendChild(types);
+        if (m.groups.length) {
+            const gs = document.createElement("div");
+            gs.className = "hub-stack-vnodes-groups";
+            gs.innerHTML = `<div class="hub-stack-vnodes-sect">Groups</div>` +
+                m.groups.map((g) => `<span class="hub-stack-vnodes-group">▦ ${esc(g)}</span>`).join("");
+            body.appendChild(gs);
+        }
+    } else {
+        const noMeta = document.createElement("div");
+        noMeta.className = "hub-stack-vnodes-nometa";
+        noMeta.textContent = "The raw JSON is too large for a live summary (>100 KB) - the full content is below.";
+        body.appendChild(noMeta);
+    }
+    const det = document.createElement("details");
+    det.className = "hub-stack-vnodes-raw";
+    const sum = document.createElement("summary");
+    sum.textContent = "Raw fragment JSON";
+    const pre = document.createElement("pre");
+    pre.className = "hub-stack-viewer-pre";
+    pre.textContent = raw.length > MEDIA_TEXT_BYTES
+        ? raw.slice(0, MEDIA_TEXT_BYTES) + "\n… (truncated at 300 KB - 📋 copies the FULL JSON)"
+        : raw;
+    det.append(sum, pre);
+    body.appendChild(det);
+    document.body.appendChild(v);
+    viewerEl = v;
+    v.addEventListener("mousedown", (e) => { if (e.target === v) closeViewer(); });
+    v.querySelector(".hub-stack-viewer-x").addEventListener("click", closeViewer);
+    v.querySelector(".hub-stack-viewer-copy").addEventListener("click", async () => {
+        try {
+            if (!navigator.clipboard?.writeText) { localToast("Clipboard write unavailable"); return; }
+            await navigator.clipboard.writeText(raw);
+            localToast("Fragment JSON copied");
+            bumpUses(item);
+        } catch (_) { localToast("Copy failed"); }
+    });
+    v.querySelector(".hub-stack-viewer-ins").addEventListener("click", () => pasteNodesIntoCanvas(item));
+    window.addEventListener("keydown", onViewerKey, true);
+    return v;
 }
 
 async function openTextViewer(item) {
@@ -3024,6 +3531,7 @@ function openMediaViewer(item, kind) {
 function teardown() {
     closeStkPop();  // v88: the ⚙ settings popup must not outlive the panel
     closeViewer(); // v79: the full-text overlay must not outlive the panel
+    hideDropMark(); // v96: the paste-here marker must not outlive the panel
     try { panel?.remove(); } catch (_) {}
     try { chip?.remove(); } catch (_) {}
     panel = chip = headEl = listEl = pasteEl = noteEl = grip = toolsEl = tabEl = null;
@@ -3061,10 +3569,14 @@ function buildDom() {
         `<button type="button" class="hub-stack-kind" data-kind="all" title="Every kind">All</button>` +
         `<button type="button" class="hub-stack-kind" data-kind="text" title="Text cards">Txt</button>` +
         `<button type="button" class="hub-stack-kind" data-kind="image" title="Images">Img</button>` +
+        // v96: node fragments (copied graph selections with their groups)
+        `<button type="button" class="hub-stack-kind" data-kind="nodes" title="Node fragments (copied graph selections)">Nod</button>` +
         `<button type="button" class="hub-stack-kind" data-kind="file" title="Video / audio / files">Files</button>` +
         `<button type="button" class="hub-stack-tagnote" style="display:none" title="Clear the tag filter"></button>` +
         // v80: the move-mode toggle (the header stays two-button per v75)
         `<button type="button" class="hub-stack-kind hub-stack-move" title="Move mode: drag cards to sort the stack (the order is saved on the server)">⇅</button>` +
+        // v96: grab the CURRENT canvas selection into the stack (nodes + groups)
+        `<button type="button" class="hub-stack-kind hub-stack-grab" title="Add the canvas selection to the stack (nodes + groups, like Ctrl+C but stacked)">⧩</button>` +
         `</div>` +
         `<div class="hub-stack-list"></div>` +
         `<div class="hub-stack-paste" tabindex="0" title="Click: read the clipboard. Or press Ctrl+V while hovering the panel.">＋ Click or Ctrl+V to add from clipboard</div>` +
@@ -3291,6 +3803,7 @@ function buildDom() {
             const a = act.dataset.act;
             if (a === "send") sendToMediaRow(item);
             else if (a === "ins") insertIntoLastFocused(item);
+            else if (a === "insg") pasteNodesIntoCanvas(item); // v96: fragment → canvas
             else if (a === "pin") togglePin(item);
             else if (a === "view") openViewer(item); // v79: full text view
             else if (a === "edit") { editId = item.id; renderAll(); }
@@ -3332,6 +3845,8 @@ function buildDom() {
     }
     // v80: the move-mode toggle
     toolsEl.querySelector(".hub-stack-move").addEventListener("click", () => setMoveMode(!moveMode));
+    // v96: the manual canvas-selection grab
+    toolsEl.querySelector(".hub-stack-grab").addEventListener("click", () => { void captureCanvasSelection(); });
     toolsEl.querySelector(".hub-stack-tagnote").addEventListener("click", () => {
         viewFilter.tag = null;
         saveFilter();
@@ -3486,6 +4001,7 @@ export function initStack() {
     mounted = true;
     renderAll();
     hookWorkflowSwitch();
+    installCanvasCopyHook(); // v96: Ctrl+C on the graph lands in the stack
     // v77: in per-workflow mode mark the workflow with its stack id right
     // away (idempotent) so the binding is in the file even before the first
     // capture.
@@ -3553,6 +4069,17 @@ export function __stackTestHooks() {
         openStkSettingsPop,
         closeStkPop,
         stkPopEl: () => stkPop,
+        // v96: node-fragment introspection for the smoke tests
+        parseGraphFragment,
+        addNodesFragment,
+        onCanvasCopied,
+        installCanvasCopyHook,
+        captureCanvasSelection,
+        pasteNodesIntoCanvas,
+        canvasSelectionCount,
+        isNodeCaptureEnabled,
+        setNodeCapture,
+        canvasClipboardKey: CANVAS_CLIPBOARD_KEY,
         setPasteHover: (v) => { pasteHover = !!v; },
         viewFilter: () => ({ ...viewFilter }),
         dragState: () => (dragCtx ? { started: !!dragCtx.started, target: dragCtx.target } : null),

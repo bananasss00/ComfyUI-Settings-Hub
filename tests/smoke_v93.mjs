@@ -281,7 +281,7 @@ phase("PA build v95 + version manifest");
     const s93src = fs.readFileSync(sb.stack, "utf8");
     const m93src = fs.readFileSync(sb.menu, "utf8");
     const r93src = fs.readFileSync(sb.renderer, "utf8");
-    check("PA stack self-reports v93 (unchanged)", s93src.includes('__SettingsHubLoaded["stack"] = "v93"'));
+    check("PA stack self-reports v96 (the v96 node-fragment round changed it)", s93src.includes('__SettingsHubLoaded["stack"] = "v96"'));
     check("PA context_menu self-reports v93 (unchanged)", m93src.includes('__SettingsHubLoaded["context_menu"] = "v93"'));
     check("PA hub_ui_renderer self-reports v94", r93src.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
 }

@@ -285,8 +285,8 @@ phase("PA build v95 + version manifest");
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat + renderer v94",
         entrySrc.includes('"chat": "v94"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the v95 fix round",
-        entrySrc.includes("web build: v95 - HUB RENAME POPUP ABOVE THE HUB WINDOW"));
+    check("PA the banner names the v96 node-fragments round",
+        entrySrc.includes("web build: v96 - PASTE STACK NODE FRAGMENTS"));
 }
 
 // ---------------------------------------------------------------------------

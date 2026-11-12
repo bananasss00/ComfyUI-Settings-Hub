@@ -44,20 +44,20 @@ const num = (css, sel) => {
 phase("PA build v95 + version manifest");
 {
     const entry = fs.readFileSync(path.join(WEB, "settings_hub.js"), "utf8");
-    check("PA the entry reports v95 (exactly once)",
-        (entry.match(/globalThis\.__SettingsHubBuild = "v95"/g) || []).length === 1);
-    check("PA the banner names the v95 fix round",
-        entry.includes("web build: v95 - HUB RENAME POPUP ABOVE THE HUB WINDOW"));
+    check("PA the entry reports v96 (exactly once)",
+        (entry.match(/globalThis\.__SettingsHubBuild = "v96"/g) || []).length === 1);
+    check("PA the banner names the v96 node-fragments round",
+        entry.includes("web build: v96 - PASTE STACK NODE FRAGMENTS"));
     check("PA styles.css?v= follows the entry (cache-bust for the CSS fix)",
-        entry.includes("styles.css?v=95"));
+        entry.includes("styles.css?v=96"));
     check("PA no module self-report moved (CSS-only round)",
         entry.includes('"chat": "v94"') && entry.includes('"hub_ui_renderer": "v94"') &&
         entry.includes('"launcher": "v93"') && entry.includes('"core": "v93"'));
     const py = fs.readFileSync(path.join(ROOT, "py", "stack_store.py"), "utf8");
-    check("PA py STACK_SERVER_VERSION = v95 (bumps together with the entry)",
-        py.includes('STACK_SERVER_VERSION = "v95"'));
+    check("PA py STACK_SERVER_VERSION = v96 (bumps together with the entry)",
+        py.includes('STACK_SERVER_VERSION = "v96"'));
     const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
-    check("PA README badge is v95", /web%20build-v95-/.test(readme));
+    check("PA README badge is v96", /web%20build-v96-/.test(readme));
 }
 
 // ---------------------------------------------------------------------------

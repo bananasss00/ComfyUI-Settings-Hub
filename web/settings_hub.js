@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v95 - HUB RENAME POPUP ABOVE THE HUB WINDOW (owner follow-up 2026-11-10, 1 fix to v94): the rename popup (opened by the double-click on the window title OR the window's right-click Rename action) stacked BELOW the floating hub window itself - z-index 99920 vs the panel's 99990 - and it is anchored to the window's top-left corner, so whenever the two overlapped the window covered the input and the owner had to drag the hub aside to reach it; the popup now stacks at 100002 - above the hub window, the compare menu and every other hub floating layer (the v90 modal guard still hides it while a ComfyUI modal is open). v94 rides along: FIX 1 - the virtual hub RENAME now visibly APPLIES: Enter saved node.title all along, but the floating header painted its text only once at panel creation (renderHub rebuilds the hub root, never the pin panel) - the header refreshes in place on commit now; AND the double-tap rename really opens: the opener's stopPropagation kept the header drag handler from preventDefault()-ing the pointer, the browser fired the COMPATIBILITY mousedown for the same tap, and the popup's own outside-closed committed + closed it within one frame ('nothing happens') - the second tap now cancels the pointer AND the popup ignores its opening gesture for 500ms (a real outside click still commits); FIX 2 - the stack card action buttons (🔍 📌 ✎ ✕) were a VERTICAL column clipped by the card's overflow:hidden whenever the entry was short (a single-line text card is ~39px, the column ~73px) - the actions are a wrapping ROW now (grow sideways first, wrap downwards), right-aligned like before; FIX 3 - the one-shot runs list no longer accumulates the reasoning of SEVERAL runs into one giant 'history' block: renderRuns() preserves the live stream bubble while a run is up, but nobody removed it afterwards, so the NEXT run reset the paint state and APPENDED its thoughts/answer into the stale bubble (chat mode never saw this - its renderMsgs() wipes the list) - the bubble is dropped when a run starts and in the finally of every run; v93 (one-shot inference mode, taskbar drag, GPU-popup VRAM checkboxes, hub rename/RMB menu, DOM-widget drop target) rides along unchanged. Stale-cache guard: EXPECTED manifest verifies every module.");
+console.info("[SettingsHub] web build: v96 - PASTE STACK NODE FRAGMENTS (owner request 2026-11-12: 'add the ability to put copied nodes with groups into the buffer stack - useful for copy-paste between different workflows'): the stack now holds COPIED GRAPH SELECTIONS and pastes them into any workflow - AUTO: canvas.copyToClipboard is wrapped once, every Ctrl+C on the graph lands in the stack as a nodes entry (a new 'Capture canvas copies (nodes)' toggle in the stack gear, default ON; identical re-copies move the existing card to the top instead of duplicating); MANUAL: a new tools-row button grabs the CURRENT selection regardless of the toggle; CARD: a nodes card shows the node count + the group titles as chips, carries ->paste into the CURRENT workflow (the fragment is inserted by swapping localStorage['litegrapheditor_clipboard'] for one native canvas.pasteFromClipboard() call - nodes, wires, widget values, GROUP BOXES, reroutes and subgraphs come back exactly as this ComfyUI version copied them; works in both graph libraries, the key contract is identical) and a structure viewer (node-type census + group list + raw JSON); DRAG: a nodes card drags onto the canvas like a media card onto a node - a crosshair marks the graph point and the drop pastes the fragment THERE (graph_mouse is aimed and restored); STORAGE: the fragment rides the existing text route with type:'nodes' (py v96 allowlist; an old py stores it as a text card - graceful degradation); FILTER: a 'Nod' kind chip in the tools row. v95 rides along: the hub rename popup stacks above the hub window. Stale-cache guard: EXPECTED manifest verifies every module.");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v95 - HUB RENAME POPUP ABOVE THE HUB WIND
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=95", import.meta.url).href;
+    link.href = new URL("styles.css?v=96", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -51,7 +51,7 @@ console.info("[SettingsHub] web build: v95 - HUB RENAME POPUP ABOVE THE HUB WIND
 // ONE stale cached file silently removed every "Pin to Settings Hub" menu
 // item and the sync hooks. The detector keeps its diagnostic value but is
 // NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v95";
+globalThis.__SettingsHubBuild = "v96";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -101,7 +101,7 @@ const FILES = [
         "hub_ui_renderer": "v94", // DOM widget rendering (+ v94 rename commit refresh + popup grace)
         "sync_manager": "v70",    // reactive sync hooks
         "launcher": "v93",        // v93 TASKBAR (drag from anywhere with a 5px click threshold)
-        "stack": "v93",           // Paste Stack (+ v93 DOM-widget drop target + textarea highlight)
+        "stack": "v96",           // Paste Stack (+ v96 node fragments: Ctrl+C capture, ⧩ grab, →🧩 paste)
         "chat": "v94",            // LLM Chat (+ v94 one-shot stale stream-bubble fix)
         "compare": "v83",         // Image Compare A/B panel (v83 display fix)
         "context_menu": "v93",    // "Pin to Settings Hub" menus (+ v93 hub window RMB Rename/Materialize)

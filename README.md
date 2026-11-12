@@ -1,6 +1,6 @@
 # Settings Hub для ComfyUI
 
-[![build](https://img.shields.io/badge/web%20build-v95-3d5a80)](#как-это-работает)
+[![build](https://img.shields.io/badge/web%20build-v96-3d5a80)](#как-это-работает)
 [![tests](https://img.shields.io/badge/tests-1005%20passing-2b6b3f)](#разработка-и-тесты)
 [![python](https://img.shields.io/badge/python-stub-lightgrey)](#как-это-работает)
 [![frontend](https://img.shields.io/badge/ComfyUI-frontend%20extension-3d5a80)](#установка)
@@ -302,6 +302,28 @@ Ctrl+T/W/N) — они неперехватываемы.
   ≤10 файлов / 25 МБ / 60 МБ, никаких фоновых опросов);
 - `Ctrl+V` при наведении на панель;
 - **drag&drop файлов из Проводника** — любые виды (видео/аудио/текст/бинарные).
+
+**Скопированные ноды с группами (v96)** — стек хранит фрагменты графа и
+вставляет их в любой воркфлоу (копирование между разными рабочими
+процессами):
+
+- **автозахват**: каждый `Ctrl+C` на графе попадает в стак (тумблер
+  ⚙ стека «Capture canvas copies (nodes)», по умолчанию ВКЛ; повторное
+  копирование того же выделения поднимает существующую карточку наверх, а не
+  плодит дубли);
+- **вручную**: кнопка **⧩** в тулбаре панели кладёт в стек ТЕКУЩЕЕ выделение
+  канваса независимо от тумблера;
+- **карточка 🧩**: число нод, названия ГРУПП чипами, размер; `[→🧩]` — вставка
+  в ТЕКУЩИЙ воркфлоу (фрагмент подменяется в канвас-буфер
+  `litegrapheditor_clipboard` на время одного нативного
+  `canvas.pasteFromClipboard()` — возвращаются ноды, провода, значения
+  виджетов, ГРУППОВЫЕ БОКСЫ, рерауты и подграфы ровно в том виде, как их
+  скопировала эта версия ComfyUI; работает и на новом, и на старом litegraph);
+- **🔍 структура**: просмотр состава фрагмента (состав нод по типам, список
+  групп, сырой JSON), `[📋]` — копирование JSON в системный буфер;
+- **drag на канвас**: карточку нод можно перетащить прямо на граф —
+  перекрестие показывает точку, и вставка произойдёт В НЕЙ;
+- фильтр типа «Nod» в тулбаре.
 
 ![Paste Stack: карточки буфера обмена](docs/screenshots/19_paste_stack.jpg)
 
@@ -664,18 +686,17 @@ ComfyUI и гоняют настоящие модули (Node ESM + jsdom).
 ```bash
 npm i jsdom          # единственная jsdom-зависимость
 node tests/smoke_nav.mjs    # движок точек навигации, камера, хоткеи, UI-путь, stack-bridge, глаз-скрытие (240 проверок)
-node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке/без-крестика/self-check/тихие-зелёные-заметки/вкладки+вьюер/scope-режимы/move-mode-сортировка/большой-просмотр-медиа + Image Compare (276)
+node tests/smoke_stack.mjs  # Paste Stack: захват/дедуп/лимиты/file-режим/drag/сниппеты/скролл/clear-в-шапке/без-крестика/self-check/тихие-зелёные-заметки/вкладки+вьюер/scope-режимы/move-mode-сортировка/большой-просмотр-медиа/фрагменты нод с группами (авто+⧩ захват, →🧩 вставка, drag на канвас, вьюер) + Image Compare (312)
 node tests/smoke_menu.mjs   # регистрация меню, fail-open, баннер деградации (24)
 python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файловый/patch/health/reorder-роуты стека + per-workflow scope + вкладки + кастомный корень v84 (97)
-node tests/smoke_chat.mjs            # окно/вкладки/настройки/отправка/стриминг/стоп/вложения/вьюер/markdown/рефит/очистка/🕘/деградация/ctx-fill/поиск/промпт-каталог (159)
+node tests/smoke_chat.mjs            # окно/вкладки/настройки/отправка/стриминг/стоп/вложения/вьюер/markdown/рефит/очистка/🕘/деградация/ctx-fill/поиск/промпт-каталог (160)
 python3 tests/py_test_chat.py        # payload-сборка, сессии, вложения, прокси /send (JSON+SSE) со стаб-апстримом, one-shot (209)
 ```
 
-Итого 1005 проверок. Одна из них в `smoke_chat.mjs` устарела относительно
-конвенции v82: она ждёт, что `chat.js` саморепортит версию ПАКА (v95), тогда
-как по конвенции модуль рапортует версию своего последнего функционального
-изменения (v94) — `tools/version.py --check` подтверждает, что манифест
-консистентен.
+Итого 1301 проверок (v96: +32 в smoke_stack на фрагменты нод, +1 в
+smoke_chat — устаревшая проверка «chat self-reports the pack version»
+приведена к конвенции v82: модуль саморепортит версию своего последнего
+функционального изменения, и манифест EXPECTED называет ровно её).
 
 Структура:
 
@@ -683,11 +704,11 @@ python3 tests/py_test_chat.py        # payload-сборка, сессии, вл�
 __init__.py            регистрация ноды + WEB_DIRECTORY
 py/settings_hub.py     заглушка ноды (без OUTPUT_NODE)
 py/media_list.py       эндпоинт /settings_hub/list_media
-py/stack_store.py      роуты /settings_hub/stack* (хранилище Paste Stack, /health - самодиагностика v76, ?wf= - per-workflow scope v77, GET/POST /root - кастомный абсолютный корень v84)
+py/stack_store.py      роуты /settings_hub/stack* (хранилище Paste Stack, /health - самодиагностика v76, ?wf= - per-workflow scope v77, GET/POST /root - кастомный абсолютный корень v84, type:"nodes" для фрагментов нод v96)
 py/chat_proxy.py       роуты /settings_hub/chat* (v86: конфиг+ключ, сессии, блобы, прокси к LLM со стримингом и отменой)
 py/clipboard_helper.py роут /settings_hub/clipboard (чтение буфера ОС, loopback+заголовок)
 web/settings_hub.js    загрузчик: баннер, EXPECTED-манифест версий, fail-open регистрация
-web/stack.js           Paste Stack: панель, захват, drag, сниппеты
+web/stack.js           Paste Stack: панель, захват, drag, сниппеты, фрагменты нод с группами (v96)
 web/compare.js         Image Compare: A/B wipe/fade/blink/diff
 web/core.js            конфиг, классификация виджетов, резолверы, слайдер-override
 web/hub_ui_renderer.js весь UI хаба: вкладки, строки, попапы, layout

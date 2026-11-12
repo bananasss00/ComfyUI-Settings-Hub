@@ -3773,6 +3773,166 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 }
 
 /* ===========================================================================
+   v96: NODE FRAGMENTS - cards for copied graph selections (nodes + groups),
+   the structure viewer, the ⧩ grab button and the canvas drop marker.
+   ======================================================================== */
+
+.hub-stack-nodes {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 2px 0;
+}
+
+.hub-stack-nodes-head {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+}
+
+.hub-stack-nodes-ico { font-size: calc(var(--sh-fs, 1) * 14px); }
+
+.hub-stack-nodes-count {
+    color: #dfe6f5;
+    font-size: calc(var(--sh-fs, 1) * 11.5px);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.hub-stack-nodes-g {
+    color: #8a9ac0;
+    font-size: calc(var(--sh-fs, 1) * 9.5px);
+    white-space: nowrap;
+}
+
+.hub-stack-nodes-groups {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    min-width: 0;
+}
+
+.hub-stack-nodes-group {
+    background: #1e2c46;
+    border: 1px solid #34486a;
+    color: #a9c4ea;
+    border-radius: 7px;
+    font-size: calc(var(--sh-fs, 1) * 8.5px);
+    padding: 0 5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+/* the ⧩ grab button (tools row) - same family as the ⇅ move toggle */
+.hub-stack-kind.hub-stack-grab {
+    padding: 1px 7px;
+    font-size: calc(var(--sh-fs, 1) * 11px);
+    line-height: 1.1;
+}
+
+/* the crosshair marker while a nodes card hovers the canvas */
+.hub-stack-dropmark {
+    position: fixed;
+    z-index: 999950;
+    width: 26px;
+    height: 26px;
+    margin: -13px 0 0 -13px;
+    border: 2px dashed #58c470;
+    border-radius: 50%;
+    pointer-events: none;
+    display: none;
+    box-shadow: 0 0 10px rgba(88, 196, 112, 0.45);
+}
+
+.hub-stack-dropmark::before,
+.hub-stack-dropmark::after {
+    content: "";
+    position: absolute;
+    background: #58c470;
+}
+
+.hub-stack-dropmark::before {
+    left: 50%;
+    top: -7px;
+    bottom: -7px;
+    width: 1px;
+    margin-left: -0.5px;
+}
+
+.hub-stack-dropmark::after {
+    top: 50%;
+    left: -7px;
+    right: -7px;
+    height: 1px;
+    margin-top: -0.5px;
+}
+
+/* the structure viewer (🔍 on a nodes card) */
+.hub-stack-viewer-body-nodes {
+    overflow: auto;
+    min-height: 0;
+}
+
+.hub-stack-vnodes-types,
+.hub-stack-vnodes-groups {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 10px;
+}
+
+.hub-stack-vnodes-sect {
+    flex-basis: 100%;
+    color: #66668a;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.hub-stack-vnodes-type,
+.hub-stack-vnodes-group {
+    background: #1c2c44;
+    border: 1px solid #2c4460;
+    color: #b9d0ee;
+    border-radius: 7px;
+    font-size: calc(var(--sh-fs, 1) * 10.5px);
+    padding: 1px 7px;
+    font-family: ui-monospace, monospace;
+    white-space: nowrap;
+}
+
+.hub-stack-vnodes-group { color: #a9c4ea; }
+
+.hub-stack-vnodes-type b { color: #ffd76a; font-weight: 600; }
+
+.hub-stack-vnodes-nometa {
+    color: #8a8ab0;
+    font-size: calc(var(--sh-fs, 1) * 11px);
+    margin-bottom: 8px;
+}
+
+.hub-stack-vnodes-raw {
+    border: 1px solid #33334e;
+    border-radius: 5px;
+    background: #12122a;
+}
+
+.hub-stack-vnodes-raw summary {
+    cursor: pointer;
+    color: #8a8ab0;
+    font-size: calc(var(--sh-fs, 1) * 10.5px);
+    padding: 4px 8px;
+    user-select: none;
+}
+
+.hub-stack-vnodes-raw summary:hover { color: #dfe6f5; }
+
+.hub-stack-vnodes-raw[open] summary { border-bottom: 1px solid #33334e; }
+
+/* ===========================================================================
    v73: Image Compare - a floating A/B panel (wipe / fade / blink / pixel
    diff x gain) fed from hub media rows, gallery thumbs and Stack image
    cards via the "Add to Compare" context menu.

@@ -492,7 +492,7 @@ async def stack_get(request):
 # (the web panel compares it against globalThis.__SettingsHubBuild and warns
 # about a half-updated install: web/ replaced while py/ stayed old, or the
 # page reloaded before ComfyUI restarted). AGENTS.md release checklist line.
-STACK_SERVER_VERSION = "v95"
+STACK_SERVER_VERSION = "v96"
 
 
 @PromptServer.instance.routes.get("/settings_hub/stack/health")
@@ -593,7 +593,13 @@ async def stack_root_set(request):
 @PromptServer.instance.routes.post("/settings_hub/stack/item")
 async def stack_add_text(request):
     """Add a TEXT entry. Body: JSON {text}. Text lives inline in the index
-    unless it exceeds TEXT_INLINE_LIMIT - then it is stored as a .txt blob."""
+    unless it exceeds TEXT_INLINE_LIMIT - then it is stored as a .txt blob.
+    v96: the body may carry `type` - "nodes" marks the text as a NODE
+    FRAGMENT (a canvas-clipboard selection copied in the ComfyUI graph: the
+    web panel pastes it back through the native canvas.pasteFromClipboard).
+    The allowlist keeps the index honest; an absent/unknown type stays
+    "text" (an old web build never sends the key, a newer one degrades the
+    same way against an old py)."""
     try:
         body = await request.json()
     except Exception:
@@ -605,6 +611,10 @@ async def stack_add_text(request):
         return web.json_response({"ok": False, "error": "text too large"}, status=413)
     name = _sanitize_name(body.get("name")) if isinstance(body, dict) else None
     tab = _sanitize_tab(body.get("tab")) if isinstance(body, dict) else None
+    # v96: entry type - "nodes" = a node-fragment JSON, "text" = everything else
+    entry_type = body.get("type") if isinstance(body, dict) else None
+    if entry_type not in ("text", "nodes"):
+        entry_type = "text"
     wf, err = _wf_from(request)
     if err is not None:
         return err
@@ -624,7 +634,7 @@ async def stack_add_text(request):
                 dup[0]["tab"] = tab
                 _write_index(items, wf)
             return web.json_response({"ok": True, "item": dup[0], "moved": True})
-        item = {"id": uuid.uuid4().hex[:12], "type": "text", "hash": h,
+        item = {"id": uuid.uuid4().hex[:12], "type": entry_type, "hash": h,
                 "text": text, "size": size}
         if name:
             item["name"] = name
