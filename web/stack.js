@@ -102,10 +102,36 @@
 //   stays the 🔍 of text cards; teardown() removes the overlay with the
 //   panel (same viewerEl channel).
 // ============================================================================
+// ============================================================================
+// v99 (owner plan 2026-11-13: "улучшение отображения скопированных нод в
+//   Paste Stack" - phases 1-3 of the plan, the Graph map is the NEXT round):
+// the node-fragment CARD becomes COMPACT + INFORMATIVE (three lines: the
+// resolved title + node counter / the real type names with counts and
+// "+N types" / groups · links · size · date; the height NEVER depends on
+// the graph size, no thumbnail); the preview aggregate "nodeMeta"
+// (schema 1: nodeCount / linkCount / groupCount / top types / groups /
+// singleTitle) is computed ONCE per fragment at capture time, rides the
+// same POST (py v99: whitelist + caps, never part of the content hash,
+// refreshed on re-capture of an identical fragment) and is lazily
+// back-filled for OLD entries via PATCH {nodeMeta} (rate-limited per item;
+// file-backed >100 KB fragments become fully described too). The full
+// view becomes an INSPECTOR: Overview (stats + type distribution + groups)
+// | Nodes (search + portioned list + lazy per-node details: inputs,
+// outputs, widget values with copy, properties, neighbors) | Groups
+// (color + reliable membership) | Connections ("src → out → dst → in",
+// reliable rows only, reroute notice) | JSON (collapsed, capped, 📋 copies
+// the FULL source). Reliable-or-nothing: unknown link counts stay "n/a",
+// group membership only via the group's own bounding box, reroute-mediated
+// links counted, never fabricated. Big graphs: 60 rows first, "+Show N
+// more" batches of 150, per-node details built on the first expand and
+// cached - the interface never blocks and the raw JSON is never re-parsed
+// per renderList().
+// ============================================================================
+
 // v89 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v97";
+globalThis.__SettingsHubLoaded["stack"] = "v99";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -1165,7 +1191,7 @@ async function apiGet() {
     } catch (_) { return null; }
 }
 
-async function apiAddText(text, name, tab, type) {
+async function apiAddText(text, name, tab, type, nodeMeta) {
     try {
         const body = { text };
         if (name) body.name = String(name);
@@ -1173,6 +1199,8 @@ async function apiAddText(text, name, tab, type) {
         // v96: "nodes" fragments ride the same text route; an old py ignores
         // the unknown key and stores a text card (graceful degradation).
         if (type === "nodes") body.type = "nodes";
+        // v99: the bounded preview aggregate (an old py also ignores it).
+        if (type === "nodes" && nodeMeta) body.nodeMeta = nodeMeta;
         const r = await app.api.fetchApi(scopeUrl("/settings_hub/stack/item"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1455,14 +1483,15 @@ async function evictLoop() {
 // Capture paths
 // ---------------------------------------------------------------------------
 
-async function addText(text, name, type) {
+async function addText(text, name, type, nodeMeta) {
     const t = String(text ?? "");
     if (!t.trim()) return false;
     if (t.length > MAX_TEXT_CHARS) { localToast("Text too large (1M char limit)"); return false; }
     // v79: a capture lands in the OPEN tab ("" on All = ungrouped)
     const fallback = localTextItem(t, name, type);
     if (activeTab) fallback.tab = activeTab;
-    applyServerAdd(await apiAddText(t, name, activeTab, type), fallback);
+    if (nodeMeta && type === "nodes") fallback.nodeMeta = nodeMeta; // v99: session cards keep the preview
+    applyServerAdd(await apiAddText(t, name, activeTab, type, nodeMeta), fallback);
     if (serverOk === false) localToast("Stack not persisted - restart ComfyUI to enable storage");
     return true;
 }
@@ -1648,7 +1677,15 @@ function onPasteEvent(e) {
 
 /** Parse + summarize a canvas-clipboard fragment. Returns null when the text
  *  is not a node selection (plain text, workflow JSON without nodes, junk).
- *  {ok, nodeCount, groupCount, groups:[title...], types:[[type,count]...]} */
+ *  v96: {ok, nodeCount, groupCount, groups:[title...], types:[[type,count]...]}
+ *  v99 adds: linkCount (null = the clipboard shape does not let us count it
+ *  RELIABLY - the UI must never show "0 links" for an unknown number),
+ *  groupDetails ([{title, color?, bounds?}...]), nodeSummaries ([{id, type,
+ *  title, groupIdx?}...] - groupIdx only when the membership is RELIABLE,
+ *  i.e. the group carries a bounding box and the node center falls inside
+ *  it: the same rule the graph itself uses to rebuild grouping on paste),
+ *  rerouteCount. The summaries feed the inspector; nodeMeta carries only
+ *  the bounded aggregate (buildNodeMeta below). */
 function parseGraphFragment(text) {
     try {
         const t = String(text ?? "").trim();
@@ -1674,30 +1711,138 @@ function parseGraphFragment(text) {
         }
         for (const [ty, c] of byType) types.push([ty, c]);
         types.sort((a, b) => b[1] - a[1]);
-        const groups = (Array.isArray(j.groups) ? j.groups : [])
+        // v99: groups - keep the plain title list (v96 contract) and build
+        // the rich details (color + bounding box) alongside.
+        const rawGroups = Array.isArray(j.groups) ? j.groups : [];
+        const groups = rawGroups
             .map((g) => String((g && (g.title || g.name)) || "").trim())
             .filter(Boolean);
+        const groupDetails = rawGroups
+            .filter((g) => g && typeof g === "object" && (g.title || g.name))
+            .map((g) => {
+                const d = { title: String(g.title || g.name).trim() };
+                if (typeof g.color === "string" && g.color) d.color = g.color;
+                if (Array.isArray(g.bounding) && g.bounding.length === 4 &&
+                    g.bounding.every((x) => typeof x === "number")) d.bounding = g.bounding.slice();
+                return d;
+            })
+            .filter((g) => g.title);
+        // v99: RELIABLE link counting. The canvas clipboard carries links as
+        // [id, origin_id, origin_slot, target_id, target_slot, type] tuples
+        // (both the legacy and the TS build). Count the array ONLY when every
+        // entry looks like such a tuple; anything else (missing array, other
+        // shapes) stays null - unknown, NOT zero.
+        let linkCount = null;
+        if (Array.isArray(j.links)) {
+            const okShape = j.links.every((l) => Array.isArray(l) && l.length >= 5 &&
+                typeof l[0] === "number" && typeof l[1] === "number" &&
+                typeof l[2] === "number" && typeof l[3] === "number");
+            if (okShape) linkCount = j.links.length;
+        }
+        // v99: per-node summaries + RELIABLE group membership. A node counts
+        // as a group member only when the group carries a bounding box AND
+        // the node CENTER falls inside it (LiteGraph itself rebuilds grouping
+        // by bounds on paste, so this matches what the paste will actually
+        // produce). Nodes outside every known bound carry no groupIdx.
+        const reroutes = Array.isArray(j.reroutes) ? j.reroutes : [];
+        const nodeSummaries = nodes.map((n) => {
+            const s = {
+                id: typeof n.id === "number" ? n.id : null,
+                type: String(n.type || "?"),
+                title: String(typeof n.title === "string" && n.title.trim() ? n.title.trim() : n.type || "?"),
+            };
+            if (Array.isArray(n.inputs)) s.inputs = n.inputs.length;
+            if (Array.isArray(n.outputs)) s.outputs = n.outputs.length;
+            if (Array.isArray(n.pos) && n.pos.length >= 2 &&
+                typeof n.pos[0] === "number" && typeof n.pos[1] === "number") {
+                s.pos = [n.pos[0], n.pos[1]];
+                if (Array.isArray(n.size) && n.size.length >= 2 &&
+                    typeof n.size[0] === "number" && typeof n.size[1] === "number") s.size = [n.size[0], n.size[1]];
+                const cx = s.size ? s.pos[0] + s.size[0] / 2 : s.pos[0];
+                const cy = s.size ? s.pos[1] + s.size[1] / 2 : s.pos[1];
+                for (let gi = 0; gi < groupDetails.length; gi++) {
+                    const b = groupDetails[gi].bounding;
+                    if (!b) continue;
+                    if (cx >= b[0] && cx <= b[0] + b[2] && cy >= b[1] && cy <= b[1] + b[3]) {
+                        s.groupIdx = gi;
+                        break;
+                    }
+                }
+            }
+            return s;
+        });
         return {
             ok: true,
             nodeCount: nodes.length,
-            groupCount: (Array.isArray(j.groups) ? j.groups.length : 0),
+            groupCount: rawGroups.length,
             groups,
             types,
+            // v99 fields (undefined-safe for the v96 callers)
+            linkCount,
+            groupDetails,
+            nodeSummaries,
+            rerouteCount: reroutes.length,
         };
+    } catch (_) { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// v99: NODE-FRAGMENT PREVIEW METADATA ("nodeMeta")
+// Owner plan: the card must IDENTIFY the fragment at one glance (real type
+// names, counts, groups, links) and stay COMPACT for any graph size; the
+// raw JSON stays the only paste source. nodeMeta is a small bounded
+// aggregate computed ONCE per fragment (capture time) or lazily for old
+// entries; it never touches the content hash and never re-parses on every
+// renderList().
+// ---------------------------------------------------------------------------
+
+const NODE_META_SCHEMA = 1;
+const NODE_META_MAX_TYPES = 32;   // mirrors py/stack_store.py
+const NODE_META_MAX_GROUPS = 32;
+
+/** Build the bounded preview aggregate from a parse result. null = nothing
+ *  worth storing (the caller keeps the item without nodeMeta). */
+function buildNodeMeta(m) {
+    try {
+        if (!m || !m.ok) return null;
+        const meta = {
+            schema: NODE_META_SCHEMA,
+            nodeCount: m.nodeCount,
+            linkCount: (typeof m.linkCount === "number") ? m.linkCount : null,
+            groupCount: m.groupCount || 0,
+            types: (m.types || []).slice(0, NODE_META_MAX_TYPES)
+                .map(([ty, c]) => [String(ty).slice(0, 96), c]),
+            groups: (m.groupDetails || []).slice(0, NODE_META_MAX_GROUPS)
+                .map((g) => {
+                    const e = { title: String(g.title).slice(0, 96) };
+                    if (g.color) e.color = String(g.color).slice(0, 32);
+                    return e;
+                }),
+        };
+        // v99 card naming rule: a single-node fragment can show the REAL node
+        // title (never stored as the item name - display only).
+        if (m.nodeCount === 1 && m.nodeSummaries?.[0]?.title) {
+            meta.singleTitle = String(m.nodeSummaries[0].title).slice(0, 192);
+        }
+        try { JSON.stringify(meta); } catch (_) { return null; }
+        return meta;
     } catch (_) { return null; }
 }
 
 /** Capture a RAW canvas-clipboard string as a "nodes" entry. Returns the
  *  meta when it really is a fragment (null otherwise - the caller decides
  *  whether that is an error). Name it after the first group when the
- *  selection lives inside one, else "N nodes". */
+ *  selection lives inside one, else "N nodes". v99: the bounded preview
+ *  aggregate (nodeMeta) is computed HERE, once per fragment, and rides the
+ *  same POST - the card never parses the raw JSON again, and file-backed
+ *  fragments (>100 KB) stay fully described forever. */
 async function addNodesFragment(raw, name) {
     const meta = parseGraphFragment(raw);
     if (!meta) return null;
     const auto = name || (meta.groupCount === 1 && meta.groups[0]
         ? meta.groups[0]
         : meta.nodeCount + " node" + (meta.nodeCount === 1 ? "" : "s"));
-    const ok = await addText(String(raw), auto, "nodes");
+    const ok = await addText(String(raw), auto, "nodes", buildNodeMeta(meta));
     if (ok) localToast(`Stacked: ${meta.nodeCount} nodes` +
         (meta.groupCount ? `, ${meta.groupCount} group${meta.groupCount === 1 ? "" : "s"}` : ""));
     return ok ? meta : null;
@@ -1941,6 +2086,134 @@ async function getBlob(item) {
 // Rendering
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// v99: COMPACT INFORMATIVE NODE-FRAGMENT CARD (owner plan phase 1)
+// The card must identify the fragment at ONE GLANCE and never grow with the
+// graph size. Three information lines:
+//   1. 🧩 + the display title + the node counter;
+//   2. the REAL node-type names with counts ("KSampler ×3 · CLIP ×2 · +4 types");
+//   3. the shared meta row: groups · links (when reliably counted) · size · date.
+// A 500-node graph renders EXACTLY the same structure as a 2-node one - the
+// height does not depend on the graph, and no thumbnail is ever built.
+// ---------------------------------------------------------------------------
+
+/** Auto-generated fragment names look like "1 node" / "12 nodes" - those are
+ *  NOT user names, the card may replace them with something real. A name
+ *  taken from a group title (or typed by the user) never matches. */
+const FRAG_AUTO_NAME_RE = /^\d+ nodes?$/;
+
+/** Unified card-level view of a fragment: prefers the stored nodeMeta
+ *  aggregate (zero parsing - file-backed fragments included), falls back to
+ *  the inline parse (WeakMap-cached per item object). null = nothing known
+ *  (the card falls back to the plain "node fragment" display). */
+function fragCardModel(item) {
+    try {
+        const nm = item?.nodeMeta;
+        if (nm && typeof nm === "object" && typeof nm.nodeCount === "number") {
+            return {
+                nodeCount: nm.nodeCount,
+                linkCount: (typeof nm.linkCount === "number") ? nm.linkCount : null,
+                groupCount: nm.groupCount || 0,
+                types: Array.isArray(nm.types) ? nm.types.filter((t) => Array.isArray(t) && t.length === 2 && t[0]) : [],
+                groups: Array.isArray(nm.groups)
+                    ? nm.groups.map((g) => (typeof g === "string" ? g : (g && g.title) || "")).filter(Boolean)
+                    : [],
+                singleTitle: (typeof nm.singleTitle === "string" && nm.singleTitle) || null,
+            };
+        }
+        const m = fragMetaOf(item);
+        if (!m) return null;
+        return {
+            nodeCount: m.nodeCount,
+            linkCount: (typeof m.linkCount === "number") ? m.linkCount : null,
+            groupCount: m.groupCount || 0,
+            types: m.types || [],
+            groups: m.groups || [],
+            singleTitle: (m.nodeCount === 1 && m.nodeSummaries?.[0]?.title) || null,
+        };
+    } catch (_) { return null; }
+}
+
+/** v99 card TITLE rules (display only - the stored name is never rewritten):
+ *  1. a user name (or a group auto-name) always wins;
+ *  2. an auto "N nodes" name on a single-node fragment shows the REAL node
+ *     title;
+ *  3. an auto name + one named group shows the group title;
+ *  4. otherwise the most characteristic type names identify it. */
+function fragDisplayName(item, cm) {
+    const nm = String(item?.name || "").trim();
+    if (nm && !FRAG_AUTO_NAME_RE.test(nm)) return nm;
+    if (cm) {
+        if (cm.nodeCount === 1 && cm.singleTitle) return cm.singleTitle;
+        if (cm.groupCount === 1 && cm.groups[0]) return cm.groups[0];
+        if (cm.types.length) return cm.types.slice(0, 2).map((t) => t[0]).join(" · ");
+    }
+    return nm || "Node fragment";
+}
+
+/** v99 truncation rules of the type line: 1 node -> its title; <=5 nodes ->
+ *  every type; more -> the top 3 types + "+N types". Long type names are
+ *  capped (CSS ellipsis also guards the row). */
+function fragTypeLine(cm) {
+    if (!cm || !cm.types || !cm.types.length) return "";
+    const cap = (t) => {
+        const s = String(t);
+        return s.length > 30 ? s.slice(0, 29) + "…" : s;
+    };
+    if (cm.nodeCount === 1) return esc(cap(cm.singleTitle || cm.types[0][0]));
+    let shown;
+    let extra = 0;
+    if (cm.nodeCount <= 5) {
+        shown = cm.types;
+    } else {
+        shown = cm.types.slice(0, 3);
+        extra = cm.types.length - 3;
+    }
+    const parts = shown.map(([ty, c]) =>
+        `${esc(cap(ty))}${c > 1 ? ` <b>×${c}</b>` : ""}`);
+    if (extra > 0) parts.push(`<span class="hub-stack-nodes-more">+${extra} type${extra === 1 ? "" : "s"}</span>`);
+    return parts.join(" · ");
+}
+
+// v99 lazy nodeMeta backfill for OLD entries (captured before v99, inline or
+// file-backed): the card renders from whatever it has, ONE async job fetches
+// + parses + PATCHes the aggregate; applyPatched re-renders with the full
+// preview. Rate-limited per item (in-flight set + a failed WeakSet), so a
+// big list never re-fetches on every render.
+const nodeMetaInFlight = new Set();
+const nodeMetaDead = new WeakSet();
+function ensureNodeMeta(item) {
+    try {
+        if (!item || item.type !== "nodes" || item.nodeMeta) return;
+        if (typeof item.text === "string") return; // inline: parses locally (WeakMap)
+        if (item.local) return;                     // session blob: no server to PATCH
+        if (nodeMetaInFlight.has(item.id) || nodeMetaDead.has(item)) return;
+        nodeMetaInFlight.add(item.id);
+        void (async () => {
+            try {
+                const raw = await itemText(item);
+                const m = parseGraphFragment(raw);
+                if (!m) { nodeMetaDead.add(item); return; }
+                const nm = buildNodeMeta(m);
+                if (!nm) { nodeMetaDead.add(item); return; }
+                const patched = await apiPatch(item.id, { nodeMeta: nm });
+                if (patched && patched.id) {
+                    applyPatched(patched); // server truth (also re-renders the card)
+                } else {
+                    // server unreachable / old py: session-only fallback so the
+                    // card still becomes informative until the next reload
+                    item.nodeMeta = nm;
+                    renderAll();
+                }
+            } catch (_) {
+                nodeMetaDead.add(item);
+            } finally {
+                nodeMetaInFlight.delete(item.id);
+            }
+        })();
+    } catch (_) {}
+}
+
 function cardHtml(item) {
     const name = String(item.name || "");
     const nameHtml = name ? `<span class="hub-stack-name" title="${esc(name)}">${esc(name)}</span>` : "";
@@ -2010,27 +2283,35 @@ function cardHtml(item) {
             `<button type="button" class="hub-stack-act" data-act="send" title="Send into the first matching hub media row">→</button>` +
             `<a class="hub-stack-act" data-act="dl" title="Download" download="${esc(name || item.file || "stack_file")}" href="${esc(item.localUrl || (item.file ? fileUrl(item.file) : ""))}">⤓</a>` + pinAct + editAct;
     } else if (item.type === "nodes") {
-        // v96: a NODE FRAGMENT - node count + group chips parsed from the
-        // stored JSON (inline texts parse synchronously; a >100 KB fragment
-        // is file-backed and shows only the size - the 🔍 viewer parses it
-        // asynchronously). The →🧩 action pastes through the native
-        // pasteFromClipboard, groups and wires included.
-        const m = fragMetaOf(item);
-        const n = m ? m.nodeCount : null;
-        const gc = m ? m.groupCount : 0;
-        const chips = m && m.groups.length
-            ? `<div class="hub-stack-nodes-groups">` +
-                m.groups.slice(0, 3).map((g) =>
-                    `<span class="hub-stack-nodes-group" title="Group: ${esc(g)}">▦ ${esc(g.length > 24 ? g.slice(0, 23) + "…" : g)}</span>`).join("") +
-                (m.groups.length > 3 ? `<span class="hub-stack-nodes-group">+${m.groups.length - 3}</span>` : "") +
-                `</div>`
-            : "";
+        // v99: a NODE FRAGMENT - the compact informative card (owner plan):
+        // line 1 = 🧩 + the resolved display title + the node counter;
+        // line 2 = the real type names with counts (+"+N types" when cut);
+        // the shared meta row carries groups · links (when reliably counted)
+        // · size. The →🧩 action pastes through the native pasteFromClipboard,
+        // groups and wires included. The preview never parses the raw JSON
+        // per render: the stored nodeMeta wins, an inline fragment parses
+        // once into the WeakMap, a file-backed one triggers the ONE-TIME
+        // lazy backfill.
+        const cm = fragCardModel(item);
+        if (!cm) ensureNodeMeta(item); // async backfill, this render shows the fallback
+        const dn = cm ? fragDisplayName(item, cm) : (name || "Node fragment");
+        const n = cm ? cm.nodeCount : null;
+        const typeLine = fragTypeLine(cm);
         preview = `<div class="hub-stack-nodes">` +
             `<div class="hub-stack-nodes-head"><span class="hub-stack-nodes-ico">🧩</span>` +
-            `<span class="hub-stack-nodes-count">${n != null ? n + " node" + (n === 1 ? "" : "s") : "node fragment"}</span>` +
-            (gc ? `<span class="hub-stack-nodes-g">${gc} group${gc === 1 ? "" : "s"}</span>` : "") +
-            `</div>${chips}</div>`;
-        meta = `nodes${item.size ? " · " + fmtBytes(item.size) : ""}`;
+            `<span class="hub-stack-nodes-name" title="${esc(dn)}">${esc(dn)}</span>` +
+            (n != null
+                ? `<span class="hub-stack-nodes-count">${n} node${n === 1 ? "" : "s"}</span>`
+                : `<span class="hub-stack-nodes-count">fragment</span>`) +
+            `</div>` +
+            (typeLine ? `<div class="hub-stack-nodes-types">${typeLine}</div>` : "") +
+            `</div>`;
+        // meta row: groups · links · size ("0 links" is NEVER fabricated -
+        // an unknown count just stays silent)
+        meta = "nodes" +
+            (cm && cm.groupCount ? ` · ${cm.groupCount} group${cm.groupCount === 1 ? "" : "s"}` : "") +
+            (cm && cm.linkCount != null ? ` · ${cm.linkCount} link${cm.linkCount === 1 ? "" : "s"}` : "") +
+            (item.size ? " · " + fmtBytes(item.size) : "");
         acts = viewAct +
             `<button type="button" class="hub-stack-act" data-act="insg" title="Paste into the CURRENT workflow - nodes, wires and groups">→🧩</button>` +
             pinAct + editAct;
@@ -2052,7 +2333,7 @@ function cardHtml(item) {
     return `<div class="hub-stack-card${pinCls}" data-id="${esc(item.id)}" data-type="${item.type}" title="${esc(mainTitle)}">` +
         `${item.pinned ? '<span class="hub-stack-pinflag" title="Pinned">📌</span>' : ""}` +
         `<div class="hub-stack-card-main">${handle}${preview}` +
-        `<div class="hub-stack-meta">${nameHtml}<span class="hub-stack-tagslot">${tagsHtml}${usesHtml}</span><span>${esc(meta)}</span><span>${esc(fmtTime(item.created))}${item.local ? " · session" : ""}</span></div></div>` +
+        `<div class="hub-stack-meta">${item.type === "nodes" ? "" : nameHtml}<span class="hub-stack-tagslot">${tagsHtml}${usesHtml}</span><span>${esc(meta)}</span><span>${esc(fmtTime(item.created))}${item.local ? " · session" : ""}</span></div></div>` +
         `<div class="hub-stack-acts">${acts}<button type="button" class="hub-stack-del" title="Delete entry">✕</button></div>` +
         `</div>`;
 }
@@ -3314,10 +3595,162 @@ function openViewer(item) {
     return openTextViewer(item); // v79: the text overlay, unchanged
 }
 
-/** v96: the NODE-FRAGMENT viewer - what is inside this fragment, without
- *  dumping raw JSON at the user first: a node-type census, the group list
- *  (+ colors when the build carries them), the size, then the RAW JSON in a
- *  collapsed <details> (capped at the media-viewer's 300 KB text budget).
+// ---------------------------------------------------------------------------
+// v99: NODE-FRAGMENT INSPECTOR (owner plan phase 2 + 3)
+// The full view becomes a real inspector: Overview | Nodes | Groups |
+// Connections | JSON. The raw fragment JSON is parsed ONCE per open; every
+// pane renders from the in-memory model; huge graphs render PORTIONED (60
+// rows first, "+Show N more" batches of 150) and per-node details build
+// lazily on the first expand - hundreds of nodes never create a DOM dump and
+// the interface never blocks.
+// ---------------------------------------------------------------------------
+
+const FRAG_ROWS_INITIAL = 60;   // first batch of the Nodes / Connections list
+const FRAG_ROWS_BATCH = 150;    // each "+Show N more" click
+const FRAG_VALUE_CAP = 160;     // long widget/text values collapse past this
+const FRAG_TYPES_OVERVIEW_CAP = 40;
+
+/** Build the full inspector model from the parsed fragment JSON (one call
+ *  per viewer open, all panes read it without re-parsing). Reliable-only:
+ *  link endpoints that resolve to known nodes produce CONNECTION rows;
+ *  endpoints that hit a reroute are counted, never fabricated; anything
+ *  else is ignored. */
+function buildFragDetail(j, m) {
+    const nodes = Array.isArray(j.nodes) ? j.nodes : [];
+    const byId = new Map();
+    for (const n of nodes) {
+        if (n && typeof n === "object" && typeof n.id === "number") byId.set(n.id, n);
+    }
+    const rerouteIds = new Set((Array.isArray(j.reroutes) ? j.reroutes : [])
+        .map((r) => (r && typeof r.id === "number") ? r.id : null).filter((x) => x != null));
+    const slotName = (node, arrName, idx, prefix) => {
+        try {
+            const arr = Array.isArray(node?.[arrName]) ? node[arrName] : [];
+            const s = arr[idx];
+            const nm = s && typeof s === "object" && typeof s.name === "string" && s.name.trim();
+            if (nm) return s.name.trim();
+        } catch (_) {}
+        return `${prefix} ${idx}`;
+    };
+    const links = [];
+    let rerouted = 0;
+    let unresolved = 0;
+    if (Array.isArray(j.links)) {
+        for (const l of j.links) {
+            if (!Array.isArray(l) || l.length < 5 ||
+                typeof l[0] !== "number" || typeof l[1] !== "number" ||
+                typeof l[2] !== "number" || typeof l[3] !== "number") continue;
+            const [lid, oid, osl, tid, tsl] = l;
+            const ltype = (typeof l[5] === "string" && l[5]) ? l[5] : "";
+            if (rerouteIds.has(oid) || rerouteIds.has(tid)) { rerouted++; continue; }
+            const from = byId.get(oid);
+            const to = byId.get(tid);
+            if (!from || !to) { unresolved++; continue; }
+            links.push({
+                from: oid, to: tid,
+                fromTitle: String((typeof from.title === "string" && from.title.trim()) ? from.title.trim() : from.type || "?"),
+                toTitle: String((typeof to.title === "string" && to.title.trim()) ? to.title.trim() : to.type || "?"),
+                out: slotName(from, "outputs", osl, "slot"),
+                in: slotName(to, "inputs", tsl, "slot"),
+                type: ltype,
+            });
+        }
+    }
+    return { byId, links, rerouted, unresolved, rerouteCount: rerouteIds.size };
+}
+
+/** One widget/property VALUE for the detail view: short values inline, long
+ *  ones collapsed into a <details> with a copy button (the owner plan: long
+ *  text values must collapse and be copyable). */
+function fragValueHtml(v) {
+    let text;
+    try {
+        text = typeof v === "string" ? v : JSON.stringify(v);
+    } catch (_) {
+        text = String(v);
+    }
+    if (text == null || text === "undefined") text = "(empty)";
+    if (text.length <= FRAG_VALUE_CAP) return esc(text);
+    const head = esc(text.slice(0, FRAG_VALUE_CAP));
+    return `<details class="hub-stack-vw-long"><summary>${head}\u2026 (${text.length.toLocaleString()} chars)</summary>` +
+        `<div class="hub-stack-vw-full">${esc(text)}</div>` +
+        `<button type="button" class="hub-stack-vw-copy" data-copy="1" title="Copy the full value">copy</button></details>`;
+}
+
+/** The EXPANDED content of one node: inputs, outputs, widget values,
+ *  properties, directly connected nodes. Built lazily on the first expand
+ *  and cached per node id - a 500-node graph builds details for the one
+ *  node the user actually opened. */
+function fragNodeDetailHtml(nid, detail) {
+    try {
+        const n = detail.byId.get(nid);
+        if (!n || typeof n !== "object") return `<div class="hub-stack-vnode-empty">Node data is not available</div>`;
+        const sect = (title, inner) => inner
+            ? `<div class="hub-stack-vnode-sect"><div class="hub-stack-vnode-sect-t">${title}</div>${inner}</div>`
+            : "";
+        const io = (arr, kind) => (Array.isArray(arr) && arr.length)
+            ? arr.map((s, i) => {
+                const nm = (s && typeof s.name === "string" && s.name.trim()) ? s.name.trim() : `${kind} ${i}`;
+                const ty = (s && typeof s.type === "string" && s.type) ? `<span class="hub-stack-vio-type">${esc(s.type)}</span>` : "";
+                return `<div class="hub-stack-vio-row"><span class="hub-stack-vio-name">${esc(nm)}</span>${ty}</div>`;
+            }).join("")
+            : "";
+        let widgets = "";
+        const wv = n.widgets_values;
+        if (Array.isArray(wv) && wv.length) {
+            widgets = wv.map((v, i) => {
+                const label = (v && typeof v === "object" && !Array.isArray(v)) ? "" : `w${i + 1}`;
+                return `<div class="hub-stack-vw-row">${label ? `<span class="hub-stack-vw-name">${esc(label)}</span>` : ""}<span class="hub-stack-vw-value">${fragValueHtml(v)}</span></div>`;
+            }).join("");
+        } else if (wv && typeof wv === "object") {
+            widgets = Object.entries(wv).map(([k, v]) =>
+                `<div class="hub-stack-vw-row"><span class="hub-stack-vw-name">${esc(k)}</span><span class="hub-stack-vw-value">${fragValueHtml(v)}</span></div>`).join("");
+        }
+        let props = "";
+        if (n.properties && typeof n.properties === "object") {
+            const keys = Object.keys(n.properties);
+            if (keys.length) {
+                props = keys.slice(0, 12).map((k) =>
+                    `<div class="hub-stack-vw-row"><span class="hub-stack-vw-name">${esc(k)}</span><span class="hub-stack-vw-value">${fragValueHtml(n.properties[k])}</span></div>`).join("") +
+                (keys.length > 12 ? `<div class="hub-stack-vw-more">+${keys.length - 12} more properties</div>` : "");
+            }
+        }
+        // directly connected nodes - only links whose BOTH endpoints resolved
+        let conn = "";
+        if (detail?.links?.length) {
+            const inc = detail.links.filter((l) => l.to === nid);
+            const out = detail.links.filter((l) => l.from === nid);
+            const row = (l, arrow) =>
+                `<div class="hub-stack-vio-row"><span class="hub-stack-vio-name">${esc(arrow === "in" ? l.fromTitle : l.toTitle)}</span>` +
+                `<span class="hub-stack-vio-type">${esc(arrow === "in" ? l.out + " \u2192 " + l.in : l.out + " \u2192 " + l.in)}${l.type ? " · " + esc(l.type) : ""}</span></div>`;
+            const incHtml = inc.slice(0, 12).map((l) => row(l, "in")).join("");
+            const outHtml = out.slice(0, 12).map((l) => row(l, "out")).join("");
+            conn = (inc.length || out.length)
+                ? (incHtml ? sect(`Connected (${inc.length} in)`, incHtml) : "") +
+                    (outHtml ? sect(`Connected (${out.length} out)`, outHtml) : "") +
+                    ((inc.length > 12 || out.length > 12) ? `<div class="hub-stack-vw-more">more connections on the Connections tab</div>` : "")
+                : "";
+        }
+        return sect("Inputs", io(n.inputs, "input")) +
+            sect("Outputs", io(n.outputs, "output")) +
+            sect("Widget values", widgets) +
+            sect("Properties", props) +
+            conn;
+    } catch (_) {
+        return `<div class="hub-stack-vnode-empty">Node data is not available</div>`;
+    }
+}
+
+/** v99: the NODE-FRAGMENT INSPECTOR - what is inside this fragment and how
+ *  it is built, without dumping raw JSON at the user first:
+ *    Overview  - stats + the type distribution + the group list (default);
+ *    Nodes     - every copied node with its real title, expandable to
+ *                inputs / outputs / widget values / properties / neighbors;
+ *                searchable; portioned for huge graphs;
+ *    Groups    - title + color + the reliably-counted member list;
+ *    Connections - "source \u2192 out \u2192 target \u2192 in" rows, reliable ones only;
+ *    JSON      - the raw source in a collapsed <details> (capped preview,
+ *                📋 copies the FULL text).
  *  Buttons: 📋 copy the raw JSON, →🧩 paste into the current workflow. */
 async function openNodesViewer(item) {
     if (!item) return null;
@@ -3326,58 +3759,267 @@ async function openNodesViewer(item) {
     const raw = await itemText(item);
     if (seq !== viewerSeq) return null; // a newer open superseded this one
     const m = parseGraphFragment(raw);
+    // one extra parse for the full detail model (per OPEN, never per render)
+    let detail = null;
+    if (m) {
+        try {
+            const j = JSON.parse(raw);
+            if (j && typeof j === "object" && !Array.isArray(j)) detail = buildFragDetail(j, m);
+        } catch (_) {}
+    }
     const v = document.createElement("div");
     v.className = "hub-stack-viewer";
     const title = String(item.name || "Node fragment");
+    const metaTxt = m
+        ? `${m.nodeCount} nodes · ${m.groupCount} group${m.groupCount === 1 ? "" : "s"} · ${fmtBytes(raw.length)}`
+        : "node fragment";
     v.innerHTML =
         `<div class="hub-stack-viewer-card">` +
         `<div class="hub-stack-viewer-head">` +
         `<span class="hub-stack-viewer-ico">🧩</span>` +
         `<span class="hub-stack-viewer-title" title="${esc(title)}">${esc(title)}</span>` +
-        `<span class="hub-stack-viewer-n hub-stack-viewer-meta"></span>` +
+        `<span class="hub-stack-viewer-n hub-stack-viewer-meta">${esc(metaTxt)}</span>` +
         `<button type="button" class="hub-btn hub-stack-viewer-copy" title="Copy the raw fragment JSON to the clipboard">📋 copy</button>` +
         `<button type="button" class="hub-btn hub-stack-viewer-ins" title="Paste into the current workflow (nodes, wires, groups)">→🧩</button>` +
         `<button type="button" class="hub-btn hub-stack-viewer-x" title="Close (Esc)">✕</button>` +
         `</div>` +
-        `<div class="hub-stack-viewer-body hub-stack-viewer-body-nodes"></div>` +
-        `</div>`;
+        `<div class="hub-stack-viewer-body hub-stack-viewer-body-nodes">` +
+        (m
+            ? `<div class="hub-stack-vtabs">` +
+                `<button type="button" class="hub-stack-vtab hub-stack-vtab-on" data-vtab="overview">Overview</button>` +
+                `<button type="button" class="hub-stack-vtab" data-vtab="nodes">Nodes</button>` +
+                `<button type="button" class="hub-stack-vtab" data-vtab="groups">Groups</button>` +
+                `<button type="button" class="hub-stack-vtab" data-vtab="conn">Connections</button>` +
+                `<button type="button" class="hub-stack-vtab" data-vtab="json">JSON</button>` +
+                `</div>` +
+                `<div class="hub-stack-vpane hub-stack-vpane-overview hub-stack-vpane-on"></div>` +
+                `<div class="hub-stack-vpane hub-stack-vpane-nodes"></div>` +
+                `<div class="hub-stack-vpane hub-stack-vpane-groups"></div>` +
+                `<div class="hub-stack-vpane hub-stack-vpane-conn"></div>` +
+                `<div class="hub-stack-vpane hub-stack-vpane-json"></div>`
+            : `<div class="hub-stack-vnodes-nometa">This entry is not a parseable node fragment anymore - the raw JSON is below.</div>` +
+                `<div class="hub-stack-vpane hub-stack-vpane-json hub-stack-vpane-on"></div>`)
+        + `</div></div>`;
     const body = v.querySelector(".hub-stack-viewer-body");
-    const metaEl = v.querySelector(".hub-stack-viewer-meta");
-    if (metaEl) {
-        metaEl.textContent = m
-            ? `${m.nodeCount} nodes · ${m.groupCount} group${m.groupCount === 1 ? "" : "s"} · ${fmtBytes(raw.length)}`
-            : "node fragment";
-    }
-    if (m) {
-        const types = document.createElement("div");
-        types.className = "hub-stack-vnodes-types";
-        types.innerHTML = m.types.map(([ty, c]) =>
-            `<span class="hub-stack-vnodes-type">${esc(ty)}${c > 1 ? ` <b>×${c}</b>` : ""}</span>`).join("");
-        body.appendChild(types);
-        if (m.groups.length) {
-            const gs = document.createElement("div");
-            gs.className = "hub-stack-vnodes-groups";
-            gs.innerHTML = `<div class="hub-stack-vnodes-sect">Groups</div>` +
-                m.groups.map((g) => `<span class="hub-stack-vnodes-group">▦ ${esc(g)}</span>`).join("");
-            body.appendChild(gs);
+    const live = () => seq === viewerSeq && viewerEl === v; // stale-render guard
+    // --- Overview (default): compact stats + aggregates, no per-node DOM ---
+    const renderOverview = () => {
+        const pane = v.querySelector(".hub-stack-vpane-overview");
+        if (!pane) return;
+        const stat = (num, label, na) =>
+            `<div class="hub-stack-vstat"><span class="hub-stack-vstat-n">${na ? "n/a" : esc(String(num))}</span><span class="hub-stack-vstat-l">${label}</span></div>`;
+        const typeRows = m.types.slice(0, FRAG_TYPES_OVERVIEW_CAP).map(([ty, c]) =>
+            `<div class="hub-stack-vtype-row"><span class="hub-stack-vtype-name" title="${esc(ty)}">${esc(ty)}</span><span class="hub-stack-vtype-count">${c > 1 ? "×" + c : ""}</span></div>`).join("") +
+            (m.types.length > FRAG_TYPES_OVERVIEW_CAP
+                ? `<div class="hub-stack-vw-more">+${m.types.length - FRAG_TYPES_OVERVIEW_CAP} more types</div>` : "");
+        const groupRows = (m.groupDetails || []).slice(0, FRAG_TYPES_OVERVIEW_CAP).map((g) => {
+            const cnt = (m.nodeSummaries || []).filter((s) => s.groupIdx != null && (m.groupDetails[s.groupIdx] || {}).title === g.title).length;
+            const sw = g.color ? `<span class="hub-stack-vswatch" style="background:${esc(g.color)}"></span>` : `<span class="hub-stack-vswatch"></span>`;
+            return `<div class="hub-stack-vgroup-row">${sw}<span class="hub-stack-vtype-name" title="${esc(g.title)}">${esc(g.title)}</span>` +
+                (cnt ? `<span class="hub-stack-vtype-count">${cnt} node${cnt === 1 ? "" : "s"}</span>` : `<span class="hub-stack-vtype-count"></span>`) + `</div>`;
+        }).join("") +
+            ((m.groupDetails || []).length > FRAG_TYPES_OVERVIEW_CAP
+                ? `<div class="hub-stack-vw-more">+${m.groupDetails.length - FRAG_TYPES_OVERVIEW_CAP} more groups</div>` : "");
+        pane.innerHTML =
+            `<div class="hub-stack-vstats">` +
+            stat(m.nodeCount, "nodes") +
+            stat(m.types.length, "types") +
+            stat(m.groupCount, "groups", m.groupCount === 0) +
+            stat(m.linkCount != null ? m.linkCount : 0, "links", m.linkCount == null) +
+            `</div>` +
+            (m.linkCount == null
+                ? `<div class="hub-stack-vnotice">This clipboard shape does not expose reliable links - the count is unknown (not zero).</div>`
+                : "") +
+            `<div class="hub-stack-vnodes-sect">Node types</div>` +
+            `<div class="hub-stack-vnodes-types">${m.types.slice(0, FRAG_TYPES_OVERVIEW_CAP).map(([ty, c]) =>
+                `<span class="hub-stack-vnodes-type">${esc(ty)}${c > 1 ? ` <b>×${c}</b>` : ""}</span>`).join("")}` +
+            (m.types.length > FRAG_TYPES_OVERVIEW_CAP ? `<span class="hub-stack-vnodes-type">+${m.types.length - FRAG_TYPES_OVERVIEW_CAP} more</span>` : "") +
+            `</div>` +
+            (m.groupCount
+                ? `<div class="hub-stack-vnodes-sect">Groups</div><div class="hub-stack-vgroup-list">${groupRows}</div>`
+                : `<div class="hub-stack-vnodes-sect">Groups</div><div class="hub-stack-vnotice">No groups in this fragment.</div>`);
+    };
+    // --- Nodes: searchable, portioned, lazy per-node details ---
+    const nodeState = { query: "", shown: FRAG_ROWS_INITIAL, cache: new Map() };
+    const filteredNodes = () => {
+        const q = nodeState.query.trim().toLowerCase();
+        const list = m.nodeSummaries || [];
+        if (!q) return list;
+        return list.filter((s) => s.title.toLowerCase().includes(q) || s.type.toLowerCase().includes(q));
+    };
+    const groupTitleOf = (s) => {
+        if (s.groupIdx == null || !m.groupDetails || !m.groupDetails[s.groupIdx]) return "";
+        return m.groupDetails[s.groupIdx].title;
+    };
+    const renderNodes = () => {
+        const pane = v.querySelector(".hub-stack-vpane-nodes");
+        if (!pane) return;
+        const list = filteredNodes();
+        const shown = list.slice(0, nodeState.shown);
+        const rows = shown.map((s, i) => {
+            const gt = groupTitleOf(s);
+            const io = `${s.inputs != null ? s.inputs + " in" : ""}${s.inputs != null && s.outputs != null ? " · " : ""}${s.outputs != null ? s.outputs + " out" : ""}`;
+            return `<details class="hub-stack-vnode" data-nid="${s.id != null ? s.id : ""}">` +
+                `<summary class="hub-stack-vnode-main">` +
+                `<span class="hub-stack-vnode-idx">${i + 1}</span>` +
+                `<span class="hub-stack-vnode-title" title="${esc(s.title)}">${esc(s.title)}</span>` +
+                `<span class="hub-stack-vnode-type">${esc(s.type)}</span>` +
+                (s.id != null ? `<span class="hub-stack-vnode-id">#${s.id}</span>` : "") +
+                (gt ? `<span class="hub-stack-vnode-group" title="Group: ${esc(gt)}">▦ ${esc(gt)}</span>` : "") +
+                (io ? `<span class="hub-stack-vnode-io">${esc(io)}</span>` : "") +
+                `</summary>` +
+                `<div class="hub-stack-vnode-detail">${detail ? "" : `<div class="hub-stack-vnode-empty">Details are unavailable for this fragment</div>`}</div>` +
+                `</details>`;
+        }).join("");
+        pane.innerHTML =
+            `<div class="hub-stack-vsearch-row"><input type="text" class="hub-stack-vsearch" data-hub-focus spellcheck="false" placeholder="Search nodes by title or type (${list.length})" value="${esc(nodeState.query)}"></div>` +
+            (list.length
+                ? `<div class="hub-stack-vnode-list">${rows}</div>` +
+                    (list.length > shown.length
+                        ? `<button type="button" class="hub-stack-vmore">Show ${Math.min(FRAG_ROWS_BATCH, list.length - shown.length)} more of ${list.length}</button>`
+                        : "")
+                : `<div class="hub-stack-vnotice">No nodes match "${esc(nodeState.query)}".</div>`);
+        const inp = pane.querySelector(".hub-stack-vsearch");
+        if (inp) {
+            inp.addEventListener("input", () => {
+                if (!live()) return;
+                nodeState.query = inp.value || "";
+                nodeState.shown = FRAG_ROWS_INITIAL;
+                renderNodes();
+            });
         }
+        const more = pane.querySelector(".hub-stack-vmore");
+        if (more) {
+            more.addEventListener("click", () => {
+                if (!live()) return;
+                nodeState.shown += FRAG_ROWS_BATCH;
+                renderNodes();
+            });
+        }
+        // lazy per-node details: built on the FIRST expand, cached per node
+        pane.querySelectorAll(".hub-stack-vnode[data-nid]").forEach((d) => {
+            d.addEventListener("toggle", () => {
+                if (!d.open || !live() || !detail) return;
+                const box = d.querySelector(".hub-stack-vnode-detail");
+                if (!box || box.dataset.filled) return;
+                const nid = Number(d.dataset.nid);
+                if (!nodeState.cache.has(nid)) nodeState.cache.set(nid, fragNodeDetailHtml(nid, detail));
+                box.innerHTML = nodeState.cache.get(nid);
+                box.dataset.filled = "1";
+                box.querySelectorAll(".hub-stack-vw-copy").forEach((btn) => {
+                    btn.addEventListener("click", async (ev) => {
+                        ev.stopPropagation();
+                        try {
+                            const full = btn.parentElement?.querySelector(".hub-stack-vw-full")?.textContent || "";
+                            if (!navigator.clipboard?.writeText) { localToast("Clipboard write unavailable"); return; }
+                            await navigator.clipboard.writeText(full);
+                            localToast("Value copied");
+                        } catch (_) { localToast("Copy failed"); }
+                    });
+                });
+            });
+        });
+    };
+    // --- Groups: reliable membership only ---
+    const renderGroups = () => {
+        const pane = v.querySelector(".hub-stack-vpane-groups");
+        if (!pane) return;
+        if (!m.groupCount) {
+            pane.innerHTML = `<div class="hub-stack-vnotice">No groups in this fragment.</div>`;
+            return;
+        }
+        const rows = (m.groupDetails || []).map((g) => {
+            const members = (m.nodeSummaries || []).filter((s) => s.groupIdx != null && (m.groupDetails[s.groupIdx] || {}).title === g.title);
+            const sw = g.color ? `<span class="hub-stack-vswatch" style="background:${esc(g.color)}"></span>` : `<span class="hub-stack-vswatch"></span>`;
+            const memberList = members.length
+                ? members.slice(0, 16).map((s) => esc(s.title)).join(", ") +
+                    (members.length > 16 ? ` +${members.length - 16} more` : "")
+                : (g.bounding ? "no nodes fall inside this bound" : "membership unknown (no bounding box)");
+            return `<div class="hub-stack-vgroup-card">` +
+                `<div class="hub-stack-vgroup-row">${sw}<span class="hub-stack-vtype-name" title="${esc(g.title)}">${esc(g.title)}</span>` +
+                (members.length ? `<span class="hub-stack-vtype-count">${members.length} node${members.length === 1 ? "" : "s"}</span>` : `<span class="hub-stack-vtype-count"></span>`) + `</div>` +
+                `<div class="hub-stack-vgroup-members">${memberList}</div>` +
+                `</div>`;
+        }).join("");
+        pane.innerHTML = `<div class="hub-stack-vnodes-sect">Groups</div>` + rows;
+    };
+    // --- Connections: reliable rows only, portioned ---
+    const connState = { shown: FRAG_ROWS_INITIAL };
+    const renderConn = () => {
+        const pane = v.querySelector(".hub-stack-vpane-conn");
+        if (!pane) return;
+        const links = detail?.links || [];
+        const notes = [];
+        if (m.linkCount == null) notes.push("This clipboard shape does not expose reliable links - nothing is shown rather than guessed.");
+        if (detail && (detail.rerouted > 0 || detail.unresolved > 0)) {
+            notes.push(`${detail.rerouted + detail.unresolved} more connection${detail.rerouted + detail.unresolved === 1 ? "" : "s"} go through reroutes or unresolvable endpoints and are not shown.`);
+        }
+        if (m.linkCount === 0) notes.push("The fragment has no connections between nodes.");
+        if (!links.length) {
+            pane.innerHTML = notes.map((n) => `<div class="hub-stack-vnotice">${esc(n)}</div>`).join("") ||
+                `<div class="hub-stack-vnotice">No resolvable connections.</div>`;
+            return;
+        }
+        const shown = links.slice(0, connState.shown);
+        const rows = shown.map((l) =>
+            `<div class="hub-stack-vlink-row">` +
+            `<span class="hub-stack-vlink-title" title="${esc(l.fromTitle)}">${esc(l.fromTitle)}</span>` +
+            `<span class="hub-stack-vlink-arrow">→</span>` +
+            `<span class="hub-stack-vlink-slot">${esc(l.out)}</span>` +
+            `<span class="hub-stack-vlink-arrow">→</span>` +
+            `<span class="hub-stack-vlink-title" title="${esc(l.toTitle)}">${esc(l.toTitle)}</span>` +
+            `<span class="hub-stack-vlink-arrow">→</span>` +
+            `<span class="hub-stack-vlink-slot">${esc(l.in)}</span>` +
+            (l.type ? `<span class="hub-stack-vio-type">${esc(l.type)}</span>` : "") +
+            `</div>`).join("");
+        pane.innerHTML = notes.map((n) => `<div class="hub-stack-vnotice">${esc(n)}</div>`).join("") +
+            `<div class="hub-stack-vlink-list">${rows}</div>` +
+            (links.length > shown.length
+                ? `<button type="button" class="hub-stack-vmore">Show ${Math.min(FRAG_ROWS_BATCH, links.length - shown.length)} more of ${links.length}</button>`
+                : "");
+        const more = pane.querySelector(".hub-stack-vmore");
+        if (more) {
+            more.addEventListener("click", () => {
+                if (!live()) return;
+                connState.shown += FRAG_ROWS_BATCH;
+                renderConn();
+            });
+        }
+    };
+    // --- JSON: the raw source, collapsed, capped preview + FULL copy ---
+    const renderJson = () => {
+        const pane = v.querySelector(".hub-stack-vpane-json");
+        if (!pane) return;
+        const det = document.createElement("details");
+        det.className = "hub-stack-vnodes-raw";
+        const sum = document.createElement("summary");
+        sum.textContent = "Raw fragment JSON";
+        const pre = document.createElement("pre");
+        pre.className = "hub-stack-viewer-pre";
+        pre.textContent = raw.length > MEDIA_TEXT_BYTES
+            ? raw.slice(0, MEDIA_TEXT_BYTES) + "\n… (truncated at 300 KB - 📋 copies the FULL JSON)"
+            : raw;
+        det.append(sum, pre);
+        pane.innerHTML = "";
+        pane.append(det);
+    };
+    if (m) {
+        renderOverview();
+        renderNodes();
+        renderGroups();
+        renderConn();
+        renderJson();
+        body.querySelectorAll(".hub-stack-vtab").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                if (!live()) return;
+                const name = btn.dataset.vtab;
+                body.querySelectorAll(".hub-stack-vtab").forEach((b) => b.classList.toggle("hub-stack-vtab-on", b === btn));
+                body.querySelectorAll(".hub-stack-vpane").forEach((p) => p.classList.toggle("hub-stack-vpane-on", p.classList.contains("hub-stack-vpane-" + name)));
+            });
+        });
     } else {
-        const noMeta = document.createElement("div");
-        noMeta.className = "hub-stack-vnodes-nometa";
-        noMeta.textContent = "The raw JSON is too large for a live summary (>100 KB) - the full content is below.";
-        body.appendChild(noMeta);
+        renderJson();
     }
-    const det = document.createElement("details");
-    det.className = "hub-stack-vnodes-raw";
-    const sum = document.createElement("summary");
-    sum.textContent = "Raw fragment JSON";
-    const pre = document.createElement("pre");
-    pre.className = "hub-stack-viewer-pre";
-    pre.textContent = raw.length > MEDIA_TEXT_BYTES
-        ? raw.slice(0, MEDIA_TEXT_BYTES) + "\n… (truncated at 300 KB - 📋 copies the FULL JSON)"
-        : raw;
-    det.append(sum, pre);
-    body.appendChild(det);
     document.body.appendChild(v);
     viewerEl = v;
     v.addEventListener("mousedown", (e) => { if (e.target === v) closeViewer(); });
@@ -4256,6 +4898,15 @@ export function __stackTestHooks() {
         stkPopEl: () => stkPop,
         // v96: node-fragment introspection for the smoke tests
         parseGraphFragment,
+        // v99: compact informative cards + nodeMeta + inspector introspection
+        buildNodeMeta,
+        fragCardModel,
+        fragDisplayName,
+        fragTypeLine,
+        ensureNodeMeta,
+        buildFragDetail,
+        openNodesViewer,
+        nodeMetaInFlight: () => nodeMetaInFlight,
         addNodesFragment,
         onCanvasCopied,
         installCanvasCopyHook,

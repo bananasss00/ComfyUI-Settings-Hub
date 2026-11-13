@@ -156,6 +156,14 @@ MAX_NAME_CHARS = 120            # display name of an entry (v71)
 MAX_TAGS = 8                    # v72: per-entry tag cap
 MAX_TAG_CHARS = 24              # v72: per-tag cap
 MAX_TAB_CHARS = 48              # v79: display-group (tab) name cap
+# v99: node-fragment PREVIEW metadata (aggregated types/groups, never a copy
+# of the graph). Hard caps keep the index small: at most 32 type entries and
+# 32 groups, and the serialized whole must fit NODE_META_MAX_BYTES or it is
+# dropped entirely (the card falls back to the old parse-on-demand path).
+NODE_META_MAX_BYTES = 8192
+NODE_META_MAX_TYPES = 32
+NODE_META_MAX_GROUPS = 32
+NODE_META_MAX_STR = 96          # per type / group title / single-title cap
 
 _IMG_EXT = {
     "png": "image/png",
@@ -454,6 +462,93 @@ def _sanitize_tab(raw):
     return cleaned[:MAX_TAB_CHARS]
 
 
+def _sanitize_node_meta(raw):
+    """v99: PREVIEW metadata of a node-fragment entry ("nodes" type only).
+    The web panel computes it ONCE per fragment at capture time (or lazily
+    for old entries) and stores it alongside the item so the CARD never has
+    to re-parse the raw JSON, and file-backed fragments (>100 KB) become
+    fully described too. WHITELIST rebuild: only the known keys survive,
+    every string is control-stripped and capped, every counter clamped to a
+    sane range; the rebuilt object must fit NODE_META_MAX_BYTES or the whole
+    thing is dropped (None - the client falls back to parsing on demand).
+    The metadata NEVER participates in the content hash (that is computed
+    from the text alone) and never touches the stored fragment JSON."""
+    if not isinstance(raw, dict):
+        return None
+    def _str(v, cap):
+        if not isinstance(v, str):
+            return None
+        cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", v).strip()
+        return cleaned[:cap] if cleaned else None
+    def _int(v, lo, hi):
+        try:
+            return max(lo, min(hi, int(v)))
+        except (TypeError, ValueError):
+            return None
+    meta = {"schema": 1}
+    nc = _int(raw.get("nodeCount"), 1, 100_000)
+    if nc is None:
+        return None  # a fragment meta without a node count is meaningless
+    meta["nodeCount"] = nc
+    # linkCount: null = the clipboard shape did not let us count reliably -
+    # the card must NOT show "0 links" for an unknown number.
+    if raw.get("linkCount") is None:
+        meta["linkCount"] = None
+    else:
+        lc = _int(raw.get("linkCount"), 0, 500_000)
+        if lc is None:
+            return None
+        meta["linkCount"] = lc
+    gc = _int(raw.get("groupCount"), 0, 10_000)
+    if gc is None:
+        return None
+    meta["groupCount"] = gc
+    types = []
+    rt = raw.get("types")
+    if isinstance(rt, list):
+        for t in rt:
+            if not isinstance(t, (list, tuple)) or len(t) != 2:
+                continue
+            name = _str(t[0], NODE_META_MAX_STR)
+            # a zero/negative occurrence count is meaningless - drop the entry
+            # (a clamp would FABRICATE occurrences that never existed)
+            cnt = _int(t[1], 0, 100_000)
+            if name and cnt:
+                types.append([name, cnt])
+            if len(types) >= NODE_META_MAX_TYPES:
+                break
+    meta["types"] = types
+    groups = []
+    rg = raw.get("groups")
+    if isinstance(rg, list):
+        for g in rg:
+            if isinstance(g, str):
+                g = {"title": g}
+            if not isinstance(g, dict):
+                continue
+            title = _str(g.get("title"), NODE_META_MAX_STR)
+            if not title:
+                continue
+            entry = {"title": title}
+            color = _str(g.get("color"), 32)
+            if color:
+                entry["color"] = color
+            groups.append(entry)
+            if len(groups) >= NODE_META_MAX_GROUPS:
+                break
+    meta["groups"] = groups
+    st = _str(raw.get("singleTitle"), 2 * NODE_META_MAX_STR)
+    if st:
+        meta["singleTitle"] = st
+    try:
+        blob = json.dumps(meta, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    if len(blob.encode("utf-8", "ignore")) > NODE_META_MAX_BYTES:
+        return None
+    return meta
+
+
 def _blob_type_for(ext):
     """v71: index `type` for a stored blob extension."""
     if ext in _IMG_EXT:
@@ -492,7 +587,7 @@ async def stack_get(request):
 # (the web panel compares it against globalThis.__SettingsHubBuild and warns
 # about a half-updated install: web/ replaced while py/ stayed old, or the
 # page reloaded before ComfyUI restarted). AGENTS.md release checklist line.
-STACK_SERVER_VERSION = "v98"
+STACK_SERVER_VERSION = "v99"
 
 
 @PromptServer.instance.routes.get("/settings_hub/stack/health")
@@ -615,6 +710,13 @@ async def stack_add_text(request):
     entry_type = body.get("type") if isinstance(body, dict) else None
     if entry_type not in ("text", "nodes"):
         entry_type = "text"
+    # v99: optional PREVIEW metadata of a node fragment (aggregated types /
+    # groups / counts). Accepted for "nodes" entries only; sanitized to a
+    # bounded whitelist - junk or oversize is dropped and the card falls back
+    # to its parse-on-demand path. NEVER part of the content hash.
+    node_meta = None
+    if entry_type == "nodes" and isinstance(body, dict) and "nodeMeta" in body:
+        node_meta = _sanitize_node_meta(body.get("nodeMeta"))
     wf, err = _wf_from(request)
     if err is not None:
         return err
@@ -633,6 +735,12 @@ async def stack_add_text(request):
             if tab and not dup[0].get("tab"):
                 dup[0]["tab"] = tab
                 _write_index(items, wf)
+            # v99: a re-capture of an identical fragment REFRESHES the preview
+            # metadata (the schema may have evolved; the content is the same,
+            # so the hash and the dedupe stay untouched).
+            if node_meta is not None:
+                dup[0]["nodeMeta"] = node_meta
+                _write_index(items, wf)
             return web.json_response({"ok": True, "item": dup[0], "moved": True})
         item = {"id": uuid.uuid4().hex[:12], "type": entry_type, "hash": h,
                 "text": text, "size": size}
@@ -640,6 +748,8 @@ async def stack_add_text(request):
             item["name"] = name
         if tab:
             item["tab"] = tab
+        if node_meta is not None:
+            item["nodeMeta"] = node_meta
         if size > TEXT_INLINE_LIMIT:
             _ensure_dirs(wf)
             blob_name = item["id"] + ".txt"
@@ -804,6 +914,21 @@ async def stack_patch(request):
                 it["tab"] = tb
             else:
                 it.pop("tab", None)  # v79: empty string = back to "All"
+        # v99: store/refresh the PREVIEW metadata of a NODE FRAGMENT (the
+        # lazy backfill path for entries captured before v99, file-backed
+        # ones included). Strictly "nodes"-only and whitelist-sanitized -
+        # a refusal answers 400 so the client knows the backfill failed
+        # (a silent ignore would look like a lost card).
+        if "nodeMeta" in body:
+            if it.get("type") != "nodes":
+                return web.json_response(
+                    {"ok": False, "error": "nodeMeta allowed for nodes entries only"},
+                    status=400)
+            nm = _sanitize_node_meta(body.get("nodeMeta"))
+            if nm is None:
+                return web.json_response(
+                    {"ok": False, "error": "bad nodeMeta"}, status=400)
+            it["nodeMeta"] = nm
         # v97: edit the CONTENT of a text entry (the Full text view editor).
         # Refusals answer with an error so the client can keep the textarea
         # open (a silent ignore would look like a lost save).

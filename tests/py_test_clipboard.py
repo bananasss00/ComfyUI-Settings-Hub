@@ -735,6 +735,121 @@ check("root: old custom store keeps its files",
       os.path.isfile(os.path.join(ROOT_CUSTOM, "index.json")), ROOT_CUSTOM)
 
 # ---------------------------------------------------------------------------
+# v99: nodeMeta - the bounded PREVIEW metadata of node-fragment entries
+# ---------------------------------------------------------------------------
+
+print("\n== stack_store v99: nodeMeta ==")
+
+
+def add_text_route(body, wf=None):
+    q = {"wf": wf} if wf else {}
+    return call(("POST", "/settings_hub/stack/item"), FakeRequest(query=q, json_body=body))
+
+
+NM_FRAG = json.dumps({
+    "nodes": [
+        {"id": 1, "type": "KSampler", "pos": [100, 100], "size": [270, 262],
+         "title": "My sampler", "widgets_values": [42]},
+        {"id": 2, "type": "CheckpointLoaderSimple", "pos": [400, 100], "size": [315, 106]},
+        {"id": 3, "type": "VAEDecode", "pos": [700, 100], "size": [210, 58]},
+    ],
+    "links": [[1, 2, 0, 1, 0, "MODEL"], [2, 1, 0, 3, 0, "LATENT"]],
+    "groups": [{"title": "Render", "bounding": [60, 40, 900, 400], "color": "#3f526b"}],
+})
+
+# 1. add with nodeMeta: stored on the item, hash stays text-only
+meta_in = {"schema": 1, "nodeCount": 3, "linkCount": 2, "groupCount": 1,
+           "types": [["KSampler", 1], ["CheckpointLoaderSimple", 1], ["VAEDecode", 1]],
+           "groups": [{"title": "Render", "color": "#3f526b"}]}
+r = add_text_route({"text": NM_FRAG, "type": "nodes", "nodeMeta": meta_in})
+j = r.json()
+it = j.get("item", {})
+check("nodeMeta: stored on a nodes entry",
+      r.status == 200 and it.get("type") == "nodes" and
+      it.get("nodeMeta", {}).get("nodeCount") == 3, str(it.get("nodeMeta"))[:120])
+check("nodeMeta: hash covers the TEXT only (never the meta)",
+      it.get("hash") == stack_store._hash_bytes(NM_FRAG.encode("utf-8")), str(it.get("hash")))
+
+# 2. re-capture of an IDENTICAL fragment (same hash): the meta REFRESHES
+meta_new = dict(meta_in, linkCount=None)
+r2 = add_text_route({"text": NM_FRAG, "type": "nodes", "nodeMeta": meta_new})
+j2 = r2.json()
+check("nodeMeta: re-capture refreshes the aggregate (dedupe moved)",
+      j2.get("moved") is True and j2.get("item", {}).get("nodeMeta", {}).get("linkCount") is None,
+      str(j2.get("item", {}).get("nodeMeta"))[:120])
+check("nodeMeta: re-capture kept ONE entry",
+      len([x for x in get_items() if x.get("hash") == stack_store._hash_bytes(NM_FRAG.encode("utf-8"))]) == 1, "")
+
+# 3. junk meta is dropped silently (the card falls back to parse-on-demand)
+for junk in ("junk", 42, {"nodeCount": "no"}, {"schema": 1}, None):
+    r3 = add_text_route({"text": NM_FRAG[:-1] + " ", "type": "nodes", "nodeMeta": junk})
+    j3 = r3.json()
+    check(f"nodeMeta: junk {type(junk).__name__} dropped on add",
+          j3.get("item", {}).get("nodeMeta") in (None,) or "nodeMeta" not in j3.get("item", {}),
+          str(j3.get("item", {}).get("nodeMeta"))[:60])
+
+# oversized meta is TRUNCATED to the hard caps (32 types / 32 groups) - the
+# rebuilt whole is bounded no matter how much junk came in
+huge = {"schema": 1, "nodeCount": 2, "linkCount": None, "groupCount": 0,
+        "types": [["T" * 90, 1]] * 200, "groups": []}
+r4 = add_text_route({"text": NM_FRAG[:-2] + " ", "type": "nodes", "nodeMeta": huge})
+big_stored = r4.json().get("item", {}).get("nodeMeta")
+check("nodeMeta: oversized aggregate truncated to the cap",
+      big_stored is not None and len(big_stored.get("types", [])) == 32,
+      str(len(big_stored.get("types", [])) if big_stored else None))
+
+# 4. text entries never take nodeMeta
+r5 = add_text_route({"text": "plain prompt text v99", "type": "text", "nodeMeta": meta_in})
+check("nodeMeta: ignored for text entries on add",
+      "nodeMeta" not in r5.json().get("item", {}), "")
+
+# 5. PATCH {nodeMeta}: the lazy backfill path - nodes only, strict refusals
+items_now = get_items()
+frag_item = next((x for x in items_now if x.get("type") == "nodes" and x.get("hash") == stack_store._hash_bytes(NM_FRAG.encode("utf-8"))), None)
+text_item = next((x for x in items_now if x.get("type") == "text"), None)
+check("nodeMeta: a nodes item exists for the patch test", frag_item is not None, "")
+if frag_item:
+    r6 = call(("POST", "/settings_hub/stack/patch"),
+              FakeRequest(json_body={"id": frag_item["id"], "nodeMeta": {"schema": 1, "nodeCount": 3,
+                                                            "linkCount": 2, "groupCount": 1,
+                                                            "types": [["KSampler", 1]], "groups": []}}))
+    check("nodeMeta: PATCH stores a clean aggregate",
+          r6.status == 200 and r6.json().get("item", {}).get("nodeMeta", {}).get("nodeCount") == 3,
+          str(r6.json())[:120])
+    r7 = call(("POST", "/settings_hub/stack/patch"),
+              FakeRequest(json_body={"id": frag_item["id"], "nodeMeta": "junk"}))
+    check("nodeMeta: PATCH junk -> 400",
+          r7.status == 400, str(r7.status))
+    # rename keeps the metadata (sort/rename/tags never touch nodeMeta)
+    r8 = call(("POST", "/settings_hub/stack/patch"),
+              FakeRequest(json_body={"id": frag_item["id"], "name": "Renamed frag"}))
+    check("nodeMeta: rename keeps the metadata",
+          r8.status == 200 and r8.json().get("item", {}).get("nodeMeta", {}).get("nodeCount") == 3 and
+          r8.json().get("item", {}).get("name") == "Renamed frag", "")
+if text_item:
+    r9 = call(("POST", "/settings_hub/stack/patch"),
+              FakeRequest(json_body={"id": text_item["id"], "nodeMeta": meta_in}))
+    check("nodeMeta: PATCH on a text entry -> 400",
+          r9.status == 400 and "nodes" in str(r9.json().get("error", "")), str(r9.status))
+
+# 6. sanitizer internals: whitelist + clamps + control-char stripping
+sm = stack_store._sanitize_node_meta({"schema": 9, "nodeCount": 5, "linkCount": -3,
+                                      "groupCount": 1, "types": [["A\x01B", 2], ["bad", 0], ["ok", 1]],
+                                      "groups": [{"title": "G\x02", "color": "#3355AA"}, "junk"],
+                                      "singleTitle": "S\x03T", "evil": {}})
+check("nodeMeta: sanitize whitelist keeps only known keys",
+      sm is not None and set(sm.keys()) == {"schema", "nodeCount", "linkCount", "groupCount", "types", "groups", "singleTitle"},
+      str(sorted(sm.keys())) if sm else "")
+check("nodeMeta: sanitize clamps negative linkCount to 0", sm.get("linkCount") == 0, str(sm.get("linkCount")))
+check("nodeMeta: sanitize strips control chars", sm.get("singleTitle") == "S T" and sm["types"][0][0] == "A B",
+      str(sm.get("singleTitle")))
+check("nodeMeta: sanitize drops zero-count types", [t[0] for t in sm["types"]] == ["A B", "ok"], str(sm["types"]))
+check("nodeMeta: sanitize accepts a bare string group", any(g.get("title") == "G" for g in sm["groups"]), str(sm["groups"]))
+check("nodeMeta: sanitize drops unknown keys (evil)", "evil" not in sm, "")
+check("nodeMeta: sanitize refuses a meta without nodeCount",
+      stack_store._sanitize_node_meta({"schema": 1}) is None, "")
+
+# ---------------------------------------------------------------------------
 
 print(f"\npy_test_clipboard: {PASS} passed, {FAIL} failed")
 if FAILURES:

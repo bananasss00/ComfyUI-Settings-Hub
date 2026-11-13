@@ -238,6 +238,15 @@ function makeFakeApi() {
                 if (healthMode === "missing") return jsonResp({ ok: false, error: "not found" }, 404);
                 return jsonResp({ ok: true, items: items.map((x) => ({ ...x })) });
             }
+            // v99: the file GET route (mirrors py /settings_hub/stack/file/{name})
+            // - serves the stored blob bytes as text; the lazy nodeMeta backfill
+            // of file-backed fragments reads through it
+            if (path.startsWith("/settings_hub/stack/file/") && method === "GET") {
+                const fname = decodeURIComponent(path.slice("/settings_hub/stack/file/".length));
+                const buf = blobBytes.get((wfKey || "") + "/" + fname);
+                if (!buf) return jsonResp({ ok: false, error: "not found" }, 404);
+                return blobResp(buf, "application/octet-stream");
+            }
             if (path === "/settings_hub/stack/item" && method === "POST") {
                 let body = opts.body;
                 try { body = JSON.parse(body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
@@ -249,7 +258,13 @@ function makeFakeApi() {
                 // v96: optional entry type - "nodes" = a node-fragment JSON
                 // (allowlist mirrors py/stack_store.py stack_add_text)
                 const entryType = body?.type === "nodes" ? "nodes" : "text";
+                // v99: the bounded preview aggregate - mirror py semantics:
+                // nodes entries only, stored as-is if it looks sane
                 const item = { id: "srv" + (++seq), type: entryType, text, hash: h, size: text.length, created: Math.floor(Date.now() / 1000) };
+                if (entryType === "nodes" && body.nodeMeta && typeof body.nodeMeta === "object" &&
+                    typeof body.nodeMeta.nodeCount === "number") item.nodeMeta = body.nodeMeta;
+                if (body?.name) item.name = String(body.name).slice(0, 120);
+                if (body?.tab) item.tab = String(body.tab).slice(0, 48);
                 items.unshift(item);
                 return jsonResp({ ok: true, item: { ...item }, moved: false });
             }
@@ -319,6 +334,14 @@ function makeFakeApi() {
                 }
                 if ("uses" in body) it.uses = Math.max(0, parseInt(body.uses, 10) || 0);
                 if (body.bumpUses) it.uses = (it.uses || 0) + 1;
+                // v99: nodeMeta patch mirrors py - "nodes" entries only, sane
+                // object stored, a refusal answers 400
+                if ("nodeMeta" in body) {
+                    if (it.type !== "nodes") return jsonResp({ ok: false, error: "nodeMeta allowed for nodes entries only" }, 400);
+                    const nm = body.nodeMeta;
+                    if (!nm || typeof nm !== "object" || typeof nm.nodeCount !== "number") return jsonResp({ ok: false, error: "bad nodeMeta" }, 400);
+                    it.nodeMeta = nm;
+                }
                 return jsonResp({ ok: true, item: { ...it } });
             }
             if (path === "/settings_hub/clipboard" && method === "POST") {
@@ -349,6 +372,10 @@ function makeFakeApi() {
         __calls: calls,
         __items: () => storeFor("").map((x) => ({ ...x })),
         __itemsOf: (wf) => storeFor(wf || "").map((x) => ({ ...x })), // v77: scoped store read
+        // v99: inject a raw item (e.g. a file-backed node fragment) directly
+        // into the shared store - the next GET /stack serves it to the panel
+        __pushItem: (it) => { storeFor("").unshift(it); },
+        __storeBlob: storeBlob, // v99: seed the blob store for the file GET route
         __setFailing: (v) => { failing = !!v; },
         __setHealth: (m) => { healthMode = m; },
         __setServerVersion: (v) => { serverVersion = String(v); },
@@ -2109,8 +2136,23 @@ phase("UA node fragments — auto-capture: wrapped copyToClipboard stacks the se
         postTexts().length === postsBefore + 1 &&
         JSON.parse(fakeApi.__calls.filter((c) => c.method === "POST" && c.url === "/settings_hub/stack/item").pop().body).type === "nodes");
     check("UA: the card shows the node count", /2\s*nodes/.test(card.textContent), card.textContent.slice(0, 120));
-    check("UA: the card shows the group titles as chips",
-        card.textContent.includes("Sampler block") && card.textContent.includes("Sources"));
+    // v99: the group titles moved INTO the resolved display title (the one
+    // named group IS the title) and the meta row shows the group COUNT
+    // v99: with TWO groups no single title wins - the resolved display title
+    // falls back to the characteristic type names (the user name would win
+    // if set; a ONE-group fragment resolves to the group title)
+    check("UA: the card resolves the title to the characteristic types",
+        card.querySelector(".hub-stack-nodes-name") &&
+        card.querySelector(".hub-stack-nodes-name").textContent.includes("KSampler"),
+        card.querySelector(".hub-stack-nodes-name")?.textContent);
+    check("UA: the card shows the real type names (line 2)",
+        card.querySelector(".hub-stack-nodes-types") &&
+        card.querySelector(".hub-stack-nodes-types").textContent.includes("CheckpointLoaderSimple"),
+        card.querySelector(".hub-stack-nodes-types")?.textContent);
+    check("UA: the meta row counts the groups",
+        /2\s*groups/.test(card.textContent), card.textContent.slice(0, 160));
+    check("UA: the POST body carried nodeMeta (the bounded aggregate)",
+        (() => { try { const b = JSON.parse(fakeApi.__calls.filter((c) => c.method === "POST" && c.url === "/settings_hub/stack/item").pop().body); return b.nodeMeta && b.nodeMeta.nodeCount === 2 && Array.isArray(b.nodeMeta.types) && b.nodeMeta.types.length === 2; } catch (_) { return false; } })());
     check("UA: the card carries the →🧩 paste action", !!card.querySelector('[data-act="insg"]'));
     check("UA: the server stored the entry as type nodes",
         fakeApi.__items().some((x) => x.type === "nodes" && x.text === frag));
@@ -2496,6 +2538,474 @@ phase("UI tab-strip wheel — the vertical wheel scrolls the hidden-scrollbar st
     // cleanup: drop the layout stubs (the prototype getters come back)
     for (const k of ["scrollWidth", "clientWidth", "offsetLeft", "offsetWidth", "scrollLeft"]) delete strip[k];
     for (const k of ["offsetLeft", "offsetWidth"]) delete activeChip[k];
+}
+
+// ===========================================================================
+// VJ-VM - v99: COMPACT INFORMATIVE CARDS + nodeMeta + THE INSPECTOR
+// (owner plan "улучшение отображения скопированных нод", phases 1-3)
+// ===========================================================================
+
+phase("VJ v99 card model — naming rules, truncation, honest link counts");
+{
+    // 1. a SINGLE node: the auto "1 node" name resolves to the REAL title
+    const single = JSON.stringify({ nodes: [{ id: 7, type: "KSampler", title: "My main sampler", pos: [0, 0], size: [270, 262] }], links: [] });
+    const sm1 = hooks.parseGraphFragment(single);
+    const nm1 = hooks.buildNodeMeta(sm1);
+    check("VJ: single node -> singleTitle = the real node title",
+        nm1 && nm1.singleTitle === "My main sampler", JSON.stringify(nm1));
+    check("VJ: single node -> linkCount 0 (empty links array is honest)",
+        nm1.linkCount === 0, String(nm1.linkCount));
+    const item1 = { id: "t1", type: "nodes", name: "1 node", nodeMeta: nm1 };
+    check("VJ: the auto name '1 node' is replaced by the real title",
+        hooks.fragDisplayName(item1, hooks.fragCardModel(item1)) === "My main sampler");
+    check("VJ: the stored name is never rewritten (display-only)",
+        item1.name === "1 node");
+
+    // 2. multiple SAME-type nodes: the type becomes the identifying name
+    const same3 = JSON.stringify({
+        nodes: Array.from({ length: 3 }, (_, i) => ({ id: i + 1, type: "KSampler", pos: [0, i * 100] })),
+        links: [],
+    });
+    const sm2 = hooks.parseGraphFragment(same3);
+    const nm2 = hooks.buildNodeMeta(sm2);
+    check("VJ: 3 same-type nodes -> types [[KSampler,3]], no singleTitle",
+        JSON.stringify(nm2.types) === JSON.stringify([["KSampler", 3]]) && nm2.singleTitle == null,
+        JSON.stringify(nm2.types));
+    const item2 = { id: "t2", type: "nodes", nodeMeta: nm2 };
+    check("VJ: same-type name resolves to 'KSampler'",
+        hooks.fragDisplayName(item2, hooks.fragCardModel(item2)) === "KSampler");
+    check("VJ: the type line shows 'KSampler ×3'",
+        hooks.fragTypeLine(hooks.fragCardModel(item2)).includes("×3"),
+        hooks.fragTypeLine(hooks.fragCardModel(item2)));
+
+    // 3. 2-5 nodes: ALL types shown, no "+N types"
+    const five = JSON.stringify({
+        nodes: ["A", "B", "C", "D", "E"].map((t, i) => ({ id: i + 1, type: "Node" + t, pos: [0, i * 50] })),
+        links: [],
+    });
+    const cm3 = hooks.fragCardModel({ id: "t3", type: "nodes", nodeMeta: hooks.buildNodeMeta(hooks.parseGraphFragment(five)) });
+    const line3 = hooks.fragTypeLine(cm3);
+    check("VJ: 5 nodes -> every type on the line, no truncation note",
+        line3.includes("NodeA") && line3.includes("NodeE") && !line3.includes("+"),
+        line3);
+
+    // 4. 12 nodes / 5 types: top-3 types + "+2 types"
+    const twelve = JSON.stringify({
+        nodes: [
+            ...Array.from({ length: 5 }, (_, i) => ({ id: 100 + i, type: "KSampler", pos: [0, i * 50] })),
+            ...Array.from({ length: 3 }, (_, i) => ({ id: 200 + i, type: "CLIPTextEncode", pos: [0, 300 + i * 50] })),
+            { id: 301, type: "VAELoader", pos: [0, 500] },
+            { id: 302, type: "SaveImage", pos: [0, 560] },
+            { id: 303, type: "LoadImage", pos: [0, 620] },
+        ],
+        links: [],
+    });
+    const nm4 = hooks.buildNodeMeta(hooks.parseGraphFragment(twelve));
+    const cm4 = hooks.fragCardModel({ id: "t4", type: "nodes", nodeMeta: nm4 });
+    const line4 = hooks.fragTypeLine(cm4);
+    check("VJ: 12 nodes -> top-3 types + '+2 types'",
+        line4.includes("KSampler") && line4.includes("CLIPTextEncode") && line4.includes("VAELoader") &&
+        line4.includes("+2 types"), line4);
+    check("VJ: '+N types' counts the REST of the census (5-3)",
+        line4.includes("+2 types"), line4);
+
+    // 5. 86 nodes: the card stays aggregated (the height never grows)
+    const many = {
+        nodes: [], links: [], groups: [
+            { title: "Video Input", bounding: [0, 0, 300, 300], color: "#335577" },
+            { title: "Generation", bounding: [0, 400, 300, 300] },
+        ],
+    };
+    const counters = { KSampler: 12, "Load Image": 8, CLIPTextEncode: 6 };
+    let idc = 1;
+    for (const [ty, n] of Object.entries(counters)) {
+        for (let i = 0; i < n; i++) many.nodes.push({ id: idc++, type: ty, pos: [i * 10, 0], size: [200, 100] });
+    }
+    for (let i = 0; i < 59; i++) many.nodes.push({ id: idc++, type: "T" + (i % 19), pos: [0, 1000 + i * 10] });
+    const nm5 = hooks.buildNodeMeta(hooks.parseGraphFragment(JSON.stringify(many)));
+    check("VJ: 86 nodes counted", nm5.nodeCount === 85, String(nm5.nodeCount));
+    const cm5 = hooks.fragCardModel({ id: "t5", type: "nodes", nodeMeta: nm5 });
+    const line5 = hooks.fragTypeLine(cm5);
+    check("VJ: 86 nodes -> 'KSampler ×12' first + '+19 types'",
+        line5.startsWith("<span") === false && line5.includes("KSampler <b>×12</b>") && line5.includes("+19 types"), line5);
+    check("VJ: groups carry colors in the aggregate",
+        nm5.groups[0].title === "Video Input" && nm5.groups[0].color === "#335577" &&
+        nm5.groups.length === 2 && nm5.groupCount === 2, JSON.stringify(nm5.groups));
+
+    // 6. NO links array -> linkCount NULL (never "0 links" fabricated)
+    const noLinks = JSON.stringify({ nodes: [{ id: 1, type: "KSampler", pos: [0, 0] }] });
+    const nm6 = hooks.buildNodeMeta(hooks.parseGraphFragment(noLinks));
+    check("VJ: missing links array -> linkCount null (unknown, not zero)",
+        nm6.linkCount === null, String(nm6.linkCount));
+    const cm6 = hooks.fragCardModel({ id: "t6", type: "nodes", nodeMeta: nm6 });
+    check("VJ: an unknown link count stays SILENT on the card model",
+        cm6.linkCount === null, String(cm6.linkCount));
+
+    // 7. a user name ALWAYS wins over every auto resolution
+    const item7 = { id: "t7", type: "nodes", name: "My pipeline", nodeMeta: nm1 };
+    check("VJ: the user name wins over the node title",
+        hooks.fragDisplayName(item7, hooks.fragCardModel(item7)) === "My pipeline");
+    // 7b. a group-titled name is not an auto name - it stays
+    const item7b = { id: "t7b", type: "nodes", name: "Sampler block", nodeMeta: nm2 };
+    check("VJ: a group-titled name is kept as-is",
+        hooks.fragDisplayName(item7b, hooks.fragCardModel(item7b)) === "Sampler block");
+
+    // 8. a long type name is capped in the type line
+    const longTy = JSON.stringify({ nodes: [{ id: 1, type: "ULTIMATEsdupscale_BUT_better_WITH_face_detailer_AND_41_more_words", pos: [0, 0] }], links: [] });
+    const line8 = hooks.fragTypeLine(hooks.fragCardModel({ id: "t8", type: "nodes", nodeMeta: hooks.buildNodeMeta(hooks.parseGraphFragment(longTy)) }));
+    check("VJ: a long type name is capped (no card blowout)",
+        line8.length < 80 && line8.endsWith("…"), line8);
+
+    // 9. inline parse fallback for OLD entries (no nodeMeta at all)
+    const oldItem = { id: "t9", type: "nodes", name: "1 node", text: single };
+    const cm9 = hooks.fragCardModel(oldItem);
+    check("VJ: an old entry without nodeMeta parses inline (WeakMap cache)",
+        cm9 && cm9.nodeCount === 1 && cm9.singleTitle === "My main sampler", JSON.stringify(cm9));
+    check("VJ: the old entry's card resolves the real title too",
+        hooks.fragDisplayName(oldItem, cm9) === "My main sampler");
+    // the WeakMap cache: the SECOND model call returns the same numbers
+    // without re-parsing (same item object identity)
+    const cm9b = hooks.fragCardModel(oldItem);
+    check("VJ: the WeakMap cache serves repeated renders",
+        cm9b === cm9 || (cm9b && cm9b.nodeCount === 1));
+}
+
+phase("VK v99 lazy nodeMeta backfill — file-backed old entries, failure paths");
+{
+    document.querySelector('.hub-stack-tab[data-tab=""]')?.click(); // back to All
+    await settle();
+    // a FILE-BACKED fragment (text lives in a blob) captured before v99:
+    // no nodeMeta, no inline text - the FIRST render fires the ONE async
+    // backfill job (fetch + parse + PATCH), then the card re-renders with
+    // the full preview
+    const fragFB = JSON.stringify({
+        nodes: [
+            { id: 1, type: "CheckpointLoaderSimple", title: "ckpt", pos: [0, 0], size: [315, 106] },
+            { id: 2, type: "KSampler", pos: [400, 0], size: [270, 262] },
+        ],
+        links: [[1, 1, 0, 2, 0, "MODEL"]],
+        groups: [],
+    });
+    const fname = "v99backfill.txt";
+    // push the item into the SERVER store, the panel mirror re-reads it on refresh
+    fakeApi.__pushItem({
+        id: "srvfb99", type: "nodes", file: fname, size: fragFB.length,
+        created: Math.floor(Date.now() / 1000), hash: "fb99",
+    });
+    // seed the blob store so the fake file GET route can serve the fragment
+    await fakeApi.__storeBlob(new dom.window.Blob([fragFB], { type: "application/octet-stream" }), fname, "application/octet-stream", "");
+    const patchBefore = fakeApi.__calls.filter((c) => String(c.url).startsWith("/settings_hub/stack/patch")).length;
+    hooks.refresh();
+    await settle();
+    await settle();
+    // the auto-backfill PATCHed the clean aggregate exactly ONCE
+    const patchCalls = fakeApi.__calls.slice(patchBefore)
+        .filter((c) => String(c.url).startsWith("/settings_hub/stack/patch") && String(c.body || "").includes("srvfb99"));
+    check("VK: the backfill PATCHed exactly once", patchCalls.length === 1, String(patchCalls.length));
+    let pm = null;
+    try { pm = JSON.parse(patchCalls[0]?.body || "{}").nodeMeta; } catch (_) {}
+    check("VK: the backfill PATCHed a clean aggregate",
+        !!pm && pm.nodeCount === 2 && pm.linkCount === 1 && pm.groupCount === 0 &&
+        Array.isArray(pm.types) && pm.types.length === 2,
+        JSON.stringify(pm));
+    // the server store carries the metadata now
+    check("VK: the server item carries nodeMeta",
+        fakeApi.__items().find((x) => x.id === "srvfb99")?.nodeMeta?.nodeCount === 2, "");
+    // applyPatched re-rendered the card with the FULL preview
+    const card1 = document.querySelector('.hub-stack-card[data-id="srvfb99"]');
+    check("VK: the card became informative after the backfill",
+        /2\s*nodes/.test(card1?.textContent || "") && (card1?.textContent || "").includes("1 link"),
+        card1?.textContent.slice(0, 120));
+    // re-renders (refresh) never PATCH again (nodeMeta present / rate limit)
+    hooks.refresh();
+    await settle();
+    check("VK: the backfill is rate-limited (no duplicate PATCH)",
+        fakeApi.__calls.slice(patchBefore)
+            .filter((c) => String(c.url).startsWith("/settings_hub/stack/patch") && String(c.body || "").includes("srvfb99")).length === 1);
+
+    // a BROKEN file-backed fragment: the backfill marks it dead, no PATCH storm
+    await fakeApi.__storeBlob(new dom.window.Blob(["{ this is not json"], { type: "application/octet-stream" }), "v99broken.txt", "application/octet-stream", "");
+    const broken = { id: "srvfb99bad", type: "nodes", file: "v99broken.txt", size: 18, created: 1, hash: "fb99b" };
+    fakeApi.__pushItem(broken);
+    const pb2 = fakeApi.__calls.filter((c) => String(c.url).startsWith("/settings_hub/stack/patch")).length;
+    hooks.refresh();
+    await settle();
+    await settle();
+    check("VK: a broken fragment backfill PATCHes nothing",
+        fakeApi.__calls.slice(pb2)
+            .filter((c) => String(c.url).startsWith("/settings_hub/stack/patch") && String(c.body || "").includes("srvfb99bad")).length === 0);
+    const badCard = document.querySelector('.hub-stack-card[data-id="srvfb99bad"]');
+    check("VK: the broken card stays on the old fallback",
+        !!badCard && badCard.textContent.includes("fragment"), badCard?.textContent.slice(0, 80));
+}
+
+phase("VL v99 inspector — Overview | Nodes | Groups | Connections | JSON");
+{
+    document.querySelector('.hub-stack-tab[data-tab=""]')?.click(); // back to All
+    await settle();
+    // a RICH fragment: titles, widgets (one LONG text), groups with colors
+    // + bounds, links incl. one reroute-mediated, properties
+    const longText = "masterpiece, best quality, intricate details, cinematic lighting, " +
+        "ultra-detailed background, depth of field, volumetric fog, golden hour rim light, " +
+        "photorealistic skin texture, subsurface scattering, 8k render, award-winning photography";
+    const rich = JSON.stringify({
+        nodes: [
+            { id: 1, type: "CheckpointLoaderSimple", title: "ckpt source", pos: [10, 10], size: [315, 106],
+                inputs: [], outputs: [{ name: "MODEL", type: "MODEL", links: [1] }, { name: "CLIP", type: "CLIP" }, { name: "VAE", type: "VAE" }],
+                widgets_values: ["v1-5-pruned-emaonly.safetensors"], properties: { "Node name for S&R": "CheckpointLoaderSimple" } },
+            { id: 2, type: "CLIPTextEncode", title: "positive prompt", pos: [10, 200], size: [400, 200],
+                inputs: [{ name: "clip", type: "CLIP", link: 9 }], outputs: [{ name: "CONDITIONING", type: "CONDITIONING", links: [2] }],
+                widgets_values: [longText], properties: {} },
+            { id: 3, type: "KSampler", title: "the sampler", pos: [10, 450], size: [270, 262],
+                inputs: [{ name: "model", type: "MODEL", link: 1 }, { name: "positive", type: "CONDITIONING", link: 2 }],
+                outputs: [{ name: "LATENT", type: "LATENT" }],
+                widgets_values: [42, "fixed", 20, 7, "euler", "normal"], properties: { seed: 42 } },
+            { id: 4, type: "Reroute", pos: [500, 100], size: [75, 75] },
+        ],
+        links: [
+            [1, 1, 0, 3, 0, "MODEL"],
+            [2, 2, 0, 3, 1, "CONDITIONING"],
+            [9, 4, 0, 2, 0, "CLIP"],
+        ],
+        groups: [
+            { title: "Sources", bounding: [0, 0, 600, 150], color: "#3f526b" },
+            { title: "Render", bounding: [0, 180, 600, 560] },
+        ],
+        reroutes: [{ id: 4, pos: [500, 100] }],
+    });
+    await hooks.addText(rich, "rich frag", "nodes");
+    await settle();
+    const rItem = hooks.items().find((x) => x.type === "nodes" && x.name === "rich frag");
+    check("VL: the rich fragment landed in the stack", !!rItem);
+
+    const card = document.querySelector('.hub-stack-card[data-id="' + rItem.id + '"]');
+    check("VL: the card shows 4 nodes + the types line",
+        /4\s*nodes/.test(card?.textContent || "") && (card?.querySelector(".hub-stack-nodes-types")?.textContent || "").includes("CLIPTextEncode"),
+        card?.textContent.slice(0, 120));
+    check("VL: the meta row shows 2 groups and the reroute-diminished link count",
+        /2\s*groups/.test(card?.textContent || "") && /3\s*links/.test(card?.textContent || ""),
+        card?.textContent.slice(0, 160));
+
+    // the INSPECTOR
+    card.querySelector('[data-act="view"]').click();
+    await settle();
+    const v = document.querySelector(".hub-stack-viewer");
+    check("VL: the inspector opened", !!v && !!v.querySelector(".hub-stack-viewer-body-nodes"));
+    check("VL: the head meta counts nodes/groups/size",
+        (v.querySelector(".hub-stack-viewer-meta")?.textContent || "").includes("4 nodes"),
+        v.querySelector(".hub-stack-viewer-meta")?.textContent);
+    check("VL: five tabs exist (Overview | Nodes | Groups | Connections | JSON)",
+        [...v.querySelectorAll(".hub-stack-vtab")].map((b) => b.textContent.trim()).join("|") === "Overview|Nodes|Groups|Connections|JSON");
+    // Overview is the DEFAULT tab
+    check("VL: Overview is active by default",
+        v.querySelector(".hub-stack-vtab-on")?.textContent.trim() === "Overview" &&
+        !!v.querySelector(".hub-stack-vpane-overview.hub-stack-vpane-on"));
+    check("VL: Overview shows the stats blocks",
+        v.querySelectorAll(".hub-stack-vstat").length === 4 &&
+        (v.querySelector(".hub-stack-vstat-n")?.textContent || "") === "4");
+    check("VL: Overview lists the type census",
+        (v.querySelector(".hub-stack-vpane-overview")?.textContent || "").includes("CLIPTextEncode") &&
+        (v.querySelector(".hub-stack-vpane-overview")?.textContent || "").includes("Groups"),
+        "");
+    check("VL: Overview shows the group colors + membership",
+        v.querySelectorAll(".hub-stack-vpane-overview .hub-stack-vgroup-row").length === 2 &&
+        v.querySelector(".hub-stack-vpane-overview .hub-stack-vswatch")?.getAttribute("style")?.includes("#3f526b"));
+
+    // Nodes tab: rows, search, expandable details
+    const tabByName = (name) => [...v.querySelectorAll(".hub-stack-vtab")].find((b) => b.textContent.trim() === name);
+    tabByName("Nodes").click();
+    check("VL: the Nodes pane activated",
+        !!v.querySelector(".hub-stack-vpane-nodes.hub-stack-vpane-on"));
+    const rows = [...v.querySelectorAll(".hub-stack-vpane-nodes .hub-stack-vnode")];
+    check("VL: 4 node rows (title + type + id)", rows.length === 4 &&
+        (rows[0].textContent || "").includes("ckpt source") && (rows[0].querySelector(".hub-stack-vnode-id")?.textContent || "") === "#1",
+        rows.map((r) => r.textContent.slice(0, 30)).join(" / "));
+    check("VL: the group badge rides the row when membership is reliable",
+        (rows[1].querySelector(".hub-stack-vnode-group")?.textContent || "").includes("Render"),
+        rows[1].textContent.slice(0, 80));
+    // search by title
+    const search = v.querySelector(".hub-stack-vsearch");
+    search.value = "sampler";
+    search.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    const rowsAfter = [...v.querySelectorAll(".hub-stack-vpane-nodes .hub-stack-vnode")];
+    check("VL: the search filters by title ('sampler' -> the sampler row)",
+        rowsAfter.length === 1 && rowsAfter[0].textContent.includes("the sampler"),
+        rowsAfter.map((r) => r.textContent.slice(0, 24)).join("/"));
+    search.value = "";
+    search.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    const rowsAll = [...v.querySelectorAll(".hub-stack-vpane-nodes .hub-stack-vnode")];
+    // expand a node: the detail builds lazily with inputs/widgets/properties
+    const det = rowsAll[2]; // KSampler
+    det.open = true;
+    det.dispatchEvent(new dom.window.Event("toggle", { bubbles: false }));
+    const dbox = det.querySelector(".hub-stack-vnode-detail");
+    check("VL: expanding a node fills inputs + widget values",
+        (dbox?.textContent || "").includes("Inputs") && (dbox?.textContent || "").includes("model") &&
+        (dbox?.textContent || "").includes("Widget values") && (dbox?.textContent || "").includes("42"),
+        dbox?.textContent.slice(0, 120));
+    check("VL: properties render in the detail",
+        (dbox?.textContent || "").includes("Properties") && (dbox?.textContent || "").includes("seed"));
+    // the LONG widget value collapses + carries a copy button
+    const posDet = rowsAll[1];
+    posDet.open = true;
+    posDet.dispatchEvent(new dom.window.Event("toggle", { bubbles: false }));
+    const longBox = posDet.querySelector(".hub-stack-vnode-detail");
+    const longDet = longBox?.querySelector(".hub-stack-vw-long");
+    check("VL: the long prompt value collapses into details (closed)",
+        !!longDet && longDet.open === false && (longDet.textContent || "").includes("chars"),
+        longDet?.textContent.slice(0, 60));
+    check("VL: the collapsed value carries a copy button",
+        !!longDet?.querySelector(".hub-stack-vw-copy"));
+    longDet.open = true;
+    check("VL: opening the collapse reveals the FULL value (copy = full text)",
+        (longDet.querySelector(".hub-stack-vw-full")?.textContent || "").includes("award-winning photography"));
+    // connected nodes section (reliable links only)
+    check("VL: the expanded sampler shows its connected source",
+        (dbox?.textContent || "").includes("Connected") && (dbox?.textContent || "").includes("ckpt source"),
+        dbox?.textContent.slice(0, 200));
+
+    // Groups tab
+    tabByName("Groups").click();
+    const gCards = [...v.querySelectorAll(".hub-stack-vpane-groups .hub-stack-vgroup-card")];
+    check("VL: the Groups tab lists 2 groups with reliable members",
+        gCards.length === 2 && gCards[0].textContent.includes("Sources") &&
+        /\d+ node/.test(gCards[0].textContent), gCards.map((g) => g.textContent.slice(0, 40)).join(" | "));
+
+    // Connections tab: "src → out → dst → in" rows, reliable only
+    tabByName("Connections").click();
+    const linkRows = [...v.querySelectorAll(".hub-stack-vpane-conn .hub-stack-vlink-row")];
+    check("VL: 2 reliable connection rows (the reroute one is NOT fabricated)",
+        linkRows.length === 2, String(linkRows.length));
+    check("VL: a connection row reads 'ckpt source → MODEL → the sampler → model'",
+        (linkRows[0]?.textContent || "").includes("ckpt source") &&
+        (linkRows[0]?.textContent || "").includes("MODEL") &&
+        (linkRows[0]?.textContent || "").includes("the sampler") &&
+        (linkRows[0]?.textContent || "").includes("model"),
+        linkRows[0]?.textContent);
+    check("VL: the reroute note explains the hidden connection",
+        (v.querySelector(".hub-stack-vpane-conn")?.textContent || "").includes("reroute"),
+        v.querySelector(".hub-stack-vpane-conn")?.textContent.slice(0, 160));
+
+    // JSON tab: collapsed, capped preview, the head 📋 still copies the FULL raw
+    tabByName("JSON").click();
+    const raw = v.querySelector(".hub-stack-vnodes-raw");
+    check("VL: the JSON pane keeps the raw collapsed by default", !!raw && raw.open === false);
+    check("VL: the raw preview holds the full short JSON",
+        (raw.querySelector("pre")?.textContent || "").includes("KSampler"));
+
+    // copy button = FULL raw JSON (never the preview cap)
+    let copied = "";
+    const writeText = navigator.clipboard?.writeText;
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: async (t) => { copied = t; } }, configurable: true });
+    v.querySelector(".hub-stack-viewer-copy").click();
+    await settle();
+    check("VL: 📋 copies the FULL raw JSON", copied === rich, String(copied.length));
+    if (writeText) Object.defineProperty(navigator, "clipboard", { value: { writeText: writeText }, configurable: true });
+
+    v.querySelector(".hub-stack-viewer-x").click();
+    await settle();
+    check("VL: the inspector closed", !document.querySelector(".hub-stack-viewer"));
+
+    // the CLIPBOARD JSON is untouched by the whole round (paste contract)
+    check("VL: the stored fragment JSON is byte-identical (no preview rewrites)",
+        hooks.items().find((x) => x.id === rItem.id).text === rich);
+}
+
+phase("VM v99 huge graph — portioned rendering, stable card, no DOM blowout");
+{
+    document.querySelector('.hub-stack-tab[data-tab=""]')?.click(); // back to All
+    await settle();
+    // 500 nodes + 40 groups + 300 links: the SAME compact card + a portioned
+    // inspector (60 rows first, batches of 150)
+    const groups = Array.from({ length: 40 }, (_, g) => ({
+        title: "Group " + g, bounding: [0, g * 500, 1000, 400], color: "#3f526b",
+    }));
+    const nodes = [];
+    for (let i = 0; i < 500; i++) {
+        nodes.push({
+            id: i + 1,
+            type: ["KSampler", "CLIPTextEncode", "VAEDecode", "LoadImage", "SaveImage"][i % 5],
+            title: "node " + (i + 1),
+            pos: [10 + (i % 10) * 80, Math.floor(i / 10) * 40],
+            size: [70, 30],
+            inputs: i % 3 ? [{ name: "in", type: "*", link: null }] : [],
+            outputs: i % 2 ? [{ name: "out", type: "*" }] : [],
+            widgets_values: i % 7 === 0 ? ["some value " + i] : [],
+        });
+    }
+    const links = [];
+    for (let i = 1; i < 300; i++) links.push([i, (i % 500) + 1, 0, ((i + 1) % 500) + 1, 0, "TYPE"]);
+    const huge = JSON.stringify({ nodes, links, groups });
+    check("VM: the synthetic graph is really 500 nodes", hooks.parseGraphFragment(huge).nodeCount === 500);
+    const hugeMeta = hooks.buildNodeMeta(hooks.parseGraphFragment(huge));
+    check("VM: the aggregate is bounded even for 500 nodes",
+        hugeMeta.nodeCount === 500 && hugeMeta.types.length === 5 && hugeMeta.groups.length === 32,
+        JSON.stringify({ t: hugeMeta.types.length, g: hugeMeta.groups.length }));
+    await hooks.addText(huge, "", "nodes", hugeMeta);
+    await settle();
+    const hItem = hooks.items().find((x) => x.type === "nodes" && x.nodeMeta && x.nodeMeta.nodeCount === 500);
+    check("VM: the capture carried the bounded nodeMeta", !!hItem, "");
+    const hCard = document.querySelector('.hub-stack-card[data-id="' + hItem.id + '"]');
+    // the card structure is IDENTICAL to a 2-node card: one head + ONE types line
+    check("VM: the 500-node card has exactly one types line (no blowout)",
+        hCard.querySelectorAll(".hub-stack-nodes-types").length === 1 &&
+        /500\s*nodes/.test(hCard.textContent),
+        hCard?.textContent.slice(0, 140));
+    check("VM: the type line aggregates top-3 + '+N types'",
+        (hCard.querySelector(".hub-stack-nodes-types")?.textContent || "").includes("+2 types"),
+        hCard.querySelector(".hub-stack-nodes-types")?.textContent);
+    check("VM: the meta row counts groups and links",
+        /40\s*groups/.test(hCard.textContent) && /299\s*links/.test(hCard.textContent),
+        hCard.textContent.slice(0, 180));
+
+    // the inspector: Overview aggregates instantly, Nodes is portioned
+    hCard.querySelector('[data-act="view"]').click();
+    await settle();
+    const v = document.querySelector(".hub-stack-viewer");
+    check("VM: the huge inspector opened on Overview", !!v &&
+        v.querySelector(".hub-stack-vtab-on")?.textContent.trim() === "Overview");
+    check("VM: Overview stats say 500 nodes / 299 links",
+        (v.querySelector(".hub-stack-vstats")?.textContent || "").includes("500") &&
+        (v.querySelector(".hub-stack-vstats")?.textContent || "").includes("299"),
+        v.querySelector(".hub-stack-vstats")?.textContent);
+    check("VM: Overview caps the type census (never 500 rows)",
+        v.querySelectorAll(".hub-stack-vpane-overview .hub-stack-vnodes-type").length <= 41);
+    const tabByName2 = (name) => [...v.querySelectorAll(".hub-stack-vtab")].find((b) => b.textContent.trim() === name);
+    tabByName2("Nodes").click();
+    let rowsNow = [...v.querySelectorAll(".hub-stack-vpane-nodes .hub-stack-vnode")];
+    check("VM: the Nodes tab renders the FIRST 60 rows only",
+        rowsNow.length === 60, String(rowsNow.length));
+    const more = v.querySelector(".hub-stack-vpane-nodes .hub-stack-vmore");
+    check("VM: the Show-more button offers the next batch of 150",
+        more && more.textContent.includes("150"), more?.textContent);
+    more.click();
+    rowsNow = [...v.querySelectorAll(".hub-stack-vpane-nodes .hub-stack-vnode")];
+    check("VM: one click -> 210 rows (60 + 150), still not 500",
+        rowsNow.length === 210, String(rowsNow.length));
+    // search on the huge list
+    const search2 = v.querySelector(".hub-stack-vsearch");
+    search2.value = "node 499";
+    search2.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    rowsNow = [...v.querySelectorAll(".hub-stack-vpane-nodes .hub-stack-vnode")];
+    check("VM: the search finds node 499 in the huge graph",
+        rowsNow.length === 1 && rowsNow[0].textContent.includes("node 499"), String(rowsNow.length));
+    search2.value = "";
+    search2.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    // Connections: portioned too
+    tabByName2("Connections").click();
+    const linkRowsNow = [...v.querySelectorAll(".hub-stack-vpane-conn .hub-stack-vlink-row")];
+    check("VM: the Connections tab is portioned as well (60 rows)",
+        linkRowsNow.length === 60, String(linkRowsNow.length));
+    // a node detail builds lazily on the huge graph too
+    tabByName2("Nodes").click();
+    const firstRow = v.querySelector(".hub-stack-vpane-nodes .hub-stack-vnode");
+    firstRow.open = true;
+    firstRow.dispatchEvent(new dom.window.Event("toggle", { bubbles: false }));
+    check("VM: the lazy detail works on the huge graph",
+        (firstRow.querySelector(".hub-stack-vnode-detail")?.textContent || "").length > 0);
+    v.querySelector(".hub-stack-viewer-x").click();
+    await settle();
+    check("VM: the huge inspector closed cleanly", !document.querySelector(".hub-stack-viewer"));
 }
 
 // ---------------------------------------------------------------------------

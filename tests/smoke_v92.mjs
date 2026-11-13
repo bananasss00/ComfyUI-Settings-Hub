@@ -244,7 +244,7 @@ phase("PA build v92 + version manifest");
     const ssrc = fs.readFileSync(sb.stack, "utf8");
     check("PA renderer self-reports v94", rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA context_menu self-reports v93 (unchanged)", msrc.includes('__SettingsHubLoaded["context_menu"] = "v93"'));
-    check("PA stack self-reports v97 (the v97 stack-UX round changed it)", ssrc.includes('__SettingsHubLoaded["stack"] = "v97"'));
+    check("PA stack self-reports v99 (the v99 fragment-inspector round changed it)", ssrc.includes('__SettingsHubLoaded["stack"] = "v99"'));
 }
 
 // ---------------------------------------------------------------------------

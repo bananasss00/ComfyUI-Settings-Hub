@@ -44,20 +44,20 @@ const num = (css, sel) => {
 phase("PA build v95 + version manifest");
 {
     const entry = fs.readFileSync(path.join(WEB, "settings_hub.js"), "utf8");
-    check("PA the entry reports v98 (exactly once)",
-        (entry.match(/globalThis\.__SettingsHubBuild = "v98"/g) || []).length === 1);
-    check("PA the banner names the v98 chat tab-strip wheel round",
-        entry.includes("web build: v98 - CHAT TAB-STRIP WHEEL SCROLL"));
+    check("PA the entry reports v99 (exactly once)",
+        (entry.match(/globalThis\.__SettingsHubBuild = "v99"/g) || []).length === 1);
+    check("PA the banner names the v99 fragment-cards round",
+        entry.includes("web build: v99 - STACK NODE-FRAGMENT CARDS + INSPECTOR"));
     check("PA styles.css?v= follows the entry (cache-bust for the CSS fix)",
-        entry.includes("styles.css?v=98"));
-    check("PA only chat moved in the self-report manifest (chat-only round)",
-        entry.includes('"chat": "v98"') && entry.includes('"hub_ui_renderer": "v94"') &&
+        entry.includes("styles.css?v=99"));
+    check("PA stack moved to v99, chat stays v98 (chat-only v98 round + v99 stack round)",
+        entry.includes('"chat": "v98"') && entry.includes('"stack": "v99"') && entry.includes('"hub_ui_renderer": "v94"') &&
         entry.includes('"launcher": "v93"') && entry.includes('"core": "v93"'));
     const py = fs.readFileSync(path.join(ROOT, "py", "stack_store.py"), "utf8");
-    check("PA py STACK_SERVER_VERSION = v98 (bumps together with the entry)",
-        py.includes('STACK_SERVER_VERSION = "v98"'));
+    check("PA py STACK_SERVER_VERSION = v99 (bumps together with the entry)",
+        py.includes('STACK_SERVER_VERSION = "v99"'));
     const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
-    check("PA README badge is v98", /web%20build-v98-/.test(readme));
+    check("PA README badge is v99", /web%20build-v99-/.test(readme));
 }
 
 // ---------------------------------------------------------------------------

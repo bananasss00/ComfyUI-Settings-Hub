@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v98 - CHAT TAB-STRIP WHEEL SCROLL (owner request 2026-11-13: 'в llm чате такая же проблема - нету скролинга вкладок' - the same defect the Paste Stack had before v97): the CHAT tab strip scrolls horizontally with the MOUSE WHEEL (the vertical delta maps to scrollLeft, deltaMode 1 = lines x16 / 2 = pages xclientWidth, a trackpad deltaX wins when present; the event is consumed only when the strip really overflows, otherwise it bubbles untouched) and revealActiveTab() keeps the ACTIVE chip inside the visible strip after every re-render (open / switch / close-arm) - same mechanics as the stack (v97). Stale-cache guard: EXPECTED manifest verifies every module.");
+console.info("[SettingsHub] web build: v99 - STACK NODE-FRAGMENT CARDS + INSPECTOR (owner plan 2026-11-13, phases 1-3): the node-fragment card is COMPACT + INFORMATIVE - the resolved title + node counter, the REAL type names with counts and '+N types', groups/links/size in the meta row; the height never depends on the graph size; the bounded 'nodeMeta' aggregate is computed once per fragment (capture time), stored server-side (whitelist + caps, NEVER part of the content hash, refreshed on re-capture) and lazily back-filled for old entries (file-backed >100KB fragments included); the full view is an INSPECTOR: Overview stats + types + groups | Nodes with search, portioned rendering and lazy per-node details (inputs / outputs / widget values with copy / properties / neighbors) | Groups with colors + reliable membership | Connections 'src \u2192 out \u2192 dst \u2192 in' reliable rows only | JSON collapsed with a FULL copy. Reliable-or-nothing: unknown link counts stay n/a, membership only via bounding boxes, reroute links counted never fabricated; 60 rows first, '+Show N more' batches, no UI blocking. Stale-cache guard: EXPECTED manifest verifies every module.");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v98 - CHAT TAB-STRIP WHEEL SCROLL (owner 
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=98", import.meta.url).href;
+    link.href = new URL("styles.css?v=99", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -51,7 +51,7 @@ console.info("[SettingsHub] web build: v98 - CHAT TAB-STRIP WHEEL SCROLL (owner 
 // ONE stale cached file silently removed every "Pin to Settings Hub" menu
 // item and the sync hooks. The detector keeps its diagnostic value but is
 // NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v98";
+globalThis.__SettingsHubBuild = "v99";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -101,7 +101,7 @@ const FILES = [
         "hub_ui_renderer": "v94", // DOM widget rendering (+ v94 rename commit refresh + popup grace)
         "sync_manager": "v70",    // reactive sync hooks
         "launcher": "v93",        // v93 TASKBAR (drag from anywhere with a 5px click threshold)
-        "stack": "v97",           // Paste Stack (+ v97: universal card editing, text editor in the Full text view, tab-strip wheel scroll)
+        "stack": "v99",           // Paste Stack (+ v99: informative fragment cards + nodeMeta + the Overview/Nodes/Groups/Connections/JSON inspector)
         "chat": "v98",            // LLM Chat (+ v98: tab-strip wheel scroll + reveal the active chip)
         "compare": "v83",         // Image Compare A/B panel (v83 display fix)
         "context_menu": "v93",    // "Pin to Settings Hub" menus (+ v93 hub window RMB Rename/Materialize)

@@ -285,8 +285,8 @@ phase("PA build v95 + version manifest");
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat v98 + renderer v94",
         entrySrc.includes('"chat": "v98"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the v98 chat tab-strip wheel round",
-        entrySrc.includes("web build: v98 - CHAT TAB-STRIP WHEEL SCROLL"));
+    check("PA the banner names the v99 fragment-cards round",
+        entrySrc.includes("web build: v99 - STACK NODE-FRAGMENT CARDS + INSPECTOR"));
 }
 
 // ---------------------------------------------------------------------------
