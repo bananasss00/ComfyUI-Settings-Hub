@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v99 - STACK NODE-FRAGMENT CARDS + INSPECTOR (owner plan 2026-11-13, phases 1-3): the node-fragment card is COMPACT + INFORMATIVE - the resolved title + node counter, the REAL type names with counts and '+N types', groups/links/size in the meta row; the height never depends on the graph size; the bounded 'nodeMeta' aggregate is computed once per fragment (capture time), stored server-side (whitelist + caps, NEVER part of the content hash, refreshed on re-capture) and lazily back-filled for old entries (file-backed >100KB fragments included); the full view is an INSPECTOR: Overview stats + types + groups | Nodes with search, portioned rendering and lazy per-node details (inputs / outputs / widget values with copy / properties / neighbors) | Groups with colors + reliable membership | Connections 'src \u2192 out \u2192 dst \u2192 in' reliable rows only | JSON collapsed with a FULL copy. Reliable-or-nothing: unknown link counts stay n/a, membership only via bounding boxes, reroute links counted never fabricated; 60 rows first, '+Show N more' batches, no UI blocking. Stale-cache guard: EXPECTED manifest verifies every module.");
+console.info("[SettingsHub] web build: v100 - STACK FRAGMENT CONNECTIONS FIX (owner report 2026-11-14: 'connections пишет does not expose reliable links - и так для всех в стаке элементов'): the v99 inspector counted links only in the workflow-dump 6-tuple shape, while the REAL canvas clipboards carry TS link OBJECTS {id, origin_id, origin_slot, target_id, target_slot, type, ...presentation} and legacy relative 5-tuples [origin_rel, origin_slot, target_rel, target_slot, origin_id?] (origin_rel null = the source node was not selected) - so EVERY fragment showed the apology instead of connections. Fix: normalizeFragmentLinks() accepts ALL THREE shapes into one index-based edge list; Connections renders 'src \u2192 out \u2192 dst \u2192 in' rows, external endpoints shown as '(external)'; nodeMeta captured by v99 (linkCount:null) is lazily REPAIRED by one re-parse + PATCH per entry. Audit found + fixed two more v99 bugs: the Nodes search lost focus after the first keystroke (focus + caret restored), and same-title groups double-counted members (membership by group index). Raw JSON / paste fidelity untouched. Stale-cache guard: EXPECTED manifest verifies every module.");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v99 - STACK NODE-FRAGMENT CARDS + INSPECT
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=99", import.meta.url).href;
+    link.href = new URL("styles.css?v=100", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -51,7 +51,7 @@ console.info("[SettingsHub] web build: v99 - STACK NODE-FRAGMENT CARDS + INSPECT
 // ONE stale cached file silently removed every "Pin to Settings Hub" menu
 // item and the sync hooks. The detector keeps its diagnostic value but is
 // NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v99";
+globalThis.__SettingsHubBuild = "v100";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -101,7 +101,7 @@ const FILES = [
         "hub_ui_renderer": "v94", // DOM widget rendering (+ v94 rename commit refresh + popup grace)
         "sync_manager": "v70",    // reactive sync hooks
         "launcher": "v93",        // v93 TASKBAR (drag from anywhere with a 5px click threshold)
-        "stack": "v99",           // Paste Stack (+ v99: informative fragment cards + nodeMeta + the Overview/Nodes/Groups/Connections/JSON inspector)
+        "stack": "v100",          // Paste Stack (+ v100: reliable connections for ALL real clipboard shapes + search focus + group counts)
         "chat": "v98",            // LLM Chat (+ v98: tab-strip wheel scroll + reveal the active chip)
         "compare": "v83",         // Image Compare A/B panel (v83 display fix)
         "context_menu": "v93",    // "Pin to Settings Hub" menus (+ v93 hub window RMB Rename/Materialize)

@@ -2744,7 +2744,9 @@ phase("VL v99 inspector — Overview | Nodes | Groups | Connections | JSON");
     document.querySelector('.hub-stack-tab[data-tab=""]')?.click(); // back to All
     await settle();
     // a RICH fragment: titles, widgets (one LONG text), groups with colors
-    // + bounds, links incl. one reroute-mediated, properties
+    // + bounds, links incl. one to a Reroute NODE (a real endpoint - TS
+    // reroute ITEMS are never link endpoints, see normalizeFragmentLinks),
+    // properties
     const longText = "masterpiece, best quality, intricate details, cinematic lighting, " +
         "ultra-detailed background, depth of field, volumetric fog, golden hour rim light, " +
         "photorealistic skin texture, subsurface scattering, 8k render, award-winning photography";
@@ -2782,7 +2784,7 @@ phase("VL v99 inspector — Overview | Nodes | Groups | Connections | JSON");
     check("VL: the card shows 4 nodes + the types line",
         /4\s*nodes/.test(card?.textContent || "") && (card?.querySelector(".hub-stack-nodes-types")?.textContent || "").includes("CLIPTextEncode"),
         card?.textContent.slice(0, 120));
-    check("VL: the meta row shows 2 groups and the reroute-diminished link count",
+    check("VL: the meta row shows 2 groups and all 3 reliably-counted links",
         /2\s*groups/.test(card?.textContent || "") && /3\s*links/.test(card?.textContent || ""),
         card?.textContent.slice(0, 160));
 
@@ -2871,19 +2873,26 @@ phase("VL v99 inspector — Overview | Nodes | Groups | Connections | JSON");
         gCards.length === 2 && gCards[0].textContent.includes("Sources") &&
         /\d+ node/.test(gCards[0].textContent), gCards.map((g) => g.textContent.slice(0, 40)).join(" | "));
 
-    // Connections tab: "src → out → dst → in" rows, reliable only
+    // Connections tab: "src → out → dst → in" rows, reliable only. v100:
+    // the Reroute NODE is a real endpoint (it is a real node in nodes[]);
+    // the v99 code suppressed this row by an id-collision-prone reroute check
     tabByName("Connections").click();
     const linkRows = [...v.querySelectorAll(".hub-stack-vpane-conn .hub-stack-vlink-row")];
-    check("VL: 2 reliable connection rows (the reroute one is NOT fabricated)",
-        linkRows.length === 2, String(linkRows.length));
+    check("VL: 3 reliable connection rows (every link of a known shape renders)",
+        linkRows.length === 3, String(linkRows.length));
     check("VL: a connection row reads 'ckpt source → MODEL → the sampler → model'",
         (linkRows[0]?.textContent || "").includes("ckpt source") &&
         (linkRows[0]?.textContent || "").includes("MODEL") &&
         (linkRows[0]?.textContent || "").includes("the sampler") &&
         (linkRows[0]?.textContent || "").includes("model"),
         linkRows[0]?.textContent);
-    check("VL: the reroute note explains the hidden connection",
-        (v.querySelector(".hub-stack-vpane-conn")?.textContent || "").includes("reroute"),
+    check("VL: the Reroute-node connection is shown truthfully, not suppressed",
+        (linkRows[2]?.textContent || "").includes("Reroute") &&
+        (linkRows[2]?.textContent || "").includes("positive prompt") &&
+        (linkRows[2]?.textContent || "").includes("CLIP"),
+        linkRows[2]?.textContent);
+    check("VL: a known link shape never shows the 'unreliable links' apology",
+        !(v.querySelector(".hub-stack-vpane-conn")?.textContent || "").includes("does not expose reliable links"),
         v.querySelector(".hub-stack-vpane-conn")?.textContent.slice(0, 160));
 
     // JSON tab: collapsed, capped preview, the head 📋 still copies the FULL raw
@@ -3006,6 +3015,288 @@ phase("VM v99 huge graph — portioned rendering, stable card, no DOM blowout");
     v.querySelector(".hub-stack-viewer-x").click();
     await settle();
     check("VM: the huge inspector closed cleanly", !document.querySelector(".hub-stack-viewer"));
+}
+
+// ===========================================================================
+// VN - v100: RELIABLE CONNECTIONS FOR ALL REAL CLIPBOARD SHAPES
+// (owner report: "connections пишет does not expose reliable links - и так
+// для всех в стаке элементов" - the v99 parser understood only the
+// workflow-dump 6-tuple, while the TS frontend writes link OBJECTS and the
+// legacy build writes relative 5-tuples, so EVERY real fragment showed the
+// apology; plus two audit fixes: the search focus loss + same-title groups)
+// ===========================================================================
+
+phase("VN v100 links — TS object shape counts and renders (the owner bug)");
+{
+    // a REAL TS-build clipboard: node inputs carry link:null (the wires live
+    // in the top-level links array), links are OBJECTS with presentation
+    // extras, one link originates OUTSIDE the copied selection
+    const ts = JSON.stringify({
+        nodes: [
+            { id: 5, type: "CheckpointLoaderSimple", title: "ckpt source", pos: [0, 0], size: [315, 106],
+                inputs: [], outputs: [{ name: "MODEL", type: "MODEL", links: [11] }] },
+            { id: 8, type: "KSampler", title: "the sampler", pos: [400, 0], size: [270, 262],
+                inputs: [{ name: "model", type: "MODEL", link: null }, { name: "seed", type: "SEED", link: null }],
+                outputs: [{ name: "LATENT", type: "LATENT" }], widgets_values: [42, "fixed"] },
+        ],
+        links: [
+            { id: 11, origin_id: 5, origin_slot: 0, target_id: 8, target_slot: 0, type: "MODEL", path: [[0, 0], [1, 1]] },
+            { id: 12, origin_id: 99, origin_slot: 1, target_id: 8, target_slot: 1, type: "SEED" },
+        ],
+        groups: [],
+    });
+    const mTS = hooks.parseGraphFragment(ts);
+    check("VN: TS object links are counted reliably (linkCount 2)",
+        mTS && mTS.linkCount === 2, String(mTS && mTS.linkCount));
+    check("VN: the external endpoint is counted as such (1 external)",
+        mTS.linkExternals === 1 && mTS.linkEdges.length === 2, JSON.stringify(mTS.linkEdges));
+    check("VN: TS edge carries slots + type (out 0 -> in 0, MODEL)",
+        mTS.linkEdges[0].from === 0 && mTS.linkEdges[0].to === 1 &&
+        mTS.linkEdges[0].outSlot === 0 && mTS.linkEdges[0].inSlot === 0 &&
+        mTS.linkEdges[0].type === "MODEL", JSON.stringify(mTS.linkEdges[0]));
+    check("VN: buildNodeMeta keeps the honest count for TS fragments",
+        hooks.buildNodeMeta(mTS).linkCount === 2, JSON.stringify(hooks.buildNodeMeta(mTS)));
+    // the decorated detail model: titles + slot names + "(external)"
+    const dTS = hooks.buildFragDetail(JSON.parse(ts), mTS);
+    check("VN: the TS detail row reads 'ckpt source -> MODEL -> the sampler -> model'",
+        dTS.links[0].fromTitle === "ckpt source" && dTS.links[0].out === "MODEL" &&
+        dTS.links[0].toTitle === "the sampler" && dTS.links[0].in === "model" && !dTS.links[0].ext,
+        JSON.stringify(dTS.links[0]));
+    check("VN: the external endpoint renders as '(external)', never guessed",
+        dTS.links[1].fromTitle === "(external)" && dTS.links[1].in === "seed" &&
+        dTS.links[1].ext === true && dTS.externals === 1, JSON.stringify(dTS.links[1]));
+    check("VN: normFragId normalizes numeric strings, keeps subgraph ids",
+        hooks.normFragId("42") === 42 && hooks.normFragId("12:5") === "12:5" &&
+        hooks.normFragId(null) == null, "");
+
+    // the viewer renders the rows + the external note, no apology
+    await hooks.addText(ts, "ts frag", "nodes");
+    await settle();
+    const tsItem = hooks.items().find((x) => x.type === "nodes" && x.name === "ts frag");
+    const tsCard = document.querySelector('.hub-stack-card[data-id="' + tsItem.id + '"]');
+    check("VN: the TS card meta row shows '2 links'",
+        /2\s*links/.test(tsCard?.textContent || ""), tsCard?.textContent.slice(0, 160));
+    tsCard.querySelector('[data-act="view"]').click();
+    await settle();
+    const vTS = document.querySelector(".hub-stack-viewer");
+    const tabTS = (name) => [...vTS.querySelectorAll(".hub-stack-vtab")].find((b) => b.textContent.trim() === name);
+    tabTS("Connections").click();
+    const rowsTS = [...vTS.querySelectorAll(".hub-stack-vpane-conn .hub-stack-vlink-row")];
+    check("VN: the Connections tab shows 2 rows for the TS fragment",
+        rowsTS.length === 2, String(rowsTS.length));
+    check("VN: row 1 = 'ckpt source → MODEL → the sampler → model'",
+        rowsTS[0]?.textContent.includes("ckpt source") && rowsTS[0]?.textContent.includes("MODEL") &&
+        rowsTS[0]?.textContent.includes("the sampler") && rowsTS[0]?.textContent.includes("model"),
+        rowsTS[0]?.textContent);
+    check("VN: row 2 shows the external endpoint + the SEED slot name",
+        rowsTS[1]?.textContent.includes("(external)") && rowsTS[1]?.textContent.includes("seed") &&
+        rowsTS[1]?.textContent.includes("the sampler"), rowsTS[1]?.textContent);
+    check("VN: the external note explains the outside connection",
+        (vTS.querySelector(".hub-stack-vpane-conn")?.textContent || "").includes("outside the copied selection"),
+        vTS.querySelector(".hub-stack-vpane-conn")?.textContent.slice(0, 180));
+    check("VN: NO 'does not expose reliable links' apology on the TS shape",
+        !(vTS.querySelector(".hub-stack-vpane-conn")?.textContent || "").includes("does not expose reliable links"),
+        vTS.querySelector(".hub-stack-vpane-conn")?.textContent.slice(0, 180));
+    // the lazy node detail wires neighbors from the OBJECT links too
+    tabTS("Nodes").click();
+    const samplerRow = [...vTS.querySelectorAll(".hub-stack-vnode")].find((r) => r.textContent.includes("the sampler"));
+    samplerRow.open = true;
+    samplerRow.dispatchEvent(new dom.window.Event("toggle", { bubbles: false }));
+    const samplerBox = samplerRow.querySelector(".hub-stack-vnode-detail");
+    check("VN: the node detail shows the incoming TS connection",
+        (samplerBox?.textContent || "").includes("Connected") &&
+        (samplerBox?.textContent || "").includes("ckpt source"),
+        samplerBox?.textContent.slice(0, 200));
+
+    // the search focus survives re-renders (v99 lost it after one keystroke)
+    const searchTS = vTS.querySelector(".hub-stack-vsearch");
+    searchTS.focus();
+    searchTS.value = "sam";
+    searchTS.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    const focus1 = document.activeElement;
+    check("VN: after typing, the NEW search input is focused again",
+        !!focus1 && focus1.classList.contains("hub-stack-vsearch") && focus1.value === "sam",
+        focus1 && (focus1.className + " :: " + focus1.value));
+    check("VN: the caret sits at the end of the restored input",
+        focus1.selectionStart === focus1.value.length, String(focus1.selectionStart));
+    focus1.value = "sampler";
+    focus1.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    const rowsFocus = [...vTS.querySelectorAll(".hub-stack-vnode")];
+    check("VN: the second keystroke filters (typing is continuous now)",
+        rowsFocus.length === 1 && rowsFocus[0].textContent.includes("the sampler"),
+        rowsFocus.map((r) => r.textContent.slice(0, 24)).join("/"));
+    vTS.querySelector(".hub-stack-viewer-x").click();
+    await settle();
+}
+
+phase("VN v100 links — legacy relative 5-tuples resolve by ORDER, not id");
+{
+    // the legacy build: [origin_rel, origin_slot, target_rel, target_slot,
+    // origin_global_id?] - RELATIVE indexes into the clipboard node order;
+    // origin_rel may be null (the source node was NOT selected). The node ids
+    // here are deliberately odd - resolving them BY id must fail, by ORDER
+    // must succeed.
+    const legacy = JSON.stringify({
+        nodes: [
+            { id: 77, type: "CheckpointLoaderSimple", title: "L ckpt", pos: [0, 0], size: [315, 106],
+                outputs: [{ name: "MODEL", type: "MODEL" }] },
+            { id: 12, type: "KSampler", title: "L sampler", pos: [400, 0], size: [270, 262],
+                inputs: [{ name: "model", type: "MODEL" }, { name: "seed", type: "SEED" }] },
+        ],
+        links: [[0, 0, 1, 0, 77], [null, 3, 1, 1, 42]],
+    });
+    const mL = hooks.parseGraphFragment(legacy);
+    check("VN: legacy 5-tuples count reliably (2 links, 1 external)",
+        mL && mL.linkCount === 2 && mL.linkExternals === 1, JSON.stringify(mL && mL.linkEdges));
+    const dL = hooks.buildFragDetail(JSON.parse(legacy), mL);
+    check("VN: legacy edge 0 resolves BY ORDER ('L ckpt' -> 'L sampler')",
+        dL.links[0].fromTitle === "L ckpt" && dL.links[0].toTitle === "L sampler" &&
+        dL.links[0].out === "MODEL" && dL.links[0].in === "model", JSON.stringify(dL.links[0]));
+    check("VN: legacy edge 1 has a null origin -> external, slot name unknown -> 'slot 3'",
+        dL.links[1].fromTitle === "(external)" && dL.links[1].out === "slot 3" &&
+        dL.links[1].in === "seed", JSON.stringify(dL.links[1]));
+    await hooks.addText(legacy, "legacy frag", "nodes");
+    await settle();
+    const lItem = hooks.items().find((x) => x.type === "nodes" && x.name === "legacy frag");
+    const lCard = document.querySelector('.hub-stack-card[data-id="' + lItem.id + '"]');
+    check("VN: the legacy card meta row shows '2 links'",
+        /2\s*links/.test(lCard?.textContent || ""), lCard?.textContent.slice(0, 160));
+}
+
+phase("VN v100 links — unknown and mixed shapes stay UNKNOWN (never 0)");
+{
+    const junkNumbers = JSON.stringify({ nodes: [{ id: 1, type: "A" }, { id: 2, type: "B" }], links: [1, 2, 3] });
+    const mixed = JSON.stringify({
+        nodes: [{ id: 1, type: "A" }, { id: 2, type: "B" }],
+        links: [{ origin_id: 1, origin_slot: 0, target_id: 2, target_slot: 0 }, [0, 0, 1, 0]],
+    });
+    const junkObjects = JSON.stringify({ nodes: [{ id: 1, type: "A" }, { id: 2, type: "B" }], links: [{ foo: 1 }] });
+    check("VN: junk number links -> unknown (null)",
+        hooks.parseGraphFragment(junkNumbers).linkCount === null, "");
+    check("VN: mixed object+tuple links -> unknown (null)",
+        hooks.parseGraphFragment(mixed).linkCount === null, "");
+    check("VN: objects without endpoint fields -> unknown (null)",
+        hooks.parseGraphFragment(junkObjects).linkCount === null, "");
+    // the empty array is an HONEST zero, not an unknown
+    const empty = JSON.stringify({ nodes: [{ id: 1, type: "A" }], links: [] });
+    check("VN: an empty links array counts as 0",
+        hooks.parseGraphFragment(empty).linkCount === 0, "");
+    // the viewer still shows the apology for the unknown shape
+    await hooks.addText(junkObjects, "junk frag", "nodes");
+    await settle();
+    const jItem = hooks.items().find((x) => x.type === "nodes" && x.name === "junk frag");
+    document.querySelector('.hub-stack-card[data-id="' + jItem.id + '"] [data-act="view"]').click();
+    await settle();
+    const vJ = document.querySelector(".hub-stack-viewer");
+    [...vJ.querySelectorAll(".hub-stack-vtab")].find((b) => b.textContent.trim() === "Connections").click();
+    check("VN: the unknown shape still gets the reliable-or-nothing apology",
+        (vJ.querySelector(".hub-stack-vpane-conn")?.textContent || "").includes("does not expose reliable links"),
+        vJ.querySelector(".hub-stack-vpane-conn")?.textContent.slice(0, 160));
+    vJ.querySelector(".hub-stack-viewer-x").click();
+    await settle();
+}
+
+phase("VN v100 groups — same-title groups count members by INDEX");
+{
+    const dup = JSON.stringify({
+        nodes: [
+            { id: 1, type: "NodeA", title: "in g1", pos: [10, 10], size: [50, 50] },
+            { id: 2, type: "NodeB", title: "in g2", pos: [1010, 10], size: [50, 50] },
+        ],
+        links: [],
+        groups: [
+            { title: "Dup", bounding: [0, 0, 500, 200] },
+            { title: "Dup", bounding: [900, 0, 500, 200] },
+        ],
+    });
+    await hooks.addText(dup, "dup frag", "nodes");
+    await settle();
+    const dpItem = hooks.items().find((x) => x.type === "nodes" && x.name === "dup frag");
+    document.querySelector('.hub-stack-card[data-id="' + dpItem.id + '"] [data-act="view"]').click();
+    await settle();
+    const vD = document.querySelector(".hub-stack-viewer");
+    const counts = [...vD.querySelectorAll(".hub-stack-vpane-overview .hub-stack-vgroup-row .hub-stack-vtype-count")]
+        .map((el) => el.textContent.trim());
+    check("VN: two same-title groups each show exactly their own member (1 node)",
+        counts.length === 2 && counts[0] === "1 node" && counts[1] === "1 node",
+        JSON.stringify(counts));
+    [...vD.querySelectorAll(".hub-stack-vtab")].find((b) => b.textContent.trim() === "Groups").click();
+    const gCounts = [...vD.querySelectorAll(".hub-stack-vpane-groups .hub-stack-vgroup-card .hub-stack-vtype-count")]
+        .map((el) => el.textContent.trim());
+    check("VN: the Groups tab counts by index too (no double-count)",
+        gCounts.length === 2 && gCounts[0] === "1 node" && gCounts[1] === "1 node",
+        JSON.stringify(gCounts));
+    vD.querySelector(".hub-stack-viewer-x").click();
+    await settle();
+}
+
+phase("VN v100 repair — v99 aggregates with linkCount null are PATCHed once");
+{
+    document.querySelector('.hub-stack-tab[data-tab=""]')?.click();
+    await settle();
+    // a v99-captured file-backed entry: nodeMeta carries linkCount:null (the
+    // v99 parser could not count TS object links); the v100 repair re-parses
+    // ONCE and PATCHes the completed aggregate
+    const fragR = JSON.stringify({
+        nodes: [
+            { id: 5, type: "CheckpointLoaderSimple", title: "ckpt source", pos: [0, 0], size: [315, 106] },
+            { id: 8, type: "KSampler", pos: [400, 0], size: [270, 262] },
+        ],
+        links: [{ id: 11, origin_id: 5, origin_slot: 0, target_id: 8, target_slot: 0, type: "MODEL" }],
+        groups: [],
+    });
+    fakeApi.__pushItem({
+        id: "srvt100g", type: "nodes", file: "v100repair.txt", size: fragR.length,
+        created: Math.floor(Date.now() / 1000), hash: "r100g",
+        nodeMeta: { schema: 1, nodeCount: 2, linkCount: null, groupCount: 0, types: [["KSampler", 1], ["CheckpointLoaderSimple", 1]], groups: [] },
+    });
+    await fakeApi.__storeBlob(new dom.window.Blob([fragR], { type: "application/octet-stream" }), "v100repair.txt", "application/octet-stream", "");
+    // a v99 aggregate over a TRULY unknowable shape: must NOT be PATCHed
+    const fragBad = JSON.stringify({ nodes: [{ id: 1, type: "A" }, { id: 2, type: "B" }], links: [{ foo: 1 }] });
+    fakeApi.__pushItem({
+        id: "srvt100x", type: "nodes", file: "v100bad.txt", size: fragBad.length,
+        created: Math.floor(Date.now() / 1000), hash: "r100x",
+        nodeMeta: { schema: 1, nodeCount: 2, linkCount: null, groupCount: 0, types: [["A", 1], ["B", 1]], groups: [] },
+    });
+    await fakeApi.__storeBlob(new dom.window.Blob([fragBad], { type: "application/octet-stream" }), "v100bad.txt", "application/octet-stream", "");
+    hooks.refresh();
+    await settle();
+    await settle();
+    const patchesG = fakeApi.__calls.filter((c) =>
+        String(c.url).startsWith("/settings_hub/stack/patch") && String(c.body || "").includes("srvt100g"));
+    check("VN: the repair PATCHed the v99 aggregate exactly once",
+        patchesG.length === 1, String(patchesG.length));
+    let pmG = null;
+    try { pmG = JSON.parse(patchesG[0]?.body || "{}").nodeMeta; } catch (_) {}
+    check("VN: the repaired aggregate carries linkCount 1 (was null)",
+        !!pmG && pmG.linkCount === 1 && pmG.nodeCount === 2, JSON.stringify(pmG));
+    check("VN: the server store holds the repaired aggregate",
+        fakeApi.__items().find((x) => x.id === "srvt100g")?.nodeMeta?.linkCount === 1, "");
+    const cardG = document.querySelector('.hub-stack-card[data-id="srvt100g"]');
+    check("VN: the repaired card now shows the link count",
+        /1\s*link/.test(cardG?.textContent || "") && /2\s*nodes/.test(cardG?.textContent || ""),
+        cardG?.textContent.slice(0, 160));
+    // a second render cycle does NOT re-PATCH (complete aggregate -> early out)
+    hooks.refresh();
+    await settle();
+    await settle();
+    check("VN: no duplicate repair PATCH on the next render",
+        fakeApi.__calls.filter((c) =>
+            String(c.url).startsWith("/settings_hub/stack/patch") && String(c.body || "").includes("srvt100g")).length === 1,
+        "");
+    // the unknowable shape: one silent re-parse, ZERO PATCHes, never retried
+    check("VN: the unknowable shape was not PATCHed at all",
+        !fakeApi.__calls.some((c) =>
+            String(c.url).startsWith("/settings_hub/stack/patch") && String(c.body || "").includes("srvt100x")),
+        "");
+    const cardX = document.querySelector('.hub-stack-card[data-id="srvt100x"]');
+    check("VN: the unknowable card stays honest (no fabricated links)",
+        cardX && !/\d+\s*links?/.test(cardX.textContent), cardX?.textContent.slice(0, 160));
+    // cleanup: remove both repair entries so later phases stay isolated
+    for (const id of ["srvt100g", "srvt100x"]) {
+        document.querySelector(`.hub-stack-card[data-id="${id}"] .hub-stack-del`)?.click();
+    }
+    await settle();
 }
 
 // ---------------------------------------------------------------------------

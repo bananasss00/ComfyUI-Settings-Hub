@@ -103,35 +103,31 @@
 //   panel (same viewerEl channel).
 // ============================================================================
 // ============================================================================
-// v99 (owner plan 2026-11-13: "улучшение отображения скопированных нод в
-//   Paste Stack" - phases 1-3 of the plan, the Graph map is the NEXT round):
-// the node-fragment CARD becomes COMPACT + INFORMATIVE (three lines: the
-// resolved title + node counter / the real type names with counts and
-// "+N types" / groups · links · size · date; the height NEVER depends on
-// the graph size, no thumbnail); the preview aggregate "nodeMeta"
-// (schema 1: nodeCount / linkCount / groupCount / top types / groups /
-// singleTitle) is computed ONCE per fragment at capture time, rides the
-// same POST (py v99: whitelist + caps, never part of the content hash,
-// refreshed on re-capture of an identical fragment) and is lazily
-// back-filled for OLD entries via PATCH {nodeMeta} (rate-limited per item;
-// file-backed >100 KB fragments become fully described too). The full
-// view becomes an INSPECTOR: Overview (stats + type distribution + groups)
-// | Nodes (search + portioned list + lazy per-node details: inputs,
-// outputs, widget values with copy, properties, neighbors) | Groups
-// (color + reliable membership) | Connections ("src → out → dst → in",
-// reliable rows only, reroute notice) | JSON (collapsed, capped, 📋 copies
-// the FULL source). Reliable-or-nothing: unknown link counts stay "n/a",
-// group membership only via the group's own bounding box, reroute-mediated
-// links counted, never fabricated. Big graphs: 60 rows first, "+Show N
-// more" batches of 150, per-node details built on the first expand and
-// cached - the interface never blocks and the raw JSON is never re-parsed
-// per renderList().
+// v100 (owner report 2026-11-14: "connections пишет does not expose reliable
+//   links - и так для всех в стаке элементов"):
+// the v99 inspector counted links ONLY in the workflow-dump 6-tuple shape,
+// while the REAL canvas clipboards are: the TS build writes link OBJECTS
+// {id, origin_id, origin_slot, target_id, target_slot, type, ...presentation}
+// and the legacy build writes relative 5-tuples [origin_rel, origin_slot,
+// target_rel, target_slot, origin_id?] (origin_rel = null when the source
+// node was not selected). Result: EVERY fragment reported "does not expose
+// reliable links" and the Connections tab showed the apology instead of rows.
+// Fix: normalizeFragmentLinks() accepts ALL THREE shapes and turns them into
+// one index-based edge list ({from,to} = indexes into nodes, -1 = endpoint
+// outside the copied selection); links ARE counted, Connections renders
+// "src → out → dst → in" rows with the external endpoints as "(external)";
+// nodeMeta aggregates captured by v99 (linkCount:null) are lazily REPAIRED
+// by one re-parse + PATCH per entry. Two more v99 bugs found in the audit:
+// the Nodes search lost focus after the first keystroke (the re-render
+// replaces the input - focus + caret are restored now), and two groups with
+// the same title double-counted their members (membership matches the group
+// INDEX now). Raw JSON / paste fidelity untouched - the meta is read-only.
 // ============================================================================
 
 // v89 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v99";
+globalThis.__SettingsHubLoaded["stack"] = "v100";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -1675,17 +1671,118 @@ function onPasteEvent(e) {
 // version-specific re-serialization) and re-inserts it by swapping the key
 // for the duration of one native pasteFromClipboard() call.
 
+/** v100: normalized fragment node id - finite numbers pass through, numeric
+ *  strings become numbers, other strings (TS subgraph ids like "12:5") stay
+ *  as-is; null when there is no usable id. One definition is shared by the
+ *  parser, the detail model and the endpoint lookups. */
+function normFragId(v) {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string") {
+        const t = v.trim();
+        if (/^-?\d+$/.test(t)) return Number(t);
+        if (t) return t;
+    }
+    return null;
+}
+function fragNodeId(n) {
+    return n && typeof n === "object" ? normFragId(n.id) : null;
+}
+
+/** v100: normalize the link array of a canvas-clipboard fragment into
+ *  index-based edges ({from,to} = indexes into `nodes`, -1 = the endpoint is
+ *  OUTSIDE the copied selection, e.g. an incoming wire from an unselected
+ *  node). Returns null when the shape is unknown or mixed - the caller keeps
+ *  linkCount null ("unknown", never 0). Three real shapes exist (verified
+ *  against the frontend sources in research/):
+ *   - TS build (OBJECTS): {id, origin_id, origin_slot, target_id,
+ *     target_slot, type, ...link presentation} - origin/target ids are the
+ *     LIVE node ids and serializeNodeId() keeps numeric ids unchanged, so
+ *     they match nodes[].id directly; node inputs are serialized with
+ *     link:null (the wires live in this top-level array);
+ *   - legacy litegraph build (5-TUPLES): [origin_rel(null|number),
+ *     origin_slot, target_rel(number), target_slot(number), origin_id?] -
+ *     RELATIVE indexes in clipboard order; origin_rel is null when the source
+ *     node was not selected (JSON.stringify turns undefined into null);
+ *   - workflow-dump 6-tuples: [id, origin_id, origin_slot, target_id,
+ *     target_slot, type] - global ids (such a fragment is not pastable
+ *     as-is, but the count and endpoints are still readable).
+ *  The v99 parser understood only the 6-tuple, so every REAL fragment (TS
+ *  objects, legacy tuples) was reported as "unreliable" - the owner report:
+ *  the Connections tab showed the apology for every stack entry. */
+function normalizeFragmentLinks(rawLinks, nodes) {
+    if (!Array.isArray(rawLinks)) return null;
+    if (!rawLinks.length) return { edges: [], externals: 0 };
+    const allObj = rawLinks.every((l) => l && typeof l === "object" && !Array.isArray(l));
+    const allArr = rawLinks.every((l) => Array.isArray(l));
+    if (allObj === allArr) return null; // mixed shapes or junk - unknown
+    const idToIdx = new Map();
+    for (let i = 0; i < nodes.length; i++) {
+        const id = fragNodeId(nodes[i]);
+        if (id != null && !idToIdx.has(id)) idToIdx.set(id, i);
+    }
+    const isEndpointId = (v) => normFragId(v) != null;
+    const isSlot = (v) => typeof v === "number" && Number.isFinite(v);
+    let externals = 0;
+    if (allObj) {
+        const ok = rawLinks.every((l) =>
+            isEndpointId(l.origin_id) && isSlot(l.origin_slot) &&
+            isEndpointId(l.target_id) && isSlot(l.target_slot));
+        if (!ok) return null;
+        const edges = rawLinks.map((l) => {
+            const oid = normFragId(l.origin_id);
+            const tid = normFragId(l.target_id);
+            const from = (oid != null && idToIdx.has(oid)) ? idToIdx.get(oid) : -1;
+            const to = (tid != null && idToIdx.has(tid)) ? idToIdx.get(tid) : -1;
+            if (from === -1 || to === -1) externals++;
+            return {
+                from, to,
+                outSlot: l.origin_slot, inSlot: l.target_slot,
+                type: (typeof l.type === "string" && l.type) ? l.type : "",
+            };
+        });
+        return { edges, externals };
+    }
+    const all6 = rawLinks.every((l) => l.length >= 6 && l.slice(0, 5).every((x) => typeof x === "number"));
+    if (all6) {
+        const edges = rawLinks.map((l) => {
+            const oid = normFragId(l[1]);
+            const tid = normFragId(l[3]);
+            const from = (oid != null && idToIdx.has(oid)) ? idToIdx.get(oid) : -1;
+            const to = (tid != null && idToIdx.has(tid)) ? idToIdx.get(tid) : -1;
+            if (from === -1 || to === -1) externals++;
+            return {
+                from, to,
+                outSlot: l[2], inSlot: l[4],
+                type: (typeof l[5] === "string" && l[5]) ? l[5] : "",
+            };
+        });
+        return { edges, externals };
+    }
+    const ok5 = rawLinks.every((l) => l.length >= 4 && l.length <= 5 &&
+        (l[0] === null || (typeof l[0] === "number" && Number.isFinite(l[0]))) &&
+        isSlot(l[1]) && isSlot(l[2]) && isSlot(l[3]));
+    if (!ok5) return null;
+    const edges = rawLinks.map((l) => {
+        const from = (l[0] != null && Number.isInteger(l[0]) && l[0] >= 0 && l[0] < nodes.length) ? l[0] : -1;
+        const to = (Number.isInteger(l[2]) && l[2] >= 0 && l[2] < nodes.length) ? l[2] : -1;
+        if (from === -1 || to === -1) externals++;
+        return { from, to, outSlot: l[1], inSlot: l[3], type: "" };
+    });
+    return { edges, externals };
+}
+
 /** Parse + summarize a canvas-clipboard fragment. Returns null when the text
  *  is not a node selection (plain text, workflow JSON without nodes, junk).
  *  v96: {ok, nodeCount, groupCount, groups:[title...], types:[[type,count]...]}
- *  v99 adds: linkCount (null = the clipboard shape does not let us count it
- *  RELIABLY - the UI must never show "0 links" for an unknown number),
- *  groupDetails ([{title, color?, bounds?}...]), nodeSummaries ([{id, type,
- *  title, groupIdx?}...] - groupIdx only when the membership is RELIABLE,
- *  i.e. the group carries a bounding box and the node center falls inside
- *  it: the same rule the graph itself uses to rebuild grouping on paste),
- *  rerouteCount. The summaries feed the inspector; nodeMeta carries only
- *  the bounded aggregate (buildNodeMeta below). */
+ *  v99 adds: linkCount, groupDetails ([{title, color?, bounds?}...]),
+ *  nodeSummaries ([{id, type, title, groupIdx?}...] - groupIdx only when the
+ *  membership is RELIABLE, i.e. the group carries a bounding box and the node
+ *  center falls inside it: the same rule the graph itself uses to rebuild
+ *  grouping on paste), rerouteCount.
+ *  v100 replaces the tuple-only link counting with normalizeFragmentLinks():
+ *  linkCount is reliable for ALL THREE real clipboard shapes, linkEdges is
+ *  the pre-normalized index-based edge list (null when the shape is unknown)
+ *  and linkExternals counts edges reaching outside the copied selection. */
 function parseGraphFragment(text) {
     try {
         const t = String(text ?? "").trim();
@@ -1727,18 +1824,16 @@ function parseGraphFragment(text) {
                 return d;
             })
             .filter((g) => g.title);
-        // v99: RELIABLE link counting. The canvas clipboard carries links as
-        // [id, origin_id, origin_slot, target_id, target_slot, type] tuples
-        // (both the legacy and the TS build). Count the array ONLY when every
-        // entry looks like such a tuple; anything else (missing array, other
-        // shapes) stays null - unknown, NOT zero.
-        let linkCount = null;
-        if (Array.isArray(j.links)) {
-            const okShape = j.links.every((l) => Array.isArray(l) && l.length >= 5 &&
-                typeof l[0] === "number" && typeof l[1] === "number" &&
-                typeof l[2] === "number" && typeof l[3] === "number");
-            if (okShape) linkCount = j.links.length;
-        }
+        // v100: RELIABLE link counting + normalized edges for ALL THREE real
+        // clipboard shapes (TS objects / legacy 5-tuples / workflow 6-tuples).
+        // Anything else (missing array, mixed junk) stays null - unknown, NOT
+        // zero. The v99 code understood only the 6-tuple, so every real
+        // fragment captured on the current TS frontend reported "does not
+        // expose reliable links" (owner report).
+        const linkNorm = normalizeFragmentLinks(Array.isArray(j.links) ? j.links : null, nodes);
+        const linkCount = linkNorm ? linkNorm.edges.length : null;
+        const linkEdges = linkNorm ? linkNorm.edges : null;
+        const linkExternals = linkNorm ? linkNorm.externals : 0;
         // v99: per-node summaries + RELIABLE group membership. A node counts
         // as a group member only when the group carries a bounding box AND
         // the node CENTER falls inside it (LiteGraph itself rebuilds grouping
@@ -1747,7 +1842,7 @@ function parseGraphFragment(text) {
         const reroutes = Array.isArray(j.reroutes) ? j.reroutes : [];
         const nodeSummaries = nodes.map((n) => {
             const s = {
-                id: typeof n.id === "number" ? n.id : null,
+                id: fragNodeId(n), // v100: numeric strings and TS subgraph ids survive too
                 type: String(n.type || "?"),
                 title: String(typeof n.title === "string" && n.title.trim() ? n.title.trim() : n.type || "?"),
             };
@@ -1777,8 +1872,12 @@ function parseGraphFragment(text) {
             groupCount: rawGroups.length,
             groups,
             types,
-            // v99 fields (undefined-safe for the v96 callers)
+            // v99 fields (undefined-safe for the v96 callers); v100 adds the
+            // pre-normalized edge list + the count of edges that reach
+            // outside the copied selection (reliable shapes only)
             linkCount,
+            linkEdges,
+            linkExternals,
             groupDetails,
             nodeSummaries,
             rerouteCount: reroutes.length,
@@ -2180,20 +2279,31 @@ function fragTypeLine(cm) {
 // + parses + PATCHes the aggregate; applyPatched re-renders with the full
 // preview. Rate-limited per item (in-flight set + a failed WeakSet), so a
 // big list never re-fetches on every render.
+// v100 REPAIR: entries captured BY v99 carry nodeMeta with linkCount:null -
+// the v99 parser understood only the workflow 6-tuple link shape, while the
+// TS frontend writes objects and the legacy build writes relative 5-tuples
+// (owner report: "connections пишет does not expose reliable links - и так
+// для всех элементов"). Such entries are re-parsed ONCE per session; the
+// PATCH happens only when the fixed parser CAN count the links (a truly
+// unknown shape is marked done instead of churning the server forever).
 const nodeMetaInFlight = new Set();
 const nodeMetaDead = new WeakSet();
+const nodeMetaRepaired = new WeakSet();
 function ensureNodeMeta(item) {
     try {
-        if (!item || item.type !== "nodes" || item.nodeMeta) return;
-        if (typeof item.text === "string") return; // inline: parses locally (WeakMap)
-        if (item.local) return;                     // session blob: no server to PATCH
-        if (nodeMetaInFlight.has(item.id) || nodeMetaDead.has(item)) return;
+        if (!item || item.type !== "nodes" || item.local) return;
+        const has = !!(item.nodeMeta && typeof item.nodeMeta === "object");
+        const repair = has && item.nodeMeta.linkCount == null; // v99-captured aggregate
+        if (has && !repair) return;                            // complete aggregate - nothing to do
+        if (!has && typeof item.text === "string") return;     // inline: fragCardModel parses locally (WeakMap)
+        if (nodeMetaInFlight.has(item.id) || nodeMetaDead.has(item) || nodeMetaRepaired.has(item)) return;
         nodeMetaInFlight.add(item.id);
         void (async () => {
             try {
                 const raw = await itemText(item);
                 const m = parseGraphFragment(raw);
                 if (!m) { nodeMetaDead.add(item); return; }
+                if (repair && m.linkCount == null) { nodeMetaRepaired.add(item); return; } // still unknowable
                 const nm = buildNodeMeta(m);
                 if (!nm) { nodeMetaDead.add(item); return; }
                 const patched = await apiPatch(item.id, { nodeMeta: nm });
@@ -2293,7 +2403,8 @@ function cardHtml(item) {
         // once into the WeakMap, a file-backed one triggers the ONE-TIME
         // lazy backfill.
         const cm = fragCardModel(item);
-        if (!cm) ensureNodeMeta(item); // async backfill, this render shows the fallback
+        // v100: ensureNodeMeta also REPAIRS v99 aggregates (linkCount null)
+        if (!cm || (item.nodeMeta && item.nodeMeta.linkCount == null)) ensureNodeMeta(item);
         const dn = cm ? fragDisplayName(item, cm) : (name || "Node fragment");
         const n = cm ? cm.nodeCount : null;
         const typeLine = fragTypeLine(cm);
@@ -3610,19 +3721,25 @@ const FRAG_ROWS_BATCH = 150;    // each "+Show N more" click
 const FRAG_VALUE_CAP = 160;     // long widget/text values collapse past this
 const FRAG_TYPES_OVERVIEW_CAP = 40;
 
-/** Build the full inspector model from the parsed fragment JSON (one call
- *  per viewer open, all panes read it without re-parsing). Reliable-only:
- *  link endpoints that resolve to known nodes produce CONNECTION rows;
- *  endpoints that hit a reroute are counted, never fabricated; anything
- *  else is ignored. */
+/** v100: the full inspector model (one call per viewer open, all panes read
+ *  it without re-parsing). Reliable-only: every edge of the normalized edge
+ *  list (m.linkEdges carries indexes into j.nodes, -1 = endpoint OUTSIDE the
+ *  copied selection) becomes a CONNECTION row decorated with titles, slot
+ *  names and endpoint ids for rendering; an endpoint that falls outside the
+ *  copied selection is real and shown as "(external)" - nothing is guessed
+ *  into a node name, nothing is dropped. The v99 code re-derived links from
+ *  j.links assuming the workflow 6-tuple shape - it produced zero rows for
+ *  every real clipboard. */
 function buildFragDetail(j, m) {
     const nodes = Array.isArray(j.nodes) ? j.nodes : [];
     const byId = new Map();
     for (const n of nodes) {
-        if (n && typeof n === "object" && typeof n.id === "number") byId.set(n.id, n);
+        if (n && typeof n === "object") {
+            const id = fragNodeId(n);
+            if (id != null && !byId.has(id)) byId.set(id, n);
+        }
     }
-    const rerouteIds = new Set((Array.isArray(j.reroutes) ? j.reroutes : [])
-        .map((r) => (r && typeof r.id === "number") ? r.id : null).filter((x) => x != null));
+    const rawAt = (i) => (i >= 0 && i < nodes.length && nodes[i] && typeof nodes[i] === "object") ? nodes[i] : null;
     const slotName = (node, arrName, idx, prefix) => {
         try {
             const arr = Array.isArray(node?.[arrName]) ? node[arrName] : [];
@@ -3632,31 +3749,35 @@ function buildFragDetail(j, m) {
         } catch (_) {}
         return `${prefix} ${idx}`;
     };
+    const titleOf = (n) =>
+        String((typeof n?.title === "string" && n.title.trim()) ? n.title.trim() : n?.type || "?");
     const links = [];
-    let rerouted = 0;
-    let unresolved = 0;
-    if (Array.isArray(j.links)) {
-        for (const l of j.links) {
-            if (!Array.isArray(l) || l.length < 5 ||
-                typeof l[0] !== "number" || typeof l[1] !== "number" ||
-                typeof l[2] !== "number" || typeof l[3] !== "number") continue;
-            const [lid, oid, osl, tid, tsl] = l;
-            const ltype = (typeof l[5] === "string" && l[5]) ? l[5] : "";
-            if (rerouteIds.has(oid) || rerouteIds.has(tid)) { rerouted++; continue; }
-            const from = byId.get(oid);
-            const to = byId.get(tid);
-            if (!from || !to) { unresolved++; continue; }
-            links.push({
-                from: oid, to: tid,
-                fromTitle: String((typeof from.title === "string" && from.title.trim()) ? from.title.trim() : from.type || "?"),
-                toTitle: String((typeof to.title === "string" && to.title.trim()) ? to.title.trim() : to.type || "?"),
-                out: slotName(from, "outputs", osl, "slot"),
-                in: slotName(to, "inputs", tsl, "slot"),
-                type: ltype,
-            });
-        }
+    let externals = 0;
+    for (const e of (m.linkEdges || [])) {
+        const from = rawAt(e.from);
+        const to = rawAt(e.to);
+        if (e.from === -1 || e.to === -1) externals++;
+        links.push({
+            fromIdx: e.from, toIdx: e.to,
+            from: from ? fragNodeId(from) : null,
+            to: to ? fragNodeId(to) : null,
+            // an endpoint outside the copied selection is REAL (an incoming
+            // wire from an unselected node) - shown as "(external)", never
+            // silently dropped and never guessed into a node name
+            fromTitle: from ? titleOf(from) : "(external)",
+            toTitle: to ? titleOf(to) : "(external)",
+            out: from ? slotName(from, "outputs", e.outSlot, "slot") : `slot ${e.outSlot}`,
+            in: to ? slotName(to, "inputs", e.inSlot, "slot") : `slot ${e.inSlot}`,
+            type: e.type || "",
+            ext: e.from === -1 || e.to === -1,
+        });
     }
-    return { byId, links, rerouted, unresolved, rerouteCount: rerouteIds.size };
+    return {
+        byId,
+        links,
+        externals,
+        rerouteCount: Array.isArray(j.reroutes) ? j.reroutes.length : (m.rerouteCount || 0),
+    };
 }
 
 /** One widget/property VALUE for the detail view: short values inline, long
@@ -3812,8 +3933,10 @@ async function openNodesViewer(item) {
             `<div class="hub-stack-vtype-row"><span class="hub-stack-vtype-name" title="${esc(ty)}">${esc(ty)}</span><span class="hub-stack-vtype-count">${c > 1 ? "×" + c : ""}</span></div>`).join("") +
             (m.types.length > FRAG_TYPES_OVERVIEW_CAP
                 ? `<div class="hub-stack-vw-more">+${m.types.length - FRAG_TYPES_OVERVIEW_CAP} more types</div>` : "");
-        const groupRows = (m.groupDetails || []).slice(0, FRAG_TYPES_OVERVIEW_CAP).map((g) => {
-            const cnt = (m.nodeSummaries || []).filter((s) => s.groupIdx != null && (m.groupDetails[s.groupIdx] || {}).title === g.title).length;
+        const groupRows = (m.groupDetails || []).slice(0, FRAG_TYPES_OVERVIEW_CAP).map((g, gi) => {
+            // v100: members by group INDEX - the v99 code compared by title,
+            // so two groups with the same title double-counted their members
+            const cnt = (m.nodeSummaries || []).filter((s) => s.groupIdx === gi).length;
             const sw = g.color ? `<span class="hub-stack-vswatch" style="background:${esc(g.color)}"></span>` : `<span class="hub-stack-vswatch"></span>`;
             return `<div class="hub-stack-vgroup-row">${sw}<span class="hub-stack-vtype-name" title="${esc(g.title)}">${esc(g.title)}</span>` +
                 (cnt ? `<span class="hub-stack-vtype-count">${cnt} node${cnt === 1 ? "" : "s"}</span>` : `<span class="hub-stack-vtype-count"></span>`) + `</div>`;
@@ -3840,7 +3963,7 @@ async function openNodesViewer(item) {
                 : `<div class="hub-stack-vnodes-sect">Groups</div><div class="hub-stack-vnotice">No groups in this fragment.</div>`);
     };
     // --- Nodes: searchable, portioned, lazy per-node details ---
-    const nodeState = { query: "", shown: FRAG_ROWS_INITIAL, cache: new Map() };
+    const nodeState = { query: "", shown: FRAG_ROWS_INITIAL, cache: new Map(), refocus: false };
     const filteredNodes = () => {
         const q = nodeState.query.trim().toLowerCase();
         const list = m.nodeSummaries || [];
@@ -3859,7 +3982,10 @@ async function openNodesViewer(item) {
         const rows = shown.map((s, i) => {
             const gt = groupTitleOf(s);
             const io = `${s.inputs != null ? s.inputs + " in" : ""}${s.inputs != null && s.outputs != null ? " · " : ""}${s.outputs != null ? s.outputs + " out" : ""}`;
-            return `<details class="hub-stack-vnode" data-nid="${s.id != null ? s.id : ""}">` +
+            // v100: data-nid keeps the RAW id string - TS subgraph ids
+            // ("12:5") are not numbers, Number() would turn them into NaN
+            const nidAttr = s.id != null ? String(s.id) : "";
+            return `<details class="hub-stack-vnode"${nidAttr ? ` data-nid="${esc(nidAttr)}"` : ""}>` +
                 `<summary class="hub-stack-vnode-main">` +
                 `<span class="hub-stack-vnode-idx">${i + 1}</span>` +
                 `<span class="hub-stack-vnode-title" title="${esc(s.title)}">${esc(s.title)}</span>` +
@@ -3881,9 +4007,18 @@ async function openNodesViewer(item) {
                 : `<div class="hub-stack-vnotice">No nodes match "${esc(nodeState.query)}".</div>`);
         const inp = pane.querySelector(".hub-stack-vsearch");
         if (inp) {
+            // v100: every keystroke re-renders this pane, which REPLACES the
+            // input element - restore focus + caret to the new one, or typing
+            // stops after the first character (owner report)
+            if (nodeState.refocus) {
+                nodeState.refocus = false;
+                inp.focus();
+                try { const L = String(inp.value).length; inp.setSelectionRange(L, L); } catch (_) {}
+            }
             inp.addEventListener("input", () => {
                 if (!live()) return;
                 nodeState.query = inp.value || "";
+                nodeState.refocus = true;
                 nodeState.shown = FRAG_ROWS_INITIAL;
                 renderNodes();
             });
@@ -3897,12 +4032,13 @@ async function openNodesViewer(item) {
             });
         }
         // lazy per-node details: built on the FIRST expand, cached per node
-        pane.querySelectorAll(".hub-stack-vnode[data-nid]").forEach((d) => {
+        pane.querySelectorAll(".hub-stack-vnode").forEach((d) => {
             d.addEventListener("toggle", () => {
                 if (!d.open || !live() || !detail) return;
                 const box = d.querySelector(".hub-stack-vnode-detail");
                 if (!box || box.dataset.filled) return;
-                const nid = Number(d.dataset.nid);
+                const nidRaw = d.dataset.nid || "";
+                const nid = /^-?\d+$/.test(nidRaw) ? Number(nidRaw) : (nidRaw || NaN);
                 if (!nodeState.cache.has(nid)) nodeState.cache.set(nid, fragNodeDetailHtml(nid, detail));
                 box.innerHTML = nodeState.cache.get(nid);
                 box.dataset.filled = "1";
@@ -3928,8 +4064,8 @@ async function openNodesViewer(item) {
             pane.innerHTML = `<div class="hub-stack-vnotice">No groups in this fragment.</div>`;
             return;
         }
-        const rows = (m.groupDetails || []).map((g) => {
-            const members = (m.nodeSummaries || []).filter((s) => s.groupIdx != null && (m.groupDetails[s.groupIdx] || {}).title === g.title);
+        const rows = (m.groupDetails || []).map((g, gi) => {
+            const members = (m.nodeSummaries || []).filter((s) => s.groupIdx === gi); // v100: by INDEX (same-title groups double-counted)
             const sw = g.color ? `<span class="hub-stack-vswatch" style="background:${esc(g.color)}"></span>` : `<span class="hub-stack-vswatch"></span>`;
             const memberList = members.length
                 ? members.slice(0, 16).map((s) => esc(s.title)).join(", ") +
@@ -3951,10 +4087,10 @@ async function openNodesViewer(item) {
         const links = detail?.links || [];
         const notes = [];
         if (m.linkCount == null) notes.push("This clipboard shape does not expose reliable links - nothing is shown rather than guessed.");
-        if (detail && (detail.rerouted > 0 || detail.unresolved > 0)) {
-            notes.push(`${detail.rerouted + detail.unresolved} more connection${detail.rerouted + detail.unresolved === 1 ? "" : "s"} go through reroutes or unresolvable endpoints and are not shown.`);
+        if (detail && detail.externals > 0) {
+            notes.push(`${detail.externals} connection${detail.externals === 1 ? " reaches" : "s reach"} outside the copied selection - the external endpoint is shown as "(external)".`);
         }
-        if (m.linkCount === 0) notes.push("The fragment has no connections between nodes.");
+        if (m.linkCount === 0) notes.push("The fragment has no connections between the copied nodes.");
         if (!links.length) {
             pane.innerHTML = notes.map((n) => `<div class="hub-stack-vnotice">${esc(n)}</div>`).join("") ||
                 `<div class="hub-stack-vnotice">No resolvable connections.</div>`;
@@ -4898,6 +5034,10 @@ export function __stackTestHooks() {
         stkPopEl: () => stkPop,
         // v96: node-fragment introspection for the smoke tests
         parseGraphFragment,
+        // v100: multi-shape link normalization + repair introspection
+        normalizeFragmentLinks,
+        normFragId,
+        nodeMetaRepaired: () => nodeMetaRepaired,
         // v99: compact informative cards + nodeMeta + inspector introspection
         buildNodeMeta,
         fragCardModel,
