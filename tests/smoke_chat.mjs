@@ -1158,6 +1158,82 @@ hooks.closeSetPop();
 
 // ---------------------------------------------------------------------------
 
+// SZ (v98) tab-strip wheel — the same defect the Paste Stack had before v97:
+// the strip is overflow-x:auto with a HIDDEN scrollbar, so the mouse wheel
+// is the only scroller. Mirrors the stack's UI phase.
+phase("SZ (v98) tab-strip wheel — the vertical wheel scrolls the hidden-scrollbar strip");
+{
+    for (let i = 1; i <= 8; i++) await hooks.createTab("Wheel chat " + i);
+    const strip = hooks.tabsEl();
+    check("SZ: the strip holds the modes switch + 9 tab chips",
+        strip.querySelectorAll(".hub-chat-tab:not(.hub-chat-tab-edit)").length === 9 &&
+        !!strip.querySelector(".hub-chat-modes"));
+    // jsdom has no layout engine: simulate the overflow metrics on THIS element
+    const stub = (el, k, v) => Object.defineProperty(el, k, { value: v, writable: true, configurable: true });
+    stub(strip, "scrollWidth", 900);
+    stub(strip, "clientWidth", 260);
+    let sl = 0;
+    Object.defineProperty(strip, "scrollLeft", { get: () => sl, set: (x) => { sl = x; }, configurable: true });
+    const wheelAt = (el, dx, dy, mode) => {
+        const ev = new dom.window.Event("wheel", { bubbles: true, cancelable: true });
+        ev.deltaX = dx; ev.deltaY = dy; ev.deltaMode = mode || 0;
+        el.dispatchEvent(ev);
+        return ev.defaultPrevented;
+    };
+    check("SZ: wheelTabs(0,120) scrolled the strip and reported the scroll",
+        hooks.wheelTabs(0, 120, 0) === true && sl === 120, String(sl));
+    check("SZ: a wheel EVENT over the strip is consumed (preventDefault)",
+        wheelAt(strip, 0, 120, 0) === true && sl === 240, String(sl));
+    check("SZ: deltaMode 1 (lines) scales x16",
+        hooks.wheelTabs(0, 2, 1) === true && sl === 272, String(sl));
+    check("SZ: deltaMode 2 (pages) scales by the visible width",
+        hooks.wheelTabs(0, 1, 2) === true && sl === 532, String(sl));
+    check("SZ: a horizontal (trackpad) delta wins over the vertical one",
+        hooks.wheelTabs(-50, 10, 0) === true && sl === 482, String(sl));
+    check("SZ: a zero delta is a no-op", hooks.wheelTabs(0, 0, 0) === false && sl === 482);
+    // no overflow -> the event passes through untouched
+    stub(strip, "scrollWidth", 200);
+    check("SZ: without overflow nothing scrolls and the event bubbles",
+        hooks.wheelTabs(0, 120, 0) === false && sl === 482 &&
+        wheelAt(strip, 0, 120, 0) === false);
+    // revealActiveTab: the active chip sits beyond the right edge -> scrolled into view
+    stub(strip, "scrollWidth", 900);
+    const activeChip = strip.querySelector(".hub-chat-tab-on");
+    check("SZ: exactly one active chip after the renders", !!activeChip);
+    stub(activeChip, "offsetLeft", 620);
+    stub(activeChip, "offsetWidth", 90);
+    sl = 0;
+    hooks.revealActiveTab();
+    check("SZ: revealActiveTab scrolls the active chip into view",
+        sl === 620 + 90 - 260 + 4, String(sl));
+    activeChip.offsetLeft = 0; // left edge: scroll back to the start
+    sl = 500;
+    hooks.revealActiveTab();
+    check("SZ: revealActiveTab scrolls BACK when the chip is left of the view",
+        sl === 0, String(sl));
+    // a re-render (switch the active tab) also reveals the new active chip.
+    // The freshly rendered chip element cannot carry per-element stubs (the
+    // innerHTML rebuild recreates it) - stub the geometry on the prototype
+    // for the duration of the switch instead. createTab ACTIVATES the new
+    // tab, so a non-active one (the first) is the honest switch target.
+    const firstId = hooks.tabs()[0].id;
+    stub(strip, "scrollWidth", 900);
+    sl = 0;
+    Object.defineProperty(dom.window.HTMLElement.prototype, "offsetLeft", { value: 700, configurable: true });
+    Object.defineProperty(dom.window.HTMLElement.prototype, "offsetWidth", { value: 90, configurable: true });
+    hooks.setActive(firstId);
+    // renderTabs already ran inside setActive: scrollLeft moved to the new chip
+    check("SZ: setActive re-render reveals the newly opened chip",
+        sl === 700 + 90 - 260 + 4, String(sl));
+    delete dom.window.HTMLElement.prototype.offsetLeft;
+    delete dom.window.HTMLElement.prototype.offsetWidth;
+    // cleanup: drop the layout stubs (the prototype getters come back)
+    for (const k of ["scrollWidth", "clientWidth", "offsetLeft", "offsetWidth", "scrollLeft"]) delete strip[k];
+    for (const k of ["offsetLeft", "offsetWidth"]) delete activeChip[k];
+}
+
+// ---------------------------------------------------------------------------
+
 console.log();
 console.log("smoke_chat: %d passed, %d failed", pass, fail);
 if (failures.length) {

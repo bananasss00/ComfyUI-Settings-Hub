@@ -274,7 +274,7 @@ const hooks = chat.__chatTestHooks();
 phase("PA build v95 + version manifest");
 {
     check("PA the entry reports v95", globalThis.__SettingsHubBuild === "v95");
-    check("PA chat self-reports v94", globalThis.__SettingsHubLoaded?.chat === "v94");
+    check("PA chat self-reports v98 (the v98 chat tab-strip wheel round)", globalThis.__SettingsHubLoaded?.chat === "v98");
     check("PA launcher self-reports v93 (unchanged this round)",
         globalThis.__SettingsHubLoaded?.launcher === "v93");
     check("PA core self-reports v93 (unchanged this round)",
@@ -283,10 +283,10 @@ phase("PA build v95 + version manifest");
     const entrySrc = fs.readFileSync(path.join(WEB, "settings_hub.js"), "utf8");
     check("PA hub_ui_renderer self-reports v94",
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
-    check("PA the EXPECTED manifest expects chat + renderer v94",
-        entrySrc.includes('"chat": "v94"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the v96 node-fragments round",
-        entrySrc.includes("web build: v96 - PASTE STACK NODE FRAGMENTS"));
+    check("PA the EXPECTED manifest expects chat v98 + renderer v94",
+        entrySrc.includes('"chat": "v98"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
+    check("PA the banner names the v98 chat tab-strip wheel round",
+        entrySrc.includes("web build: v98 - CHAT TAB-STRIP WHEEL SCROLL"));
 }
 
 // ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v97 - STACK UX ROUND (owner request 2026-11-12: 'when there are many tabs in the stack they overflow - they must scroll with the mouse wheel' + 'editing works only for text entries - let images and the other stack elements take tags, names etc., and let the text itself be edited in the Full text view'): the TAB STRIP scrolls horizontally with the mouse wheel (the vertical delta maps to scrollLeft, deltaMode lines/pages honored, a trackpad deltaX wins; the event is consumed only when the strip really overflows) and the OPENED tab is kept visible after every re-render; the INLINE EDITOR (name / tags / tab) now opens for EVERY kind - image, video, audio, file and node-fragment cards included (the edit branch used to sit after the type branches and was reachable for text cards only); the FULL TEXT VIEW gained a TEXT EDITOR: 'edit' swaps the read view for a textarea, 'save' writes through PATCH {text} (py v97: text entries only - inline texts rewrite in place, past-100KB texts promote to a .txt blob, file-backed texts rewrite their blob, size+hash follow; empty/oversized refused), Esc first cancels the edit, the second Esc closes the viewer. Stale-cache guard: EXPECTED manifest verifies every module.");
+console.info("[SettingsHub] web build: v98 - CHAT TAB-STRIP WHEEL SCROLL (owner request 2026-11-13: 'в llm чате такая же проблема - нету скролинга вкладок' - the same defect the Paste Stack had before v97): the CHAT tab strip scrolls horizontally with the MOUSE WHEEL (the vertical delta maps to scrollLeft, deltaMode 1 = lines x16 / 2 = pages xclientWidth, a trackpad deltaX wins when present; the event is consumed only when the strip really overflows, otherwise it bubbles untouched) and revealActiveTab() keeps the ACTIVE chip inside the visible strip after every re-render (open / switch / close-arm) - same mechanics as the stack (v97). Stale-cache guard: EXPECTED manifest verifies every module.");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v97 - STACK UX ROUND (owner request 2026-
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=97", import.meta.url).href;
+    link.href = new URL("styles.css?v=98", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -51,7 +51,7 @@ console.info("[SettingsHub] web build: v97 - STACK UX ROUND (owner request 2026-
 // ONE stale cached file silently removed every "Pin to Settings Hub" menu
 // item and the sync hooks. The detector keeps its diagnostic value but is
 // NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v97";
+globalThis.__SettingsHubBuild = "v98";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -102,7 +102,7 @@ const FILES = [
         "sync_manager": "v70",    // reactive sync hooks
         "launcher": "v93",        // v93 TASKBAR (drag from anywhere with a 5px click threshold)
         "stack": "v97",           // Paste Stack (+ v97: universal card editing, text editor in the Full text view, tab-strip wheel scroll)
-        "chat": "v94",            // LLM Chat (+ v94 one-shot stale stream-bubble fix)
+        "chat": "v98",            // LLM Chat (+ v98: tab-strip wheel scroll + reveal the active chip)
         "compare": "v83",         // Image Compare A/B panel (v83 display fix)
         "context_menu": "v93",    // "Pin to Settings Hub" menus (+ v93 hub window RMB Rename/Materialize)
         "core": "v93",            // (+ v93 hub DOM resolver registry for the window menu)

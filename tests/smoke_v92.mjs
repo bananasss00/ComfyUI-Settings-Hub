@@ -236,7 +236,7 @@ phase("PA build v92 + version manifest");
     // (this round touched ONLY styles.css; every module keeps its
     // self-report of the last functional change)
     check("PA the entry reports v95", globalThis.__SettingsHubBuild === "v95");
-    check("PA chat self-reports v94", globalThis.__SettingsHubLoaded?.chat === "v94");
+    check("PA chat self-reports v98 (the v98 chat tab-strip wheel round)", globalThis.__SettingsHubLoaded?.chat === "v98");
     check("PA launcher self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.launcher === "v93");
     check("PA core self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.core === "v93");
     const rsrc = fs.readFileSync(sb.renderer, "utf8");
@@ -244,7 +244,7 @@ phase("PA build v92 + version manifest");
     const ssrc = fs.readFileSync(sb.stack, "utf8");
     check("PA renderer self-reports v94", rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA context_menu self-reports v93 (unchanged)", msrc.includes('__SettingsHubLoaded["context_menu"] = "v93"'));
-    check("PA stack self-reports v96 (the v96 node-fragment round changed it)", ssrc.includes('__SettingsHubLoaded["stack"] = "v96"'));
+    check("PA stack self-reports v97 (the v97 stack-UX round changed it)", ssrc.includes('__SettingsHubLoaded["stack"] = "v97"'));
 }
 
 // ---------------------------------------------------------------------------

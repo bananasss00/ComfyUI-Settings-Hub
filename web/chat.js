@@ -146,10 +146,22 @@
 //       viewport-clamped like the hub one.
 // ============================================================================
 
+// v98 (owner request 2026-11-13: "в llm чате такая же проблема - нету
+//   скролинга вкладок" - the same defect the Paste Stack had before v97):
+// the CHAT tab strip scrolls horizontally with the MOUSE WHEEL - the strip
+// is overflow-x:auto with a hidden scrollbar, so the wheel is the scroller
+// (the vertical delta maps to scrollLeft, deltaMode 1 = lines x16 / 2 =
+// pages xclientWidth, a trackpad deltaX wins when present; the event is
+// consumed only when the strip really overflows, otherwise it bubbles
+// untouched) and revealActiveTab() keeps the ACTIVE chip inside the visible
+// strip after every re-render (open / switch / close-arm). Same mechanics
+// as the stack (v97).
+// ============================================================================
+
 // v87 self-report (single-source version, docs/plan-versions.md): the last
 // FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["chat"] = "v94";
+globalThis.__SettingsHubLoaded["chat"] = "v98";
 
 import { app } from "../../scripts/app.js";
 // v90: the shared UI font scale - the chat ⚙ hosts the same row as the hub
@@ -710,6 +722,45 @@ let tabEdit = null; // {mode:"create"|"rename", id?}
 let tabArm = null, tabArmTs = 0;
 const TAB_ARM_MS = 2600;
 
+// ---------------------------------------------------------------------------
+// v98: TAB-STRIP WHEEL SCROLL (owner: "в llm чате такая же проблема - нету
+// скролинга вкладок"). The same defect the Paste Stack had before v97: the
+// strip is overflow-x:auto with a HIDDEN scrollbar, so the mouse wheel is
+// the only scroller. The vertical delta maps to scrollLeft (deltaMode 1 =
+// lines -> x16px, 2 = pages -> xclientWidth; a real horizontal delta -
+// trackpads - wins when present). The event is consumed ONLY when the strip
+// actually overflows - otherwise it bubbles untouched. jsdom has no layout
+// engine - zero metrics simply mean "nothing to scroll". Mirrors wheelTabs /
+// revealActiveTab in web/stack.js (v97).
+// ---------------------------------------------------------------------------
+
+/** One wheel tick over the chat tab strip. Returns true when the strip
+ *  overflows and the delta was applied (the caller then swallows the event). */
+function wheelTabs(dx, dy, mode) {
+    if (!tabEl) return false;
+    const max = tabEl.scrollWidth - tabEl.clientWidth;
+    if (max <= 0) return false;
+    const d = Math.abs(dx) > Math.abs(dy) ? dx : dy;
+    if (!d) return false;
+    const k = mode === 1 ? 16 : (mode === 2 ? tabEl.clientWidth : 1);
+    tabEl.scrollLeft += d * k;
+    return true;
+}
+
+/** v98: keep the ACTIVE chat tab visible after every re-render (opening,
+ *  switching, arming its ✕) - with many tabs the active chip can sit beyond
+ *  the strip's right edge and the user would not see what they opened. */
+function revealActiveTab() {
+    try {
+        if (!tabEl || tabEl.scrollWidth <= tabEl.clientWidth) return;
+        const on = tabEl.querySelector(".hub-chat-tab-on");
+        if (!on) return;
+        const l = on.offsetLeft, r = l + on.offsetWidth;
+        if (l - 4 < tabEl.scrollLeft) tabEl.scrollLeft = Math.max(0, l - 4);
+        else if (r + 4 > tabEl.scrollLeft + tabEl.clientWidth) tabEl.scrollLeft = r - tabEl.clientWidth + 4;
+    } catch (_) {}
+}
+
 function renderTabs() {
     if (!tabEl) return;
     // v93: the MODE SWITCH lives on the left of the tabs row - 💬 chat / ⚡
@@ -739,6 +790,7 @@ function renderTabs() {
         `title="Close the tab (the dialog stays in 🕘)">✕</button>` +
         `</span>`).join("") +
         `<button type="button" class="hub-chat-tab-add" title="New chat">＋</button>`);
+    revealActiveTab(); // v98: many tabs - the opened chip must stay visible
 }
 
 // ---------------------------------------------------------------------------
@@ -2901,6 +2953,15 @@ function buildDom() {
 
     headEl = panel.querySelector(".hub-chat-head");
     tabEl = panel.querySelector(".hub-chat-tabs");
+    // v98: the mouse wheel scrolls the chat tab strip horizontally (the strip
+    // has a hidden scrollbar - the wheel is the only scroller); consumed only
+    // when the strip really overflows (same mechanics as the stack, v97)
+    tabEl.addEventListener("wheel", (e) => {
+        if (wheelTabs(e.deltaX, e.deltaY, e.deltaMode)) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+    }, { passive: false });
     msgsEl = panel.querySelector(".hub-chat-msgs");
     runBarEl = panel.querySelector(".hub-chat-runs-bar");
     runEl = panel.querySelector(".hub-chat-runs");
@@ -3427,6 +3488,9 @@ export function __chatTestHooks() {
         openSetPop, closeSetPop, openPromptPop, closePromptPop,
         openGpuPop, closeGpuPop, refreshGpuPop, gpuAction,
         tabs: () => tabs.map((t) => ({ id: t.id, title: t.title, n: t.msgs.length, pending: t.pending.length })),
+        // v98: tab-strip wheel scroll introspection for the smoke tests
+        wheelTabs,
+        revealActiveTab,
         tabById: (id) => tabs.find((t) => t.id === id) || null,
         activeId: () => activeId,
         setActive,

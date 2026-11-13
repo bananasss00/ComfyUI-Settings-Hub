@@ -273,7 +273,7 @@ phase("PA build v95 + version manifest");
     // v95: this round touched ONLY styles.css - the other modules keep
     // their self-reports (the manifest follows the truth)
     check("PA the entry reports v95", globalThis.__SettingsHubBuild === "v95");
-    check("PA chat self-reports v94", globalThis.__SettingsHubLoaded?.chat === "v94");
+    check("PA chat self-reports v98 (the v98 chat tab-strip wheel round)", globalThis.__SettingsHubLoaded?.chat === "v98");
     check("PA launcher self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.launcher === "v93");
     check("PA core self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.core === "v93");
     // the modules the boot does not import are checked in their sources
@@ -281,7 +281,7 @@ phase("PA build v95 + version manifest");
     const s93src = fs.readFileSync(sb.stack, "utf8");
     const m93src = fs.readFileSync(sb.menu, "utf8");
     const r93src = fs.readFileSync(sb.renderer, "utf8");
-    check("PA stack self-reports v96 (the v96 node-fragment round changed it)", s93src.includes('__SettingsHubLoaded["stack"] = "v96"'));
+    check("PA stack self-reports v97 (the v97 stack-UX round changed it)", s93src.includes('__SettingsHubLoaded["stack"] = "v97"'));
     check("PA context_menu self-reports v93 (unchanged)", m93src.includes('__SettingsHubLoaded["context_menu"] = "v93"'));
     check("PA hub_ui_renderer self-reports v94", r93src.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
 }
