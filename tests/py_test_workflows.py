@@ -245,7 +245,7 @@ check("health: ok", r.status == 200 and j.get("ok") is True)
 check("health: version matches the source constant",
       j.get("version") == wf_store.WORKFLOWS_SERVER_VERSION,
       "%s vs %s" % (j.get("version"), wf_store.WORKFLOWS_SERVER_VERSION))
-check("health: version is v104", j.get("version") == "v104", str(j.get("version")))
+check("health: version is v105", j.get("version") == "v105", str(j.get("version")))
 check("health: default dir", j.get("dir") == os.path.join(_USER_DIR, "settings_hub", "workflows"), j.get("dir"))
 check("health: no custom root yet", j.get("custom") is None)
 check("health: writable", j.get("writable") is True)

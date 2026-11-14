@@ -1,6 +1,6 @@
 # Settings Hub для ComfyUI
 
-[![build](https://img.shields.io/badge/web%20build-v104-3d5a80)](#как-это-работает)
+[![build](https://img.shields.io/badge/web%20build-v105-3d5a80)](#как-это-работает)
 [![tests](https://img.shields.io/badge/tests-1709%20passing-2b6b3f)](#разработка-и-тесты)
 [![python](https://img.shields.io/badge/python-stub-lightgrey)](#как-это-работает)
 [![frontend](https://img.shields.io/badge/ComfyUI-frontend%20extension-3d5a80)](#установка)
@@ -42,7 +42,7 @@
    - [Paste Stack 📋 (история буфера обмена)](#paste-stack)
    - [Image Compare ⇆ (A/B-сравнение)](#image-compare)
    - [LLM Chat (чат с моделями)](#llm-chat)
-   - [Workflows Manager 🗂 (v101-v104)](#workflows-manager)
+   - [Workflows Manager 🗂 (v101-v105)](#workflows-manager)
    - [Глобальные настройки ⚙](#глобальные-настройки)
 4. [Как это работает](#как-это-работает)
 5. [Разработка и тесты](#разработка-и-тесты)
@@ -720,7 +720,19 @@ Presets/Files (имя + путь + видимый бейдж temp, Esc очищ�
 другой машины — пресет появится при следующем чтении без экспорта/импорта,
 снапшоты temp по-прежнему встроены ВНУТРЬ файла пресета, а старый общий
 `presets.json` при первом обращении автоматически разделяется на отдельные
-файлы (оригинал сохраняется как `presets.json.bak`, никогда не удаляется)):
+файлы (оригинал сохраняется как `presets.json.bak`, никогда не удаляется);
+v105 — третий раунд фидбека: массовые закрытия переехали в одно меню
+**🧹 Close ▾** (ряд кнопок снова компактный: Close ▾ / 💾 Save all / ＋ Save
+preset) и в нём появилось **✕ Close all** — закрывает ВСЕ вкладки, остаются
+только закреплённые 📌 (несохранённые в партии требуют второго клика);
+пустая вкладка Presets после обновления страницы — лечится сама: неудачное
+чтение при старте повторяется на каждом тике опроса и при каждом открытии
+вкладки (вместо вводящего в заблуждение «No presets yet» — «Reading
+presets…»), строка статуса показывает живую версию серверного пакета
+(`srv vNNN`), а health-проба сверяет её с веб-сборкой: сервер СТАРШЕ →
+красная плашка «RESTART ComfyUI» (обновление только веб-половины не
+активирует новый py-код и продолжало писать общий presets.json), сервер
+МОЛОЖЕ → «hard refresh»):
 
 - **Пресеты рабочих наборов**: сохраните открытые вкладки как именованный
   пресет (★ избранное, `N wf`-бейдж, дата). Сохранённые вкладки кладутся как
@@ -735,10 +747,12 @@ Presets/Files (имя + путь + видимый бейдж temp, Esc очищ�
 - **＋ Add** — дооткрывает недостающие вкладки пресета, не трогая текущие;
   **↻ Update** — обновляет пресет текущими вкладками (Overwrite / Merge с
   дедупликацией по пути).
-- **Массовые действия**: 🧹 Close saved / Close other saved (несохранённые,
-  замки и активная вкладка выживают; пустые 0-node temp закрываются по
-  настройке), 💾 Save all modified, одиночное ✕ с двойным подтверждением
-  для несохранённых.
+- **Массовые действия** — меню **🧹 Close ▾**: Close saved / Close other
+  saved (несохранённые, замки и активная вкладка выживают; пустые 0-node
+  temp закрываются по настройке) и **✕ Close all** — все вкладки кроме
+  📌 (если в партии есть несохранённые — второй клик подтверждает);
+  💾 Save all modified, одиночное ✕ с двойным подтверждением для
+  несохранённых.
 - **Files & Recent**: кольцевой буфер 15 недавно закрытых (клик — открыть
   заново), плоский **мульти-словный поиск** по всем сохранённым файлам
   воркфлоу, чекбоксы + «▶ Open selected» и «💾 Save selected as preset»
@@ -810,11 +824,11 @@ node tests/smoke_menu.mjs   # регистрация меню, fail-open, бан
 python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файловый/patch/health/reorder-роуты стека + patch text v97 + per-workflow scope + вкладки + кастомный корень v84 + nodeMeta v99 (133)
 node tests/smoke_chat.mjs            # окно/вкладки/настройки/отправка/стриминг/стоп/вложения/вьюер/markdown/рефит/очистка/🕘/деградация/ctx-fill/поиск/промпт-каталог/скролл вкладок колесом v98 (172)
 python3 tests/py_test_chat.py        # payload-сборка, сессии, вложения, прокси /send (JSON+SSE) со стаб-апстримом, one-shot (209)
-node tests/smoke_workflows.mjs       # Workflows Manager: свёрнутый первый запуск + бейдж таскбара, защищённый массовый Close saved (модифицированные/temp/замки), форма сохранения (снапшоты temp, activePath, overwrite/merge), умный diff ▶ Switch + ↩ Undo, Files & Recent (буфер, мульти-словный поиск, выбор), ⚙ смена папки хранения v84, деградация, интеграция entry; v102: активация = подмена канваса через loadGraphData, снапшот никогда-не-активированной temp, открытый/закрытый/последний таб, закреплённый layout + ширина ⚙; v103: фаза WJ — recents скроллятся в капе 30%, Select/Deselect all в форме, поиск по вкладке Open (имя+путь+temp), паритет маркеров ресайза; v104: фаза WK — «один файл на пресет» в исходниках (заголовок модуля, подсказка ⚙, тост экспорта с серверным файлом) + py-контракт хранилища (presets/<id>.json, миграция .bak, folder-wins, all-or-nothing import) (195)
+node tests/smoke_workflows.mjs       # Workflows Manager: свёрнутый первый запуск + бейдж таскбара, защищённый массовый Close saved (модифицированные/temp/замки), форма сохранения (снапшоты temp, activePath, overwrite/merge), умный diff ▶ Switch + ↩ Undo, Files & Recent (буфер, мульти-словный поиск, выбор), ⚙ смена папки хранения v84, деградация, интеграция entry; v102: активация = подмена канваса через loadGraphData, снапшот никогда-не-активированной temp, открытый/закрытый/последний таб, закреплённый layout + ширина ⚙; v103: фаза WJ — recents скроллятся в капе 30%, Select/Deselect all в форме, поиск по вкладке Open (имя+путь+temp), паритет маркеров ресайза; v104: фаза WK — «один файл на пресет» в исходниках + py-контракт хранилища; v105: фаза WL — меню 🧹 Close (ряд компактнее, пункты с подписями), Close all с выжившими 📌 и вооружённым подтверждением несохранённых, автоповтор чтения пресетов (тик опроса + открытие вкладки, «Reading presets…»), srv-версия в статусе и плашка рассинхрона сервер/веб (RESTART / hard refresh) (217)
 python3 tests/py_test_workflows.py   # пресеты воркфлоу: health/root (v84-механика: абсолютный путь, probe до переключения, override в дефолтной user-папке, изоляция данных), CRUD (path+snapshot, дедуп, сортировка fav), overwrite/merge, PUT/DELETE, import (свежие id, overwrite-флаг, all-or-nothing), лимиты; v104: один файл на пресет (свой файл у create/import/DELETE-удаление файла, снапшот внутри), миграция legacy presets.json → presets/<id>.json + .bak (rerun-safe, свежие имена для кривых id), перенос копированием файла, игнор рассинхрона id, живучесть при битом файле (113)
 ```
 
-Итого 1809 проверок (v104: +14 в smoke_workflows — фаза WK «один файл на пресет» — и +25 в py_test_workflows — миграция legacy presets.json, перенос копированием файла, игнор рассинхрона id/name, битый файл не глушит список, файл-удаление DELETE, all-or-nothing import; v103: +21 в smoke_workflows — фаза WJ: recents в капе
+Итого 1831 проверка (v105: +22 в smoke_workflows — фаза WL: меню 🧹 Close вместо двух кнопок, Close all с 📌-выжившими и armed-подтверждением, автоповтор чтения пресетов на тике и на открытии вкладки + «Reading presets…», srv-версия в статусе Presets, плашки рассинхрона сервер-старше/новее веб-сборки; v104: +14 в smoke_workflows — фаза WK «один файл на пресет» — и +25 в py_test_workflows — миграция legacy presets.json, перенос копированием файла, игнор рассинхрона id/name, битый файл не глушит список, файл-удаление DELETE, all-or-nothing import; v103: +21 в smoke_workflows — фаза WJ: recents в капе
 со скроллом, Select/Deselect all в форме сохранения, поиск вкладки Open
 (имя+путь+temp, Esc), паритет маркеров ресайза стека/чата; v101: +120 в smoke_workflows — смоук нового модуля:
 монтаж/бейдж, массовые закрытия, форма пресета, план применения + undo,
@@ -848,12 +862,12 @@ py/settings_hub.py     заглушка ноды (без OUTPUT_NODE)
 py/media_list.py       эндпоинт /settings_hub/list_media
 py/stack_store.py      роуты /settings_hub/stack* (хранилище Paste Stack, /health - самодиагностика v76, ?wf= - per-workflow scope v77, GET/POST /root - кастомный абсолютный корень v84, type:"nodes" для фрагментов нод v96, PATCH text v97, nodeMeta - whitelist+лимиты v99)
 py/chat_proxy.py       роуты /settings_hub/chat* (v86: конфиг+ключ, сессии, блобы, прокси к LLM со стримингом и отменой)
-py/workflows_store.py  роуты /settings_hub/workflows* (v101: хранилище пресетов Workflows Manager — health, GET/POST /root по механике v84, CRUD пресетов с path/snapshot-элементами, overwrite/merge, import; v102/v103 — штамп версии; v104 — ОДИН ФАЙЛ НА ПРЕСЕТ: presets/<id>.json, автоперенос legacy presets.json → отдельные файлы + .bak, снимок=temp остаётся внутри пресета)
+py/workflows_store.py  роуты /settings_hub/workflows* (v101: хранилище пресетов Workflows Manager — health, GET/POST /root по механике v84, CRUD пресетов с path/snapshot-элементами, overwrite/merge, import; v102/v103 — штамп версии; v104 — ОДИН ФАЙЛ НА ПРЕСЕТ: presets/<id>.json, автоперенос legacy presets.json → отдельные файлы + .bak, снимок=temp остаётся внутри пресета; v105 — штамп версии)
 py/clipboard_helper.py роут /settings_hub/clipboard (чтение буфера ОС, loopback+заголовок)
 web/settings_hub.js    загрузчик: баннер, EXPECTED-манифест версий, fail-open регистрация
 web/stack.js           Paste Stack: панель, захват, drag, сниппеты, фрагменты нод с группами (v96), универсальное редактирование + текст в Full text view + скролл вкладок (v97), информативные карточки + nodeMeta + инспектор Overview/Nodes/Groups/Connections/JSON (v99), достоверные связи из любой формы канвас-буфера + ремонт v99-агрегатов (v100)
 web/chat.js            LLM Chat: окно, сессии, стриминг, one-shot, GPU-попап, скролл вкладок колесом (v98)
-web/workflows.js       Workflows Manager (v101): пресеты открытых вкладок (path+snapshot), умный diff ▶ Switch с планом и ↩ Undo, ＋ Add, ↻ Update (overwrite/merge), массовые закрытия с 📌-замками, 💾 Save all, Files & Recent, экспорт/импорт, ⚙ с папкой хранения v84, лестница-адаптер к extensionManager.workflow (v102: активация подменяет канвас через app.loadGraphData — как workflowService, снапшоты холодных temp из content-строк, закреплённый layout со статус-баром и поиском Files, ширина ⚙-попапа, фокус соседа при закрытии, связка /userdata-открытий с файлом; v103: recents-группа скроллится в капе 30%, Select/Deselect all в форме сохранения, поиск по вкладке Open — имя+путь+temp; v104: описания раскладки «один файл на пресет» + тост экспорта называет серверный файл пресета)
+web/workflows.js       Workflows Manager (v101): пресеты открытых вкладок (path+snapshot), умный diff ▶ Switch с планом и ↩ Undo, ＋ Add, ↻ Update (overwrite/merge), массовые закрытия с 📌-замками, 💾 Save all, Files & Recent, экспорт/импорт, ⚙ с папкой хранения v84, лестница-адаптер к extensionManager.workflow (v102: активация подменяет канвас через app.loadGraphData — как workflowService, снапшоты холодных temp из content-строк, закреплённый layout со статус-баром и поиском Files, ширина ⚙-попапа, фокус соседа при закрытии, связка /userdata-открытий с файлом; v103: recents-группа скроллится в капе 30%, Select/Deselect all в форме сохранения, поиск по вкладке Open — имя+путь+temp; v104: описания раскладки «один файл на пресет» + тост экспорта называет серверный файл пресета; v105: меню 🧹 Close + Close all (📌 остаются, armed-подтверждение), автоповтор чтения пресетов + «Reading presets…», srv-версия в статусе и плашка рассинхрона сервер/веб)
 web/compare.js         Image Compare: A/B wipe/fade/blink/diff
 web/core.js            конфиг, классификация виджетов, резолверы, слайдер-override
 web/hub_ui_renderer.js весь UI хаба: вкладки, строки, попапы, layout

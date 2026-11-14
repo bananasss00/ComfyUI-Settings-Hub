@@ -1,6 +1,29 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER (v104)
+// SettingsHub - WORKFLOWS MANAGER (v105)
 // ----------------------------------------------------------------------------
+// v105 (owner feedback round 3):
+//   1. "Close all" - the 🧹 Close menu (the Open tab) closes EVERY open tab
+//      while the pinned 📌 stay; unsaved tabs inside the batch need the armed
+//      second click (the panel owns the confirm UX, never a silent loss);
+//   2. presets were EMPTY on a fresh page load / a new browser tab until a
+//      new preset was saved: the boot-time presets fetch is one-shot - a
+//      transient failure (the server still busy serving the page) was never
+//      retried and nothing re-rendered. The list now has presetsLoaded + an
+//      auto-retry (poll tick + every Presets-tab open), the tab shows
+//      "Reading presets…" instead of the misleading "No presets yet";
+//   3. the Open-tab button row grew a 5th button - Close saved, Close other
+//      saved and the new Close all moved into ONE 🧹 Close ▾ dropdown (the
+//      row stays [Close ▾] [Save all] [+ Save preset]); the items keep the
+//      full-word labels + tooltips, so nothing got less discoverable;
+//   4. "saved a preset and still only presets.json" = the PY half of the
+//      pack only activates on a ComfyUI RESTART - a page refresh updates the
+//      web half (v104 in the banner) while the server keeps the old
+//      single-file store. The health probe now compares the server version
+//      against this web build and the panel shows a red note naming the
+//      exact problem ("RESTART ComfyUI ..." / "hard refresh ..."), plus the
+//      presets status line shows the live "srv vNNN" so the restart is
+//      verifiable at a glance.
+//
 // v104 (owner decision on the storage layout):
 //   ONE FILE PER PRESET on the server - presets/<id>.json inside the storage
 //   root instead of the single presets.json array (tabs are many, temp
@@ -93,8 +116,12 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // self-report (single-source version, docs/plan-versions.md): the stamp
 // of the LAST functional change of this file - the entry's EXPECTED manifest
 // verifies it.
+// v105: this build's OWN stamp (the mismatch check against /health). The
+// release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
+// so "server older than this build" == "the py half is stale = restart".
+const WF_WEB_VERSION = "v105";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v104";
+globalThis.__SettingsHubLoaded["workflows"] = "v105";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -119,6 +146,10 @@ function esc(s) {
     return String(s ?? "")
         .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function verNum(s) {
+    return parseInt(String(s || "").replace(/\D+/g, ""), 10) || 0;
 }
 
 function localToast(msg, ms = 2600) {
@@ -652,7 +683,14 @@ function graphJsonOfOpenTab(t) {
 
 let serverState = null;   // the /health answer (null = not probed yet)
 let serverNote = null;    // {why} - a red note line under the tabs
+let presetsLoaded = false; // v105: the presets GET has succeeded at least once
 let probeSeq = 0;
+let loadSig = "";         // v105: the retry render guard (no re-render churn)
+
+function calcLoadSig() {
+    return JSON.stringify([!!serverState, serverState?.version || "",
+        serverNote?.why || "", presets.length, presetsLoaded]);
+}
 
 async function jfetch(url, opts = {}) {
     try {
@@ -678,18 +716,52 @@ async function probeServer() {
     } else {
         serverState = res.json;
         serverNote = null;
+        // v105: the pack releases py + web together, so a server version
+        // OLDER than this web build means the py half is still the previous
+        // process (a page refresh only swaps the web half). Name the exact
+        // problem instead of the mysterious "presets.json did not split":
+        // the owner's v105 report - v104 web + v103 py kept saving the
+        // legacy single-file store.
+        const srv = String(serverState.version || "");
+        if (srv && verNum(srv) !== verNum(WF_WEB_VERSION)) {
+            serverNote = {
+                why: verNum(srv) < verNum(WF_WEB_VERSION)
+                    ? ("Server storage pack is " + srv + ", this web build is " + WF_WEB_VERSION +
+                       " - RESTART ComfyUI to finish the update (the old server keeps the previous storage layout).")
+                    : ("This web build (" + WF_WEB_VERSION + ") is older than the server pack (" + srv +
+                       ") - the browser cached a stale file, hard refresh (Ctrl+F5)."),
+            };
+        }
     }
-    renderAll();
+    loadSig = calcLoadSig();
+    // v105: no renderAll here - the callers decide (the poll retry only
+    // re-renders when the signature actually changed, so a red offline note
+    // cannot steal the focus from a search input every 900 ms)
 }
 
 async function refreshPresets() {
     const res = await jfetch("/settings_hub/workflows/presets");
     if (res.json?.ok) {
         presets = Array.isArray(res.json.presets) ? res.json.presets : [];
+        presetsLoaded = true;
+        loadSig = calcLoadSig();
         return true;
     }
     if (res.status === 404) serverNote = { why: "The server has no /settings_hub/workflows routes (old py/) - update the FULL pack and RESTART ComfyUI." };
+    loadSig = calcLoadSig();
     return false;
+}
+
+/** v105: one boot/retry pass - probe + presets read. The poll tick and the
+ *  Presets-tab open call this while `!serverState || !presetsLoaded`, so a
+ *  transient boot failure (the server busy serving the page, a hidden tab
+ *  that mounted late) heals itself and the cards appear WITHOUT a save. */
+async function loadServerState() {
+    await probeServer();
+    // a version-mismatch note does NOT block the read: an older-but-alive
+    // server still serves its preset list (the note just says "restart")
+    if (serverState) await refreshPresets();
+    return !!(serverState && presetsLoaded);
 }
 
 async function savePreset(payload) {
@@ -796,6 +868,7 @@ let sessionUndo = null;    // 1-level {paths, activePath}
 let saveForm = null;       // the in-panel save dialog state
 let armedClose = null;     // {key, t} - the armed single-✕ confirm
 let armedDelete = null;    // {pid, t} - the armed preset 🗑 confirm
+let armedCloseAll = null;  // v105: {t} - the armed Close-all confirm (unsaved in the batch)
 let openRowsShown = ROW_LIST_CAP;
 let fileRowsShown = ROW_LIST_CAP;
 let fileSel = new Set();            // the Files-tab selection (normalized paths)
@@ -805,7 +878,9 @@ let filesSearch = "";
 let openSearch = "";       // v103: the multi-word filter of the Open tab
 let pollT = null;
 let pollSeq = 0;
+let pollN = 0;
 let lastOpenSig = "";
+let lastLoadSig = "";      // v105: the retry render guard's last seen value
 
 function openHasPath(p) {
     const norm = normWfPath(p);
@@ -1005,6 +1080,44 @@ async function closeEmptyTempTabs() {
     }
     if (closed) { await refreshOpen(true); renderAll(); }
     return closed;
+}
+
+// v105: Close ALL open tabs - the pinned 📌 stay. Unsaved work inside the
+// batch (modified saved tabs, non-empty temp tabs, and empty temps when the
+// ⚙ preference keeps them) needs the armed second click - the same panel-
+// owns-the-confirm contract as the single ✕ and the preset 🗑. Returns
+// "closed" | "armed" | "empty" so the 🧹 menu keeps itself open while armed.
+async function closeAllTabs() {
+    const victims = openTabs.filter((t) => !lockedKeys.has(t.key));
+    if (!victims.length) {
+        localToast("Only pinned (📌) tabs are open - nothing to close");
+        return "empty";
+    }
+    const risky = victims.filter((t) => t.isModified || (t.isTemporary && !t.isEmpty) ||
+        (t.isTemporary && t.isEmpty && !getPref().closeEmptyTemp));
+    if (risky.length && !armedCloseAll) {
+        clearTimeout(armedCloseAll?.t);
+        armedCloseAll = { t: setTimeout(() => { armedCloseAll = null; renderCloseMenu(); }, ARM_MS) };
+        renderCloseMenu();
+        localToast("⚠ " + risky.length + " unsaved tab(s) in the batch - click Close all AGAIN to confirm", 3600);
+        return "armed";
+    }
+    clearTimeout(armedCloseAll?.t);
+    armedCloseAll = null;
+    if (queueRunning && getPref().warnOnQueue) {
+        localToast("⚠ A generation is running - the tabs still closed (the pinned 📌 stayed).");
+    }
+    let closed = 0;
+    for (const t of victims) {
+        const r = await closeWorkflowTab(t, { forceClean: true });
+        if (r.ok) closed++;
+        await sleep(TAB_SEQ);
+        await nextFrame();
+    }
+    await refreshOpen(true);
+    renderAll();
+    localToast("Closed " + closed + " tab(s)" + (lockedKeys.size ? " (the pinned 📌 stayed)" : ""));
+    return "closed";
 }
 
 async function closeOneTab(t) {
@@ -1321,6 +1434,15 @@ function setUiTab(tab) {
     saveUi({ tab });
     if (tab === "files" || tab === "presets") void refreshSavedFiles();
     renderAll();
+    // v105: the presets list is loaded ONCE per session - a transient boot
+    // failure used to leave the tab empty until a save happened. Opening the
+    // Presets tab retries the read while it has never succeeded.
+    if (tab === "presets" && !presetsLoaded) {
+        void (async () => {
+            await loadServerState();
+            if (presetsLoaded) renderAll();
+        })();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,9 +1534,11 @@ function openTabHtml() {
         // search; Esc clears (tokens match the tab name and its file path)
         `<input type="text" class="hub-wf-search" data-wf="opensearch" placeholder="filter: flux inpaint…" value="${esc(openSearch)}" spellcheck="false">` +
         `</div>` +
+        // v105: ONE 🧹 Close dropdown instead of two fat buttons + the new
+        // Close all - the row stays compact (Close ▾ / Save all / Save preset)
+        // while the menu items keep the full-word labels + tooltips
         `<div class="hub-wf-acts">` +
-        `<button type="button" class="hub-wf-act" data-act="closesaved" title="Close every saved + unmodified tab (locks 📌 and the active tab stay)">🧹 Close saved</button>` +
-        `<button type="button" class="hub-wf-act" data-act="closeothers" title="Same, but the active tab stays even when it is clean">🧹 Close other saved</button>` +
+        `<button type="button" class="hub-wf-act" data-act="closemenu" title="Mass close - pick what stays: saved clean tabs (📌 stay), other saved (the active stays too), or EVERYTHING except 📌">🧹 Close ▾</button>` +
         `<button type="button" class="hub-wf-act${unsaved ? "" : " hub-wf-dim"}" data-act="saveall" title="Save every modified tab that has a disk file">💾 Save all${unsaved ? " *" : ""}</button>` +
         `<button type="button" class="hub-wf-act" data-act="savepreset" title="Save the open tabs as a preset">＋ Save preset</button>` +
         `</div>` +
@@ -1512,8 +1636,16 @@ function presetsTabHtml() {
         // v102: the cards scroll INSIDE .hub-wf-scroll - the search toolbar
         // and the save form stay pinned on top, the status bar at the bottom
         `<div class="hub-wf-scroll"><div class="hub-wf-list">${list.map(presetCardHtml).join("") ||
-            `<div class="hub-wf-emptylist">${presets.length ? "Nothing matches the filter" : "No presets yet - arrange the open tabs and press ＋ Save current"}</div>`}</div></div>` +
-        `<div class="hub-wf-status">${presets.length} preset(s)${serverState ? "" : " · server storage offline"}</div>`;
+            `<div class="hub-wf-emptylist">${presets.length ? "Nothing matches the filter"
+                // v105: never claim "No presets yet" while the list simply has
+                // not been read (the boot fetch is retried every tick)
+                : !presetsLoaded ? (serverState ? "Reading presets…" : "Server storage offline - presets cannot be read")
+                : "No presets yet - arrange the open tabs and press ＋ Save current"}</div>`}</div></div>` +
+        // v105: the status names the LIVE server pack version - the "I refreshed
+        // the page and got v104 web but the py half is still the old process"
+        // case becomes visible at a glance (srv v103 vs the banner v104)
+        `<div class="hub-wf-status">${presets.length} preset(s)${!presetsLoaded && serverState ? " · reading…" : ""}` +
+        `${serverState ? " · srv " + esc(serverState.version || "?") + (serverNote ? " ⚠" : "") : " · server storage offline"}</div>`;
 }
 
 function filesTabHtml() {
@@ -1598,6 +1730,10 @@ async function onBodyClick(e) {
         }
         case "closesaved": return void closeSavedTabs(false);
         case "closeothers": return void closeSavedTabs(true);
+        case "closeall": return void closeAllTabs();
+        // v105: the 🧹 Close dropdown (Close saved / Close other saved /
+        // Close all) - one anchored menu instead of a 5-button row
+        case "closemenu": openCloseMenuPop(btn); return;
         case "saveall": return void saveAllModified();
         case "savepreset": openSaveForm("new"); return;
         // the in-panel save form buttons
@@ -2176,6 +2312,89 @@ function openImportPop() {
 }
 
 // ---------------------------------------------------------------------------
+// v105: the 🧹 CLOSE MENU - one anchored dropdown on the Open tab instead of
+// a 5-button row. Close saved / Close other saved keep their exact v101
+// semantics; Close all closes everything except the pinned 📌 (the armed
+// second click when unsaved tabs are in the batch). Outside-mousedown + Esc
+// close, clamped into the viewport - the wfPop pattern.
+// ---------------------------------------------------------------------------
+
+let wfCloseMenu = null;
+
+function closeWfCloseMenu() {
+    clearTimeout(armedCloseAll?.t);
+    armedCloseAll = null;
+    try { wfCloseMenu?.remove(); } catch (_) {}
+    wfCloseMenu = null;
+    try { window.removeEventListener("mousedown", onCloseMenuDown, true); } catch (_) {}
+    try { window.removeEventListener("keydown", onCloseMenuKey, true); } catch (_) {}
+}
+function onCloseMenuDown(e) {
+    if (!wfCloseMenu || wfCloseMenu.contains(e.target)
+        || panel?.querySelector('[data-act="closemenu"]')?.contains?.(e.target)) return;
+    closeWfCloseMenu();
+}
+function onCloseMenuKey(e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeWfCloseMenu(); }
+}
+
+function closeMenuItemsHtml() {
+    const victims = openTabs.filter((t) => !lockedKeys.has(t.key));
+    const risky = victims.filter((t) => t.isModified || (t.isTemporary && !t.isEmpty) ||
+        (t.isTemporary && t.isEmpty && !getPref().closeEmptyTemp));
+    const armed = !!armedCloseAll && risky.length > 0;
+    return `<div class="hub-menu-title">🧹 Mass close</div>` +
+        `<button type="button" class="hub-wf-cmi" data-act="closesaved" ` +
+        `title="Close every saved + unmodified tab (locks 📌 and the active tab stay)">🧹 Close saved<span class="hub-wf-cmi-sub">clean saved tabs · 📌 + active stay</span></button>` +
+        `<button type="button" class="hub-wf-cmi" data-act="closeothers" ` +
+        `title="Same, but the active tab stays even when it is clean">🧹 Close other saved<span class="hub-wf-cmi-sub">the active tab stays too</span></button>` +
+        `<button type="button" class="hub-wf-cmi${armed ? " hub-wf-armed" : ""}" data-act="closeall" ` +
+        `title="${armed ? "Click AGAIN to confirm - " + risky.length + " unsaved tab(s) will be closed" : "Close EVERY open tab; only the pinned 📌 stay" + (risky.length ? " (" + risky.length + " unsaved - confirms on the second click)" : "")}">` +
+        (armed ? "⚠ Close all - click AGAIN" : "✕ Close all (📌 stay)") +
+        `<span class="hub-wf-cmi-sub">${armed ? risky.length + " unsaved tab(s) in the batch" : "everything except the pinned"}</span></button>`;
+}
+function renderCloseMenu() {
+    if (!wfCloseMenu) return;
+    wfCloseMenu.innerHTML = closeMenuItemsHtml();
+}
+function openCloseMenuPop(anchorBtn) {
+    if (wfCloseMenu) { closeWfCloseMenu(); return; }
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-wf-closemenu";
+    pop.innerHTML = closeMenuItemsHtml();
+    document.body.appendChild(pop);
+    wfCloseMenu = pop;
+    // under the anchor button, clamped into the viewport (flip above when tight)
+    try {
+        const r = anchorBtn.getBoundingClientRect();
+        const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+        const w = pop.offsetWidth || 240, h = pop.offsetHeight || 130;
+        const x = Math.min(Math.max(8, r.left), Math.max(8, vw - w - 8));
+        let y = r.bottom + 6;
+        if (y + h > vh - 8) y = Math.max(8, r.top - h - 6);
+        pop.style.left = x + "px";
+        pop.style.top = y + "px";
+    } catch (_) {}
+    window.addEventListener("mousedown", onCloseMenuDown, true);
+    window.addEventListener("keydown", onCloseMenuKey, true);
+    pop.addEventListener("click", async (e) => {
+        const b = e.target?.closest?.("[data-act]");
+        if (!b) return;
+        const act = b.dataset.act;
+        if (act === "closeall") {
+            // armed confirm lives INSIDE closeAllTabs - the menu stays open
+            // while armed (its item re-renders with the ⚠ label)
+            const r = await closeAllTabs();
+            if (r !== "armed") closeWfCloseMenu();
+            return;
+        }
+        closeWfCloseMenu();
+        if (act === "closesaved") return void closeSavedTabs(false);
+        if (act === "closeothers") return void closeSavedTabs(true);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // ⚙ WORKFLOWS SETTINGS POPUP - the panel manages itself (the stack.js
 // openStkSettingsPop pattern): ONE body-level .hub-menu, outside-mousedown +
 // Esc close, clamped into the viewport. Includes the v84-mechanics STORAGE
@@ -2350,6 +2569,28 @@ async function refreshSavedFiles() {
 
 async function pollTick() {
     if (!mounted || !panel || (typeof document !== "undefined" && document.hidden)) return;
+    // v105: the server state + the preset list self-heal. The boot-time read
+    // is one-shot - a transient failure (the server busy serving the page,
+    // a hidden tab that mounted late) used to leave the Presets tab empty
+    // until a save happened. Retry while the first successful read has not
+    // landed; re-render ONLY when something actually changed (the red note
+    // must not steal the focus from a search input every 900 ms).
+    pollN++;
+    if (!serverState || !presetsLoaded) {
+        await loadServerState();
+        if (loadSig !== lastLoadSig) {
+            lastLoadSig = loadSig;
+            renderAll();
+        }
+    } else if (pollN % 10 === 0) {
+        // every ~9s: keep the srv version + the mismatch note live - the
+        // owner restarts ComfyUI, and the note must clear WITHOUT a remount
+        await probeServer();
+        if (loadSig !== lastLoadSig) {
+            lastLoadSig = loadSig;
+            renderAll();
+        }
+    }
     await refreshOpen(false);
     const sig = openSignature();
     if (sig !== lastOpenSig) {
@@ -2396,11 +2637,12 @@ export function initWorkflows() {
     mounted = true;
     watchQueue();
     void (async () => {
-        await probeServer();
+        await loadServerState();
         if (seq !== initSeq) return;
-        await refreshPresets();
+        // v105: a refreshOpen throw must not skip the one render that shows
+        // the freshly-read presets (a stale body used to outlive the read)
+        try { await refreshOpen(true); } catch (_) {}
         if (seq !== initSeq) return;
-        await refreshOpen(true);
         renderAll();
     })();
     clearTimeout(pollT);
@@ -2419,6 +2661,7 @@ function teardown() {
     closePlanPop();
     closeImportPop();
     closeNamePop();
+    closeWfCloseMenu(); // v105: the 🧹 dropdown + its armed timer
     try { window.removeEventListener("resize", onWinResize); } catch (_) {}
     try { panel?.remove(); } catch (_) {}
     try { chip?.remove(); } catch (_) {}
@@ -2429,6 +2672,7 @@ function teardown() {
     armedClose = null;
     armedDelete = null;
     sessionUndo = null;
+    presetsLoaded = false; // v105: the next mount re-reads from scratch
 }
 
 // ---------------------------------------------------------------------------
@@ -2454,6 +2698,17 @@ export function __workflowsTestHooks() {
         renderAll: () => renderAll(),
         serverState: () => serverState,
         serverNote: () => serverNote,
+        presetsLoaded: () => presetsLoaded,
+        loadServerState: () => loadServerState(),
+        // v105 test determinism: the module preset list survives remounts by
+        // design (the last known state) - the retry tests need a clean slate
+        clearPresets: () => { presets = []; presetsLoaded = false; loadSig = calcLoadSig(); },
+        pollTick: () => pollTick(),
+        probeServer: () => probeServer(),
+        closeAllTabs: () => closeAllTabs(),
+        closeMenuItemsHtml,
+        openCloseMenuPop: (btn) => openCloseMenuPop(btn),
+        closeWfCloseMenu,
         saveForm: () => saveForm ? { ...saveForm, rows: saveForm.rows.map((r) => ({ ...r, tab: undefined })) } : null,
         openSaveForm,
         commitFormSave,

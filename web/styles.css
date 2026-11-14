@@ -6416,6 +6416,36 @@ body.sh-modal-open .hub-sh-note {
 .hub-wf-namepop { width: 300px; }
 .hub-wf-namepop-in { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
 
+/* v105: the 🧹 Close dropdown (Close saved / Close other saved / Close all
+   pinned-stay) - the wfPop chrome, the rows carry a muted sub-caption */
+.hub-wf-closemenu { width: 250px; padding: 6px; }
+.hub-wf-cmi {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    color: #e0e0e0;
+    font: calc(var(--sh-fs, 1) * 11px) "Inter", -apple-system, sans-serif;
+    padding: 6px 8px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+.hub-wf-cmi:hover { background: #3a3a4e; color: #fff; }
+.hub-wf-cmi-sub {
+    display: block;
+    color: #8a8aae;
+    font-size: calc(var(--sh-fs, 1) * 9px);
+    margin-top: 1px;
+}
+.hub-wf-cmi.hub-wf-armed {
+    background: #3a1e1e;
+    color: #ffb4a8;
+    outline: 1px solid #a33b2e;
+}
+.hub-wf-cmi.hub-wf-armed .hub-wf-cmi-sub { color: #d98a7e; }
+
 /* the action toast (Switched · ↩ Undo) */
 .hub-wf-toast { display: flex; align-items: center; gap: 8px; }
 .hub-wf-toast-act {

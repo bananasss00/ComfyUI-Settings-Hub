@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER smoke test (v102)
+// SettingsHub - WORKFLOWS MANAGER smoke test (v105)
 // ----------------------------------------------------------------------------
 // Node ESM + jsdom. Loads the REAL web/workflows.js module exactly like the
 // entry does (a sandbox copies web/ and stubs ../../scripts/app.js with an
@@ -49,6 +49,14 @@
 //       presets/<id>.json (module header + the storage-folder hint), the
 //       per-preset export toast names the server file, and the py store
 //       carries the migration (presets.json -> per-preset files -> .bak).
+//   WL  v105: the 🧹 Close menu (one dropdown, the row stays compact) + the
+//       new Close all (pinned 📌 stay, unsaved tabs arm the confirm), the
+//       presets AUTO-RETRY (a failed boot read heals on the poll tick AND on
+//       every Presets-tab open - "Reading presets…" instead of the misleading
+//       "No presets yet"), the presets status line names the live "srv vNNN",
+//       and the health probe compares the server pack against this web build:
+//       an older server = "RESTART ComfyUI" (the py half of an update only
+//       activates on restart), a newer one = "hard refresh".
 //
 // Run from the extension root:  node tests/smoke_workflows.mjs  (jsdom)
 // ============================================================================
@@ -128,6 +136,8 @@ function makeFakeApi() {
     const calls = [];
     let presets = [];
     let healthMode = "ok";           // "ok" | "missing" | "http"
+    let healthVersion = null;        // v105: override -> the mismatch-note test
+    let presetsFail = false;         // v105: GET /presets 500 -> the retry test
     let rootCustom = null;
     let savedFiles = [
         { path: "workflows/flux_main.json", name: "flux_main.json" },
@@ -152,7 +162,7 @@ function makeFakeApi() {
             const [p] = String(u).split("?");
             if (p === "/settings_hub/workflows/health" && method === "GET") {
                 return jsonResp({
-                    ok: true, version: PACK_VERSION,
+                    ok: true, version: healthVersion || PACK_VERSION,
                     dir: rootCustom || "user/settings_hub/workflows",
                     custom: rootCustom, default: "user/settings_hub/workflows",
                     writable: true, presets: presets.length,
@@ -177,6 +187,7 @@ function makeFakeApi() {
                     custom: rootCustom, default: "user/settings_hub/workflows", writable: true });
             }
             if (p === "/settings_hub/workflows/presets" && method === "GET") {
+                if (presetsFail) return jsonResp({ ok: false, error: "boom" }, 500);
                 const sorted = [...presets].sort((a, b) => (0 + (b.fav ? 1 : 0)) - (0 + (a.fav ? 1 : 0)) ||
                     (b.updated - a.updated));
                 return jsonResp({ ok: true, presets: sorted });
@@ -266,6 +277,8 @@ function makeFakeApi() {
         __presets: () => presets,
         __setPresets: (v) => { presets = v; },
         __setHealth: (m) => { healthMode = m; },
+        __setHealthVersion: (v) => { healthVersion = v; },
+        __setPresetsFail: (v) => { presetsFail = !!v; },
         __setFiles: (v) => { savedFiles = v; },
     };
     return api;
@@ -477,11 +490,23 @@ await settle();
 check("lock: the row wears the locked class",
     !!body.querySelector('.hub-wf-row[data-key="workflows/locked.json"].hub-wf-row-locked'));
 
-// Close saved: a.json + b.json? no - b is modified. Empty temp goes (pref on),
-// the LOCKED clean tab stays, the non-empty temp stays.
+// Close saved (through the v105 🧹 Close menu): a.json + b.json? no - b is
+// modified. Empty temp goes (pref on), the LOCKED clean tab stays, the
+// non-empty temp stays.
 const closeCallsBefore = wfStore.calls.filter((c) => c.op === "close").length;
-await body.querySelector('[data-act="closesaved"]').click();
+await body.querySelector('[data-act="closemenu"]').click();
+await settle();
+let cmenu = document.querySelector(".hub-wf-closemenu");
+check("the 🧹 Close menu opened with the three close items",
+    !!cmenu && !!cmenu.querySelector('[data-act="closesaved"]') &&
+    !!cmenu.querySelector('[data-act="closeothers"]') &&
+    !!cmenu.querySelector('[data-act="closeall"]'),
+    String(!!cmenu));
+check("the Open row is compact: no separate close buttons outside the menu",
+    !body.querySelector('[data-act="closesaved"]') && !body.querySelector('[data-act="closeothers"]'));
+await cmenu.querySelector('[data-act="closesaved"]').click();
 await settle(20);
+check("the menu closed after the item click", !document.querySelector(".hub-wf-closemenu"));
 const closedPaths = wfStore.calls.slice(closeCallsBefore).filter((c) => c.op === "close").map((c) => c.path);
 check("Close saved closed ONLY the clean unlocked saved tab",
     closedPaths.includes("workflows/a.json") && !closedPaths.includes("workflows/b.json") &&
@@ -500,7 +525,9 @@ await hooks.refreshOpen(true);
 hooks.renderAll();
 await settle();
 const before2 = wfStore.calls.length; // ALL ops (v102 logs neighbor-focus opens too)
-await body.querySelector('[data-act="closeothers"]').click();
+await body.querySelector('[data-act="closemenu"]').click();
+await settle();
+document.querySelector(".hub-wf-closemenu").querySelector('[data-act="closeothers"]').click();
 await settle(20);
 check("Close other saved keeps the ACTIVE clean tab", wfStore.openWorkflows.includes(tC));
 check("Close other saved closed nothing else here (b is modified)", wfStore.calls.length - before2 === 0,
@@ -845,16 +872,19 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v104", /"workflows":\s*"v104"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v105", /"workflows":\s*"v105"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v104", ENTRY_SRC.includes("web build: v104 - WORKFLOWS STORAGE: ONE FILE PER PRESET"));
-check("styles.css?v=104", ENTRY_SRC.includes("styles.css?v=104"));
-check("the module self-reports v104",
+check("the entry banner names v105", ENTRY_SRC.includes("web build: v105 - CLOSE MENU + PRESETS AUTO-RETRY"));
+check("styles.css?v=105", ENTRY_SRC.includes("styles.css?v=105"));
+check("the module self-reports v105",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v104"'));
-check("py stamp bumps together (v104)",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v105"'));
+check("the web stamp literal is v105",
+    fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
+        .includes('const WF_WEB_VERSION = "v105"'));
+check("py stamp bumps together (v105)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v104"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v105"'));
 check("the workflows module uses the --sh-fs scale (v90 rule)",
     (fs.readFileSync(path.join(WEB, "styles.css"), "utf8").match(/hub-wf-panel[\s\S]{0,400}?--sh-fs/) !== null));
 check("the modal guard hides the workflows panel",
@@ -1281,6 +1311,156 @@ await settle();
     check("WK py: the import stays all-or-nothing (sanitize ALL before the first write)",
         pySrc.includes("Phase 1 - sanitize EVERY raw preset first") &&
         pySrc.indexOf("# Phase 1") < pySrc.indexOf("async with _lock:\n        _migrate_legacy_file()\n        # Phase 2"));
+}
+
+// ===========================================================================
+// --- 11) WL v105: the Close menu + Close all, the presets auto-retry, the
+//     server-version mismatch notice
+{
+    const pnl = () => hooks.panelEl();
+    const bodyEl = () => pnl().querySelector(".hub-wf-body");
+
+    // ------------------------------------------------------------------
+    // 11a) Close ALL - the pinned 📌 stay, unsaved tabs arm the confirm
+    // ------------------------------------------------------------------
+    phase("WL v105: Close all (pinned stay, armed confirm), presets auto-retry, srv-version notice");
+
+    wfStore.openWorkflows = [
+        makeTab({ path: "workflows/a.json" }),                    // clean saved
+        makeTab({ path: "workflows/b.json", isModified: true }),  // modified
+        makeTab({ name: "Sketch", isTemporary: true, isPersisted: false, nodes: [1, 2] }), // temp
+        makeTab({ path: "workflows/pinned.json" }),               // clean saved (locked below)
+    ];
+    wfStore.activeWorkflow = wfStore.openWorkflows[0];
+    await hooks.refreshOpen(true);
+    hooks.renderAll();
+    await settle();
+    const wbody = bodyEl();
+    // a key WB never touched (lockedKeys survives scenes - a re-lock would
+    // TOGGLE the pin off)
+    await wbody.querySelector('[data-act="lock"][data-key="workflows/pinned.json"]').click();
+    await settle();
+
+    await wbody.querySelector('[data-act="closemenu"]').click();
+    await settle();
+    let cmenu = document.querySelector(".hub-wf-closemenu");
+    check("WL: the 🧹 menu opens on the Open tab", !!cmenu);
+    const closeCalls0 = wfStore.calls.filter((c) => c.op === "close").length;
+    await cmenu.querySelector('[data-act="closeall"]').click();
+    await settle(10);
+    check("WL: Close all first click ARMS (2 unsaved in the batch) - nothing closed yet",
+        wfStore.calls.filter((c) => c.op === "close").length === closeCalls0 &&
+        wfStore.openWorkflows.length === 4);
+    check("WL: the armed item re-renders with the ⚠ label",
+        !!cmenu.querySelector('[data-act="closeall"].hub-wf-armed') &&
+        cmenu.querySelector('[data-act="closeall"]').textContent.includes("AGAIN"));
+    cmenu = document.querySelector(".hub-wf-closemenu");
+    await cmenu.querySelector('[data-act="closeall"]').click();
+    await settle(40);           // the close loop (TAB_SEQ per tab) + the menu close
+    check("WL: Close all second click closes the batch (a + b + the temp)",
+        !wfStore.openWorkflows.some((t) => t.path === "workflows/a.json") &&
+        !wfStore.openWorkflows.some((t) => t.path === "workflows/b.json") &&
+        !wfStore.openWorkflows.some((t) => t.name === "Sketch"));
+    check("WL: the PINNED tab survived Close all",
+        wfStore.openWorkflows.some((t) => t.path === "workflows/pinned.json"));
+    check("WL: the menu closed after the confirmed close", !document.querySelector(".hub-wf-closemenu"));
+    check("WL: the workspace keeps a tab (never zero)",
+        wfStore.openWorkflows.length >= 1, String(wfStore.openWorkflows.length));
+
+    // a pinned-only workspace: Close all is a no-op with a toast
+    wfStore.openWorkflows = [makeTab({ path: "workflows/pinned.json" })];
+    await hooks.refreshOpen(true);
+    hooks.renderAll();
+    await settle();
+    const r0 = await hooks.closeAllTabs();
+    check("WL: Close all with ONLY pinned tabs answers 'empty' (nothing closed)",
+        r0 === "empty" && wfStore.openWorkflows.length === 1);
+
+    // ------------------------------------------------------------------
+    // 11b) the presets auto-retry (the owner's issue 2: empty Presets tab
+    //      after a refresh until a save happened)
+    // ------------------------------------------------------------------
+    fakeApi.__setPresets([{
+        id: "pk1", name: "Night batch", created: 1, updated: 2, fav: false,
+        items: [{ kind: "path", path: "workflows/a.json", name: "a.json" }],
+    }]);
+    fakeApi.__setPresetsFail(true);
+    hooks.clearPresets();       // the module list survives remounts - clean slate
+    hooks.setTab("open");       // a known tab so the later setTab(presets) fires
+    await settle();
+    hooks.setOn(false);
+    await settle();
+    hooks.setOn(true);          // fresh mount: the boot read fails (500)
+    await settle(30);
+    check("WL: a failed boot read leaves presetsLoaded false",
+        hooks.presetsLoaded() === false && hooks.presets().length === 0);
+    hooks.setTab("presets");
+    await settle();
+    let pbody = bodyEl().textContent;
+    check("WL: the empty tab does NOT claim 'No presets yet' while unread",
+        pbody.includes("Reading presets…") || pbody.includes("Server storage offline"),
+        pbody.slice(0, 120));
+    fakeApi.__setPresetsFail(false);
+    await hooks.pollTick();     // the retry pass heals the list
+    await settle();
+    check("WL: the poll retry loads the presets without any save",
+        hooks.presetsLoaded() === true && hooks.presets().length === 1);
+    pbody = bodyEl().textContent;
+    check("WL: the card renders after the retry", pbody.includes("Night batch"));
+    check("WL: the status line names the live server version (srv vNNN)",
+        bodyEl().querySelector(".hub-wf-status").textContent.includes("srv "));
+
+    // the tab-open retry: a fresh mount + a working server heals on OPEN
+    hooks.setTab("open");
+    await settle();
+    hooks.setOn(false);
+    await settle();
+    fakeApi.__setPresetsFail(true);
+    hooks.clearPresets();
+    hooks.setOn(true);
+    await settle(30);           // boot read fails again
+    fakeApi.__setPresetsFail(false);
+    hooks.setTab("presets");    // opening the tab itself retries
+    await settle(30);
+    check("WL: opening the Presets tab retries a failed boot read",
+        hooks.presetsLoaded() === true && hooks.presets().length === 1);
+    hooks.setTab("open");
+    await settle();
+
+    // ------------------------------------------------------------------
+    // 11c) the server-version mismatch notice (the owner's issue 4:
+    //      v104 web after a page refresh + a v103 py process kept the old
+    //      single-file store - the panel now names the problem)
+    // ------------------------------------------------------------------
+    fakeApi.__setHealthVersion("v104"); // one behind the pack (v105)
+    await hooks.probeServer();          // presetsLoaded=true -> the poll probes periodically
+    hooks.renderAll();
+    await settle();
+    const note2 = pnl().querySelector(".hub-wf-note");
+    check("WL: an older server pack names 'RESTART ComfyUI' in the red note",
+        !!note2 && note2.style.display !== "none" &&
+        note2.textContent.includes("RESTART ComfyUI") &&
+        note2.textContent.includes("Server storage pack is v104"),
+        note2?.textContent || "(no note)");
+    hooks.setTab("presets");
+    await settle();
+    const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
+    check("WL: the presets status shows the stale srv version + ⚠",
+        stTxt2.includes("srv v104") && stTxt2.includes("⚠"), stTxt2);
+    fakeApi.__setHealthVersion("v106"); // ahead of the pack - a stale web file
+    await hooks.probeServer();
+    hooks.renderAll();
+    await settle();
+    check("WL: a newer server pack asks for a hard refresh",
+        (hooks.serverNote()?.why || "").includes("hard refresh"), hooks.serverNote()?.why);
+    fakeApi.__setHealthVersion(null); // back to the pack version - the note clears
+    await hooks.probeServer();
+    hooks.renderAll();
+    await settle();
+    check("WL: the matching server version clears the note",
+        !hooks.serverNote(), JSON.stringify(hooks.serverNote()));
+    hooks.setTab("open");
+    await settle();
 }
 
 // ===========================================================================
