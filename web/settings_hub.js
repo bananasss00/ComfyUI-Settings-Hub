@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v101 - WORKFLOWS MANAGER (owner plan: 'Workflows / Workspace Manager - реализуй план полностью'): a 4th floating utility over ALL the open ComfyUI workflows - not bound to a SettingsHub node. Saves the open tabs as PRESETS (path items + optional SNAPSHOTS of temporary tabs), applies them with a SMART DIFF (\u25b6 Switch with an apply-plan preview: what closes / stays / opens, keep-unsaved guard, 1-level \u21a9 Undo; \uff0b Append opens only the missing tabs - a target tab that is already open is NEVER closed or reloaded), bulk \ud83e\uddf9 Close saved / Close other saved with \ud83d\udccc tab locks, \ud83d\udcbe Save all modified, a \ud83d\udd5c recently-closed buffer, a flat multi-word search over all saved workflow files, JSON export/import, a queue-running warning, and a \u2699 popup with the v84-mechanics STORAGE FOLDER switch (py/workflows_store.py: presets.json under user/settings_hub/workflows by default, re-pointable to any absolute path, probed writable BEFORE the switch, the override lives in the DEFAULT user dir, changing the root NEVER moves presets). The tab access is an ADAPTER LADDER over app.extensionManager.workflow (store -> commands -> the native /userdata endpoint) - a missing rung degrades the panel, ComfyUI never breaks. First run starts MINIMIZED into the taskbar. Stale-cache guard: EXPECTED manifest verifies every module.");
+console.info("[SettingsHub] web build: v102 - WORKFLOWS MANAGER FIXES (owner feedback on v101, six fixes): the tab activation now swaps the CANVAS via app.loadGraphData - the v101 store-open rung only flipped the tab-strip state, so clicking a workflow / ▶ Switch / ＋ Add changed the tab but kept the previous graph on the canvas; snapshots of temp tabs that were never activated (no changeTracker) are read from the store's in-memory content strings - 'Save new' with checked temp rows works again; the ⚙ popup got the width cap of the stack/chat settings pops (v101 stretched it across the screen); the lists scroll in their own container so the status bar stays pinned at the bottom and the Files-tab search stays pinned on top; closing the ACTIVE tab focuses a neighbor first and an emptied workspace re-opens a blank tab (frontend service parity); /userdata opens bind to the saved file instead of forking an orphan unsaved copy. v101: presets of open tabs (path items + snapshots of temp tabs), smart-diff ▶ Switch with a plan preview + ↩ Undo, ＋ Add, ↻ Update (overwrite/merge), protected bulk close with 📌 locks, 💾 Save all, 🕘 recent buffer, multi-word file search, export/import, the v84-mechanics storage folder. First run starts MINIMIZED into the taskbar. Stale-cache guard: EXPECTED manifest verifies every module.");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v101 - WORKFLOWS MANAGER (owner plan: 'Wo
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=101", import.meta.url).href;
+    link.href = new URL("styles.css?v=102", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -51,7 +51,7 @@ console.info("[SettingsHub] web build: v101 - WORKFLOWS MANAGER (owner plan: 'Wo
 // ONE stale cached file silently removed every "Pin to Settings Hub" menu
 // item and the sync hooks. The detector keeps its diagnostic value but is
 // NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v101";
+globalThis.__SettingsHubBuild = "v102";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -104,7 +104,7 @@ const FILES = [
         "launcher": "v101",       // v101: the 4th taskbar item (workflows) + text+dot badges
         "stack": "v100",          // Paste Stack (+ v100: reliable connections for ALL real clipboard shapes + search focus + group counts)
         "chat": "v98",            // LLM Chat (+ v98: tab-strip wheel scroll + reveal the active chip)
-        "workflows": "v101",      // Workflows Manager (+ v101: presets, smart-diff apply, bulk close, storage folder)
+        "workflows": "v102",     // Workflows Manager (+ v102: canvas-swap activation, temp-tab snapshots, pinned layout, setpop width)
         "compare": "v83",         // Image Compare A/B panel (v83 display fix)
         "context_menu": "v93",    // "Pin to Settings Hub" menus (+ v93 hub window RMB Rename/Materialize)
         "core": "v93",            // (+ v93 hub DOM resolver registry for the window menu)

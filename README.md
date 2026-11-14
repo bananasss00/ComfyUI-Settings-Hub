@@ -1,6 +1,6 @@
 # Settings Hub для ComfyUI
 
-[![build](https://img.shields.io/badge/web%20build-v101-3d5a80)](#как-это-работает)
+[![build](https://img.shields.io/badge/web%20build-v102-3d5a80)](#как-это-работает)
 [![tests](https://img.shields.io/badge/tests-1709%20passing-2b6b3f)](#разработка-и-тесты)
 [![python](https://img.shields.io/badge/python-stub-lightgrey)](#как-это-работает)
 [![frontend](https://img.shields.io/badge/ComfyUI-frontend%20extension-3d5a80)](#установка)
@@ -42,7 +42,7 @@
    - [Paste Stack 📋 (история буфера обмена)](#paste-stack)
    - [Image Compare ⇆ (A/B-сравнение)](#image-compare)
    - [LLM Chat (чат с моделями)](#llm-chat)
-   - [Workflows Manager 🗂 (v101)](#workflows-manager)
+   - [Workflows Manager 🗂 (v101, v102)](#workflows-manager)
    - [Глобальные настройки ⚙](#глобальные-настройки)
 4. [Как это работает](#как-это-работает)
 5. [Разработка и тесты](#разработка-и-тесты)
@@ -702,7 +702,11 @@ Diff прямо в подсказке говорит, что B масштаби�
 
 Самостоятельная утилита над **всеми открытыми воркфлоу** (v101, плавающее
 окно с вкладками `Open / Presets / Files`, четвёртая кнопка минипанели — не
-привязана к ноде на канве):
+привязана к ноде на канве; v102 — шесть исправлений по фидбеку: активация
+вкладки подменяет канвас через `app.loadGraphData` (v101 меняла только
+подсветку таба), снапшоты temp-вкладок, которые ни разу не были активными,
+⚙-попап с шириной как у стека/чата, закреплённые статус-бар и поиск Files,
+фокус соседа при закрытии активной вкладки):
 
 - **Пресеты рабочих наборов**: сохраните открытые вкладки как именованный
   пресет (★ избранное, `N wf`-бейдж, дата). Сохранённые вкладки кладутся как
@@ -791,13 +795,16 @@ node tests/smoke_menu.mjs   # регистрация меню, fail-open, бан
 python3 tests/py_test_clipboard.py   # OS-хелпер буфера + файловый/patch/health/reorder-роуты стека + patch text v97 + per-workflow scope + вкладки + кастомный корень v84 + nodeMeta v99 (133)
 node tests/smoke_chat.mjs            # окно/вкладки/настройки/отправка/стриминг/стоп/вложения/вьюер/markdown/рефит/очистка/🕘/деградация/ctx-fill/поиск/промпт-каталог/скролл вкладок колесом v98 (172)
 python3 tests/py_test_chat.py        # payload-сборка, сессии, вложения, прокси /send (JSON+SSE) со стаб-апстримом, one-shot (209)
-node tests/smoke_workflows.mjs       # Workflows Manager v101: свёрнутый первый запуск + бейдж таскбара, защищённый массовый Close saved (модифицированные/temp/замки), форма сохранения (снапшоты temp, activePath, overwrite/merge), умный diff ▶ Switch + ↩ Undo, Files & Recent (буфер, мульти-словный поиск, выбор), ⚙ смена папки хранения v84, деградация, интеграция entry (120)
+node tests/smoke_workflows.mjs       # Workflows Manager: свёрнутый первый запуск + бейдж таскбара, защищённый массовый Close saved (модифицированные/temp/замки), форма сохранения (снапшоты temp, activePath, overwrite/merge), умный diff ▶ Switch + ↩ Undo, Files & Recent (буфер, мульти-словный поиск, выбор), ⚙ смена папки хранения v84, деградация, интеграция entry; v102: активация = подмена канваса через loadGraphData, снапшот никогда-не-активированной temp, открытый/закрытый/последний таб, закреплённый layout + ширина ⚙ (160)
 python3 tests/py_test_workflows.py   # пресеты воркфлоу: health/root (v84-механика: абсолютный путь, probe до переключения, override в дефолтной user-папке, изоляция данных), CRUD (path+snapshot, дедуп, сортировка fav), overwrite/merge, PUT/DELETE, import (свежие id, overwrite-флаг), лимиты (88)
 ```
 
-Итого 1709 проверок (v101: +120 в smoke_workflows — смоук нового модуля:
+Итого 1749 проверок (v101: +120 в smoke_workflows — смоук нового модуля:
 монтаж/бейдж, массовые закрытия, форма пресета, план применения + undo,
-Files & Recent, ⚙ с папкой v84, деградация, интеграция entry; +88 в
+Files & Recent, ⚙ с папкой v84, деградация, интеграция entry; v102: +40 в
+smoke_workflows — фаза WI: активация через loadGraphData, связка /userdata,
+снапшот холодной temp, закрытие активного таба с фокусом соседа, пустой
+workspace, закреплённый layout; +88 в
 py_test_workflows — хранилище пресетов целиком; v100: +36 в smoke_stack — связи v100 VN: TS-объекты,
 легаси 5-кортежи по ПОРЯДКУ, неизвестные/смешанные формы, внешние точки,
 «(external)», фокус поиска, одноимённые группы, repair v99-агрегатов;
@@ -824,12 +831,12 @@ py/settings_hub.py     заглушка ноды (без OUTPUT_NODE)
 py/media_list.py       эндпоинт /settings_hub/list_media
 py/stack_store.py      роуты /settings_hub/stack* (хранилище Paste Stack, /health - самодиагностика v76, ?wf= - per-workflow scope v77, GET/POST /root - кастомный абсолютный корень v84, type:"nodes" для фрагментов нод v96, PATCH text v97, nodeMeta - whitelist+лимиты v99)
 py/chat_proxy.py       роуты /settings_hub/chat* (v86: конфиг+ключ, сессии, блобы, прокси к LLM со стримингом и отменой)
-py/workflows_store.py  роуты /settings_hub/workflows* (v101: хранилище пресетов Workflows Manager — health, GET/POST /root по механике v84, CRUD пресетов с path/snapshot-элементами, overwrite/merge, import)
+py/workflows_store.py  роуты /settings_hub/workflows* (v101: хранилище пресетов Workflows Manager — health, GET/POST /root по механике v84, CRUD пресетов с path/snapshot-элементами, overwrite/merge, import; v102 — только штамп версии)
 py/clipboard_helper.py роут /settings_hub/clipboard (чтение буфера ОС, loopback+заголовок)
 web/settings_hub.js    загрузчик: баннер, EXPECTED-манифест версий, fail-open регистрация
 web/stack.js           Paste Stack: панель, захват, drag, сниппеты, фрагменты нод с группами (v96), универсальное редактирование + текст в Full text view + скролл вкладок (v97), информативные карточки + nodeMeta + инспектор Overview/Nodes/Groups/Connections/JSON (v99), достоверные связи из любой формы канвас-буфера + ремонт v99-агрегатов (v100)
 web/chat.js            LLM Chat: окно, сессии, стриминг, one-shot, GPU-попап, скролл вкладок колесом (v98)
-web/workflows.js       Workflows Manager (v101): пресеты открытых вкладок (path+snapshot), умный diff ▶ Switch с планом и ↩ Undo, ＋ Add, ↻ Update (overwrite/merge), массовые закрытия с 📌-замками, 💾 Save all, Files & Recent, экспорт/импорт, ⚙ с папкой хранения v84, лестница-адаптер к extensionManager.workflow
+web/workflows.js       Workflows Manager (v101): пресеты открытых вкладок (path+snapshot), умный diff ▶ Switch с планом и ↩ Undo, ＋ Add, ↻ Update (overwrite/merge), массовые закрытия с 📌-замками, 💾 Save all, Files & Recent, экспорт/импорт, ⚙ с папкой хранения v84, лестница-адаптер к extensionManager.workflow (v102: активация подменяет канвас через app.loadGraphData — как workflowService, снапшоты холодных temp из content-строк, закреплённый layout со статус-баром и поиском Files, ширина ⚙-попапа, фокус соседа при закрытии, связка /userdata-открытий с файлом)
 web/compare.js         Image Compare: A/B wipe/fade/blink/diff
 web/core.js            конфиг, классификация виджетов, резолверы, слайдер-override
 web/hub_ui_renderer.js весь UI хаба: вкладки, строки, попапы, layout
@@ -844,7 +851,7 @@ web/global_settings.js глобальные настройки (localStorage)
 web/dnd_manager.js     drag&drop строк
 web/pins.js            счётчик пинов для бейджа
 web/styles.css         тёмная тема (*.hub-*)
-tools/                 version.py (релизный бамп + --check аудит версий, включая WORKFLOWS_SERVER_VERSION v101), compare.py (сверка установленной копии с zip)
+tools/                 version.py (релизный бамп + --check аудит версий, включая WORKFLOWS_SERVER_VERSION), compare.py (сверка установленной копии с zip)
 tests/                 смоуки (jsdom)
 docs/screenshots/      скриншоты для этого README
 ```

@@ -1,6 +1,28 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER (v101)
+// SettingsHub - WORKFLOWS MANAGER (v102)
 // ----------------------------------------------------------------------------
+// v102 (owner feedback on v101 - six fixes):
+//   1. the ⚙ settings popup no longer stretches across the whole screen (the
+//      width cap of the stack/chat settings pops);
+//   2. the status bar is PINNED at the bottom - the lists scroll in their own
+//      .hub-wf-scroll container instead of dragging the status under them;
+//   3.+5. THE BIG ONE: activating a workflow now swaps the CANVAS. The
+//      frontend's own tab click is workflowService.openWorkflow ->
+//      app.loadGraphData(..., workflow) -> afterLoadNewGraph ->
+//      store.openWorkflow; calling the store's openWorkflow DIRECTLY (v101
+//      rung 1) only flipped the tab-strip state - the canvas kept the old
+//      graph. Every activation / open-by-path / snapshot-open now goes
+//      through app.loadGraphData with the workflow object (or the bind path);
+//   4. "Save new" with temp tabs checked works: a temp tab that was never
+//      activated has no changeTracker/activeState - its graph is read from
+//      the store's in-memory content/originalContent strings;
+//   6. the Files-tab search toolbar is pinned above the scroll container and
+//      stays visible while the file list scrolls;
+//   + parity fixes: closing the ACTIVE tab focuses a neighbor first and an
+//   empty workspace re-opens a blank tab (the frontend service semantics),
+//   and /userdata opens bind to the saved file instead of forking an orphan
+//   unsaved copy.
+//
 // v101 (owner plan: "Workflows / Workspace Manager"): a standalone utility
 // over ALL the open ComfyUI workflows - NOT bound to a SettingsHub node on
 // the canvas. The floating panel:
@@ -27,7 +49,7 @@
 // {ok:false, ...} with a readable toast - the panel degrades, ComfyUI never
 // breaks.
 //
-// Storage: py/workflows_store.py (v101) - <user>/settings_hub/workflows/
+// Storage: py/workflows_store.py - <user>/settings_hub/workflows/
 // presets.json by default, re-pointable. The panel probes
 // /settings_hub/workflows/health first and names the exact problem when the
 // routes are missing (an old py/ = update the FULL pack).
@@ -37,11 +59,11 @@ import { app } from "../../scripts/app.js";
 import { launcherHostsMinimized, launcherSetCollapsed, registerLauncherPanel } from "./launcher.js";
 import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel } from "./global_settings.js";
 
-// v101 self-report (single-source version, docs/plan-versions.md): the stamp
+// v102 self-report (single-source version, docs/plan-versions.md): the stamp
 // of the LAST functional change of this file - the entry's EXPECTED manifest
 // verifies it.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v101";
+globalThis.__SettingsHubLoaded["workflows"] = "v102";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -246,6 +268,81 @@ function nodeCountOf(wf) {
     return null;
 }
 
+/** The graph JSON a store workflow object carries. The truth ladder:
+ *  changeTracker.activeState (a LOADED tab keeps its state after the focus
+ *  moved away - workflowService.beforeLoadNewGraph stores it) -> the store's
+ *  in-memory content strings (a temp / never-activated tab has no tracker,
+ *  v102: this is what makes snapshots of untouched temp tabs work). */
+function storeWorkflowStateOf(wf) {
+    try {
+        const st = wf?.activeState;
+        if (st && typeof st === "object") return st;
+    } catch (_) {}
+    for (const k of ["content", "originalContent"]) {
+        try {
+            const s = wf?.[k];
+            if (typeof s === "string" && s) {
+                const j = JSON.parse(s);
+                if (j && typeof j === "object") return j;
+            }
+        } catch (_) {}
+    }
+    return null;
+}
+
+function storeWorkflowHasContent(wf) {
+    for (const k of ["content", "originalContent"]) {
+        try {
+            const s = wf?.[k];
+            if (typeof s === "string" && s) return true;
+        } catch (_) {}
+    }
+    return false;
+}
+
+function storeWorkflowIsActive(wf) {
+    const store = wfStoreOf();
+    try { if (typeof store?.isActive === "function") return !!store.isActive(wf); } catch (_) {}
+    try { return !!store && store.activeWorkflow === wf; } catch (_) {}
+    return false;
+}
+
+/** THE ACTIVATION RUNG (v102). The frontend's own tab click is
+ *  workflowService.openWorkflow -> app.loadGraphData(activeState, true, true,
+ *  workflow) -> afterLoadNewGraph -> store.openWorkflow - the CANVAS swap is
+ *  the loadGraphData call. Calling the store's openWorkflow DIRECTLY (the
+ *  v101 activate rung) only flips the tab-strip state, so the manager showed
+ *  the tab switched while the graph stayed the previous one. */
+async function openStoreWorkflow(target) {
+    if (!target) return { ok: false, error: "no tab" };
+    if (storeWorkflowIsActive(target)) return { ok: true, via: "store", alreadyActive: true };
+    // mirror workflowService.openWorkflow: load only a tab without in-memory
+    // content (a persisted file opened in the background); the dialog flags
+    // follow the service exactly
+    const loadFromRemote = !target.isLoaded && !storeWorkflowHasContent(target);
+    if (loadFromRemote && typeof target.load === "function") {
+        try { await target.load(); } catch (_) { /* the state rungs may still hold the graph */ }
+    }
+    const state = storeWorkflowStateOf(target);
+    if (state && typeof app?.loadGraphData === "function") {
+        try {
+            await app.loadGraphData(state, true, true, target, {
+                showMissingModelsDialog: loadFromRemote,
+                showMissingNodesDialog: loadFromRemote,
+                checkForRerouteMigration: false,
+            });
+            return { ok: true, via: "loadGraphData" };
+        } catch (_) { /* fall through to the state-only rung */ }
+    }
+    // very old / unusual builds without a callable loadGraphData - the
+    // state-only open at least keeps the tab strip consistent
+    const store = wfStoreOf();
+    if (store && typeof store.openWorkflow === "function") {
+        try { await store.openWorkflow(target); return { ok: true, via: "store" }; } catch (_) {}
+    }
+    return { ok: false, unsupported: true };
+}
+
 /** The normalized open-tab wrappers (ref, key, path, flags) - the panel NEVER
  *  touches the raw store objects outside this adapter. */
 function getOpenWorkflows() {
@@ -324,10 +421,10 @@ async function getSavedWorkflows() {
 
 async function activateWorkflow(w) {
     if (!w) return { ok: false, error: "no tab" };
-    const store = wfStoreOf();
-    // rung 1: the store's own open (focuses an already-open tab)
-    if (store && typeof store.openWorkflow === "function" && w.ref) {
-        try { await store.openWorkflow(w.ref); return { ok: true, via: "store" }; } catch (_) {}
+    // rung 1: the CANVAS-swap activation (the native tab-click path, v102)
+    if (w.ref) {
+        const r = await openStoreWorkflow(w.ref);
+        if (r.ok) return r;
     }
     // rung 2: the frontend tab strip - click the tab with this name
     try {
@@ -341,30 +438,48 @@ async function activateWorkflow(w) {
 /** Open a workflow FILE by its relative path (already-open tabs activate
  *  instead - a re-open must never reload a live tab). */
 async function openWorkflowByPath(path) {
-    const norm = normWfPath(path);
-    if (!norm) return { ok: false, error: "empty path" };
-    const already = getOpenWorkflows().find((t) => t.path && normWfPath(t.path) === norm);
+    const n2 = normWfPath(path);
+    if (!n2) return { ok: false, error: "empty path" };
+    // the store keys carry the workflows/ prefix, the presets may keep either
+    // shape - compare against both
+    const withPrefix = n2.startsWith("workflows/") ? n2 : ("workflows/" + n2);
+    const already = getOpenWorkflows().find((t) => t.path &&
+        (normWfPath(t.path) === n2 || normWfPath(t.path) === withPrefix));
     if (already) {
         const r = await activateWorkflow(already);
         return { ...r, alreadyOpen: true };
     }
     const store = wfStoreOf();
     let target = null;
-    try {
-        if (typeof store?.getWorkflowByPath === "function") target = await store.getWorkflowByPath(path);
-    } catch (_) { target = null; }
+    if (store && typeof store.getWorkflowByPath === "function") {
+        for (const p of [n2, withPrefix]) {
+            try {
+                // some builds expose getWorkflowByPath as async - a bare call
+                // would assign a PROMISE (truthy!) and poison the rung
+                const t = store.getWorkflowByPath(p);
+                target = (t && typeof t.then === "function") ? await t : t;
+            } catch (_) { target = null; }
+            if (target) break;
+        }
+    }
     if (!target) {
-        try { target = (Array.isArray(store?.workflows) ? store.workflows : []).find((w) => w?.path === path) || null; } catch (_) {}
+        try {
+            const list = Array.isArray(store?.workflows) ? store.workflows : [];
+            target = list.find((w) => w?.path && (normWfPath(w.path) === n2 || normWfPath(w.path) === withPrefix)) || null;
+        } catch (_) {}
     }
-    if (target && store && typeof store.openWorkflow === "function") {
-        try { await store.openWorkflow(target); return { ok: true, via: "store" }; } catch (_) {}
+    if (target) {
+        const r = await openStoreWorkflow(target);
+        if (r.ok) return r;
     }
-    // rung 3: the native endpoint -> loadGraphData (the file content wins)
+    // rung 3: the native endpoint -> loadGraphData. The 4th arg BINDS the
+    // loaded graph to the saved file (afterLoadNewGraph opens that tab) -
+    // v102: without it the open forked an orphan UNSAVED copy of the file.
     try {
-        const r = await app.api.fetchApi("/userdata/" + encodeURIComponent(norm));
+        const r = await app.api.fetchApi("/userdata/" + encodeURIComponent(withPrefix));
         if (!r || !r.ok) return { ok: false, missing: !!(r && r.status === 404) };
         const data = await r.json();
-        await app.loadGraphData(data, true, true);
+        await app.loadGraphData(data, true, true, n2.replace(/^workflows\//, ""));
         return { ok: true, via: "loadGraphData" };
     } catch (e) {
         return { ok: false, error: String((e && e.message) || e) };
@@ -375,15 +490,16 @@ async function openWorkflowByPath(path) {
 async function openSnapshotWorkflow(name, graphJson) {
     if (!graphJson || typeof graphJson !== "object") return { ok: false, error: "no graph" };
     const store = wfStoreOf();
-    // rung 1: the store's own temporary-tab factory
+    // rung 1: the store's own temporary-tab factory + the CANVAS-swap open
+    // (v102: the bare store.openWorkflow left the new tab with the previous
+    // graph on the canvas - "Add opened empty tabs")
     if (store && typeof store.createTemporary === "function") {
         try {
             const wf = await store.createTemporary(name || "Snapshot", graphJson);
             if (wf) {
-                if (typeof store.openWorkflow === "function") {
-                    try { await store.openWorkflow(wf); } catch (_) {}
-                }
-                return { ok: true, via: "store" };
+                const r = await openStoreWorkflow(wf);
+                if (r.ok) return r;
+                return r; // the temp tab exists; a canvas swap was refused
             }
         } catch (_) {}
     }
@@ -399,6 +515,36 @@ async function openSnapshotWorkflow(name, graphJson) {
     }
 }
 
+/** The workflowService parity for closes: when the ACTIVE tab is being
+ *  closed, the frontend loads a NEIGHBOR tab first (closeWorkflow ->
+ *  loadNextOpenedWorkflow). Without it the tab strip loses its active entry
+ *  and the canvas goes stale behind the panel's back. */
+async function activateNeighborBeforeClose(w, store) {
+    try {
+        let active = false;
+        try {
+            active = typeof store.isActive === "function"
+                ? !!store.isActive(w.ref)
+                : (store.activeWorkflow === w.ref);
+        } catch (_) {}
+        if (!active) return;
+        const others = getOpenWorkflows().filter((t) => t.key !== w.key);
+        if (!others.length) return;
+        // the tab that shifts into the closed slot = the native "next"
+        const next = others[Math.min(w.idx ?? 0, others.length - 1)];
+        await activateWorkflow(next);
+    } catch (_) {}
+}
+
+/** The workspace must never end with zero tabs (the native service loads a
+ *  blank/default workflow when the last one closes). */
+async function ensureSomeTab() {
+    try {
+        if (getOpenWorkflows().length) return;
+        await app.extensionManager?.command?.execute?.("Comfy.NewBlankWorkflow");
+    } catch (_) {}
+}
+
 /** Close ONE tab. forceClean (default) skips the frontend's own unsaved
  *  warning - the PANEL owns the confirmation UX (armed ✕ / the apply plan). */
 async function closeWorkflowTab(w, opts = {}) {
@@ -407,8 +553,10 @@ async function closeWorkflowTab(w, opts = {}) {
     const store = wfStoreOf();
     if (store && typeof store.closeWorkflow === "function" && w.ref) {
         try {
+            await activateNeighborBeforeClose(w, store);
             await store.closeWorkflow(w.ref, { warnIfUnsaved: !forceClean });
             recordRecent(w);
+            await ensureSomeTab();
             return { ok: true, via: "store" };
         } catch (_) {}
     }
@@ -445,11 +593,15 @@ async function saveWorkflowTab(w) {
 /** The serialized graph JSON of an open tab (the SNAPSHOT payload). */
 function graphJsonOfOpenTab(t) {
     const wf = t?.ref;
-    try {
-        if (wf?.activeState && typeof wf.activeState === "object") {
-            return JSON.parse(JSON.stringify(wf.activeState));
-        }
-    } catch (_) {}
+    // v102 ladder: changeTracker.activeState (a LOADED tab - also the
+    // non-active ones keep their stored state) -> the store's in-memory
+    // content strings (a temp tab that was never activated has NO tracker -
+    // this rung is what makes "check a temp row -> Save new" work) ->
+    // graph.serialize -> app.graph (the ACTIVE tab only).
+    const st = storeWorkflowStateOf(wf);
+    if (st) {
+        try { return JSON.parse(JSON.stringify(st)); } catch (_) {}
+    }
     try {
         const g = wf?.graph;
         if (g && typeof g.serialize === "function") return JSON.parse(JSON.stringify(g.serialize()));
@@ -1220,7 +1372,10 @@ function openTabHtml() {
         `<button type="button" class="hub-wf-act${unsaved ? "" : " hub-wf-dim"}" data-act="saveall" title="Save every modified tab that has a disk file">💾 Save all${unsaved ? " *" : ""}</button>` +
         `<button type="button" class="hub-wf-act" data-act="savepreset" title="Save the open tabs as a preset">＋ Save preset</button>` +
         `</div>` +
-        `<div class="hub-wf-list">${rows || `<div class="hub-wf-emptylist">Nothing is open (or this ComfyUI build does not expose its tab list to extensions)</div>`}${more}</div>` +
+        // v102: the rows scroll INSIDE .hub-wf-scroll - the actions stay
+        // pinned on top and the status bar stays pinned at the bottom (v101
+        // scrolled the whole body, so the status slid under the list)
+        `<div class="hub-wf-scroll">${rows || `<div class="hub-wf-emptylist">Nothing is open (or this ComfyUI build does not expose its tab list to extensions)</div>`}${more}</div>` +
         `<div class="hub-wf-status">${openTabs.length} open${unsaved ? " · unsaved work present" : ""}${queueRunning ? " · ⚠ generation running" : ""}</div>`;
 }
 
@@ -1302,8 +1457,10 @@ function presetsTabHtml() {
         `<button type="button" class="hub-wf-act" data-act="exportall" title="Export ALL presets as JSON (to the clipboard)">⤓ Export all</button>` +
         `</div>` +
         (saveForm ? saveFormHtml() : "") +
-        `<div class="hub-wf-list">${list.map(presetCardHtml).join("") ||
-            `<div class="hub-wf-emptylist">${presets.length ? "Nothing matches the filter" : "No presets yet - arrange the open tabs and press ＋ Save current"}</div>`}</div>` +
+        // v102: the cards scroll INSIDE .hub-wf-scroll - the search toolbar
+        // and the save form stay pinned on top, the status bar at the bottom
+        `<div class="hub-wf-scroll"><div class="hub-wf-list">${list.map(presetCardHtml).join("") ||
+            `<div class="hub-wf-emptylist">${presets.length ? "Nothing matches the filter" : "No presets yet - arrange the open tabs and press ＋ Save current"}</div>`}</div></div>` +
         `<div class="hub-wf-status">${presets.length} preset(s)${serverState ? "" : " · server storage offline"}</div>`;
 }
 
@@ -1328,15 +1485,20 @@ function filesTabHtml() {
     }).join("");
     const more = list.length > fileRowsShown
         ? `<button type="button" class="hub-wf-more" data-act="morefiles">Show more (${list.length - fileRowsShown} hidden)</button>` : "";
-    return `<div class="hub-wf-sect">🕘 Recently closed</div>` +
-        `<div class="hub-wf-list hub-wf-list-recent">${rec || `<div class="hub-wf-emptylist">Nothing closed yet</div>`}</div>` +
-        `<div class="hub-wf-sect">All saved workflows</div>` +
-        `<div class="hub-wf-toolbar">` +
+    return `<div class="hub-wf-toolbar">` +
+        // v102: the search + actions are PINNED above the scroll container -
+        // the field stays visible while the file list scrolls (v101 put it
+        // between the sections and it scrolled away with the body)
         `<input type="text" class="hub-wf-search" data-wf="filesearch" placeholder="filter: flux detail…" value="${esc(filesSearch)}" spellcheck="false">` +
         `<button type="button" class="hub-wf-act" data-act="openselected" title="Open every checked file">▶ Open selected</button>` +
         `<button type="button" class="hub-wf-act" data-act="saveselection" title="Save the checked files as a preset WITHOUT opening them">💾 Save selected as preset</button>` +
         `</div>` +
+        `<div class="hub-wf-scroll">` +
+        `<div class="hub-wf-sect">🕘 Recently closed</div>` +
+        `<div class="hub-wf-list hub-wf-list-recent">${rec || `<div class="hub-wf-emptylist">Nothing closed yet</div>`}</div>` +
+        `<div class="hub-wf-sect">All saved workflows</div>` +
         `<div class="hub-wf-list">${rows || `<div class="hub-wf-emptylist">${savedFilesLoaded ? "No saved workflow files found" : "Reading the workflow files…"}</div>`}${more}</div>` +
+        `</div>` +
         `<div class="hub-wf-status">${savedFilesLoaded ? savedFiles.length + " file(s)" : "reading…"} · ${fileSel.size} selected</div>`;
 }
 
@@ -1667,27 +1829,33 @@ async function saveModifiedFromForm() {
 
 async function commitFormSave(mode, targetPid) {
     if (!saveForm) return;
-    const nameIn = panel?.querySelector('[data-wf="sfname"]');
-    const name = ((nameIn?.value ?? saveForm.name) || "").trim() || nextWorkspaceName();
-    const c = collectFormItems();
-    if (c.error) { localToast(c.error, 3600); return; }
-    if (!c.items || !c.items.length) { localToast("Nothing checked - check at least one tab"); return; }
-    const res = await savePreset({
-        id: targetPid || undefined,
-        name, items: c.items,
-        activePath: c.activePath || undefined,
-        mode: mode || "create",
-    });
-    if (res.ok) {
-        saveForm = null;
-        await refreshPresets();
-        renderAll();
-        localToast((mode === "merge" ? "Merged into '" : (mode === "overwrite" ? "Overwrote '" : "Saved preset '")) +
-            name + "' (" + c.items.length + " item(s))");
-    } else {
-        localToast((res.stale
-            ? "The server has no workflows routes (old py) - update the FULL pack and RESTART ComfyUI."
-            : "Could not save the preset: " + (res.error || "?")), 4200);
+    try {
+        const nameIn = panel?.querySelector('[data-wf="sfname"]');
+        const name = ((nameIn?.value ?? saveForm.name) || "").trim() || nextWorkspaceName();
+        const c = collectFormItems();
+        if (c.error) { localToast(c.error, 3600); return; }
+        if (!c.items || !c.items.length) { localToast("Nothing checked - check at least one tab"); return; }
+        const res = await savePreset({
+            id: targetPid || undefined,
+            name, items: c.items,
+            activePath: c.activePath || undefined,
+            mode: mode || "create",
+        });
+        if (res.ok) {
+            saveForm = null;
+            await refreshPresets();
+            renderAll();
+            localToast((mode === "merge" ? "Merged into '" : (mode === "overwrite" ? "Overwrote '" : "Saved preset '")) +
+                name + "' (" + c.items.length + " item(s))");
+        } else {
+            localToast((res.stale
+                ? "The server has no workflows routes (old py) - update the FULL pack and RESTART ComfyUI."
+                : "Could not save the preset: " + (res.error || "?")), 4200);
+        }
+    } catch (e) {
+        // a throw here used to vanish as an unhandled rejection - the owner
+        // saw "nothing happens". Name the problem instead.
+        localToast("Could not save the preset: " + String((e && e.message) || e), 4200);
     }
 }
 

@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER smoke test (v101)
+// SettingsHub - WORKFLOWS MANAGER smoke test (v102)
 // ----------------------------------------------------------------------------
 // Node ESM + jsdom. Loads the REAL web/workflows.js module exactly like the
 // entry does (a sandbox copies web/ and stubs ../../scripts/app.js with an
@@ -17,7 +17,8 @@
 //       keeps the active tab even when clean, Save all modified.
 //   WC  the save form: persisted rows checked by default, temp rows opt IN
 //       as SNAPSHOTS, the activePath radio, Save new POSTs a full preset,
-//       Update (↻) offers Overwrite / Merge.
+//       Update (↻) offers Overwrite / Merge. v102: a temp tab WITHOUT a
+//       changeTracker (never activated, content-string only) is snapshotable.
 //   WD  the apply plan (▶ Switch): the smart diff - a tab whose file is
 //       already open is NEITHER closed NOR reloaded; keep-unsaved protects
 //       the modified tab; the plan popover shows close/stay/open; Apply
@@ -31,7 +32,15 @@
 //       checkboxes persist, Panel Off tears the panel down, On re-mounts.
 //   WG  degraded: a 404 health names the "old py" problem in the note.
 //   WH  entry integration (source contract): FILES + EXPECTED + the
-//       initWorkflows registration block + the v101 stamps.
+//       initWorkflows registration block + the v102 stamps.
+//   WI  v102 fixes: the activation swaps the CANVAS (loadGraphData carries
+//       the workflow object; store.openWorkflow is NOT the activation rung),
+//       open-by-path binds the saved file (the /userdata rung passes the
+//       relative path), a snapshot opens through loadGraphData, a
+//       content-string temp tab is snapshotable end-to-end, closing the
+//       ACTIVE tab focuses a neighbor first, an emptied workspace re-opens a
+//       blank tab, and the pinned layout (status bar + Files search + save
+//       form outside the .hub-wf-scroll) + the ⚙ popup width cap.
 //
 // Run from the extension root:  node tests/smoke_workflows.mjs  (jsdom)
 // ============================================================================
@@ -281,8 +290,10 @@ function makeFakeStore(api) {
             store.calls.push({ op: "createTemp", name, graph: !!graphJson });
             const wf = makeTab({ name, isTemporary: true, isPersisted: false, nodes: [1, 2] });
             wf.__snapshotGraph = graphJson;
-            store.openWorkflows.push(wf);
-            store.activeWorkflow = wf;
+            // v102 parity: the REAL createTemporary only REGISTERS the temp -
+            // the open/activation is the caller's job (workflowService calls
+            // openWorkflow separately). Pushing + focusing here would fake the
+            // canvas swap and mask the v101 activation bug.
             return wf;
         },
         async getWorkflowByPath(p) {
@@ -339,7 +350,19 @@ const appStub = {
     api: fakeApi,
     extensionManager: { workflow: wfStore, command: { execute: async (c) => { appStub.commands.push(c); } } },
     commands: [],
-    async loadGraphData(data, a, b) { loadCalls.push({ data, a, b }); },
+    // v102 parity: the REAL app.loadGraphData routes the 4th arg through
+    // workflowService.afterLoadNewGraph - a ComfyWorkflow object becomes the
+    // active tab (the canvas swap), a string binds to the saved file. The
+    // bare store.openWorkflow does NONE of that (the v101 activation bug).
+    async loadGraphData(data, a, b, c, d) {
+        loadCalls.push({ data, a, b, c, d });
+        if (c && typeof c === "object") await wfStore.openWorkflow(c);
+        else if (typeof c === "string") {
+            const rel = c.startsWith("workflows/") ? c : ("workflows/" + c);
+            const t = wfStore.workflows.find((w) => w.path === rel || w.path === c);
+            if (t) await wfStore.openWorkflow(t);
+        }
+    },
     graph: null,
     ui: { settings: { __rows: [], addSetting(cfg) { appStub.ui.settings.__rows.push(cfg?.id); return {}; } } },
 };
@@ -468,11 +491,12 @@ wfStore.activeWorkflow = tC;
 await hooks.refreshOpen(true);
 hooks.renderAll();
 await settle();
-const before2 = wfStore.calls.filter((c) => c.op === "close").length;
+const before2 = wfStore.calls.length; // ALL ops (v102 logs neighbor-focus opens too)
 await body.querySelector('[data-act="closeothers"]').click();
 await settle(20);
 check("Close other saved keeps the ACTIVE clean tab", wfStore.openWorkflows.includes(tC));
-check("Close other saved closed nothing else here (b is modified)", wfStore.calls.length - before2 === 0);
+check("Close other saved closed nothing else here (b is modified)", wfStore.calls.length - before2 === 0,
+    JSON.stringify(wfStore.calls.slice(before2)));
 
 // Save all modified: b gets saveWorkflow
 const before3 = wfStore.calls.filter((c) => c.op === "save").length;
@@ -813,13 +837,13 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v101", /"workflows":\s*"v101"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v102", /"workflows":\s*"v102"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v101", ENTRY_SRC.includes("web build: v101 - WORKFLOWS MANAGER"));
-check("styles.css?v=101", ENTRY_SRC.includes("styles.css?v=101"));
-check("the module self-reports v101",
+check("the entry banner names v102", ENTRY_SRC.includes("web build: v102 - WORKFLOWS MANAGER FIXES"));
+check("styles.css?v=102", ENTRY_SRC.includes("styles.css?v=102"));
+check("the module self-reports v102",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v101"'));
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v102"'));
 check("the workflows module uses the --sh-fs scale (v90 rule)",
     (fs.readFileSync(path.join(WEB, "styles.css"), "utf8").match(/hub-wf-panel[\s\S]{0,400}?--sh-fs/) !== null));
 check("the modal guard hides the workflows panel",
@@ -848,6 +872,230 @@ const natCount = (await hooks.adapter.getSavedWorkflows()).length;
 wfStore.workflows = savedRegistry;
 check("getSavedWorkflows falls back to the native /userdata endpoint",
     natCount === 3, String(natCount));
+
+// ===========================================================================
+phase("WI v102 fixes: canvas-swap activation, temp snapshots, pinned layout");
+
+const cssSrc = fs.readFileSync(path.join(WEB, "styles.css"), "utf8");
+const pnl = () => hooks.panelEl(); // WF re-mounted the panel - always re-query
+
+// --- 1) the activation: a row click swaps the CANVAS (loadGraphData with
+// the tab object), not just the strip state (the v101 bug)
+wfStore.openWorkflows = [
+    makeTab({ path: "workflows/a.json" }),
+    makeTab({ path: "workflows/b.json" }),
+];
+wfStore.activeWorkflow = wfStore.openWorkflows[0];
+await hooks.refreshOpen(true);
+hooks.setTab("open");
+await settle();
+{
+    const loadsBefore = loadCalls.length;
+    const bBtn = pnl().querySelector('.hub-wf-body [data-act="activate"][data-key="workflows/b.json"]');
+    check("WI scene: the b.json row button exists", !!bBtn);
+    await bBtn.click();
+    await settle();
+    const bRef = wfStore.openWorkflows.find((t) => t.path === "workflows/b.json");
+    const swap = loadCalls.slice(loadsBefore).find((c) => c.c === bRef);
+    check("v102 activate: the row click called loadGraphData WITH the tab object (the canvas swap)",
+        !!swap, JSON.stringify(loadCalls.slice(loadsBefore).map((c) => typeof c.c)));
+    check("v102 activate: the strip followed (activeWorkflow = the clicked tab)",
+        wfStore.activeWorkflow === bRef);
+    check("v102 activate: the graph data passed is the tab's own activeState",
+        !!swap && swap.data === bRef.activeState);
+}
+
+// --- 2) open-by-path: a CLOSED registry file opens through the CANVAS swap
+{
+    const rPath = await hooks.adapter.openWorkflowByPath("workflows/d.json");
+    await settle(10);
+    check("v102 open-by-path: ok via loadGraphData", rPath.ok && rPath.via === "loadGraphData",
+        JSON.stringify(rPath));
+    check("v102 open-by-path: the opened file became the ACTIVE tab",
+        wfStore.activeWorkflow?.path === "workflows/d.json");
+    const dRef = wfStore.openWorkflows.find((t) => t.path === "workflows/d.json");
+    check("v102 open-by-path: loadGraphData carried the registry tab object (afterLoadNewGraph binding)",
+        !!dRef && loadCalls.at(-1).c === dRef);
+}
+
+// --- 3) the /userdata rung binds the saved file (no orphan unsaved copy)
+{
+    const kept = wfStore.workflows;
+    wfStore.workflows = kept.filter((w) => w.path !== "workflows/upscale.json");
+    const callsBeforeUd = fakeApi.__calls().length;
+    const loadsBeforeUd = loadCalls.length;
+    const rUd = await hooks.adapter.openWorkflowByPath("workflows/upscale.json");
+    await settle(10);
+    check("v102 /userdata rung: ok", rUd.ok, JSON.stringify(rUd));
+    check("v102 /userdata rung: the fetch used the workflows/ prefixed path",
+        fakeApi.__calls().slice(callsBeforeUd).some((c) => c.url.startsWith("/userdata/workflows%2Fupscale")),
+        JSON.stringify(fakeApi.__calls().slice(callsBeforeUd).map((c) => c.url)));
+    const udCall = loadCalls.slice(loadsBeforeUd).at(-1);
+    check("v102 /userdata rung: the 4th arg BINDS the file (the bare relative path string)",
+        !!udCall && udCall.c === "upscale.json", JSON.stringify(udCall?.c));
+    wfStore.workflows = kept;
+}
+
+// --- 4) a snapshot opens through the canvas swap (the Add bug)
+{
+    const beforeSnap = wfStore.calls.filter((c) => c.op === "createTemp").length;
+    const loadsBeforeSnap = loadCalls.length;
+    const rSnap = await hooks.adapter.openSnapshotWorkflow("WI Sketch", { nodes: [{ id: 9 }], links: [] });
+    await settle(10);
+    check("v102 snapshot: the temp factory ran",
+        wfStore.calls.filter((c) => c.op === "createTemp").length === beforeSnap + 1);
+    check("v102 snapshot: ok via loadGraphData", rSnap.ok && rSnap.via === "loadGraphData", JSON.stringify(rSnap));
+    const snapRef = wfStore.openWorkflows.find((t) => t.name === "WI Sketch");
+    check("v102 snapshot: the temp tab landed in the store AND became the active tab",
+        !!snapRef && wfStore.activeWorkflow === snapRef, String(wfStore.activeWorkflow?.name));
+    check("v102 snapshot: loadGraphData carried the temp object",
+        loadCalls.slice(loadsBeforeSnap).some((c) => c.c === snapRef));
+}
+
+// --- 5) the bug-4 scene: a temp tab that was NEVER activated has no
+// activeState - only the in-memory content string. v101 returned null here
+// ("nothing happens"); v102 snapshots it.
+{
+    const coldTemp = {
+        id: "cold-temp", path: null, filename: null, name: "Unsaved Workflow (3)",
+        isModified: false, isTemporary: true, isPersisted: false,
+        content: JSON.stringify({ nodes: [{ id: 77 }], links: [] }),
+    };
+    wfStore.openWorkflows = [
+        makeTab({ path: "workflows/a.json" }),
+        coldTemp,
+    ];
+    wfStore.activeWorkflow = wfStore.openWorkflows[0];
+    await hooks.refreshOpen(true);
+    const g = hooks.adapter.graphJsonOfOpenTab({ isActive: false, isPersisted: false, ref: coldTemp });
+    check("v102 temp snapshot: a never-activated temp serializes from its content string",
+        !!g && Array.isArray(g.nodes) && g.nodes[0].id === 77, JSON.stringify(g));
+    hooks.openSaveForm("new");
+    await settle();
+    const form3 = pnl().querySelector(".hub-wf-saveform");
+    check("v102 bug4: the save form opened", !!form3);
+    const fChecks = [...form3.querySelectorAll("[data-wf-check]")];
+    check("v102 bug4: two rows (the persisted + the cold temp)", fChecks.length === 2);
+    fChecks[0].checked = false;
+    fChecks[0].dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    fChecks[1].checked = true;
+    fChecks[1].dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    const nameIn3 = form3.querySelector('[data-wf="sfname"]');
+    nameIn3.value = "Cold Temp Preset";
+    nameIn3.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    const postsBefore = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/presets" && c.method === "POST").length;
+    await form3.querySelector('[data-wf-btn="savenew"]').click();
+    await settle(20);
+    const posts = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/presets" && c.method === "POST");
+    check("v102 bug4: Save new with ONLY a temp row checked POSTs (v101 silently did nothing)",
+        posts.length === postsBefore + 1);
+    const coldBody = JSON.parse(posts.at(-1).body);
+    check("v102 bug4: the preset carries the snapshot of the cold temp",
+        coldBody.items.length === 1 && coldBody.items[0].kind === "snapshot" &&
+        coldBody.items[0].graph.nodes[0].id === 77, JSON.stringify(coldBody.items));
+    check("v102 bug4: the form closed after the save", !pnl().querySelector(".hub-wf-saveform"));
+}
+
+// --- 6) the pinned layout contract (the bugs 2 + 6)
+{
+    wfStore.openWorkflows = [makeTab({ path: "workflows/a.json" })];
+    wfStore.activeWorkflow = wfStore.openWorkflows[0];
+    await hooks.refreshOpen(true);
+    hooks.setTab("open");
+    await settle();
+    const bodyL = pnl().querySelector(".hub-wf-body");
+    const scrl = bodyL.querySelector(".hub-wf-scroll");
+    const status = bodyL.querySelector(".hub-wf-status");
+    check("v102 layout: the Open tab has exactly ONE scroll container",
+        !!scrl && bodyL.querySelectorAll(".hub-wf-scroll").length === 1);
+    check("v102 layout: the action row is pinned ABOVE the scroll",
+        bodyL.firstElementChild.className.includes("hub-wf-acts") && bodyL.children[1] === scrl);
+    check("v102 layout: the rows live INSIDE the scroll container",
+        !!scrl.querySelector(".hub-wf-row"));
+    check("v102 layout: the status bar is OUTSIDE the scroll (pinned at the bottom)",
+        !!status && !scrl.contains(status) && bodyL.lastElementChild === status);
+
+    hooks.setTab("presets");
+    await settle(20);
+    const bodyP = pnl().querySelector(".hub-wf-body");
+    const scrlP = bodyP.querySelector(".hub-wf-scroll");
+    check("v102 layout: the Presets search toolbar is pinned ABOVE the scroll",
+        bodyP.firstElementChild.className.includes("hub-wf-toolbar") &&
+        !!bodyP.firstElementChild.querySelector('[data-wf="presetsearch"]'));
+    check("v102 layout: the preset cards scroll INSIDE the container",
+        !!scrlP && !!scrlP.querySelector(".hub-wf-card"));
+    check("v102 layout: the Presets status bar is pinned outside the scroll",
+        bodyP.lastElementChild.className.includes("hub-wf-status") && !scrlP.contains(bodyP.lastElementChild));
+
+    hooks.setTab("files");
+    await settle(20);
+    const bodyF = pnl().querySelector(".hub-wf-body");
+    const scrlF = bodyF.querySelector(".hub-wf-scroll");
+    check("v102 layout: the Files search + actions live ABOVE the scroll container (always visible)",
+        bodyF.firstElementChild.className.includes("hub-wf-toolbar") &&
+        !!bodyF.firstElementChild.querySelector('[data-wf="filesearch"]') &&
+        bodyF.firstElementChild !== scrlF);
+    check("v102 layout: the recents + file list scroll INSIDE the container",
+        !!scrlF && !!scrlF.querySelector(".hub-wf-list-recent") && !!scrlF.querySelector("[data-fpath]"));
+    check("v102 layout: the Files status bar is pinned outside the scroll",
+        bodyF.lastElementChild.className.includes("hub-wf-status") && !scrlF.contains(bodyF.lastElementChild));
+
+    // the save form is pinned between the toolbar and the scroll
+    hooks.openSaveForm("new");
+    await settle();
+    const bodyS = pnl().querySelector(".hub-wf-body");
+    const scrlS = bodyS.querySelector(".hub-wf-scroll");
+    const sfS = bodyS.querySelector(".hub-wf-saveform");
+    check("v102 layout: the save form is pinned OUTSIDE the scroll container",
+        !!sfS && !!scrlS && !scrlS.contains(sfS));
+    check("v102 layout: the form rows scroll internally (the CSS cap survives)",
+        /\.hub-wf-sf-rows\s*\{[^}]*max-height/.test(cssSrc));
+    await bodyS.querySelector('[data-wf-btn="cancelsave"]').click();
+    await settle();
+
+    // the ⚙ popup width cap (the bug 1, the stack/chat parity)
+    check("v102 setpop: the width cap exists in styles.css",
+        /\.hub-wf-setpop\s*\{[^}]*width:\s*320px/.test(cssSrc));
+    check("v102 setpop: viewport-clamped like the stack/chat pops",
+        /\.hub-wf-setpop\s*\{[^}]*max-width:\s*calc\(100vw - 16px\)/.test(cssSrc));
+    check("v102 layout: the body column does not scroll itself (the scroll moved to .hub-wf-scroll)",
+        /\.hub-wf-body\s*\{[^}]*overflow:\s*hidden/.test(cssSrc) && /\.hub-wf-scroll\s*\{/.test(cssSrc));
+}
+
+// --- 7) closing the ACTIVE tab focuses a neighbor FIRST (service parity)
+{
+    const t1 = makeTab({ path: "workflows/x1.json" });
+    const t2 = makeTab({ path: "workflows/x2.json" });
+    wfStore.openWorkflows = [t1, t2];
+    wfStore.activeWorkflow = t1;
+    await hooks.refreshOpen(true);
+    const loadsBeforeClose = loadCalls.length;
+    const x1Wrap = hooks.openTabs().find((t) => t.key === "workflows/x1.json");
+    const rClose = await hooks.adapter.closeWorkflowTab(x1Wrap);
+    await settle(10);
+    check("v102 close-active: ok", rClose.ok, JSON.stringify(rClose));
+    check("v102 close-active: the neighbor got focus BEFORE the close (loadGraphData with x2)",
+        loadCalls.slice(loadsBeforeClose).some((c) => typeof c.c === "object" && c.c.path === "workflows/x2.json"));
+    check("v102 close-active: x1 is closed, x2 is the active tab",
+        !wfStore.openWorkflows.includes(t1) && wfStore.activeWorkflow === t2);
+}
+
+// --- 8) an emptied workspace re-opens a blank tab (never zero tabs)
+{
+    const cmdsBefore = appStub.commands.length;
+    const y1 = makeTab({ path: "workflows/y1.json" });
+    wfStore.openWorkflows = [y1];
+    wfStore.activeWorkflow = y1;
+    await hooks.refreshOpen(true);
+    await hooks.adapter.closeWorkflowTab(hooks.openTabs()[0]);
+    await settle(10);
+    check("v102 last-tab close: a blank tab was re-opened (the workspace never ends empty)",
+        wfStore.openWorkflows.length === 0 || appStub.commands.length > cmdsBefore,
+        JSON.stringify(appStub.commands.slice(cmdsBefore)));
+    check("v102 last-tab close: the blank-tab command fired",
+        appStub.commands.includes("Comfy.NewBlankWorkflow") && appStub.commands.length > cmdsBefore,
+        JSON.stringify(appStub.commands.slice(cmdsBefore)));
+}
 
 // ===========================================================================
 

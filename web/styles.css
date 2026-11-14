@@ -5999,22 +5999,33 @@ body.sh-modal-open .hub-sh-note {
     font-weight: 600;
 }
 
-/* the body = ONE scroll container per tab */
+/* v102: the body is a fixed COLUMN - the lists scroll inside the
+   .hub-wf-scroll child, the action/search rows stay pinned on top and the
+   status bar stays pinned at the bottom (v101 scrolled the whole body, so
+   the status bar slid under the list and the Files search scrolled away) */
 .hub-wf-body {
     flex: 1 1 auto;
     min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: hidden;
     padding: 6px;
     display: flex;
     flex-direction: column;
     gap: 6px;
     user-select: text;
 }
-.hub-wf-body::-webkit-scrollbar { width: 8px; }
-.hub-wf-body::-webkit-scrollbar-thumb { background: #33335a; border-radius: 4px; }
-.hub-wf-body::-webkit-scrollbar-track { background: transparent; }
-.hub-wf-body { scrollbar-width: thin; scrollbar-color: #33335a transparent; }
+.hub-wf-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.hub-wf-scroll::-webkit-scrollbar { width: 8px; }
+.hub-wf-scroll::-webkit-scrollbar-thumb { background: #33335a; border-radius: 4px; }
+.hub-wf-scroll::-webkit-scrollbar-track { background: transparent; }
+.hub-wf-scroll { scrollbar-width: thin; scrollbar-color: #33335a transparent; }
 
 .hub-wf-acts, .hub-wf-toolbar {
     display: flex;
@@ -6052,7 +6063,7 @@ body.sh-modal-open .hub-sh-note {
 .hub-wf-search:focus { border-color: #5a6ab0; }
 
 .hub-wf-list {
-    flex: 0 1 auto;
+    flex: 0 0 auto;
     min-height: 0;
     display: flex;
     flex-direction: column;
@@ -6388,6 +6399,27 @@ body.sh-modal-open .hub-sh-note {
     flex: 0 0 auto;
 }
 .hub-wf-toast-act:hover { background: #1a2a1e; color: #fff; }
+
+/* v102 fixes: the ⚙ popup was the only panel settings dialog without a
+   width cap - the long hint line stretched it across the whole screen (the
+   stack pop carries 320px, the chat pop 300px); the save form keeps its
+   own cap so the pinned column never overflows a short panel */
+.hub-wf-setpop {
+    width: 320px;
+    max-width: calc(100vw - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 8px;
+    scrollbar-width: thin;
+    scrollbar-color: #3d4460 #191930;
+}
+.hub-wf-setpop::-webkit-scrollbar { width: 8px; }
+.hub-wf-setpop::-webkit-scrollbar-track { background: #191930; }
+.hub-wf-setpop::-webkit-scrollbar-thumb { background: #3d4460; border-radius: 4px; }
+.hub-wf-saveform {
+    max-height: 62%;
+    overflow-y: auto;
+}
 
 /* the minimized chip (the stack/chat chip pattern) */
 .hub-wf-chip {
