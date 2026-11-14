@@ -237,7 +237,7 @@ phase("PA build v92 + version manifest");
     // self-report of the last functional change)
     check("PA the entry reports v95", globalThis.__SettingsHubBuild === "v95");
     check("PA chat self-reports v98 (the v98 chat tab-strip wheel round)", globalThis.__SettingsHubLoaded?.chat === "v98");
-    check("PA launcher self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.launcher === "v93");
+    check("PA launcher self-reports v101 (the workflows item round)", globalThis.__SettingsHubLoaded?.launcher === "v101");
     check("PA core self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.core === "v93");
     const rsrc = fs.readFileSync(sb.renderer, "utf8");
     const msrc = fs.readFileSync(sb.menu, "utf8");
@@ -255,10 +255,11 @@ phase("PB launcher = a Windows-style taskbar (owner #7)");
     const bar = document.querySelector(".hub-lnch");
     check("PB the bar exists", !!bar);
     const btns = [...bar.querySelectorAll("button.hub-lnch-btn")];
-    check("PB exactly 3 icon buttons (chat/stack/hub)",
-        btns.length === 3 &&
+    check("PB exactly 4 icon buttons (chat/stack/workflows/hub)",
+        btns.length === 4 &&
         !!bar.querySelector('[data-lnch="chat"]') &&
         !!bar.querySelector('[data-lnch="stack"]') &&
+        !!bar.querySelector('[data-lnch="workflows"]') &&
         !!bar.querySelector('[data-lnch="hub"]'));
     check("PB NO checkboxes on the bar", bar.querySelectorAll("input[type=checkbox]").length === 0);
     check("PB NO gear on the bar", !bar.querySelector(".hub-lnch-gear"));
@@ -472,3 +473,7 @@ if (FAIL) {
     for (const f of FAILURES) console.log("  FAIL: " + f);
     process.exit(1);
 }
+// harness hygiene: the loaded panels arm recurring timers (the launcher's
+// 800ms badge tick), so the event loop never drains on its own - exit
+// explicitly, like smoke_workflows.mjs does.
+process.exit(0);

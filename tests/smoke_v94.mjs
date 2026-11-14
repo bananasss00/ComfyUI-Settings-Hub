@@ -275,8 +275,8 @@ phase("PA build v95 + version manifest");
 {
     check("PA the entry reports v95", globalThis.__SettingsHubBuild === "v95");
     check("PA chat self-reports v98 (the v98 chat tab-strip wheel round)", globalThis.__SettingsHubLoaded?.chat === "v98");
-    check("PA launcher self-reports v93 (unchanged this round)",
-        globalThis.__SettingsHubLoaded?.launcher === "v93");
+    check("PA launcher self-reports v101 (the workflows item round)",
+        globalThis.__SettingsHubLoaded?.launcher === "v101");
     check("PA core self-reports v93 (unchanged this round)",
         globalThis.__SettingsHubLoaded?.core === "v93");
     const rsrc = fs.readFileSync(sb.renderer, "utf8");
@@ -285,8 +285,8 @@ phase("PA build v95 + version manifest");
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat v98 + renderer v94",
         entrySrc.includes('"chat": "v98"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the v100 connections-fix round",
-        entrySrc.includes("web build: v100 - STACK FRAGMENT CONNECTIONS FIX"));
+    check("PA the banner names the v101 workflows round",
+        entrySrc.includes("web build: v101 - WORKFLOWS MANAGER"));
 }
 
 // ---------------------------------------------------------------------------

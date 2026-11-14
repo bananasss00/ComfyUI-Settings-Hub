@@ -274,7 +274,7 @@ phase("PA build v95 + version manifest");
     // their self-reports (the manifest follows the truth)
     check("PA the entry reports v95", globalThis.__SettingsHubBuild === "v95");
     check("PA chat self-reports v98 (the v98 chat tab-strip wheel round)", globalThis.__SettingsHubLoaded?.chat === "v98");
-    check("PA launcher self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.launcher === "v93");
+    check("PA launcher self-reports v101 (the workflows item round)", globalThis.__SettingsHubLoaded?.launcher === "v101");
     check("PA core self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.core === "v93");
     // the modules the boot does not import are checked in their sources
     // (the same approach smoke_v92 takes)
@@ -546,3 +546,7 @@ if (FAIL) {
     for (const f of FAILURES) console.log("  FAIL: " + f);
     process.exit(1);
 }
+// harness hygiene (v101): the loaded panels arm recurring timers, so the
+// event loop never drains on its own - exit explicitly, like
+// smoke_workflows.mjs does.
+process.exit(0);

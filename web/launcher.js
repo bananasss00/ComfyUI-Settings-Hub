@@ -14,8 +14,10 @@
 //     taskbar metaphor;
 //   * BADGES carry the extra info the owner asked for ("минипанель пусть
 //     отображает доп инфу"): the stack button shows the ENTRY COUNT, the
-//     chat button pulses a dot while a generation is running. Panels report
-//     through the registerLauncherPanel hook's new badge() field;
+//     chat button pulses a dot while a generation is running, the workflows
+//     button (v101) shows the open-tab count with an amber dot when unsaved
+//     work is present. Panels report through the registerLauncherPanel
+//     hook's badge() field ({text}, {dot:true} or {text, dot:true} together);
 //   * the collapse-hosting contract of v91 is untouched: [–] on the chat /
 //     the stack collapses them INTO this bar (the amber state), a hidden
 //     launcher or a hidden item falls back to the panels' own chips.
@@ -34,28 +36,31 @@ import { createVirtualHub } from "./core.js";
 // stays a leaf module - a broken chat.js can never take the stack (or this
 // bar) down with it, and the import graph stays cycle-free.
 
-// v92 self-report (single-source version, docs/plan-versions.md)
+// v92 self-report (single-source version, docs/plan-versions.md) - the stamp
+// of the LAST functional change (v101: the 4th taskbar item + text+dot badges)
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["launcher"] = "v93";
+globalThis.__SettingsHubLoaded["launcher"] = "v101";
 
 const LS_ON = "settingshub.launcher.on";        // "1"/"0" - panel shown
 const LS_ITEM = "settingshub.launcher.item.";   // + kind -> "1"/"0"
 const LS_UI = "settingshub.launcher.ui";        // {x,y}
 const Z_PANEL = "99902";                        // above chat (99901) / stack (99900)
-const ITEM_KINDS = ["chat", "stack", "hub"];
+// v101: the 4th item - the Workflows Manager (web/workflows.js)
+const ITEM_KINDS = ["chat", "stack", "workflows", "hub"];
 // v92: the taskbar is ICON-ONLY (the owner's Windows-taskbar request) - the
 // labels live in the tooltips now.
-const ITEM_ICON = { chat: "💬", stack: "📋", hub: "＋" };
+const ITEM_ICON = { chat: "💬", stack: "📋", workflows: "🗂", hub: "＋" };
 const ITEM_TITLE = {
     chat: "Chat - click: minimize into this bar / restore; dimmed = the chat panel is off (click turns it on)",
     stack: "Paste Stack - click: minimize into this bar / restore; dimmed = the stack panel is off (click turns it on)",
+    workflows: "Workflows - click: open / minimize into this bar; dimmed = off (click turns it on)",
     hub: "Create a new VIRTUAL hub (a floating control window without a canvas node)",
 };
 
 let panelEl = null;
 let mounted = false;
 let initSeq = 0;
-let collapsed = { chat: false, stack: false };   // the panels collapsed INTO this bar
+let collapsed = { chat: false, stack: false, workflows: false };   // the panels collapsed INTO this bar
 const panelHooks = {};                           // kind -> {isOn,isMin,minimize,restore,showChip,badge}
 let renderT = null;
 let nativeRegistered = false;
@@ -167,7 +172,7 @@ export function registerLauncherPanel(kind, hooks) {
 }
 
 function unhostAll(why) {
-    for (const kind of ["chat", "stack"]) {
+    for (const kind of ["chat", "stack", "workflows"]) {
         if (collapsed[kind]) {
             try { panelHooks[kind]?.showChip?.(); } catch (_) {}
             collapsed[kind] = false;
@@ -188,6 +193,7 @@ function syncNative() {
     try { __launcherNative?.enabled?.set?.(isLauncherOn()); } catch (_) {}
     try { __launcherNative?.chat?.set?.(isLauncherItemOn("chat")); } catch (_) {}
     try { __launcherNative?.stack?.set?.(isLauncherItemOn("stack")); } catch (_) {}
+    try { __launcherNative?.workflows?.set?.(isLauncherItemOn("workflows")); } catch (_) {}
     try { __launcherNative?.hub?.set?.(isLauncherItemOn("hub")); } catch (_) {}
 }
 
@@ -213,6 +219,9 @@ function registerLauncherSettings() {
             stack: mk("SettingsHub.Launcher.itemStack",
                 "Mini panel: Stack item",
                 () => isLauncherItemOn("stack"), setLauncherItemOn),
+            workflows: mk("SettingsHub.Launcher.itemWorkflows",
+                "Mini panel: Workflows item",
+                () => isLauncherItemOn("workflows"), setLauncherItemOn),
             hub: mk("SettingsHub.Launcher.itemHub",
                 "Mini panel: New-hub button",
                 () => isLauncherItemOn("hub"), setLauncherItemOn),
@@ -289,22 +298,26 @@ function itemState(kind) {
     return collapsed[kind] ? "min" : "on";
 }
 
-/** v92: the corner badge of a taskbar button - {text} or {dot:true} or null.
- *  A hidden item never shows a badge; a huge count caps at "99+". */
+/** v92: the corner badge of a taskbar button - {text} / {dot:true} /
+ *  {text, dot:true} or null. A hidden item never shows a badge; a huge
+ *  count caps at "99+". v101: text and dot CAN combine (the workflows item:
+ *  the open-tab count + an amber dot while unsaved work is present). */
 function badgeOf(kind) {
     if (!isLauncherItemOn(kind)) return null;
     let b = null;
     try { b = panelHooks[kind]?.badge?.() || null; } catch (_) { b = null; }
     if (!b) return null;
-    if (b.dot) return { dot: true };
     const n = parseInt(b.text, 10);
-    if (!Number.isFinite(n) || n <= 0) return null;
-    return { text: n > 99 ? "99+" : String(n) };
+    const hasText = Number.isFinite(n) && n > 0;
+    if (hasText && b.dot) return { text: n > 99 ? "99+" : String(n), dot: true };
+    if (b.dot) return { dot: true };
+    if (hasText) return { text: n > 99 ? "99+" : String(n) };
+    return null;
 }
 
 function renderItems() {
     if (!panelEl) return;
-    for (const kind of ["chat", "stack", "hub"]) {
+    for (const kind of ITEM_KINDS) {
         const btn = panelEl.querySelector(`[data-lnch="${kind}"]`);
         if (!btn) continue;
         const on = isLauncherItemOn(kind);
@@ -318,12 +331,18 @@ function renderItems() {
             btn.title = ITEM_TITLE[kind] +
                 (st === "min" ? " (collapsed HERE - click to restore)" : "");
         }
-        // v92: the corner badge (stack = the entry count, chat = a live dot)
+        // v92: the corner badge (stack = the entry count, chat = a live dot,
+        // v101 workflows = the open count + an unsaved dot)
         const bEl = btn.querySelector(".hub-lnch-badge");
         if (bEl) {
             const b = badgeOf(kind);
             bEl.textContent = b?.text || "";
-            bEl.classList.toggle("hub-lnch-dot", !!b?.dot);
+            // a text+dot badge keeps the count shape but wears the amber
+            // "attention" colors; the pulse stays dot-only
+            const dotOnly = !!b?.dot && !b?.text;
+            const both = !!b?.dot && !!b?.text;
+            bEl.classList.toggle("hub-lnch-dot", dotOnly);
+            bEl.classList.toggle("hub-lnch-amber", both);
             bEl.style.display = b ? "" : "none";
         }
     }
@@ -342,7 +361,7 @@ function onItemBtn(kind) {
         return;
     }
     const h = panelHooks[kind];
-    if (!h) { localToast("The " + (kind === "chat" ? "chat" : "stack") + " module is not loaded yet"); return; }
+    if (!h) { localToast("The " + (ITEM_TITLE[kind] ? kind : "panel") + " module is not loaded yet"); return; }
     if (itemState(kind) === "off") {
         h.setOn(true);   // dimmed button -> turn the panel on (one click, no checkbox)
         renderItems();

@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v100 - STACK FRAGMENT CONNECTIONS FIX (owner report 2026-11-14: 'connections пишет does not expose reliable links - и так для всех в стаке элементов'): the v99 inspector counted links only in the workflow-dump 6-tuple shape, while the REAL canvas clipboards carry TS link OBJECTS {id, origin_id, origin_slot, target_id, target_slot, type, ...presentation} and legacy relative 5-tuples [origin_rel, origin_slot, target_rel, target_slot, origin_id?] (origin_rel null = the source node was not selected) - so EVERY fragment showed the apology instead of connections. Fix: normalizeFragmentLinks() accepts ALL THREE shapes into one index-based edge list; Connections renders 'src \u2192 out \u2192 dst \u2192 in' rows, external endpoints shown as '(external)'; nodeMeta captured by v99 (linkCount:null) is lazily REPAIRED by one re-parse + PATCH per entry. Audit found + fixed two more v99 bugs: the Nodes search lost focus after the first keystroke (focus + caret restored), and same-title groups double-counted members (membership by group index). Raw JSON / paste fidelity untouched. Stale-cache guard: EXPECTED manifest verifies every module.");
+console.info("[SettingsHub] web build: v101 - WORKFLOWS MANAGER (owner plan: 'Workflows / Workspace Manager - реализуй план полностью'): a 4th floating utility over ALL the open ComfyUI workflows - not bound to a SettingsHub node. Saves the open tabs as PRESETS (path items + optional SNAPSHOTS of temporary tabs), applies them with a SMART DIFF (\u25b6 Switch with an apply-plan preview: what closes / stays / opens, keep-unsaved guard, 1-level \u21a9 Undo; \uff0b Append opens only the missing tabs - a target tab that is already open is NEVER closed or reloaded), bulk \ud83e\uddf9 Close saved / Close other saved with \ud83d\udccc tab locks, \ud83d\udcbe Save all modified, a \ud83d\udd5c recently-closed buffer, a flat multi-word search over all saved workflow files, JSON export/import, a queue-running warning, and a \u2699 popup with the v84-mechanics STORAGE FOLDER switch (py/workflows_store.py: presets.json under user/settings_hub/workflows by default, re-pointable to any absolute path, probed writable BEFORE the switch, the override lives in the DEFAULT user dir, changing the root NEVER moves presets). The tab access is an ADAPTER LADDER over app.extensionManager.workflow (store -> commands -> the native /userdata endpoint) - a missing rung degrades the panel, ComfyUI never breaks. First run starts MINIMIZED into the taskbar. Stale-cache guard: EXPECTED manifest verifies every module.");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v100 - STACK FRAGMENT CONNECTIONS FIX (ow
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=100", import.meta.url).href;
+    link.href = new URL("styles.css?v=101", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -51,7 +51,7 @@ console.info("[SettingsHub] web build: v100 - STACK FRAGMENT CONNECTIONS FIX (ow
 // ONE stale cached file silently removed every "Pin to Settings Hub" menu
 // item and the sync hooks. The detector keeps its diagnostic value but is
 // NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v100";
+globalThis.__SettingsHubBuild = "v101";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -68,6 +68,7 @@ const FILES = [
     "./launcher.js",        // v91: the MINI PANEL - chat/stack toggles + collapse target + ＋ hub
     "./stack.js",           // v70: Paste Stack - floating clipboard panel
     "./chat.js",            // v89: LLM Chat - named settings fields + ctx fill + chat search + own prompts path
+    "./workflows.js",       // v101: Workflows Manager - open-tab presets, smart-diff switch, bulk close, storage folder
     "./compare.js",         // v73: Image Compare - A/B wipe/fade/blink/diff panel
     "./context_menu.js",    // "📌 Pin to Settings Hub" menus + batch picker
 ];
@@ -100,9 +101,10 @@ const FILES = [
         "hub_node": "v90",        // node registration + badge painter + phantom hiding (virtual hubs)
         "hub_ui_renderer": "v94", // DOM widget rendering (+ v94 rename commit refresh + popup grace)
         "sync_manager": "v70",    // reactive sync hooks
-        "launcher": "v93",        // v93 TASKBAR (drag from anywhere with a 5px click threshold)
+        "launcher": "v101",       // v101: the 4th taskbar item (workflows) + text+dot badges
         "stack": "v100",          // Paste Stack (+ v100: reliable connections for ALL real clipboard shapes + search focus + group counts)
         "chat": "v98",            // LLM Chat (+ v98: tab-strip wheel scroll + reveal the active chip)
+        "workflows": "v101",      // Workflows Manager (+ v101: presets, smart-diff apply, bulk close, storage folder)
         "compare": "v83",         // Image Compare A/B panel (v83 display fix)
         "context_menu": "v93",    // "Pin to Settings Hub" menus (+ v93 hub window RMB Rename/Materialize)
         "core": "v93",            // (+ v93 hub DOM resolver registry for the window menu)
@@ -188,6 +190,21 @@ const FILES = [
         });
     } else {
         console.error("[SettingsHub] chat.js unavailable - the LLM Chat panel CANNOT register (see the failed list above if any).");
+    }
+
+    // v101: the WORKFLOWS MANAGER mounts in extension setup like the stack /
+    // the chat - a standalone floating panel over the open workflow tabs.
+    // Fail-open: a dead workflows.js costs only the new panel.
+    if (mods["./workflows.js"]?.initWorkflows) {
+        app.registerExtension({
+            name: "Comfy.SettingsHub.workflows",
+            setup() {
+                try { mods["./workflows.js"].initWorkflows(); }
+                catch (err) { console.error("[SettingsHub] workflows panel init failed:", err); }
+            },
+        });
+    } else {
+        console.error("[SettingsHub] workflows.js unavailable - the Workflows Manager CANNOT register (see the failed list above if any).");
     }
 
     // v73: Image Compare installs its context-menu + executed listeners in

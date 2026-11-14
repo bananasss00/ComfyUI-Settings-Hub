@@ -12,6 +12,7 @@ changes because of the version number". The v82 convention fixes the ROOT:
     the version literal lives ONLY in
       * web/settings_hub.js   (entry: banner + __SettingsHubBuild + styles.css?v=)
       * py/stack_store.py     (STACK_SERVER_VERSION)
+      * py/workflows_store.py (WORKFLOWS_SERVER_VERSION, v101+)
       * README.md             (badge)
     and NOWHERE else. Submodules carry NO version literal; they self-report
     under __SettingsHubLoaded and the entry verifies the manifest, so stale
@@ -32,12 +33,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "web" / "settings_hub.js"
 PYSTORE = ROOT / "py" / "stack_store.py"
+# v101: the Workflows Manager storage (the same bump-together rule)
+WFSTORE = ROOT / "py" / "workflows_store.py"
 README = ROOT / "README.md"
 
 RE_ENTRY_STAMP = re.compile(r'(globalThis\.__SettingsHubBuild\s*=\s*")(v\d+)(")')
 RE_CSS_QUERY = re.compile(r'(styles\.css\?v=)(\d+)')
 RE_BANNER = re.compile(r'(web build: )(v\d+)( - )')
 RE_PY_STAMP = re.compile(r'(STACK_SERVER_VERSION\s*=\s*")(v\d+)(")')
+RE_WF_STAMP = re.compile(r'(WORKFLOWS_SERVER_VERSION\s*=\s*")(v\d+)(")')
 RE_BADGE = re.compile(r'(web%20build-)(v\d+)(-\w+)\)')
 RE_GUARD = re.compile(r'__SettingsHubBuild\s*!==\s*"(v\d+)"')
 # v82: EXPECTED manifest in the entry + per-module self-report literals
@@ -82,6 +86,16 @@ def bump(new_v):
     PYSTORE.write_text(t, "utf-8")
     changed.append("%s: %s -> %s" % (PYSTORE.name, old, new_v))
 
+    # v101: the workflows storage bumps together with the pack (the panel
+    # compares it against the entry stamp exactly like the stack storage)
+    if WFSTORE.exists():
+        t = WFSTORE.read_text("utf-8")
+        m = RE_WF_STAMP.search(t)
+        old = m.group(2) if m else None
+        t = sub_once(RE_WF_STAMP, r"\g<1>%s\g<3>" % new_v, t, "WORKFLOWS_SERVER_VERSION", WFSTORE)
+        WFSTORE.write_text(t, "utf-8")
+        changed.append("%s: %s -> %s" % (WFSTORE.name, old, new_v))
+
     if README.exists():
         t = README.read_text("utf-8")
         t2, n = RE_BADGE.subn(r"\g<1>%s\g<3>)" % new_v, t, count=1)
@@ -125,6 +139,15 @@ def check():
         errors.append("STACK_SERVER_VERSION must appear EXACTLY once, found %d" % len(py))
     else:
         versions["py"] = py[0][1]
+
+    # v101: the workflows storage must exist, appear once and match the entry
+    if WFSTORE.exists():
+        t = WFSTORE.read_text("utf-8")
+        wf = RE_WF_STAMP.findall(t)
+        if len(wf) != 1:
+            errors.append("WORKFLOWS_SERVER_VERSION must appear EXACTLY once, found %d" % len(wf))
+        else:
+            versions["workflows_py"] = wf[0][1]
 
     if README.exists():
         badge = RE_BADGE.search(README.read_text("utf-8"))
@@ -172,14 +195,18 @@ def check():
     # release rule: py and web bump together (tools/version.py does both)
     if versions.get("entry") and versions.get("py") and versions["entry"] != versions["py"]:
         errors.append("py %s != entry %s - they must bump together" % (versions["py"], versions["entry"]))
+    if versions.get("entry") and versions.get("workflows_py") and versions["entry"] != versions["workflows_py"]:
+        errors.append("workflows py %s != entry %s - they must bump together"
+                      % (versions["workflows_py"], versions["entry"]))
 
     for w in warnings:
         print("WARN: " + w)
     for e in errors:
         print("FAIL: " + e)
     if not errors:
-        print("OK: entry=%s py=%s - single-source version is consistent; "
+        print("OK: entry=%s py=%s%s - single-source version is consistent; "
               "manifest %s" % (versions.get("entry"), versions.get("py"),
+                               (" workflows_py=%s" % versions["workflows_py"]) if "workflows_py" in versions else "",
                                ", ".join("%s=%s" % (k, v) for k, v in sorted(expected.items()))))
         return 0
     return 1
