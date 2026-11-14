@@ -285,8 +285,8 @@ phase("PA build v95 + version manifest");
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat v98 + renderer v94",
         entrySrc.includes('"chat": "v108"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the v108 files file manager + unified storage + chat mass delete",
-        entrySrc.includes("web build: v108"));
+    check("PA the banner names the v109 real userdata roots for the files list",
+        entrySrc.includes("web build: v109 - REAL USERDATA ROOTS FOR THE FILES LIST"));
 }
 
 // ---------------------------------------------------------------------------

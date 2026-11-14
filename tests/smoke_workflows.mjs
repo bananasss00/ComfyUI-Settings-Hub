@@ -960,19 +960,19 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v108", /"workflows":\s*"v108"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v109", /"workflows":\s*"v109"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v108", ENTRY_SRC.includes("web build: v108 - FILES FILE MANAGER + UNIFIED STORAGE + CHAT MASS DELETE"));
-check("styles.css?v=108", ENTRY_SRC.includes("styles.css?v=108"));
-check("the module self-reports v108",
+check("the entry banner names v109", ENTRY_SRC.includes("web build: v109 - REAL USERDATA ROOTS FOR THE FILES LIST"));
+check("styles.css?v=109", ENTRY_SRC.includes("styles.css?v=109"));
+check("the module self-reports v109",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v108"'));
-check("the web stamp literal is v108",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v109"'));
+check("the web stamp literal is v109",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v108"'));
-check("py stamp bumps together (v108)",
+        .includes('const WF_WEB_VERSION = "v109"'));
+check("py stamp bumps together (v109)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v108"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v109"'));
 check("v107 routes registered (temp list/put/get/delete)",
     [".get(\"/settings_hub/workflows/temp\")", ".post(\"/settings_hub/workflows/temp\")",
      ".get(\"/settings_hub/workflows/temp/{tid}\")", ".delete(\"/settings_hub/workflows/temp/{tid}\")"]
@@ -1539,7 +1539,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v109"); // ahead of the pack - a stale web file
+    fakeApi.__setHealthVersion("v110"); // ahead of the pack (v109) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -2016,6 +2016,35 @@ check("WO: fmtSize names the human units",
 check("WO: the sort persisted into LS_UI",
     JSON.parse(dom.window.localStorage.getItem("settingshub.workflows.ui")).filesSort.key === "name",
     dom.window.localStorage.getItem("settingshub.workflows.ui"));
+
+// ===========================================================================
+// WO.9 v109 regression: the v108 blanking bug. The py rung MUST answer with
+// the real userdata files, and the client must treat an ok:true EMPTY rung-0
+// answer as "try the legacy rungs" - never as a blank Files tab + red
+// missing-marks on every preset item.
+phase("WO9 v109: the empty ok:true rung-0 answer falls back to the native rung");
+
+fakeApi.__setWfFiles([]); // ok:true, files:[] - the exact v108 wrong-layout shape
+hooks.setTab("files");
+await hooks.refreshSavedFiles();
+await settle();
+const wpanel9 = hooks.panelEl();
+check("WO9: an empty ok:true /files answer falls back to the native rung",
+    hooks.savedFiles().some((f) => f.path === "workflows/flux_main.json"),
+    JSON.stringify(hooks.savedFiles()));
+check("WO9: the Files rows render from the fallback rung",
+    !!wpanel9.querySelector('[data-fpath="workflows/flux_main.json"]') &&
+    !!wpanel9.querySelector('[data-fpath="workflows/upscale.json"]'));
+
+// and the healthy shape still wins (rung 0 preferred when it lists files)
+fakeApi.__setWfFiles([
+    { path: "workflows/from_rung0.json", name: "from_rung0.json", size: 1, mtime: NOW - 1 },
+]);
+await hooks.refreshSavedFiles();
+await settle();
+check("WO9: a non-empty rung-0 answer is still preferred",
+    hooks.savedFiles().length === 1 && hooks.savedFiles()[0].path === "workflows/from_rung0.json",
+    JSON.stringify(hooks.savedFiles()));
 
 // cleanup: an old-py shape again for any later phase (the suite ends here)
 fakeApi.__setWfFiles(null);

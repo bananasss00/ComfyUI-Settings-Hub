@@ -109,13 +109,14 @@ class FakeRequest:
     """Just enough of aiohttp.web.Request for the handlers under test."""
 
     def __init__(self, method="POST", path="/", query=None, match_info=None,
-                 json_body=None, raw_body=None):
+                 json_body=None, raw_body=None, headers=None):
         self.method = method
         self.path = path
         self.query = dict(query or {})
         self.match_info = dict(match_info or {})
         self._json = json_body
         self._raw = raw_body
+        self.headers = dict(headers or {})  # v109: comfy-user reads
 
     async def json(self):
         if self._raw is not None:
@@ -257,7 +258,7 @@ check("health: ok", r.status == 200 and j.get("ok") is True)
 check("health: version matches the source constant",
       j.get("version") == wf_store.WORKFLOWS_SERVER_VERSION,
       "%s vs %s" % (j.get("version"), wf_store.WORKFLOWS_SERVER_VERSION))
-check("health: version is v108", j.get("version") == "v108", str(j.get("version")))
+check("health: version is v109", j.get("version") == "v109", str(j.get("version")))
 check("health: default dir", j.get("dir") == os.path.join(_USER_DIR, "settings_hub", "workflows"), j.get("dir"))
 check("health: no custom root yet", j.get("custom") is None)
 check("health: writable", j.get("writable") is True)
@@ -948,9 +949,15 @@ print("== v108: the Files listing + the favorites ==")
 
 # a small workflows/ library: root file, nested files, and the storage-root
 # housekeeping that must NEVER surface in the Files list
-wfdir = os.path.join(_USER_DIR, "workflows")
+# v109: the REAL userdata layout - the Workflow Browser lists
+# <user_dir>/default/workflows (user_manager nests the users INSIDE the
+# user directory); the flat <user_dir>/workflows is the legacy v108 layout
+# and stays readable (nothing saved into it in that window may vanish)
+wfdir = os.path.join(_USER_DIR, "default", "workflows")
+legacy = os.path.join(_USER_DIR, "workflows")
 sub = os.path.join(wfdir, "sub", "deep")
 os.makedirs(sub, exist_ok=True)
+os.makedirs(legacy, exist_ok=True)
 def _touch(p, when=None, size=10):
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
@@ -963,6 +970,7 @@ now = time.time()
 _touch(os.path.join(wfdir, "a.json"), now - 100)
 _touchb = _touch(os.path.join(wfdir, "sub", "b.json"), now - 50)
 _touchc = _touch(os.path.join(wfdir, "sub", "deep", "c.json"), now - 10)
+_touch(os.path.join(legacy, "legacy_flat.json"), now - 200)  # the v108 flat layout
 # the storage housekeeping inside the workflows folder (a pathological but
 # possible root placement) + a non-json stray
 defroot = wf_store._default_root()
@@ -977,12 +985,14 @@ FAV_POST = H[("POST", "/settings_hub/workflows/files-fav")]
 r = loop(FILES(FakeRequest(method="GET")))
 j = r.json()
 paths = [f["path"] for f in j["files"]]
-check("files: ok + the default root named",
-      j.get("ok") is True and j.get("root") == wfdir)
+check("files: ok + the default-layout root named",
+      j.get("ok") is True and j.get("root") == wfdir, str(j.get("root")))
 check("files: the nested files are listed with workflows/ paths",
       "workflows/sub/b.json" in paths and "workflows/sub/deep/c.json" in paths,
       json.dumps(paths))
 check("files: the root file is listed", "workflows/a.json" in paths)
+check("files: the legacy flat layout is still listed (v108 window files)",
+      "workflows/legacy_flat.json" in paths, json.dumps(paths))
 check("files: only .json files", all(p.endswith(".json") for p in paths))
 check("files: the storage presets/temp never mix in",
       not any("presets/" in p or "temp/" in p for p in paths), json.dumps(paths))
@@ -1022,18 +1032,59 @@ check("files: the ordinary workflows survive the custom-root walk",
       "workflows/a.json" in paths2 and "workflows/sub/deep/c.json" in paths2,
       json.dumps(paths2))
 check("root: userRel names the custom root relative to the user dir",
-      loop(ROOT_GET(FakeRequest(method="GET"))).json().get("userRel") == "workflows/mystore")
+      loop(ROOT_GET(FakeRequest(method="GET"))).json().get("userRel") == "default/workflows/mystore")
 loop(ROOT_POST(FakeRequest(json_body={"path": ""})))
 r = loop(ROOT_GET(FakeRequest(method="GET")))
 check("root: userRel back to the default layout",
       r.json().get("userRel") == "settings_hub/workflows", str(r.json().get("userRel")))
 
+# v109: the multi-user header - a comfy-user folder is walked FIRST, and an
+# unsafe header name is ignored entirely (no traversal, no system users)
+otherdir = os.path.join(_USER_DIR, "alice", "workflows")
+os.makedirs(otherdir, exist_ok=True)
+_touch(os.path.join(otherdir, "alice_w.json"))
+r = loop(FILES(FakeRequest(method="GET", headers={"comfy-user": "alice"})))
+paths3 = [f["path"] for f in r.json()["files"]]
+check("files: the comfy-user root is served FIRST",
+      r.json().get("root") == otherdir, str(r.json().get("root")))
+check("files: the comfy-user files + the default user both readable",
+      "workflows/alice_w.json" in paths3 and "workflows/a.json" in paths3,
+      json.dumps(paths3))
+check("files: the legacy flat file survives the header walk too",
+      "workflows/legacy_flat.json" in paths3, json.dumps(paths3))
+r = loop(FILES(FakeRequest(method="GET", headers={"comfy-user": "..\\evil"})))
+check("files: a traversal comfy-user header is ignored (default served)",
+      r.json().get("root") == wfdir, str(r.json().get("root")))
+r = loop(FILES(FakeRequest(method="GET", headers={"comfy-user": "__system"})))
+check("files: a system-user comfy-user header is ignored",
+      r.json().get("root") == wfdir, str(r.json().get("root")))
+r = loop(FILES(FakeRequest(method="GET", headers={"comfy-user": "settings_hub"})))
+check("files: the pack's own namespace is never a user root",
+      r.json().get("root") == wfdir, str(r.json().get("root")))
+r = loop(FILES(FakeRequest(method="GET", headers={"comfy-user": "ghost"})))
+check("files: a nonexistent comfy-user falls back to default",
+      r.json().get("root") == wfdir, str(r.json().get("root")))
+try:
+    shutil_ = __import__("shutil")
+    shutil_.rmtree(os.path.join(_USER_DIR, "alice"), ignore_errors=True)
+except Exception:
+    pass
+
 try:
     shutil_ = __import__("shutil")
     shutil_.rmtree(wfdir, ignore_errors=True)
+    shutil_.rmtree(legacy, ignore_errors=True)
+    shutil_.rmtree(os.path.join(_USER_DIR, "default"), ignore_errors=True)
     shutil_.rmtree(custom2, ignore_errors=True)
 except Exception:
     pass
+
+# v109: with every library gone the walk answers ok:true + files:[] - the
+# client-side contract REQUIRES that shape to fall back to the native
+# /userdata rungs (the v108 blanking bug may never repeat client-side)
+r = loop(FILES(FakeRequest(method="GET")))
+check("files: an empty library answers ok:true with an EMPTY list",
+      r.json().get("ok") is True and r.json().get("files") == [], json.dumps(r.json().get("files")))
 reset_state()
 
 # ===========================================================================

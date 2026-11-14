@@ -910,7 +910,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v108"
+WORKFLOWS_SERVER_VERSION = "v109"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -1343,10 +1343,43 @@ async def workflows_temp_delete(request):
 MAX_FILES_LISTED = 6000  # a walk must stay bounded on a huge library
 
 
-def _workflows_user_dir():
-    """The ComfyUI userdata "workflows" folder - <user>/workflows (the same
-    root the native /userdata?dir=workflows endpoint serves)."""
-    return os.path.join(_user_dir(), "workflows")
+def _workflows_user_dirs(request=None):
+    """v109: the REAL 'workflows' folders the native /userdata endpoints
+    serve. The ComfyUI user directory is NOT the userdata root itself -
+    the server nests every user inside it (user_manager.get_request_user_id:
+    'default' unless multi-user; get_public_user_directory: <user_dir>/<id>),
+    so the Workflow Browser lists <user_dir>/default/workflows. v108 walked
+    the flat <user_dir>/workflows instead, which answered an EMPTY ok:true
+    on real installs and - as the client's rung 0 - blanked the Files tab
+    and marked every preset item missing. Returns the EXISTING roots, best
+    first: the request's comfy-user folder (multi-user installs) > the
+    'default' user > the legacy flat folder (still readable - anything
+    saved into it in the v108 window must not vanish). System users
+    ('__'-prefixed) and the pack's own 'settings_hub' namespace are never
+    candidates."""
+    base = _user_dir()
+    out = []
+    seen = set()
+
+    def add(d):
+        d = os.path.abspath(d)
+        if d in seen or not os.path.isdir(d):
+            return
+        seen.add(d)
+        out.append(d)
+
+    hdr = None
+    try:
+        hdr = request.headers.get("comfy-user") if request is not None else None
+    except Exception:
+        hdr = None
+    if (isinstance(hdr, str) and hdr and not hdr.startswith(".")
+            and not hdr.startswith("__") and "/" not in hdr and "\\" not in hdr
+            and ".." not in hdr and hdr != "settings_hub"):
+        add(os.path.join(base, hdr, "workflows"))
+    add(os.path.join(base, "default", "workflows"))
+    add(os.path.join(base, "workflows"))  # the v108 flat layout, kept readable
+    return out
 
 
 def _is_inside(path, folder):
@@ -1358,19 +1391,18 @@ def _is_inside(path, folder):
     return not rel.startswith("..") and not os.path.isabs(rel) and rel != "."
 
 
-def _files_hide_dirs():
-    """The directories the Files listing must skip - the storage root's own
-    housekeeping when it lives under (or around) the workflows folder."""
+def _files_hide_dirs(wroot):
+    """The directories ONE walk root must skip - the storage root's own
+    housekeeping when it lives under (or around) that walk root."""
     hides = []
-    wroot = _workflows_user_dir()
     sroot = _workflows_root()
     if _is_inside(sroot, wroot):
-        # the storage root sits under workflows/ - hide the whole subtree
-        # (its presets/ + temp/ die with it)
+        # the storage root sits under this workflows/ root - hide the whole
+        # subtree (its presets/ + temp/ die with it)
         hides.append(sroot)
     else:
-        # the storage root CONTAINS the workflows folder (or equals it):
-        # at least keep its presets/ + temp/ housekeeping out of the list
+        # the storage root CONTAINS the walk root (or equals it): at least
+        # keep its presets/ + temp/ housekeeping out of the list
         for name in (_PRESETS_DIR_NAME, _TEMP_DIR_NAME):
             p = os.path.join(sroot, name)
             if _is_inside(p, wroot):
@@ -1380,48 +1412,59 @@ def _files_hide_dirs():
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/files")
 async def workflows_files_list(request):
-    """Every workflow file under <user>/workflows (recursive, .json only):
-    [{path: "workflows/<rel>", name, size, mtime}]. `mtime` is the unix
-    mtime (seconds) and `size` the byte size - the Files tab sorts/filters
-    by them. The storage-root housekeeping (presets/, temp/) never appears
-    here. Bounded by MAX_FILES_LISTED (truncated: true on a hit) - a huge
-    library cannot stall the panel."""
-    root = _workflows_user_dir()
-    hides = _files_hide_dirs()
+    """Every workflow file under the REAL userdata workflows folders
+    (recursive, .json only): [{path: "workflows/<rel>", name, size, mtime}].
+    `mtime` is the unix mtime (seconds) and `size` the byte size - the Files
+    tab sorts/filters by them. v109: the walk covers the per-user roots
+    (the request's comfy-user folder > 'default') + the legacy flat folder;
+    the FIRST root wins on a relative-path clash (deduped, no stacked
+    duplicates). The storage-root housekeeping (presets/, temp/) never
+    appears here. Bounded by MAX_FILES_LISTED (truncated: true on a hit) -
+    a huge library cannot stall the panel."""
+    roots = _workflows_user_dirs(request)
     out = []
+    seen_rel = set()
     truncated = False
-    try:
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames.sort()
-            dirnames[:] = [d for d in dirnames
-                           if os.path.normcase(os.path.abspath(os.path.join(dirpath, d))) not in hides]
-            filenames.sort()
-            for fn in filenames:
-                if not fn.lower().endswith(".json"):
-                    continue
-                full = os.path.join(dirpath, fn)
-                try:
-                    st = os.stat(full)
-                except OSError:
-                    continue
-                try:
-                    rel = os.path.relpath(full, root).replace(os.sep, "/")
-                except Exception:
-                    continue
-                out.append({"path": "workflows/" + rel, "name": fn,
-                            "size": int(st.st_size), "mtime": int(st.st_mtime)})
-                if len(out) >= MAX_FILES_LISTED:
-                    truncated = True
+    for root in roots:
+        if truncated:
+            break
+        hides = _files_hide_dirs(root)
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames.sort()
+                dirnames[:] = [d for d in dirnames
+                               if os.path.normcase(os.path.abspath(os.path.join(dirpath, d))) not in hides]
+                filenames.sort()
+                for fn in filenames:
+                    if not fn.lower().endswith(".json"):
+                        continue
+                    full = os.path.join(dirpath, fn)
+                    try:
+                        st = os.stat(full)
+                    except OSError:
+                        continue
+                    try:
+                        rel = os.path.relpath(full, root).replace(os.sep, "/")
+                    except Exception:
+                        continue
+                    key = "workflows/" + rel
+                    if key in seen_rel:
+                        continue  # the first root wins - no stacked duplicates
+                    seen_rel.add(key)
+                    out.append({"path": key, "name": fn,
+                                "size": int(st.st_size), "mtime": int(st.st_mtime)})
+                    if len(out) >= MAX_FILES_LISTED:
+                        truncated = True
+                        break
+                if truncated:
                     break
-            if truncated:
-                break
-    except Exception:
-        pass  # a missing/unreadable workflows folder answers an empty list
+        except Exception:
+            pass  # a missing/unreadable workflows folder answers an empty list
     return web.json_response({
         "ok": True,
         "files": out,
         "truncated": truncated,
-        "root": root,
+        "root": roots[0] if roots else os.path.join(_user_dir(), "default", "workflows"),
     })
 
 

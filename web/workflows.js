@@ -1,6 +1,20 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER (v108)
+// SettingsHub - WORKFLOWS MANAGER (v109)
 // ----------------------------------------------------------------------------
+// v109 (owner bug report: "менеджер процессов не видит процессов в пресетах
+// (красный восклицательный знак значок) и на вкладке files пусто"):
+//   REGRESSION ROOT CAUSE: ComfyUI nests userdata users INSIDE the user
+//   directory (user_manager: 'default' unless multi-user,
+//   get_public_user_directory -> <user_dir>/<id>), so the REAL workflow
+//   library lives in <user_dir>/default/workflows. The v108 py rung walked
+//   the flat <user_dir>/workflows, got nothing and answered ok:true with an
+//   EMPTY list - and as the client's rung 0 that empty "success" masked the
+//   working legacy rungs: savedFiles went empty, the Files tab went blank
+//   and every preset path-item earned the red missing mark. Fixed BOTH
+//   sides: the py rung now walks the real per-user roots (the request's
+//   comfy-user folder > 'default' > the legacy flat folder, deduped) and
+//   the client only accepts a NON-EMPTY rung-0 answer (an empty ok:true
+//   falls through to the store/native rungs forever).
 // v108 (owner plan, 4 items):
 //   1. FILES TAB = A REAL FILE MANAGER: the listing moved to the new
 //      GET /settings_hub/workflows/files route (path + SIZE + MTIME per
@@ -195,9 +209,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v108";
+const WF_WEB_VERSION = "v109";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v108";
+globalThis.__SettingsHubLoaded["workflows"] = "v109";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -549,10 +563,14 @@ function getOpenWorkflows() {
  *  folder (it lives OUTSIDE workflows/, but a hand-copied presets/ folder
  *  inside it must not surface either). */
 async function getSavedWorkflows() {
-    // v108 rung 0: the pack's own listing (size + mtime in one shot)
+    // v108 rung 0: the pack's own listing (size + mtime in one shot).
+    // v109: only a NON-EMPTY answer wins - an ok:true files:[] reply
+    // (a py that misses the real userdata layout, or a transiently
+    // unreadable folder) must fall through to the legacy rungs and can
+    // never blank the Files tab + the preset missing-marks again.
     try {
         const res = await jfetch("/settings_hub/workflows/files");
-        if (res.json?.ok && Array.isArray(res.json.files)) {
+        if (res.json?.ok && Array.isArray(res.json.files) && res.json.files.length) {
             return res.json.files.map((f) => ({
                 path: normWfPath(f.path),
                 name: f.name || baseName(f.path),
