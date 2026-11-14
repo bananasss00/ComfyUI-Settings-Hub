@@ -6,11 +6,18 @@ saves the set of open workflow tabs as a PRESET and re-applies a preset later
 (Replace / Append) - the panel works entirely through the frontend
 `app.extensionManager.workflow` adapter; the server only stores the presets.
 
-Layout under the user directory:
+Layout under the user directory (v104: ONE FILE PER PRESET - the owner's
+call: tabs are many and temp snapshots are large, and a single file made
+every transfer all-or-nothing):
 
-    <user>/settings_hub/workflows/presets.json - the preset list (array of
-        preset objects, favorite-first / updated-desc ordering is applied on
-        read); written atomically (tmp + os.replace) under an asyncio.Lock.
+    <user>/settings_hub/workflows/         - the storage root (re-pointable
+        presets/<preset-id>.json            through the settings popup)
+                                           - ONE file per preset: the FULL
+        preset object below. Copying one presets/<id>.json into another
+        machine's presets/ folder transfers exactly that preset (no
+        export/import round-trip); the file is picked up on the next read.
+        favorite-first / updated-desc ordering is applied on read; writes
+        are atomic (tmp + os.replace) under an asyncio.Lock.
 
     {
       "id": "<uuid_hex_12>",
@@ -29,7 +36,17 @@ Layout under the user directory:
 A "path" item references a workflow FILE relative to the ComfyUI workflows/
 user folder (multi-user safe: the frontend resolves it through the frontend
 store or the native /userdata endpoint). A "snapshot" item embeds the graph
-JSON of a TEMPORARY (unsaved) tab inside the preset itself.
+JSON of a TEMPORARY (unsaved) tab INSIDE the preset file itself (kept as
+is, v104) - the snapshot travels with the preset it belongs to.
+
+Migration (one-time, automatic, on the first storage touch of a root): a
+root that still holds the legacy v101-v103 single-file store gets its
+presets.json array split into presets/<id>.json files, and the original is
+renamed presets.json.bak (never deleted - the .bak is the owner's backup).
+A per-preset file that already exists WINS over the legacy copy, so a rerun
+after a partial migration never rolls the folder back. A file whose inner
+"id" disagrees with its <name>.json is ignored on read (not served), and a
+corrupt file skips itself instead of blanking the whole list.
 
 v101 also ports the v84 CUSTOM STORAGE ROOT mechanics from py/stack_store.py
 (the owner contract, AGENTS.md 5.1 rule 12): the root defaults to
@@ -61,16 +78,16 @@ can never hide the way back. Routes:
                                             {presets: [...], overwrite?}
 
 Changing the root NEVER moves or copies presets (AGENTS.md 5.1 rules 7/12):
-each location keeps its own presets.json, the new one starts empty. The
+each location keeps its own presets/ folder, the new one starts empty. The
 override file always stays in the DEFAULT user dir, so health/root answers
 carry `custom` (the active custom root or null) and `dir` (the EFFECTIVE
 root) next to `default`.
 
-Safety: preset ids are strict hex (import may carry a wider legacy charset),
-item paths are relative-without-traversal ONLY, names are control-stripped
-and capped, writes are size-capped, the preset list is written atomically and
-every mutation takes an asyncio.Lock (aiohttp handlers interleave on one
-event loop).
+Safety: preset ids are strict hex (import may carry a wider legacy charset -
+still path-safe, it IS the file name), item paths are relative-without-
+traversal ONLY, names are control-stripped and capped, writes are size-
+capped, every preset file is written atomically and every mutation takes an
+asyncio.Lock (aiohttp handlers interleave on one event loop).
 """
 import asyncio
 import json
@@ -136,7 +153,7 @@ def _default_root():
 # custom root - a broken custom path must never hide the way back) and is
 # loaded once at import; every _workflows_root() call below honours it, so
 # ALL routes switch together. Changing the root never moves presets - each
-# location keeps its own presets.json (AGENTS.md 5.1 rule 12).
+# location keeps its own presets/ folder (AGENTS.md 5.1 rule 12).
 # ---------------------------------------------------------------------------
 
 _ROOT_OVERRIDE_NAME = "workflows_root.json"
@@ -226,39 +243,145 @@ def _workflows_root():
 _load_root_override()
 
 
-def _presets_path():
-    return os.path.join(_workflows_root(), "presets.json")
+_LEGACY_NAME = "presets.json"
+_PRESETS_DIR_NAME = "presets"
+
+
+def _legacy_presets_path():
+    """The v101-v103 single-file store of the ACTIVE root - only ever read
+    by the one-time migration; after it the name lives on as .bak."""
+    return os.path.join(_workflows_root(), _LEGACY_NAME)
+
+
+def _presets_dir():
+    """The per-preset folder of the ACTIVE root (v104 layout)."""
+    return os.path.join(_workflows_root(), _PRESETS_DIR_NAME)
+
+
+def _preset_file(pid):
+    """The per-preset file of the ACTIVE root. `pid` is ALWAYS matched
+    against _ID_LOOSE_RE before this is used as a path (a strict path-safe
+    charset: [A-Za-z0-9_-]{4,64}), so the file name cannot traverse."""
+    return os.path.join(_presets_dir(), pid + ".json")
 
 
 def _ensure_dirs():
     try:
-        os.makedirs(_workflows_root(), exist_ok=True)
+        os.makedirs(_presets_dir(), exist_ok=True)
     except Exception:
         pass
 
 
 # ---------------------------------------------------------------------------
-# Preset list read/write (atomic)
+# v104 per-preset storage (ONE file per preset) + the one-time migration of
+# the legacy presets.json array. Every write is atomic (tmp + os.replace);
+# every mutation runs under the module asyncio.Lock.
 # ---------------------------------------------------------------------------
+
+def _migrate_legacy_file():
+    """Split a legacy presets.json array into per-preset files (idempotent):
+    a per-preset file that already exists WINS over the legacy copy, so a
+    rerun after a partial migration never rolls the folder back. The original
+    is renamed presets.json.bak (never deleted - the .bak is the owner's
+    backup). Any failure leaves the legacy file in place and the next read
+    retries - the routes never break on migration."""
+    legacy = _legacy_presets_path()
+    if not os.path.isfile(legacy):
+        return
+    try:
+        with open(legacy, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        legacy_list = data if isinstance(data, list) else []
+    except Exception:
+        legacy_list = []  # a corrupt legacy file has nothing to split
+    _ensure_dirs()
+    for p in legacy_list:
+        if not isinstance(p, dict):
+            continue
+        pid = p.get("id")
+        if not isinstance(pid, str) or not _ID_LOOSE_RE.match(pid):
+            # a hand-edited legacy id -> a fresh safe file name, data kept
+            pid = uuid.uuid4().hex[:12]
+            while os.path.exists(_preset_file(pid)):
+                pid = uuid.uuid4().hex[:12]
+            p["id"] = pid
+        if os.path.exists(_preset_file(pid)):
+            continue  # the folder copy wins
+        try:
+            _write_preset_file(p)
+        except Exception:
+            return
+    try:
+        os.replace(legacy, legacy + ".bak")
+    except OSError:
+        pass  # a locked file must not break the routes; the next read retries
+
 
 def _read_presets():
+    """All the presets of the ACTIVE root: scan presets/*.json, parse each,
+    keep the well-formed ones (a dict whose inner id agrees with the file
+    name - a disagreeing file is ignored, not served). A corrupt file skips
+    itself; one bad file can never blank the whole list."""
+    _migrate_legacy_file()
+    out = []
     try:
-        with open(_presets_path(), "r", encoding="utf-8") as f:
+        names = sorted(os.listdir(_presets_dir()))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(_presets_dir(), name), "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if (isinstance(data, dict) and isinstance(data.get("id"), str)
+                and data["id"] == name[:-len(".json")]):
+            out.append(data)
+    return out
+
+
+def _count_preset_files():
+    """Cheap MAX_PRESETS guard: the number of per-preset files (no parsing)."""
+    try:
+        return len([n for n in os.listdir(_presets_dir()) if n.endswith(".json")])
+    except OSError:
+        return 0
+
+
+def _load_preset_file(pid):
+    """Parse ONE per-preset file (None when missing/corrupt/id-disagreeing).
+    The id is re-validated here - every addressing path funnels through this
+    check, so a pid from the wire can never reach the filesystem unchecked."""
+    if not isinstance(pid, str) or not _ID_LOOSE_RE.match(pid):
+        return None
+    try:
+        with open(_preset_file(pid), "r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, list):
-            return [p for p in data
-                    if isinstance(p, dict) and isinstance(p.get("id"), str)]
     except Exception:
-        pass
-    return []
+        return None
+    if isinstance(data, dict) and data.get("id") == pid:
+        return data
+    return None
 
 
-def _write_presets(presets):
+def _write_preset_file(p):
+    """Atomic write of ONE preset file (tmp + os.replace)."""
     _ensure_dirs()
-    tmp = _presets_path() + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(presets, f, ensure_ascii=False)
-    os.replace(tmp, _presets_path())
+    f = _preset_file(p["id"])
+    tmp = f + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(p, fh, ensure_ascii=False)
+    os.replace(tmp, f)
+
+
+def _delete_preset_file(pid):
+    try:
+        os.unlink(_preset_file(pid))
+        return True
+    except OSError:
+        return False
 
 
 def _sorted_presets(presets):
@@ -420,14 +543,15 @@ def _new_preset(pid, name, items, active_path, fav, now):
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/health")
 async def workflows_health(request):
-    """v101 self-diagnosis for the Workflows panel (and humans): proves the
+    """Self-diagnosis for the Workflows panel (and humans): proves the
     Python routes are alive, reports where the storage lives, whether it is
     WRITABLE (a probe file is written+deleted in the root) and how many
-    presets the active root holds. Never throws: every check degrades to a
-    false/empty field."""
+    per-preset files the active root holds (v104: the file count - parsing
+    every snapshot graph just to count would be wasteful on a probe). Never
+    throws: every check degrades to a false/empty field."""
     _ensure_dirs()
     writable = _probe_writable(_workflows_root())
-    n = len(_read_presets())
+    n = _count_preset_files()
     return web.json_response({
         "ok": True,
         "version": WORKFLOWS_SERVER_VERSION,
@@ -442,7 +566,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v103"
+WORKFLOWS_SERVER_VERSION = "v104"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -462,7 +586,7 @@ async def workflows_root_set(request):
     whitespace = back to the default; otherwise an ABSOLUTE folder path
     (~ expanded, pasted quotes stripped). The folder is created and probed
     writable BEFORE the switch. Presets are NEVER moved: the new root starts
-    empty, the old one keeps its presets.json (AGENTS.md 5.1 rule 12)."""
+    empty, the old one keeps its presets/ folder (AGENTS.md 5.1 rule 12)."""
     try:
         body = await request.json()
     except Exception:
@@ -547,13 +671,13 @@ async def workflows_presets_post(request):
     pid = body.get("id") if isinstance(body.get("id"), str) else ""
     now = int(time.time())
     async with _lock:
-        presets = _read_presets()
-        existing = next((p for p in presets if p.get("id") == pid), None) if pid else None
+        _migrate_legacy_file()
         if mode in ("overwrite", "merge"):
             if not pid or not _ID_LOOSE_RE.match(pid):
                 return web.json_response(
                     {"ok": False, "error": "a valid id is required for %s" % mode},
                     status=400)
+            existing = _load_preset_file(pid)
             if existing is None:
                 return web.json_response(
                     {"ok": False, "error": "no such preset: " + pid}, status=404)
@@ -591,22 +715,24 @@ async def workflows_presets_post(request):
                 if "activePath" in fields and fields["activePath"]:
                     existing["activePath"] = fields["activePath"]
                 existing["updated"] = now
-            _write_presets(presets)
+            _write_preset_file(existing)
             return web.json_response({"ok": True, "preset": existing,
                                       "mode": mode})
-        # create
-        if len(presets) >= MAX_PRESETS:
+        # create: the folder is the store - MAX_PRESETS counts the files and
+        # a colliding id is an existing FILE, not an array entry
+        if _count_preset_files() >= MAX_PRESETS:
             return web.json_response(
                 {"ok": False, "error": "too many presets (max %d)" % MAX_PRESETS},
                 status=400)
-        if pid and _ID_RE.match(pid) and existing is None:
+        if pid and _ID_RE.match(pid) and _load_preset_file(pid) is None:
             new_id = pid          # import keeps a provided FREE id
         else:
             new_id = uuid.uuid4().hex[:12]  # a collision regenerates
+            while _load_preset_file(new_id) is not None:
+                new_id = uuid.uuid4().hex[:12]
         preset = _new_preset(new_id, fields.get("name"), items,
                              fields.get("activePath"), fields.get("fav"), now)
-        presets.append(preset)
-        _write_presets(presets)
+        _write_preset_file(preset)
     return web.json_response({"ok": True, "preset": preset, "mode": "create"})
 
 
@@ -635,8 +761,8 @@ async def workflows_preset_put(request):
             return web.json_response(
                 {"ok": False, "error": "snapshots too large"}, status=413)
     async with _lock:
-        presets = _read_presets()
-        it = next((p for p in presets if p.get("id") == pid), None)
+        _migrate_legacy_file()
+        it = _load_preset_file(pid)
         if it is None:
             return web.json_response({"ok": False, "error": "no such preset"},
                                      status=404)
@@ -652,7 +778,7 @@ async def workflows_preset_put(request):
             else:
                 it.pop("activePath", None)
         it["updated"] = int(time.time())
-        _write_presets(presets)
+        _write_preset_file(it)
     return web.json_response({"ok": True, "preset": it})
 
 
@@ -662,22 +788,25 @@ async def workflows_preset_delete(request):
     if not _ID_LOOSE_RE.match(pid):
         return web.json_response({"ok": False, "error": "bad id"}, status=400)
     async with _lock:
-        presets = _read_presets()
-        keep = [p for p in presets if p.get("id") != pid]
-        if len(keep) == len(presets):
+        _migrate_legacy_file()
+        if _load_preset_file(pid) is None:
             return web.json_response({"ok": False, "error": "no such preset"},
                                      status=404)
-        _write_presets(keep)
+        _delete_preset_file(pid)
     return web.json_response({"ok": True, "gone": pid})
 
 
 @PromptServer.instance.routes.post("/settings_hub/workflows/import")
 async def workflows_import(request):
-    """Import presets exported by ⤓ Export (one preset object or
+    """Import presets exported by the export button (one preset object or
     {presets: [...]}). Ids are regenerated on collision; body
     {overwrite: true} replaces an existing preset with the same id instead.
-    Every imported preset is fully sanitized - a bad item anywhere refuses
-    the whole import (a half-imported list would hide which parts failed)."""
+    v104 storage: every preset lands as its OWN presets/<id>.json file, so a
+    single-preset payload transfers exactly one preset (the same transfer is
+    possible without this route at all - copy the file). Import stays
+    all-or-nothing: EVERY preset is sanitized and the room is checked BEFORE
+    the first file is written - a bad item anywhere refuses the whole import
+    (a half-imported list would hide which parts failed)."""
     try:
         body = await request.json()
     except Exception:
@@ -691,25 +820,40 @@ async def workflows_import(request):
     else:
         return web.json_response(
             {"ok": False, "error": "no presets in the payload"}, status=400)
+    # Phase 1 - sanitize EVERY raw preset first (no storage touched yet).
+    plan = []
+    for raw in raw_list:
+        fields, err = _sanitize_preset_body(raw)
+        if err:
+            return web.json_response({"ok": False, "error": err}, status=400)
+        if "items" not in fields:
+            return web.json_response(
+                {"ok": False, "error": "items are required"}, status=400)
+        total = _snapshot_bytes(fields["items"])
+        if total < 0 or total > MAX_SNAPSHOT_BYTES:
+            return web.json_response(
+                {"ok": False, "error": "snapshot size"}, status=413)
+        raw_id = raw.get("id") if isinstance(raw, dict) else None
+        raw_id = raw_id if isinstance(raw_id, str) else ""
+        plan.append((raw_id, fields))
     now = int(time.time())
     async with _lock:
-        presets = _read_presets()
+        _migrate_legacy_file()
+        # Phase 2 - the room check counts every NEW file the import would
+        # add (overwrite-in-place adds none) BEFORE the first write.
+        fresh = 0
+        for raw_id, _fields in plan:
+            exists = bool(raw_id) and _load_preset_file(raw_id) is not None
+            if not (exists and overwrite):
+                fresh += 1
+        if _count_preset_files() + fresh > MAX_PRESETS:
+            return web.json_response(
+                {"ok": False, "error": "too many presets (max %d)"
+                 % MAX_PRESETS}, status=400)
+        # Phase 3 - apply, one file per preset.
         imported = []
-        for raw in raw_list:
-            fields, err = _sanitize_preset_body(raw)
-            if err:
-                return web.json_response({"ok": False, "error": err}, status=400)
-            if "items" not in fields:
-                return web.json_response(
-                    {"ok": False, "error": "items are required"}, status=400)
-            total = _snapshot_bytes(fields["items"])
-            if total < 0 or total > MAX_SNAPSHOT_BYTES:
-                return web.json_response(
-                    {"ok": False, "error": "snapshot size"}, status=413)
-            raw_id = raw.get("id") if isinstance(raw, dict) else None
-            raw_id = raw_id if isinstance(raw_id, str) else ""
-            existing = next((p for p in presets if p.get("id") == raw_id), None) \
-                if raw_id else None
+        for raw_id, fields in plan:
+            existing = _load_preset_file(raw_id) if raw_id else None
             if existing is not None and overwrite:
                 existing["items"] = fields["items"]
                 if fields.get("name"):
@@ -722,21 +866,20 @@ async def workflows_import(request):
                 if "fav" in fields:
                     existing["fav"] = fields["fav"]
                 existing["updated"] = now
+                _write_preset_file(existing)
                 imported.append(existing)
                 continue
-            if len(presets) >= MAX_PRESETS:
-                return web.json_response(
-                    {"ok": False, "error": "too many presets (max %d)"
-                     % MAX_PRESETS}, status=400)
-            if raw_id and _ID_LOOSE_RE.match(raw_id) and existing is None:
+            if raw_id and _ID_LOOSE_RE.match(raw_id) \
+                    and _load_preset_file(raw_id) is None:
                 new_id = raw_id  # a legacy/loose id is kept when it is FREE
             else:
                 new_id = uuid.uuid4().hex[:12]
+                while _load_preset_file(new_id) is not None:
+                    new_id = uuid.uuid4().hex[:12]
             preset = _new_preset(new_id, fields.get("name"), fields["items"],
                                  fields.get("activePath"), fields.get("fav"),
                                  now)
-            presets.append(preset)
+            _write_preset_file(preset)
             imported.append(preset)
-        _write_presets(presets)
     return web.json_response({"ok": True, "imported": len(imported),
                               "presets": imported})

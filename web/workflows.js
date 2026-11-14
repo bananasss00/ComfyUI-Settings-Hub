@@ -1,6 +1,19 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER (v103)
+// SettingsHub - WORKFLOWS MANAGER (v104)
 // ----------------------------------------------------------------------------
+// v104 (owner decision on the storage layout):
+//   ONE FILE PER PRESET on the server - presets/<id>.json inside the storage
+//   root instead of the single presets.json array (tabs are many, temp
+//   snapshots are large, and a single file made every transfer
+//   all-or-nothing). Copying one presets/<id>.json into another machine's
+//   presets/ folder transfers exactly that preset - the file is picked up on
+//   the next read, no export/import round-trip. The temp-snapshot graphs
+//   STAY EMBEDDED INSIDE the preset file (as they were); the legacy
+//   v101-v103 presets.json is split into per-preset files by a one-time
+//   automatic migration that renames the original to presets.json.bak
+//   (never deleted). The routes and payloads are UNCHANGED - only the
+//   server-side layout moved, so the panel code needed no logic fixes.
+//
 // v103 (owner feedback round 2):
 //   1. the resize GRIP of the stack/chat panels now wears the workflows
 //      marker (the border corner + hover highlight) - styles.css;
@@ -66,10 +79,11 @@
 // {ok:false, ...} with a readable toast - the panel degrades, ComfyUI never
 // breaks.
 //
-// Storage: py/workflows_store.py - <user>/settings_hub/workflows/
-// presets.json by default, re-pointable. The panel probes
-// /settings_hub/workflows/health first and names the exact problem when the
-// routes are missing (an old py/ = update the FULL pack).
+// Storage: py/workflows_store.py - <user>/settings_hub/workflows/ with ONE
+// file per preset (presets/<id>.json, v104) by default, the root is
+// re-pointable. The panel probes /settings_hub/workflows/health first and
+// names the exact problem when the routes are missing (an old py/ = update
+// the FULL pack).
 // ============================================================================
 
 import { app } from "../../scripts/app.js";
@@ -80,7 +94,7 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // of the LAST functional change of this file - the entry's EXPECTED manifest
 // verifies it.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v103";
+globalThis.__SettingsHubLoaded["workflows"] = "v104";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -1637,6 +1651,7 @@ async function onBodyClick(e) {
             if (p) {
                 const ok = await copyText(JSON.stringify(p, null, 2));
                 localToast(ok ? "Preset '" + (p.name || "") + "' exported - JSON is in the clipboard"
+                    + " (it also lives as presets/" + p.id + ".json in the storage folder)"
                     : "Could not copy - see F12");
             }
             return;
@@ -2221,7 +2236,8 @@ function openWfSettingsPop() {
         `<button type="button" class="hub-cs-chip" data-wf-btn="rootdef">default</button></span></div>` +
         `<div class="hub-cs-info" data-wf="rootinfo"></div>` +
         `<div class="hub-cs-hint">Enter applies the folder, Esc reverts it. Switching the folder NEVER moves ` +
-        `presets - each location keeps its own presets.json; the root choice itself lives in the DEFAULT ` +
+        `presets - each location keeps its own presets/ folder (ONE file per preset: ` +
+        `presets/&lt;id&gt;.json - copy a file to transfer that preset); the root choice itself lives in the DEFAULT ` +
         `user folder (workflows_root.json). 🗑 on a preset card deletes it (click twice). Hidden panel: ` +
         `the mini panel (🗂) or ComfyUI Settings → SettingsHub → 'Mini panel'.</div>`;
     document.body.appendChild(pop);

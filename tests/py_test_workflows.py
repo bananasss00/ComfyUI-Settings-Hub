@@ -1,5 +1,5 @@
-"""tests/py_test_workflows.py - offline checks for the workflows routes (v101 storage,
-v103 bumps the pack version stamp together with the entry).
+"""tests/py_test_workflows.py - offline checks for the workflows routes (v104
+per-preset storage + the legacy migration, v103 bumped the pack version).
 
 Runs WITHOUT ComfyUI: `server`, `aiohttp` and `folder_paths` are stubbed in
 sys.modules before the module under test is imported, so the route
@@ -7,8 +7,19 @@ registrars only record their handlers. Then the handlers are called directly
 with fake aiohttp-style request objects.
 
 Covers py/workflows_store.py:
+  * v104 LAYOUT: every preset is its OWN presets/<id>.json file inside the
+    storage root (the single-file presets.json is gone); snapshots stay
+    EMBEDDED in the preset file; copying a file into presets/ (the transfer
+    scenario) makes it appear on the next read; a file whose inner id
+    disagrees with its name is ignored; a corrupt file skips itself without
+    blanking the list; DELETE removes the file
+  * the ONE-TIME MIGRATION: a legacy presets.json array is split into
+    per-preset files, the original is renamed presets.json.bak (kept, not
+    deleted); the folder copy wins over the legacy one (rerun-safe);
+    hand-edited legacy ids get fresh safe names; a NEW create after the
+    migration never resurrects presets.json
   * GET  /settings_hub/workflows/health  - version matches the source
-    constant, writable, the preset counter
+    constant, writable, the per-preset file counter
   * GET/POST /settings_hub/workflows/root - the v84 root mechanics:
     - 400 on a relative path, a missing / non-string `path`, an unwritable
       folder
@@ -16,9 +27,9 @@ Covers py/workflows_store.py:
     - the override file is saved in the DEFAULT user dir (never inside the
       custom root)
     - data isolation: a preset saved under the custom root lands ONLY in the
-      custom presets.json
+      custom presets/ folder
     - {"path": ""} returns to the default and leaves the old custom
-      presets.json untouched
+      presets/ folder untouched
     - health/root reflect `custom` and the effective `dir`
   * preset CRUD:
     - create (path + snapshot items), path validation (../escape refused),
@@ -27,7 +38,7 @@ Covers py/workflows_store.py:
     - PUT  /preset/{pid} (rename, items, fav)
     - DELETE /preset/{pid} (+ 404 on a second delete)
     - POST /import (single + list, fresh ids on collision, overwrite flag,
-      bad payload refused)
+      bad payload refused - all-or-nothing even with per-file writes)
   * limits: MAX_PRESETS, MAX_ITEMS_PER_PRESET, the snapshot byte budget
 
 Run: python3 tests/py_test_workflows.py   (exit 0 = all good)
@@ -188,20 +199,38 @@ PPUT = H[("PUT", "/settings_hub/workflows/preset/{pid}")]
 PDEL = H[("DELETE", "/settings_hub/workflows/preset/{pid}")]
 
 
+def presets_dir(custom=None):
+    """The v104 per-preset folder of the given (or active-default) root."""
+    base = custom or os.path.join(_USER_DIR, "settings_hub", "workflows")
+    return os.path.join(base, "presets")
+
+
+def preset_file(pid, custom=None):
+    return os.path.join(presets_dir(custom), pid + ".json")
+
+
 def presets_file(custom=None):
+    """The LEGACY v101-v103 single-file store (only the migration tests use
+    it now)."""
     base = custom or os.path.join(_USER_DIR, "settings_hub", "workflows")
     return os.path.join(base, "presets.json")
 
 
 def reset_state():
-    """Back to the default root, an empty preset list, a fresh user dir."""
+    """Back to the default root, an EMPTY preset folder, no legacy file."""
     wf_store._root_custom = None
+    import shutil
     try:
-        os.unlink(wf_store._root_override_path())
+        shutil.rmtree(presets_dir())
     except OSError:
         pass
+    for f in (presets_file(), presets_file() + ".bak"):
+        try:
+            os.unlink(f)
+        except OSError:
+            pass
     try:
-        os.unlink(presets_file())
+        os.unlink(wf_store._root_override_path())
     except OSError:
         pass
 
@@ -216,7 +245,7 @@ check("health: ok", r.status == 200 and j.get("ok") is True)
 check("health: version matches the source constant",
       j.get("version") == wf_store.WORKFLOWS_SERVER_VERSION,
       "%s vs %s" % (j.get("version"), wf_store.WORKFLOWS_SERVER_VERSION))
-check("health: version is v103", j.get("version") == "v103", str(j.get("version")))
+check("health: version is v104", j.get("version") == "v104", str(j.get("version")))
 check("health: default dir", j.get("dir") == os.path.join(_USER_DIR, "settings_hub", "workflows"), j.get("dir"))
 check("health: no custom root yet", j.get("custom") is None)
 check("health: writable", j.get("writable") is True)
@@ -275,14 +304,18 @@ with open(ovr, "r", encoding="utf-8") as f:
     ovr_data = json.load(f)
 check("root POST: override content", ovr_data.get("custom") == os.path.normpath(custom))
 
-# a preset saved under the custom root lands ONLY there
+# a preset saved under the custom root lands ONLY there (its OWN file in
+# the custom presets/ folder)
 r = loop(PPOST(FakeRequest(json_body={
     "name": "CustomRootPreset",
     "items": [{"kind": "path", "path": "workflows/a.json"}],
 })))
 check("custom: preset created", r.status == 200 and r.json().get("ok") is True)
-check("custom: presets.json exists in the CUSTOM root", os.path.isfile(presets_file(custom)))
-check("custom: the DEFAULT presets.json is NOT touched", not os.path.isfile(presets_file()))
+CUSTOM_PID = r.json()["preset"]["id"]
+check("custom: presets/<id>.json exists in the CUSTOM root",
+      os.path.isfile(preset_file(CUSTOM_PID, custom)), preset_file(CUSTOM_PID, custom))
+check("custom: the DEFAULT presets/ folder is NOT touched", not os.path.isdir(presets_dir()))
+check("custom: no legacy presets.json either", not os.path.isfile(presets_file(custom)))
 r = loop(HEALTH(FakeRequest(method="GET")))
 j = r.json()
 check("health: custom + dir follow the active root",
@@ -295,11 +328,12 @@ wf_store._load_root_override()
 check("override: reload honours the saved custom root",
       wf_store._root_custom == os.path.normpath(custom))
 
-# {"path": ""} -> back to the default, the custom presets.json stays
+# {"path": ""} -> back to the default, the custom presets/ folder stays
 r = loop(ROOT_POST(FakeRequest(json_body={"path": "   "})))
 j = r.json()
 check("root POST: empty path -> back to default", j.get("ok") is True and j.get("custom") is None)
-check("root POST: the old custom presets.json is untouched", os.path.isfile(presets_file(custom)))
+check("root POST: the old custom presets/ folder is untouched",
+      os.path.isfile(preset_file(CUSTOM_PID, custom)))
 r = loop(PGET(FakeRequest(method="GET")))
 check("default: reads empty again", r.json().get("presets") == [])
 r = loop(HEALTH(FakeRequest(method="GET")))
@@ -314,6 +348,111 @@ if os.path.isdir(home) and os.access(home, os.W_OK):
     reset_state()
     import shutil
     shutil.rmtree(os.path.join(home, "shub-wf-tilde-probe"), ignore_errors=True)
+
+reset_state()
+
+# ===========================================================================
+print("== v104 per-preset files + the one-time legacy migration ==")
+reset_state()
+
+# A root that still holds the LEGACY v101-v103 presets.json (a fresh install
+# of the old build over the new one - the typical upgrade path)
+LEGACY = [
+    {"id": "aaa111bbb222", "name": "Legacy One", "created": 1, "updated": 20,
+     "fav": True,
+     "items": [{"kind": "path", "path": "workflows/l1.json"},
+               {"kind": "snapshot", "name": "Temp tab",
+                "graph": {"nodes": [{"id": 1}], "links": []}}]},
+    {"id": "ccc333ddd444", "name": "Legacy Two", "created": 2, "updated": 30,
+     "fav": False,
+     "items": [{"kind": "path", "path": "workflows/l2.json"}]},
+    # a hand-edited legacy id (never written by the routes) - must survive
+    {"id": "bad id!", "name": "Weird id", "created": 3, "updated": 40,
+     "fav": False,
+     "items": [{"kind": "path", "path": "workflows/l3.json"}]},
+]
+os.makedirs(os.path.dirname(presets_file()), exist_ok=True)
+with open(presets_file(), "w", encoding="utf-8") as f:
+    json.dump(LEGACY, f)
+
+r = loop(PGET(FakeRequest(method="GET")))  # the first read TRIGGERS the migration
+lst = r.json().get("presets", [])
+check("migration: all 3 legacy presets served", len(lst) == 3, str(len(lst)))
+check("migration: fav-first order kept", lst[0]["name"] == "Legacy One", str([p["name"] for p in lst]))
+check("migration: per-preset file for the first", os.path.isfile(preset_file("aaa111bbb222")))
+check("migration: per-preset file for the second", os.path.isfile(preset_file("ccc333ddd444")))
+weird = next((p for p in lst if p["name"] == "Weird id"), None)
+check("migration: the weird id got a FRESH safe file name",
+      weird is not None and weird["id"] != "bad id!"
+      and re.fullmatch(r"[a-f0-9]{8,32}", weird["id"] or "") is not None
+      and os.path.isfile(preset_file(weird["id"])), str(weird))
+check("migration: presets.json is GONE (renamed)", not os.path.isfile(presets_file()))
+check("migration: presets.json.bak exists (kept, never deleted)",
+      os.path.isfile(presets_file() + ".bak"))
+with open(presets_file() + ".bak", "r", encoding="utf-8") as f:
+    bak = json.load(f)
+check("migration: the .bak holds the ORIGINAL array",
+      isinstance(bak, list) and len(bak) == 3 and bak[0]["id"] == "aaa111bbb222")
+with open(preset_file("aaa111bbb222"), "r", encoding="utf-8") as f:
+    pf = json.load(f)
+check("migration: the snapshot stays INSIDE the preset file",
+      any(it.get("kind") == "snapshot" and it.get("graph") == {"nodes": [{"id": 1}], "links": []}
+          for it in pf.get("items", [])), json.dumps(pf.get("items", []))[:120])
+
+# the migration is RERUN-SAFE: restoring the legacy file must not roll the
+# folder back (the folder copy wins) and must not duplicate anything
+with open(presets_file(), "w", encoding="utf-8") as f:
+    json.dump([dict(LEGACY[0], name="ROLLBACK-ATTEMPT", updated=999)], f)
+r = loop(PGET(FakeRequest(method="GET")))
+lst = r.json().get("presets", [])
+check("migration: rerun - the folder copy wins over the legacy one",
+      any(p["id"] == "aaa111bbb222" and p["name"] == "Legacy One" for p in lst),
+      str([p["name"] for p in lst]))
+check("migration: rerun - no duplicates", len(lst) == 3, str(len(lst)))
+check("migration: rerun - the legacy file renamed to .bak again",
+      not os.path.isfile(presets_file()) and os.path.isfile(presets_file() + ".bak"))
+
+# a NEW create after the migration must NOT resurrect presets.json
+r = loop(PPOST(FakeRequest(json_body={
+    "name": "After Migration", "items": [{"kind": "path", "path": "workflows/n.json"}]})))
+NEW_PID = r.json()["preset"]["id"]
+check("migration: create lands as its own file",
+      os.path.isfile(preset_file(NEW_PID)) and not os.path.isfile(presets_file()))
+
+# the transfer scenario: copy a preset FILE from another machine (a dict with
+# a matching id) into presets/ -> it appears on the next read
+TRANSFER = {"id": "feedface0000", "name": "Copied From Afar", "created": 9,
+            "updated": 9, "fav": False,
+            "items": [{"kind": "path", "path": "workflows/copy.json"}]}
+with open(preset_file("feedface0000"), "w", encoding="utf-8") as f:
+    json.dump(TRANSFER, f)
+r = loop(PGET(FakeRequest(method="GET")))
+check("transfer: a copied file appears on the next read",
+      any(p["id"] == "feedface0000" and p["name"] == "Copied From Afar"
+          for p in r.json().get("presets", [])))
+
+# a file whose inner id DISAGREES with its name is ignored (never served)
+with open(preset_file("feedface1111"), "w", encoding="utf-8") as f:
+    json.dump(dict(TRANSFER, id="feedface2222"), f)
+r = loop(PGET(FakeRequest(method="GET")))
+check("layout: an id/name mismatch is ignored",
+      not any(p["id"] in ("feedface1111", "feedface2222") for p in r.json().get("presets", [])))
+os.unlink(preset_file("feedface1111"))
+
+# a corrupt file skips itself without blanking the list
+with open(preset_file("deadbeefdead"), "w", encoding="utf-8") as f:
+    f.write("{nope")
+r = loop(PGET(FakeRequest(method="GET")))
+lst = r.json().get("presets", [])
+check("layout: a corrupt file does not blank the list",
+      len(lst) == 5 and not any(p["id"] == "deadbeefdead" for p in lst), str(len(lst)))
+os.unlink(preset_file("deadbeefdead"))
+
+# DELETE removes the per-preset FILE (not an array entry)
+r = loop(PDEL(FakeRequest(match_info={"pid": NEW_PID})))
+check("layout: DELETE ok", r.json().get("ok") is True)
+check("layout: DELETE removed the file",
+      not os.path.exists(preset_file(NEW_PID)))
 
 reset_state()
 
@@ -348,6 +487,17 @@ check("create: fav stored", p1.get("fav") is True)
 check("create: timestamps", isinstance(p1.get("created"), int) and isinstance(p1.get("updated"), int))
 
 PID1 = p1["id"]
+
+# v104: the create landed as its OWN per-preset file with the snapshot
+# INSIDE it, and no legacy presets.json was written
+check("create: its own presets/<id>.json exists", os.path.isfile(preset_file(PID1)))
+check("create: no legacy presets.json resurrected", not os.path.isfile(presets_file()))
+with open(preset_file(PID1), "r", encoding="utf-8") as f:
+    _pf = json.load(f)
+check("create: the file holds the FULL preset object (snapshot embedded)",
+      _pf.get("id") == PID1 and _pf.get("name") == "Flux Inpaint"
+      and any(it.get("kind") == "snapshot" and isinstance(it.get("graph"), dict)
+              for it in _pf.get("items", [])))
 
 # bad paths refuse the whole save
 for bad in ("../escape.json", "/abs/path.json", "C:\\\\winpath.json", "", "..", "a/../b.json", None):
@@ -477,6 +627,8 @@ check("import: overwrite replaced the content",
       and j["presets"][0]["items"][0]["path"] == "workflows/y.json")
 r = loop(PGET(FakeRequest(method="GET")))
 check("import: no duplicates after overwrite", len(r.json().get("presets", [])) == 2)
+check("import: each preset landed as its OWN file",
+      os.path.isfile(preset_file("deadbeef1234")) and os.path.isfile(preset_file(nid)))
 
 # bad payloads refuse
 r = loop(H[("POST", "/settings_hub/workflows/import")](FakeRequest(json_body={"nope": 1})))
@@ -486,6 +638,18 @@ check("import: bad json -> 400", r.status == 400, str(r.status))
 r = loop(H[("POST", "/settings_hub/workflows/import")](FakeRequest(json_body={
     "presets": [{"name": "Bad", "items": [{"kind": "path", "path": "../x.json"}]}]})))
 check("import: bad item path refuses", r.status == 400, str(r.status))
+# v104 all-or-nothing holds with per-file writes: the refused import (a bad
+# preset AFTER a good one in the same payload) must not leave ANY new file
+before = sorted(os.listdir(presets_dir()))
+r = loop(H[("POST", "/settings_hub/workflows/import")](FakeRequest(json_body={
+    "presets": [
+        {"name": "GoodOne", "items": [{"kind": "path", "path": "workflows/g.json"}]},
+        {"name": "BadOne", "items": [{"kind": "path", "path": "../escape.json"}]},
+    ]})))
+after = sorted(os.listdir(presets_dir()))
+check("import: a mixed good+bad payload refuses", r.status == 400, str(r.status))
+check("import: NOTHING landed from the refused import", before == after,
+      "%s vs %s" % (before, after))
 
 # ===========================================================================
 print("== limits ==")

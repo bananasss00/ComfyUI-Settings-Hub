@@ -285,8 +285,8 @@ phase("PA build v95 + version manifest");
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat v98 + renderer v94",
         entrySrc.includes('"chat": "v98"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the v103 workflows round",
-        entrySrc.includes("web build: v103"));
+    check("PA the banner names the v104 workflows storage",
+        entrySrc.includes("web build: v104"));
 }
 
 // ---------------------------------------------------------------------------

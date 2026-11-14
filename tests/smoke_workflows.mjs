@@ -45,6 +45,10 @@
 //       to paint over the saved list), the save-form Select all / Deselect
 //       all dynamic toggle, the Open-tab multi-word filter (rows + status +
 //       Esc clears), the grip-marker parity in styles.css (stack/chat = wf).
+//   WK  v104: ONE FILE PER PRESET on the server - the storage docs name
+//       presets/<id>.json (module header + the storage-folder hint), the
+//       per-preset export toast names the server file, and the py store
+//       carries the migration (presets.json -> per-preset files -> .bak).
 //
 // Run from the extension root:  node tests/smoke_workflows.mjs  (jsdom)
 // ============================================================================
@@ -841,13 +845,16 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v103", /"workflows":\s*"v103"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v104", /"workflows":\s*"v104"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v103", ENTRY_SRC.includes("web build: v103 - WORKFLOWS MANAGER FEEDBACK ROUND 2"));
-check("styles.css?v=103", ENTRY_SRC.includes("styles.css?v=103"));
-check("the module self-reports v103",
+check("the entry banner names v104", ENTRY_SRC.includes("web build: v104 - WORKFLOWS STORAGE: ONE FILE PER PRESET"));
+check("styles.css?v=104", ENTRY_SRC.includes("styles.css?v=104"));
+check("the module self-reports v104",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v103"'));
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v104"'));
+check("py stamp bumps together (v104)",
+    fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
+        .includes('WORKFLOWS_SERVER_VERSION = "v104"'));
 check("the workflows module uses the --sh-fs scale (v90 rule)",
     (fs.readFileSync(path.join(WEB, "styles.css"), "utf8").match(/hub-wf-panel[\s\S]{0,400}?--sh-fs/) !== null));
 check("the modal guard hides the workflows panel",
@@ -1230,6 +1237,50 @@ await settle();
     check("WJ grips: stack/chat carry the wf marker (border corner + hover)",
         wfGrip && stackGrip && chatGrip);
     hooks.resetRecent();
+}
+
+// ===========================================================================
+// --- 10) WK v104: ONE FILE PER PRESET - the source contract
+{
+    const wfSrc = fs.readFileSync(path.join(WEB, "workflows.js"), "utf8");
+    const pySrc = fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8");
+
+    // 10a) the frontend documents the new layout where the owner looks
+    check("WK header: the module changelog names presets/<id>.json (v104 block)",
+        wfSrc.includes("ONE FILE PER PRESET on the server - presets/<id>.json inside the storage"));
+    check("WK header: the Storage footer names the per-preset folder",
+        /Storage: py\/workflows_store\.py - <user>\/settings_hub\/workflows\/ with ONE\n\/\/ file per preset \(presets\/<id>\.json, v104\)/.test(wfSrc));
+    check("WK popup: the storage-folder hint names the per-preset files",
+        wfSrc.includes("each location keeps its own presets/ folder (ONE file per preset:"));
+    check("WK export: the per-preset toast names the server file (the transfer hint)",
+        wfSrc.includes('+ " (it also lives as presets/" + p.id + ".json in the storage folder)"'));
+
+    // 10b) the py store: the folder IS the store now
+    check("WK py: _presets_dir + _preset_file build the per-preset paths",
+        pySrc.includes('_PRESETS_DIR_NAME = "presets"') &&
+        pySrc.includes("os.path.join(_presets_dir(), pid + \".json\")"));
+    check("WK py: the legacy presets.json is NEVER written again (reader only)",
+        pySrc.includes("_legacy_presets_path") &&
+        !pySrc.includes("def _write_presets(") &&
+        pySrc.includes("def _write_preset_file("));
+    check("WK py: the migration renames the legacy file to .bak (never deletes)",
+        pySrc.includes("os.replace(legacy, legacy + \".bak\")"));
+    check("WK py: the folder copy wins on a migration rerun (rollback-safe)",
+        pySrc.includes("# the folder copy wins"));
+    check("WK py: a read requires the inner id to agree with the file name",
+        pySrc.includes('data["id"] == name[:-len(".json")]'));
+    check("WK py: every mutation funnels the id through _load_preset_file",
+        ["existing = _load_preset_file(pid)",
+         "it = _load_preset_file(pid)",
+         "if _load_preset_file(pid) is None"].every((s) => pySrc.includes(s)));
+    check("WK py: snapshots stay INSIDE the preset file (no sidecar graph files)",
+        pySrc.includes("INSIDE the preset file itself (kept as") &&
+        !pySrc.includes("snapshotGraphs"));
+    check("WK py: MAX_PRESETS counts the FILES (no array to count anymore)",
+        pySrc.includes("if _count_preset_files() >= MAX_PRESETS:"));
+    check("WK py: the import stays all-or-nothing (sanitize ALL before the first write)",
+        pySrc.includes("Phase 1 - sanitize EVERY raw preset first") &&
+        pySrc.indexOf("# Phase 1") < pySrc.indexOf("async with _lock:\n        _migrate_legacy_file()\n        # Phase 2"));
 }
 
 // ===========================================================================
