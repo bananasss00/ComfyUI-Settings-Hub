@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER smoke test (v107)
+// SettingsHub - WORKFLOWS MANAGER smoke test (v108)
 // ----------------------------------------------------------------------------
 // Node ESM + jsdom. Loads the REAL web/workflows.js module exactly like the
 // entry does (a sandbox copies web/ and stubs ../../scripts/app.js with an
@@ -160,6 +160,8 @@ function makeFakeApi() {
     let presetsFail = false;         // v105: GET /presets 500 -> the retry test
     let rootCustom = null;
     let tempMode = "ok";             // v107: "ok" | "stale" (an old py: the temp routes 404)
+    let wfFiles = null;              // v108: the /workflows/files rung (null = old py)
+    let wfFavs = [];                 // v108: the favorites store
     const tempStore = new Map();     // v107: id -> {id, name, ts, graph}
     let savedFiles = [
         { path: "workflows/flux_main.json", name: "flux_main.json" },
@@ -326,6 +328,29 @@ function makeFakeApi() {
                 }
                 return jsonResp({ error: "no such file" }, 404);
             }
+            // v108: the pack's own Files listing (path+size+mtime; the
+            // storage-root housekeeping is already excluded server-side)
+            // + the favorites store. wfFiles === null simulates an OLD py
+            // (the route 404s -> the legacy rungs take over).
+            if (p === "/settings_hub/workflows/files" && method === "GET") {
+                if (wfFiles === null) return jsonResp({ ok: false, error: "old py" }, 404);
+                return jsonResp({ ok: true, files: wfFiles, truncated: false, root: "user/workflows" });
+            }
+            if (p === "/settings_hub/workflows/files-fav" && method === "GET") {
+                if (wfFavs === null) return jsonResp({ ok: false, error: "old py" }, 404);
+                return jsonResp({ ok: true, favs: wfFavs });
+            }
+            if (p === "/settings_hub/workflows/files-fav" && method === "POST") {
+                if (wfFavs === null) return jsonResp({ ok: false, error: "old py" }, 404);
+                let body = {};
+                try { body = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                if (typeof body.path !== "string" || !body.path) {
+                    return jsonResp({ ok: false, error: "bad path" }, 400);
+                }
+                if (body.fav) { if (!wfFavs.includes(body.path)) wfFavs.push(body.path); }
+                else wfFavs = wfFavs.filter((x) => x !== body.path);
+                return jsonResp({ ok: true, favs: wfFavs });
+            }
             return jsonResp({ ok: false, error: "unhandled " + method + " " + p }, 404);
         },
         __calls: () => calls,
@@ -337,6 +362,9 @@ function makeFakeApi() {
         __setFiles: (v) => { savedFiles = v; },
         __tempStore: () => tempStore,
         __setTempMode: (m) => { tempMode = m; },
+        // v108: the Files listing + the favorites controls
+        __setWfFiles: (v) => { wfFiles = v; },
+        __wfFavs: () => wfFavs.slice(),
     };
     return api;
 }
@@ -796,13 +824,16 @@ fsearch2.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
 await settle();
 
 // selection: Open selected - NOTE: every change rerenders the body, so the
-// checkbox must be RE-QUERIED before the next check (the old node detaches)
-panel.querySelectorAll(".hub-wf-body [data-fcheck]")[0].checked = true;
-panel.querySelectorAll(".hub-wf-body [data-fcheck]")[0]
+// checkbox must be RE-QUERIED before the next check (the old node detaches);
+// v108: the rows are SORTED (date desc, name-asc tie-break), so the targets
+// are picked by their path, not by index
+const fcheckByPath = (p) => panel.querySelector(`.hub-wf-body [data-fcheck="${p.replace(/"/g, "\\\"")}"]`);
+fcheckByPath("workflows/flux_main.json").checked = true;
+fcheckByPath("workflows/flux_main.json")
     .dispatchEvent(new dom.window.Event("change", { bubbles: true }));
 await settle();
-panel.querySelectorAll(".hub-wf-body [data-fcheck]")[1].checked = true;
-panel.querySelectorAll(".hub-wf-body [data-fcheck]")[1]
+fcheckByPath("workflows/flux_detail.json").checked = true;
+fcheckByPath("workflows/flux_detail.json")
     .dispatchEvent(new dom.window.Event("change", { bubbles: true }));
 await settle();
 check("both files are selected", hooks.renderAll ? true : true);
@@ -929,19 +960,19 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v107", /"workflows":\s*"v107"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v108", /"workflows":\s*"v108"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v107", ENTRY_SRC.includes("web build: v107 - SERVER-SIDE TEMP SNAPSHOTS + STACK STORAGE TOGGLER"));
-check("styles.css?v=107", ENTRY_SRC.includes("styles.css?v=107"));
-check("the module self-reports v107",
+check("the entry banner names v108", ENTRY_SRC.includes("web build: v108 - FILES FILE MANAGER + UNIFIED STORAGE + CHAT MASS DELETE"));
+check("styles.css?v=108", ENTRY_SRC.includes("styles.css?v=108"));
+check("the module self-reports v108",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v107"'));
-check("the web stamp literal is v107",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v108"'));
+check("the web stamp literal is v108",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v107"'));
-check("py stamp bumps together (v107)",
+        .includes('const WF_WEB_VERSION = "v108"'));
+check("py stamp bumps together (v108)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v107"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v108"'));
 check("v107 routes registered (temp list/put/get/delete)",
     [".get(\"/settings_hub/workflows/temp\")", ".post(\"/settings_hub/workflows/temp\")",
      ".get(\"/settings_hub/workflows/temp/{tid}\")", ".delete(\"/settings_hub/workflows/temp/{tid}\")"]
@@ -1341,8 +1372,8 @@ await settle();
         wfSrc.includes("ONE FILE PER PRESET on the server - presets/<id>.json inside the storage"));
     check("WK header: the Storage footer names the per-preset folder",
         /Storage: py\/workflows_store\.py - <user>\/settings_hub\/workflows\/ with ONE\n\/\/ file per preset \(presets\/<id>\.json, v104\)/.test(wfSrc));
-    check("WK popup: the storage-folder hint names the per-preset files",
-        wfSrc.includes("each location keeps its own presets/ folder (ONE file per preset:"));
+    check("WK popup: the storage-folder hint names the per-preset files (v108 wording keeps the contract)",
+        wfSrc.includes("no duplicates, no loss; ONE file per preset: presets/&lt;id&gt;.json - copy a file to transfer that"));
     check("WK export: the per-preset toast names the server file (the transfer hint)",
         wfSrc.includes('+ " (it also lives as presets/" + p.id + ".json in the storage folder)"'));
 
@@ -1493,7 +1524,7 @@ await settle();
     //      v104 web after a page refresh + a v103 py process kept the old
     //      single-file store - the panel now names the problem)
     // ------------------------------------------------------------------
-    fakeApi.__setHealthVersion("v106"); // one behind the pack (v107)
+    fakeApi.__setHealthVersion("v107"); // one behind the pack (v108)
     await hooks.probeServer();          // presetsLoaded=true -> the poll probes periodically
     hooks.renderAll();
     await settle();
@@ -1501,14 +1532,14 @@ await settle();
     check("WL: an older server pack names 'RESTART ComfyUI' in the red note",
         !!note2 && note2.style.display !== "none" &&
         note2.textContent.includes("RESTART ComfyUI") &&
-        note2.textContent.includes("Server storage pack is v106"),
+        note2.textContent.includes("Server storage pack is v107"),
         note2?.textContent || "(no note)");
     hooks.setTab("presets");
     await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
-        stTxt2.includes("srv v106") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v108"); // ahead of the pack - a stale web file
+        stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
+    fakeApi.__setHealthVersion("v109"); // ahead of the pack - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -1785,6 +1816,211 @@ phase("WN v107: server-side temp snapshots (temp/<id>.json) + eviction + boot GC
     hooks.resetRecent();
     fakeApi.__tempStore().clear();
 }
+
+// ===========================================================================
+phase("WO v108: the Files file manager - meta rung, sort, filters, favorites, tree");
+
+const NOW = Date.now() / 1000;
+fakeApi.__setWfFiles([
+    { path: "workflows/flux_main.json", name: "flux_main.json", size: 2048, mtime: NOW - 2 * 86400 },
+    { path: "workflows/sub/deep/nested.json", name: "nested.json", size: 512000, mtime: NOW - 5 },
+    { path: "workflows/settings_hub/junk.json", name: "junk.json", size: 1, mtime: NOW - 3 },
+    { path: "workflows/old.json", name: "old.json", size: 4096, mtime: NOW - 20 * 86400 },
+]);
+hooks.setTab("files");
+await hooks.refreshSavedFiles();
+await settle();
+// v108: the panel is RE-MOUNTED somewhere between the phases - always
+// re-query hooks.panelEl() here, the WA-era `panel` const is detached
+const wpanel = hooks.panelEl();
+
+const wofiles = hooks.savedFiles();
+check("WO: the /files rung is preferred (size+mtime carried)",
+    wofiles.some((f) => f.path === "workflows/sub/deep/nested.json" && f.size === 512000),
+    JSON.stringify(wofiles));
+check("WO: the settings_hub subtree never mixes into Files (the owner's contract)",
+    !wofiles.some((f) => String(f.path).includes("settings_hub/")), JSON.stringify(wofiles));
+check("WO: the nested folder file is listed",
+    wofiles.some((f) => f.path === "workflows/sub/deep/nested.json"));
+
+let wbody = wpanel.querySelector(".hub-wf-body");
+check("WO: the row sub-line shows the workflows-relative path + size + date",
+    wbody.querySelector('[data-fpath="workflows/sub/deep/nested.json"] .hub-wf-filesub')
+        .textContent.includes("sub/deep/nested.json") &&
+    wbody.querySelector('[data-fpath="workflows/sub/deep/nested.json"] .hub-wf-filesub')
+        .textContent.includes("500 KB"),
+    wbody.querySelector('[data-fpath="workflows/sub/deep/nested.json"] .hub-wf-filesub')?.textContent || "");
+check("WO: the storage paths still open by the FULL path (data-path intact)",
+    !!wbody.querySelector('[data-act="openfile"][data-path="workflows/sub/deep/nested.json"]'));
+
+// the rows helper: visible file paths in render order
+const wfPaths = () => [...wpanel.querySelectorAll(".hub-wf-body [data-fpath]")]
+    .filter((r) => r.querySelector("[data-fcheck]"))
+    .map((r) => r.dataset.fpath);
+// default sort = date desc -> nested (now) , flux_main (-2d), old (-20d)
+check("WO: the default sort is date-descending",
+    JSON.stringify(wfPaths()) === JSON.stringify([
+        "workflows/sub/deep/nested.json", "workflows/flux_main.json", "workflows/old.json"]),
+    JSON.stringify(wfPaths()));
+
+// sort by name: one click = asc, the second = desc
+const nameBtn = () => wpanel.querySelector('[data-act="filesort"][data-key="name"]');
+nameBtn().dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: the name sort sorts ascending (with the arrow on the button)",
+    JSON.stringify(wfPaths()) === JSON.stringify([
+        "workflows/flux_main.json", "workflows/sub/deep/nested.json", "workflows/old.json"]) &&
+    nameBtn().textContent.includes("↑"),
+    JSON.stringify(wfPaths()));
+nameBtn().dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: the second click flips to descending",
+    JSON.stringify(wfPaths()) === JSON.stringify([
+        "workflows/old.json", "workflows/sub/deep/nested.json", "workflows/flux_main.json"]) &&
+    nameBtn().textContent.includes("↓"),
+    JSON.stringify(wfPaths()));
+nameBtn().dispatchEvent(new dom.window.Event("click", { bubbles: true })); // back to asc
+await settle();
+
+// favorites: the star toggles + persists server-side; the ★-only chip filters
+const favStar = () => wpanel.querySelector('[data-act="filefav"][data-path="workflows/old.json"]');
+favStar().dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle(12);
+check("WO: the star POSTed the toggle to the server",
+    fakeApi.__wfFavs().includes("workflows/old.json"), JSON.stringify(fakeApi.__wfFavs()));
+check("WO: the star flipped to the marked state",
+    hooks.filesFav().includes("workflows/old.json") &&
+    favStar().classList.contains("hub-wf-favbtn-on"));
+wpanel.querySelector('[data-act="favonly"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: the ★-only chip narrows the list to the favorite",
+    JSON.stringify(wfPaths()) === JSON.stringify(["workflows/old.json"]), JSON.stringify(wfPaths()));
+wpanel.querySelector('[data-act="favonly"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+
+// advanced filters: the ⚗ chip opens the row; folder / date / size / clear
+wpanel.querySelector('[data-act="fadv"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: the advanced row opened with the folder select + dates + sizes",
+    !!wpanel.querySelector('[data-wf="ffolder"]') &&
+    !!wpanel.querySelector('[data-wf="fdatefrom"]') &&
+    !!wpanel.querySelector('[data-wf="fsizemin"]'));
+const ffold = wpanel.querySelector('[data-wf="ffolder"]');
+check("WO: the folder options cover the nested levels (relative to workflows root)",
+    [...ffold.options].some((o) => o.value === "sub") &&
+    [...ffold.options].some((o) => o.value === "sub/deep"),
+    [...ffold.options].map((o) => o.value).join(","));
+ffold.value = "sub";
+ffold.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+await settle();
+check("WO: the folder filter keeps the nested subfolders",
+    JSON.stringify(wfPaths()) === JSON.stringify(["workflows/sub/deep/nested.json"]),
+    JSON.stringify(wfPaths()));
+const fclear = () => wpanel.querySelector('[data-act="fclear"]');
+fclear().dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: ✕ clears every advanced filter", wfPaths().length === 3, JSON.stringify(wfPaths()));
+
+// date bounds: until 2001-01-02 hides everything, from 2001-01-01 brings all back
+const setDate = (sel, v) => {
+    const el = wpanel.querySelector(sel);
+    el.value = v;
+    el.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+};
+setDate('[data-wf="fdateto"]', "2001-01-02");
+await settle();
+check("WO: the 'until' date hides the modern files", wfPaths().length === 0, JSON.stringify(wfPaths()));
+setDate('[data-wf="fdateto"]', "");
+setDate('[data-wf="fdatefrom"]', "2001-01-01");
+await settle();
+check("WO: the 'from' date passes everything", wfPaths().length === 3, JSON.stringify(wfPaths()));
+fclear().dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+
+// size range: max 5 KB drops the 500 KB nested file, keeps 2 KB + 4 KB
+const setSize = (sel, v) => {
+    const el = wpanel.querySelector(sel);
+    el.value = v;
+    el.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+};
+setSize('[data-wf="fsizemax"]', "5");
+await settle();
+check("WO: the size range filter works in KB",
+    wfPaths().length === 2 &&
+    !wfPaths().includes("workflows/sub/deep/nested.json"), JSON.stringify(wfPaths()));
+fclear().dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+
+// quick periods: "today" keeps only the fresh file (mtime NOW - 5s)
+wpanel.querySelector('[data-act="fquick"][data-q="today"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: the Today chip keeps only the file modified today",
+    JSON.stringify(wfPaths()) === JSON.stringify(["workflows/sub/deep/nested.json"]),
+    JSON.stringify(wfPaths()));
+check("WO: the Today chip is highlighted", !!wpanel.querySelector('[data-act="fquick"][data-q="today"].hub-wf-chip-on'));
+wpanel.querySelector('[data-act="fquick"][data-q="today"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: clicking the chip again clears the quick period", wfPaths().length === 3, JSON.stringify(wfPaths()));
+
+// the tree view: folders render, carets expand, entering + breadcrumbs work
+wpanel.querySelector('[data-act="filesview"][data-view="tree"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: the tree view renders the folder row",
+    !!wpanel.querySelector('[data-act="treeenter"][data-folder="sub"]'));
+check("WO: the recent section is a list-mode citizen (hidden in the tree)",
+    !wpanel.querySelector(".hub-wf-list-recent"));
+wpanel.querySelector('[data-act="treefold"][data-folder="sub"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: the caret expands the folder in place (the deep subfolder row appears)",
+    !!wpanel.querySelector('[data-act="treeenter"][data-folder="sub/deep"]'));
+// any depth: expand the deep subfolder too - its file row shows up indented
+wpanel.querySelector('[data-act="treefold"][data-folder="sub/deep"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: expanding any depth renders the leaf (the nested file row, indented)",
+    !!wpanel.querySelector('[data-act="openfile"][data-path="workflows/sub/deep/nested.json"]') &&
+    wpanel.querySelector('[data-fpath="workflows/sub/deep/nested.json"]').style.paddingLeft !== "",
+    wpanel.querySelector('[data-fpath="workflows/sub/deep/nested.json"]')?.outerHTML || "(no row)");
+wpanel.querySelector('[data-act="treeenter"][data-folder="sub"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: entering a folder navigates + shows the breadcrumbs",
+    !!wpanel.querySelector('[data-act="treecrumb"][data-folder=""]') &&
+    !!wpanel.querySelector('[data-act="treecrumb"][data-folder="sub"]'),
+    wpanel.querySelector(".hub-wf-crumbs")?.textContent || "");
+check("WO: inside the folder the deep subfolder is still expandable",
+    !!wpanel.querySelector('[data-act="treefold"][data-folder="sub/deep"]'));
+wpanel.querySelector('[data-act="treecrumb"][data-folder=""]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: the root crumb returns the navigation to the workflows root",
+    hooks.filesState().treeFolder === "" &&
+    !!wpanel.querySelector('[data-act="treeenter"][data-folder="sub"]'));
+wpanel.querySelector('[data-act="filesview"][data-view="list"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: back to ≡ restores the habitual Files view (the recent section returns)",
+    !!wpanel.querySelector(".hub-wf-list-recent") &&
+    !wpanel.querySelector(".hub-wf-crumbs"));
+
+// the pure helpers (unit level)
+check("WO: shortPath keeps the LAST folders + the name with the ellipsis",
+    hooks.shortPath("alpha/beta/gamma/delta/epsilon/zeta/long_name_file.json").startsWith("…/") &&
+    hooks.shortPath("alpha/beta/gamma/delta/epsilon/zeta/long_name_file.json").endsWith("long_name_file.json"),
+    hooks.shortPath("alpha/beta/gamma/delta/epsilon/zeta/long_name_file.json"));
+check("WO: shortPath passes a short path through untouched",
+    hooks.shortPath("sub/nested.json") === "sub/nested.json");
+check("WO: relWfPath strips the workflows/ prefix",
+    hooks.relWfPath("workflows/sub/nested.json") === "sub/nested.json");
+check("WO: fmtSize names the human units",
+    hooks.fmtSize(2048) === "2.0 KB" && hooks.fmtSize(512000) === "500 KB" &&
+    hooks.fmtSize(3 * 1024 * 1024) === "3.0 MB", hooks.fmtSize(2048));
+
+// the persisted view state: sort + view survive a remount
+check("WO: the sort persisted into LS_UI",
+    JSON.parse(dom.window.localStorage.getItem("settingshub.workflows.ui")).filesSort.key === "name",
+    dom.window.localStorage.getItem("settingshub.workflows.ui"));
+
+// cleanup: an old-py shape again for any later phase (the suite ends here)
+fakeApi.__setWfFiles(null);
+hooks.setTab("open");
+await settle();
 
 // ===========================================================================
 

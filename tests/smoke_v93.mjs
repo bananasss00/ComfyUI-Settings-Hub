@@ -273,7 +273,7 @@ phase("PA build v95 + version manifest");
     // v95: this round touched ONLY styles.css - the other modules keep
     // their self-reports (the manifest follows the truth)
     check("PA the entry reports v95", globalThis.__SettingsHubBuild === "v95");
-    check("PA chat self-reports v98 (the v98 chat tab-strip wheel round)", globalThis.__SettingsHubLoaded?.chat === "v98");
+    check("PA chat self-reports v108 (the chat stamp moved on with the mass-management round)", globalThis.__SettingsHubLoaded?.chat === "v108");
     check("PA launcher self-reports v101 (the workflows item round)", globalThis.__SettingsHubLoaded?.launcher === "v101");
     check("PA core self-reports v93 (unchanged)", globalThis.__SettingsHubLoaded?.core === "v93");
     // the modules the boot does not import are checked in their sources

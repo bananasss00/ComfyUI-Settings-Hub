@@ -274,7 +274,7 @@ const hooks = chat.__chatTestHooks();
 phase("PA build v95 + version manifest");
 {
     check("PA the entry reports v95", globalThis.__SettingsHubBuild === "v95");
-    check("PA chat self-reports v98 (the v98 chat tab-strip wheel round)", globalThis.__SettingsHubLoaded?.chat === "v98");
+    check("PA chat self-reports v108 (the chat stamp moved on with the mass-management round)", globalThis.__SettingsHubLoaded?.chat === "v108");
     check("PA launcher self-reports v101 (the workflows item round)",
         globalThis.__SettingsHubLoaded?.launcher === "v101");
     check("PA core self-reports v93 (unchanged this round)",
@@ -284,9 +284,9 @@ phase("PA build v95 + version manifest");
     check("PA hub_ui_renderer self-reports v94",
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat v98 + renderer v94",
-        entrySrc.includes('"chat": "v98"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the v107 server-side temp snapshots + stack storage toggler",
-        entrySrc.includes("web build: v107"));
+        entrySrc.includes('"chat": "v108"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
+    check("PA the banner names the v108 files file manager + unified storage + chat mass delete",
+        entrySrc.includes("web build: v108"));
 }
 
 // ---------------------------------------------------------------------------

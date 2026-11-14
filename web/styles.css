@@ -6233,6 +6233,180 @@ body.sh-modal-open .hub-sh-note {
 }
 .hub-wf-sf-tools .hub-wf-act { padding: 2px 7px; }
 
+/* v108: the Files tab as a file manager - the second toolbar row (sort /
+   view / favorites / advanced / quick periods), the advanced filter row,
+   the two-line file rows, the folder tree, the breadcrumbs */
+.hub-wf-tools2 {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    flex: 0 0 auto;
+    user-select: none;
+}
+.hub-wf-tools2 .hub-wf-act { padding: 2px 6px; font-size: calc(var(--sh-fs, 1) * 9.5px); }
+.hub-wf-sortbtn-on, .hub-wf-viewbtn-on, .hub-wf-chip-on, .hub-wf-advbtn-on {
+    background: #31405f;
+    color: #fff;
+    border-color: #5a6ab0;
+}
+.hub-wf-fadv {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    flex: 0 0 auto;
+    padding: 4px 5px;
+    border: 1px dashed #3d4a80;
+    border-radius: 4px;
+    user-select: none;
+}
+.hub-wf-fsel {
+    flex: 1 1 90px;
+    min-width: 80px;
+    background: #10101e;
+    border: 1px solid #3d4a80;
+    border-radius: 4px;
+    color: #eef2ff;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    padding: 2px 4px;
+    font-family: inherit;
+    outline: none;
+}
+.hub-wf-fsel:focus { border-color: #5a6ab0; }
+.hub-wf-fdate {
+    background: #10101e;
+    border: 1px solid #3d4a80;
+    border-radius: 4px;
+    color: #eef2ff;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    padding: 2px 4px;
+    font-family: inherit;
+    outline: none;
+    flex: 0 0 auto;
+    color-scheme: dark;
+}
+.hub-wf-fdate:focus { border-color: #5a6ab0; }
+.hub-wf-fnum-wrap { display: inline-flex; align-items: center; gap: 3px; }
+.hub-wf-fnum {
+    width: 52px;
+    background: #10101e;
+    border: 1px solid #3d4a80;
+    border-radius: 4px;
+    color: #eef2ff;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    padding: 2px 4px;
+    font-family: inherit;
+    outline: none;
+}
+.hub-wf-fnum:focus { border-color: #5a6ab0; }
+.hub-wf-flabel { color: #7a86ad; font-size: calc(var(--sh-fs, 1) * 9.5px); }
+.hub-wf-filecol {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+.hub-wf-filesub {
+    color: #7a86ad;
+    font-size: calc(var(--sh-fs, 1) * 9px);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.hub-wf-favbtn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: #6a7aa8;
+    font-size: calc(var(--sh-fs, 1) * 11px);
+    padding: 0 3px;
+    flex: 0 0 auto;
+    font-family: inherit;
+    line-height: 1.2;
+}
+.hub-wf-favbtn:hover { color: #ffd98e; }
+.hub-wf-favbtn.hub-wf-favbtn-on { color: #ffd98e; }
+.hub-wf-trow .hub-wf-caret {
+    background: transparent;
+    border: none;
+    color: #8f9cc7;
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: calc(var(--sh-fs, 1) * 9px);
+    width: 14px;
+    text-align: center;
+    flex: 0 0 auto;
+    font-family: inherit;
+}
+.hub-wf-trow .hub-wf-caret:hover { color: #fff; }
+.hub-wf-tname {
+    background: none;
+    border: none;
+    color: #cfd8f2;
+    cursor: pointer;
+    text-align: left;
+    padding: 0;
+    font-size: calc(var(--sh-fs, 1) * 11px);
+    font-family: inherit;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+.hub-wf-tname:hover { color: #fff; text-decoration: underline; }
+.hub-wf-tcount { color: #6d6d92; font-size: calc(var(--sh-fs, 1) * 9px); flex: 0 0 auto; }
+.hub-wf-crumbs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    flex: 0 0 auto;
+    padding: 2px;
+    user-select: none;
+}
+.hub-wf-crumb {
+    background: #22223c;
+    color: #cfd8f2;
+    border: 1px solid #3d4a80;
+    border-radius: 3px;
+    cursor: pointer;
+    padding: 1px 6px;
+    font-size: calc(var(--sh-fs, 1) * 9.5px);
+    font-family: inherit;
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.hub-wf-crumb:hover { color: #fff; border-color: #5a6ab0; }
+.hub-wf-crumb.hub-wf-crumb-on { background: #31405f; color: #fff; border-color: #5a6ab0; }
+.hub-wf-crumbs-sep { color: #6d6d92; font-size: calc(var(--sh-fs, 1) * 9px); }
+
+/* v108: the saved-chats popup - the mass-management row (dynamic select-all,
+   the two armed deletes), the row checkboxes, the selected-row highlight */
+.hub-chat-sess-tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    margin: 0 2px 6px;
+}
+.hub-chat-sess-tools .hub-cs-chip { font-size: calc(var(--sh-fs, 1) * 9.5px); padding: 2px 6px; }
+.hub-chat-sess-danger { color: #ffb0a6; border-color: #7a4038; }
+.hub-chat-sess-danger:hover { background: #402020; color: #ffd9d9; border-color: #a5533f; }
+.hub-chat-sess-bulk-armed {
+    background: #7a2c2c !important;
+    border-color: #c0564f !important;
+    color: #ffd9d9 !important;
+    animation: hub-stack-clear-pulse 0.9s ease-in-out infinite;
+}
+.hub-chat-sess-check { flex: 0 0 auto; margin: 0; }
+.hub-chat-sess-sel { background: #2c2412; }
+.hub-chat-sess-sel:hover { background: #382c14; }
+
 /* preset cards */
 .hub-wf-card {
     border: 1px solid #2e2e50;

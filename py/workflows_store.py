@@ -109,11 +109,28 @@ can never hide the way back. Routes:
     DELETE /settings_hub/workflows/temp/{tid}   -> {ok, gone, existed}
                                             (v107)
 
-Changing the root NEVER moves or copies presets (AGENTS.md 5.1 rules 7/12):
-each location keeps its own presets/ folder, the new one starts empty. The
-override file always stays in the DEFAULT user dir, so health/root answers
-carry `custom` (the active custom root or null) and `dir` (the EFFECTIVE
-root) next to `default`.
+v108 (the owner re-worked the root contract: "при переназначении пути
+хранения обеспечить доступ к данным как из пользовательского, так и из
+стандартного хранилища. Исключить дубликаты и не терять существующие данные.
+Не смешивать пресеты с обычными workflow-файлами в Files") - UNIFIED
+STORAGE VIEW: while a custom root is active, the READS cover BOTH roots
+(the ACTIVE one first, then the DEFAULT one), so the presets/temp of the
+default location stay reachable and nothing is ever lost on a switch;
+an id present in BOTH roots resolves to the ACTIVE copy (duplicates are
+excluded, not stacked). The WRITES go where the data already lives
+(overwrite/merge/PUT/DELETE act on the copy the read served), only NEW
+presets/temps land in the ACTIVE root - an update can never fork a second
+copy into the other root. Nothing is moved, copied or deleted on the root
+switch itself. The Files tab keeps its own housekeeping out of sight: the
+new GET /settings_hub/workflows/files listing skips the storage-root
+subtree (presets/, temp/) even when the root is re-pointed INSIDE the
+workflows/ userdata folder - presets must never mix into the ordinary
+workflow list. The File favorites live in the DEFAULT user dir (next to
+workflows_root.json) - they tag the workflow FILES, not the storage
+content, so a root switch cannot hide them. The override file always
+stays in the DEFAULT user dir, so health/root answers carry `custom`
+(the active custom root or null), `dir` (the EFFECTIVE root) and `userRel`
+(the active root relative to the user dir, or null) next to `default`.
 
 Safety: preset ids are strict hex (import may carry a wider legacy charset -
 still path-safe, it IS the file name), item paths are relative-without-
@@ -288,10 +305,11 @@ _PRESETS_DIR_NAME = "presets"
 _TEMP_DIR_NAME = "temp"  # v107: the reopen snapshots of TEMP tabs
 
 
-def _legacy_presets_path():
-    """The v101-v103 single-file store of the ACTIVE root - only ever read
-    by the one-time migration; after it the name lives on as .bak."""
-    return os.path.join(_workflows_root(), _LEGACY_NAME)
+def _legacy_presets_path(root=None):
+    """The v101-v103 single-file store of a root (the ACTIVE one by
+    default) - only ever read by the one-time migration; after it the name
+    lives on as .bak."""
+    return os.path.join(root or _workflows_root(), _LEGACY_NAME)
 
 
 def _presets_dir():
@@ -304,6 +322,25 @@ def _preset_file(pid):
     against _ID_LOOSE_RE before this is used as a path (a strict path-safe
     charset: [A-Za-z0-9_-]{4,64}), so the file name cannot traverse."""
     return os.path.join(_presets_dir(), pid + ".json")
+
+
+def _preset_file_in(root, pid):
+    """The per-preset file inside an EXPLICIT root (the unified view)."""
+    return os.path.join(root, _PRESETS_DIR_NAME, pid + ".json")
+
+
+def _find_preset_file(pid):
+    """The preset file of the root that OWNS the pid: the ACTIVE root first,
+    then the DEFAULT root when a custom one is active (v108 unified view).
+    Writes reuse this location so an update never forks a second copy into
+    the other root ('исключить дубликаты'). None when the pid lives nowhere."""
+    if not isinstance(pid, str) or not _ID_LOOSE_RE.match(pid):
+        return None
+    for root in _roots_all():
+        f = _preset_file_in(root, pid)
+        if os.path.isfile(f):
+            return f
+    return None
 
 
 def _temp_dir():
@@ -319,12 +356,67 @@ def _temp_file(tid):
     return os.path.join(_temp_dir(), tid + ".json")
 
 
-def _ensure_dirs():
+def _temp_file_in(root, tid):
+    """temp/<id>.json inside an EXPLICIT root (v108 unified view)."""
+    return os.path.join(root, _TEMP_DIR_NAME, tid + ".json")
+
+
+def _find_temp_file(tid):
+    """The temp snapshot file of the root that OWNS the tid (active first,
+    then the default root while a custom one is active) - a snapshot taken
+    BEFORE a root switch stays reopenable after it (no data loss)."""
+    if not isinstance(tid, str) or not _ID_RE.match(tid):
+        return None
+    for root in _roots_all():
+        f = _temp_file_in(root, tid)
+        if os.path.isfile(f):
+            return f
+    return None
+
+
+def _ensure_dir(path):
+    """Create ONE directory (best-effort)."""
     try:
-        os.makedirs(_presets_dir(), exist_ok=True)
-        os.makedirs(_temp_dir(), exist_ok=True)  # v107: the temp snapshots
+        os.makedirs(path, exist_ok=True)
     except Exception:
         pass
+
+
+def _ensure_dirs():
+    _ensure_dir(_presets_dir())
+    _ensure_dir(_temp_dir())  # v107: the temp snapshots
+
+
+# ---------------------------------------------------------------------------
+# v108 UNIFIED STORAGE VIEW - the roots a read covers. While a custom root
+# is active, the DEFAULT root stays a readable member (the owner: access to
+# the data from BOTH the user and the standard storage, no duplicates, no
+# data loss). The ACTIVE root always comes FIRST - it wins every id clash
+# and it is where new files are created.
+# ---------------------------------------------------------------------------
+
+def _roots_all():
+    """The read set of storage roots: [active] + [default] when a custom
+    root is active (deduped - the default is skipped when it IS active)."""
+    roots = [_workflows_root()]
+    d = _default_root()
+    if _root_custom and d != _workflows_root():
+        roots.append(d)
+    return roots
+
+
+def _root_rel_to_user():
+    """The ACTIVE storage root relative to the ComfyUI user dir (None when
+    it lies outside) - the client keeps this subtree out of the userdata
+    file listings, so the presets/temp housekeeping can never mix into the
+    Files tab even when the root is re-pointed inside the workflows folder."""
+    try:
+        rel = os.path.relpath(_workflows_root(), _user_dir())
+    except Exception:
+        return None
+    if rel.startswith("..") or os.path.isabs(rel):
+        return None
+    return rel.replace(os.sep, "/")
 
 
 # ---------------------------------------------------------------------------
@@ -333,14 +425,17 @@ def _ensure_dirs():
 # every mutation runs under the module asyncio.Lock.
 # ---------------------------------------------------------------------------
 
-def _migrate_legacy_file():
+def _migrate_legacy_file(root=None):
     """Split a legacy presets.json array into per-preset files (idempotent):
     a per-preset file that already exists WINS over the legacy copy, so a
     rerun after a partial migration never rolls the folder back. The original
     is renamed presets.json.bak (never deleted - the .bak is the owner's
     backup). Any failure leaves the legacy file in place and the next read
-    retries - the routes never break on migration."""
-    legacy = _legacy_presets_path()
+    retries - the routes never break on migration. v108: runs for EVERY
+    readable root (the active one and, while a custom root is switched on,
+    the default one too - the old location must stay alive and readable)."""
+    root = root or _workflows_root()
+    legacy = _legacy_presets_path(root)
     if not os.path.isfile(legacy):
         return
     try:
@@ -349,7 +444,7 @@ def _migrate_legacy_file():
         legacy_list = data if isinstance(data, list) else []
     except Exception:
         legacy_list = []  # a corrupt legacy file has nothing to split
-    _ensure_dirs()
+    _ensure_dir(os.path.join(root, _PRESETS_DIR_NAME))
     for p in legacy_list:
         if not isinstance(p, dict):
             continue
@@ -357,13 +452,13 @@ def _migrate_legacy_file():
         if not isinstance(pid, str) or not _ID_LOOSE_RE.match(pid):
             # a hand-edited legacy id -> a fresh safe file name, data kept
             pid = uuid.uuid4().hex[:12]
-            while os.path.exists(_preset_file(pid)):
+            while os.path.exists(_preset_file_in(root, pid)):
                 pid = uuid.uuid4().hex[:12]
             p["id"] = pid
-        if os.path.exists(_preset_file(pid)):
+        if os.path.exists(_preset_file_in(root, pid)):
             continue  # the folder copy wins
         try:
-            _write_preset_file(p)
+            _write_preset_file_in(root, p)  # stay in THIS root, never fork
         except Exception:
             return
     try:
@@ -373,47 +468,76 @@ def _migrate_legacy_file():
 
 
 def _read_presets():
-    """All the presets of the ACTIVE root: scan presets/*.json, parse each,
-    keep the well-formed ones (a dict whose inner id agrees with the file
-    name - a disagreeing file is ignored, not served). A corrupt file skips
-    itself; one bad file can never blank the whole list."""
-    _migrate_legacy_file()
-    out = []
-    try:
-        names = sorted(os.listdir(_presets_dir()))
-    except OSError:
-        return out
-    for name in names:
-        if not name.endswith(".json"):
-            continue
+    """All the presets VISIBLE to the panel (v108 unified storage view): the
+    ACTIVE root first, then the DEFAULT root while a custom one is active -
+    the old location stays readable after a root switch, no data is ever
+    hidden by the re-point. An id present in BOTH roots resolves to the
+    ACTIVE copy (duplicates are excluded, not stacked). Well-formed files
+    only: a dict whose inner id agrees with the file name - a disagreeing
+    file is ignored, not served; a corrupt file skips itself and can never
+    blank the whole list."""
+    for root in _roots_all():
+        _migrate_legacy_file(root)
+    out = {}
+    for root in _roots_all():
+        pdir = os.path.join(root, _PRESETS_DIR_NAME)
         try:
-            with open(os.path.join(_presets_dir(), name), "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
+            names = sorted(os.listdir(pdir))
+        except OSError:
             continue
-        if (isinstance(data, dict) and isinstance(data.get("id"), str)
-                and data["id"] == name[:-len(".json")]):
-            out.append(data)
-    return out
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(pdir, name), "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            if (isinstance(data, dict) and isinstance(data.get("id"), str)
+                    and data["id"] == name[:-len(".json")]):
+                out.setdefault(data["id"], data)  # the FIRST root wins (active)
+    return list(out.values())
 
 
 def _count_preset_files():
-    """Cheap MAX_PRESETS guard: the number of per-preset files (no parsing)."""
+    """Cheap MAX_PRESETS guard: the per-preset files of the ACTIVE root (no
+    parsing) - new presets are created here, so THIS folder is the one the
+    cap bounds."""
     try:
         return len([n for n in os.listdir(_presets_dir()) if n.endswith(".json")])
     except OSError:
         return 0
 
 
+def _count_visible_presets():
+    """v108: the number of DISTINCT preset ids across every readable root
+    (the health probe reports what the panel can actually see, not just the
+    write-target folder)."""
+    seen = set()
+    for root in _roots_all():
+        try:
+            names = os.listdir(os.path.join(root, _PRESETS_DIR_NAME))
+        except OSError:
+            continue
+        for n in names:
+            if n.endswith(".json"):
+                seen.add(n[:-len(".json")])
+    return len(seen)
+
+
 def _load_preset_file(pid):
     """Parse ONE per-preset file (None when missing/corrupt/id-disagreeing).
-    The id is re-validated here - every addressing path funnels through this
-    check, so a pid from the wire can never reach the filesystem unchecked."""
+    v108: the lookup covers every readable root (active first). The id is
+    re-validated here - every addressing path funnels through this check,
+    so a pid from the wire can never reach the filesystem unchecked."""
     if not isinstance(pid, str) or not _ID_LOOSE_RE.match(pid):
         return None
+    f = _find_preset_file(pid)
+    if not f:
+        return None
     try:
-        with open(_preset_file(pid), "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(f, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
     except Exception:
         return None
     if isinstance(data, dict) and data.get("id") == pid:
@@ -421,10 +545,29 @@ def _load_preset_file(pid):
     return None
 
 
+def _write_preset_file_in(root, p):
+    """Atomic write of ONE preset file into an EXPLICIT root (tmp +
+    os.replace) - the migration and the root-aware write path."""
+    _ensure_dir(os.path.join(root, _PRESETS_DIR_NAME))
+    f = _preset_file_in(root, p["id"])
+    tmp = f + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(p, fh, ensure_ascii=False)
+    os.replace(tmp, f)
+
+
 def _write_preset_file(p):
-    """Atomic write of ONE preset file (tmp + os.replace)."""
-    _ensure_dirs()
-    f = _preset_file(p["id"])
+    """Atomic write of ONE preset file (tmp + os.replace). v108: the file
+    lands WHERE THE PID ALREADY LIVES (active root first, default fallback)
+    so an overwrite/merge/PUT never forks a duplicate into the other root;
+    a NEW id is written into the ACTIVE root."""
+    home = _find_preset_file(p["id"])
+    if home:
+        _ensure_dir(os.path.dirname(home))
+        f = home
+    else:
+        _ensure_dirs()
+        f = _preset_file(p["id"])
     tmp = f + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(p, fh, ensure_ascii=False)
@@ -432,8 +575,13 @@ def _write_preset_file(p):
 
 
 def _delete_preset_file(pid):
+    """Delete the preset WHERE IT LIVES (active root first, then the default
+    root - the unified view)."""
+    f = _find_preset_file(pid)
+    if not f:
+        return False
     try:
-        os.unlink(_preset_file(pid))
+        os.unlink(f)
         return True
     except OSError:
         return False
@@ -470,13 +618,15 @@ def _write_temp_file(obj):
 
 def _read_temp_file(tid):
     """Parse ONE temp snapshot (None when missing/corrupt/id-disagreeing).
-    The id is re-validated here - a wire value can never reach the
-    filesystem unchecked."""
-    if not isinstance(tid, str) or not _ID_RE.match(tid):
+    v108: the lookup covers every readable root (active first). The id is
+    re-validated here - a wire value can never reach the filesystem
+    unchecked."""
+    f = _find_temp_file(tid)
+    if not f:
         return None
     try:
-        with open(_temp_file(tid), "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(f, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
     except Exception:
         return None
     if isinstance(data, dict) and data.get("id") == tid:
@@ -485,57 +635,95 @@ def _read_temp_file(tid):
 
 
 def _delete_temp_file(tid):
-    try:
-        os.unlink(_temp_file(tid))
-        return True
-    except OSError:
+    """Delete the snapshot from EVERY root that holds it (an id cannot
+    legitimately exist twice, but a root switch must never leave a stale
+    copy behind - 'не терять существующие данные' cuts both ways)."""
+    existed = False
+    if not isinstance(tid, str) or not _ID_RE.match(tid):
         return False
+    for root in _roots_all():
+        try:
+            os.unlink(_temp_file_in(root, tid))
+            existed = True
+        except OSError:
+            pass
+    return existed
 
 
 def _list_temp_files():
-    """[{id, name, ts}] of every temp snapshot in the ACTIVE root, newest
-    first - NO graphs (the list feeds the client boot GC and diagnostics;
-    the payloads are fetched one-by-one). Ties on ts (a burst of closes
-    inside one second) break by the monotonic write counter (seq) - the
-    filesystem mtime proved non-monotonic under overlayfs."""
-    out = []
-    try:
-        names = sorted(os.listdir(_temp_dir()))
-    except OSError:
-        return out
-    for name in names:
-        if not name.endswith(".json"):
+    """[{id, name, ts}] of every temp snapshot VISIBLE to the panel (v108:
+    the ACTIVE root first, then the default one while a custom root is
+    active; an id in both roots resolves to the active copy) - newest first,
+    NO graphs (the list feeds the client boot GC and diagnostics; the
+    payloads are fetched one-by-one). Ties on ts (a burst of closes inside
+    one second) break by the monotonic write counter (seq) - the filesystem
+    mtime proved non-monotonic under overlayfs."""
+    out = {}
+    for root in _roots_all():
+        tdir = os.path.join(root, _TEMP_DIR_NAME)
+        try:
+            names = sorted(os.listdir(tdir))
+        except OSError:
             continue
-        tid = name[:-len(".json")]
-        if not _ID_RE.match(tid):
-            continue
-        it = _read_temp_file(tid)
-        if it is None:
-            continue
-        out.append({"id": tid, "name": it.get("name") or "",
-                    "ts": int(it.get("ts", 0) or 0),
-                    "_s": int(it.get("seq", 0) or 0)})
-    out.sort(key=lambda it: (-it["ts"], -it["_s"]))
-    for it in out:
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            tid = name[:-len(".json")]
+            if not _ID_RE.match(tid):
+                continue
+            if tid in out:
+                continue  # the ACTIVE root's copy already won
+            it = _read_temp_file(tid)
+            if it is None:
+                continue
+            out[tid] = {"id": tid, "name": it.get("name") or "",
+                        "ts": int(it.get("ts", 0) or 0),
+                        "_s": int(it.get("seq", 0) or 0)}
+    items = sorted(out.values(), key=lambda it: (-it["ts"], -it["_s"]))
+    for it in items:
         it.pop("_s", None)
-    return out
+    return items
 
 
 def _count_temp_files():
-    """Cheap temp counter for /health (no parsing)."""
-    try:
-        return len([n for n in os.listdir(_temp_dir())
-                    if n.endswith(".json")])
-    except OSError:
-        return 0
+    """Cheap temp counter for /health (no parsing, every readable root)."""
+    n = 0
+    for root in _roots_all():
+        try:
+            n += len([x for x in os.listdir(os.path.join(root, _TEMP_DIR_NAME))
+                      if x.endswith(".json")])
+        except OSError:
+            pass
+    return n
 
 
 def _evict_temp_files():
-    """Keep the folder bounded: the OLDEST temp snapshots beyond
-    MAX_TEMP_FILES are deleted (newest-by-ts win). Best effort - a locked
-    file skips itself. Runs after every PUT."""
-    for it in _list_temp_files()[MAX_TEMP_FILES:]:
-        _delete_temp_file(it["id"])
+    """Keep every folder bounded: the OLDEST temp snapshots beyond
+    MAX_TEMP_FILES are deleted PER ROOT (newest-by-ts win; the default root
+    is evicted in its own right so a switch cannot let it grow forever).
+    Best effort - a locked file skips itself. Runs after every PUT."""
+    for root in _roots_all():
+        tdir = os.path.join(root, _TEMP_DIR_NAME)
+        try:
+            names = sorted(os.listdir(tdir))
+        except OSError:
+            continue
+        items = []
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            tid = name[:-len(".json")]
+            it = _read_temp_file(tid)
+            if it is not None:
+                items.append({"id": tid,
+                              "ts": int(it.get("ts", 0) or 0),
+                              "seq": int(it.get("seq", 0) or 0)})
+        items.sort(key=lambda it: (-it["ts"], -it["seq"]))
+        for it in items[MAX_TEMP_FILES:]:
+            try:
+                os.unlink(_temp_file_in(root, it["id"]))
+            except OSError:
+                pass
 
 
 def _sorted_presets(presets):
@@ -705,13 +893,14 @@ async def workflows_health(request):
     throws: every check degrades to a false/empty field."""
     _ensure_dirs()
     writable = _probe_writable(_workflows_root())
-    n = _count_preset_files()
+    n = _count_visible_presets()
     return web.json_response({
         "ok": True,
         "version": WORKFLOWS_SERVER_VERSION,
         "dir": _workflows_root(),
         "custom": _root_custom,
         "default": _default_root(),
+        "userRel": _root_rel_to_user(),  # v108: the root relative to the user dir
         "writable": writable,
         "presets": n,
         "temp": _count_temp_files(),  # v107: the temp-snapshot counter
@@ -721,7 +910,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v107"
+WORKFLOWS_SERVER_VERSION = "v108"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -731,6 +920,7 @@ async def workflows_root_get(request):
         "root": _workflows_root(),
         "custom": _root_custom,
         "default": _default_root(),
+        "userRel": _root_rel_to_user(),  # v108
         "writable": _probe_writable(_workflows_root()),
     })
 
@@ -774,6 +964,7 @@ async def workflows_root_set(request):
         "root": root,
         "custom": _root_custom,
         "default": _default_root(),
+        "userRel": _root_rel_to_user(),  # v108
         "writable": _probe_writable(root),
     })
 
@@ -1134,3 +1325,184 @@ async def workflows_temp_delete(request):
     async with _lock:
         existed = _delete_temp_file(tid)
     return web.json_response({"ok": True, "gone": tid, "existed": existed})
+
+
+# ---------------------------------------------------------------------------
+# v108: the FILES listing for the Workflows panel's Files tab - the ComfyUI
+# workflows/ USER folder (the userdata "workflows" directory) with the size
+# and the last-modified time of every workflow file, so the tab can sort by
+# date/size and filter by them. The STORAGE ROOT is excluded from the walk:
+# the owner's contract - presets must never mix into the ordinary workflow
+# list ("не смешивать пресеты с обычными workflow-файлами в Files"), even
+# when the root is re-pointed INSIDE the workflows folder. The listing is a
+# plain directory walk over the DEFAULT user dir (single-user installs - the
+# panel's audience; the native multi-user /userdata endpoint stays wired in
+# the client as the fallback rung when this route is missing).
+# ---------------------------------------------------------------------------
+
+MAX_FILES_LISTED = 6000  # a walk must stay bounded on a huge library
+
+
+def _workflows_user_dir():
+    """The ComfyUI userdata "workflows" folder - <user>/workflows (the same
+    root the native /userdata?dir=workflows endpoint serves)."""
+    return os.path.join(_user_dir(), "workflows")
+
+
+def _is_inside(path, folder):
+    """True when `path` lies INSIDE `folder` (or equals it)."""
+    try:
+        rel = os.path.relpath(path, folder)
+    except Exception:
+        return False
+    return not rel.startswith("..") and not os.path.isabs(rel) and rel != "."
+
+
+def _files_hide_dirs():
+    """The directories the Files listing must skip - the storage root's own
+    housekeeping when it lives under (or around) the workflows folder."""
+    hides = []
+    wroot = _workflows_user_dir()
+    sroot = _workflows_root()
+    if _is_inside(sroot, wroot):
+        # the storage root sits under workflows/ - hide the whole subtree
+        # (its presets/ + temp/ die with it)
+        hides.append(sroot)
+    else:
+        # the storage root CONTAINS the workflows folder (or equals it):
+        # at least keep its presets/ + temp/ housekeeping out of the list
+        for name in (_PRESETS_DIR_NAME, _TEMP_DIR_NAME):
+            p = os.path.join(sroot, name)
+            if _is_inside(p, wroot):
+                hides.append(p)
+    return [os.path.normcase(os.path.abspath(h)) for h in hides]
+
+
+@PromptServer.instance.routes.get("/settings_hub/workflows/files")
+async def workflows_files_list(request):
+    """Every workflow file under <user>/workflows (recursive, .json only):
+    [{path: "workflows/<rel>", name, size, mtime}]. `mtime` is the unix
+    mtime (seconds) and `size` the byte size - the Files tab sorts/filters
+    by them. The storage-root housekeeping (presets/, temp/) never appears
+    here. Bounded by MAX_FILES_LISTED (truncated: true on a hit) - a huge
+    library cannot stall the panel."""
+    root = _workflows_user_dir()
+    hides = _files_hide_dirs()
+    out = []
+    truncated = False
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            dirnames[:] = [d for d in dirnames
+                           if os.path.normcase(os.path.abspath(os.path.join(dirpath, d))) not in hides]
+            filenames.sort()
+            for fn in filenames:
+                if not fn.lower().endswith(".json"):
+                    continue
+                full = os.path.join(dirpath, fn)
+                try:
+                    st = os.stat(full)
+                except OSError:
+                    continue
+                try:
+                    rel = os.path.relpath(full, root).replace(os.sep, "/")
+                except Exception:
+                    continue
+                out.append({"path": "workflows/" + rel, "name": fn,
+                            "size": int(st.st_size), "mtime": int(st.st_mtime)})
+                if len(out) >= MAX_FILES_LISTED:
+                    truncated = True
+                    break
+            if truncated:
+                break
+    except Exception:
+        pass  # a missing/unreadable workflows folder answers an empty list
+    return web.json_response({
+        "ok": True,
+        "files": out,
+        "truncated": truncated,
+        "root": root,
+    })
+
+
+# ---------------------------------------------------------------------------
+# v108: the File favorites - the ★ marks of the Files tab. They live in the
+# DEFAULT user dir (next to workflows_root.json): a favorite tags a workflow
+# FILE of the ComfyUI workflows/ folder, not the storage content, so a root
+# switch must never hide or lose them (the same "the way back lives in the
+# default dir" philosophy as the root override file).
+# ---------------------------------------------------------------------------
+
+_FAV_NAME = "workflows_favorites.json"
+MAX_FAVS = 2000
+
+
+def _fav_path():
+    return os.path.join(_user_dir(), "settings_hub", _FAV_NAME)
+
+
+def _read_file_favs():
+    """The favorite paths (["workflows/<rel>", ...], normalized POSIX). A
+    corrupt file reads as empty - the marks re-appear on the next toggle."""
+    try:
+        with open(_fav_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        favs = data.get("favs") if isinstance(data, dict) else None
+        if isinstance(favs, list):
+            seen = set()
+            out = []
+            for x in favs:
+                if isinstance(x, str) and x and x not in seen:
+                    seen.add(x)
+                    out.append(x)
+            return out
+    except Exception:
+        pass
+    return []
+
+
+def _write_file_favs(favs):
+    """Atomic write of the favorites list (tmp + os.replace)."""
+    _ensure_dir(os.path.dirname(_fav_path()))
+    tmp = _fav_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"favs": favs, "saved": int(time.time())}, f, ensure_ascii=False)
+    os.replace(tmp, _fav_path())
+
+
+@PromptServer.instance.routes.get("/settings_hub/workflows/files-fav")
+async def workflows_files_fav_get(request):
+    return web.json_response({"ok": True, "favs": _read_file_favs()})
+
+
+@PromptServer.instance.routes.post("/settings_hub/workflows/files-fav")
+async def workflows_files_fav_post(request):
+    """Toggle ONE favorite: body {path, fav}. The path is the same relative
+    "workflows/<rel>" shape the Files listing serves (traversal-checked by
+    the item-path sanitizer). The full list comes back so the client mirrors
+    the server truth (multi-window safe)."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    path = _clean_item_path(body.get("path") if isinstance(body, dict) else None)
+    if not path:
+        return web.json_response({"ok": False, "error": "bad path"}, status=400)
+    fav = bool(body.get("fav")) if isinstance(body, dict) else False
+    async with _lock:
+        favs = _read_file_favs()
+        if fav and path not in favs:
+            favs.append(path)
+        elif not fav and path in favs:
+            favs = [x for x in favs if x != path]
+        if len(favs) > MAX_FAVS:
+            return web.json_response(
+                {"ok": False, "error": "too many favorites (max %d)" % MAX_FAVS},
+                status=400)
+        try:
+            _write_file_favs(favs)
+        except Exception:
+            return web.json_response(
+                {"ok": False, "error": "could not write the favorites file"},
+                status=500)
+    return web.json_response({"ok": True, "favs": favs})

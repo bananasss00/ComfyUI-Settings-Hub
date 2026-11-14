@@ -257,7 +257,7 @@ check("health: ok", r.status == 200 and j.get("ok") is True)
 check("health: version matches the source constant",
       j.get("version") == wf_store.WORKFLOWS_SERVER_VERSION,
       "%s vs %s" % (j.get("version"), wf_store.WORKFLOWS_SERVER_VERSION))
-check("health: version is v107", j.get("version") == "v107", str(j.get("version")))
+check("health: version is v108", j.get("version") == "v108", str(j.get("version")))
 check("health: default dir", j.get("dir") == os.path.join(_USER_DIR, "settings_hub", "workflows"), j.get("dir"))
 check("health: no custom root yet", j.get("custom") is None)
 check("health: writable", j.get("writable") is True)
@@ -837,6 +837,203 @@ check("temp: back to the default root", r.json().get("custom") is None)
 r = loop(HEALTH(FakeRequest(method="GET")))
 check("health: the temp counter counts the default-root files (v107)",
       r.json().get("temp") == wf_store.MAX_TEMP_FILES, str(r.json().get("temp")))
+reset_state()
+
+# ===========================================================================
+print("== v108: unified storage view (both roots readable, no duplicates) ==")
+reset_state()
+
+# a preset in the DEFAULT root ...
+r = loop(PPOST(FakeRequest(json_body={"name": "Home", "items": [
+    {"kind": "path", "path": "workflows/a.json"}]})))
+home_pid = r.json()["preset"]["id"]
+check("unified: the preset was created in the default root",
+      os.path.isfile(preset_file(home_pid)))
+
+# ... then the storage root is re-pointed: the preset must STAY VISIBLE
+custom = tempfile.mkdtemp(prefix="shub-wf-uni-custom-")
+loop(ROOT_POST(FakeRequest(json_body={"path": custom})))
+r = loop(PGET(FakeRequest(method="GET")))
+ids = [p["id"] for p in r.json()["presets"]]
+check("unified: the default-root preset is still listed under the custom root",
+      home_pid in ids, json.dumps(ids))
+
+# a NEW preset under the custom root lands there; BOTH are listed, no dupes
+r = loop(PPOST(FakeRequest(json_body={"name": "Custom", "items": [
+    {"kind": "path", "path": "workflows/b.json"}]})))
+cust_pid = r.json()["preset"]["id"]
+check("unified: a new preset lands in the ACTIVE (custom) root",
+      os.path.isfile(preset_file(cust_pid, custom)) and
+      not os.path.exists(preset_file(cust_pid)))
+r = loop(PGET(FakeRequest(method="GET")))
+got = [p["id"] for p in r.json()["presets"]]
+check("unified: both presets visible, each exactly once",
+      got.count(home_pid) == 1 and got.count(cust_pid) == 1, json.dumps(got))
+
+# an id present in BOTH roots resolves to the ACTIVE copy
+shutil_ = __import__("shutil")
+dupe_pid = "aabbccdd1122"
+os.makedirs(presets_dir(custom), exist_ok=True)
+os.makedirs(presets_dir(), exist_ok=True)
+with open(preset_file(dupe_pid, custom), "w", encoding="utf-8") as f:
+    json.dump({"id": dupe_pid, "name": "ActiveCopy", "created": 1, "updated": 1,
+               "fav": False, "items": []}, f)
+with open(preset_file(dupe_pid), "w", encoding="utf-8") as f:
+    json.dump({"id": dupe_pid, "name": "DefaultCopy", "created": 1, "updated": 1,
+               "fav": False, "items": []}, f)
+r = loop(PGET(FakeRequest(method="GET")))
+dupe = [p for p in r.json()["presets"] if p["id"] == dupe_pid]
+check("unified: the duplicate id resolves to the ACTIVE copy",
+      len(dupe) == 1 and dupe[0].get("name") == "ActiveCopy", json.dumps(dupe))
+
+# PUT writes WHERE THE PRESET LIVES (the default-root preset is updated in
+# place - no forked copy appears in the custom root)
+r = loop(PPUT(FakeRequest(match_info={"pid": home_pid},
+                          json_body={"name": "HomeRenamed"})))
+check("unified: PUT renamed the default-root preset",
+      r.json().get("ok") and r.json()["preset"]["name"] == "HomeRenamed")
+check("unified: the update did NOT fork a copy into the active root",
+      not os.path.exists(preset_file(home_pid, custom)))
+check("unified: the default-root file itself was updated",
+      json.load(open(preset_file(home_pid), encoding="utf-8"))["name"] == "HomeRenamed")
+
+# DELETE removes where it lives
+r = loop(PDEL(FakeRequest(match_info={"pid": home_pid})))
+check("unified: DELETE removed the default-root file",
+      r.json().get("ok") and not os.path.exists(preset_file(home_pid)))
+r = loop(PDEL(FakeRequest(match_info={"pid": cust_pid})))
+check("unified: DELETE removed the custom-root file",
+      r.json().get("ok") and not os.path.exists(preset_file(cust_pid, custom)))
+
+# temp snapshots: a snapshot taken BEFORE the switch stays fetchable while
+# its root is a member of the read set (active or default). A SWITCHED-OFF
+# third location is out of the view by design - but nothing is deleted, and
+# re-activating that root brings the snapshot back (no data loss).
+r = loop(TPUT(FakeRequest(json_body={"name": "BeforeSwitch", "graph": {"x": 1}})))
+tid = r.json()["id"]
+check("unified: the temp snapshot landed in the ACTIVE (custom) root",
+      os.path.isfile(os.path.join(temp_dir(custom), tid + ".json")))
+r = loop(TGET(FakeRequest(match_info={"tid": tid})))
+check("unified: the temp snapshot fetches under the custom root",
+      r.json().get("ok") and r.json()["graph"] == {"x": 1})
+loop(ROOT_POST(FakeRequest(json_body={"path": ""})))  # back to the default
+r = loop(TGET(FakeRequest(match_info={"tid": tid})))
+check("unified: the snapshot of the switched-OFF root is out of the view (not deleted)",
+      r.status == 404)
+r = loop(TLIST(FakeRequest(method="GET")))
+check("unified: the temp list shows the DEFAULT root's files",
+      all("BeforeSwitch" != it["name"] for it in r.json()["items"]))
+loop(ROOT_POST(FakeRequest(json_body={"path": custom})))  # re-activate
+r = loop(TGET(FakeRequest(match_info={"tid": tid})))
+check("unified: re-activating the root brings the snapshot back (no data loss)",
+      r.json().get("ok") and r.json()["name"] == "BeforeSwitch")
+r = loop(TLIST(FakeRequest(method="GET")))
+check("unified: the temp list covers the ACTIVE + the DEFAULT roots",
+      any(it["id"] == tid for it in r.json()["items"]))
+r = loop(TDEL(FakeRequest(match_info={"tid": tid})))
+check("unified: the temp delete cleans the custom-root file",
+      r.json().get("ok") and r.json().get("existed") is True and
+      not os.path.exists(os.path.join(temp_dir(custom), tid + ".json")))
+loop(ROOT_POST(FakeRequest(json_body={"path": ""})))
+
+# the health presets counter reports the VISIBLE (unique) presets
+r = loop(HEALTH(FakeRequest(method="GET")))
+vis = len(wf_store._read_presets())
+check("unified: health counts the visible presets (both roots)",
+      r.json().get("presets") == vis, str(r.json().get("presets")) + " vs " + str(vis))
+reset_state()
+
+# ===========================================================================
+print("== v108: the Files listing + the favorites ==")
+
+# a small workflows/ library: root file, nested files, and the storage-root
+# housekeeping that must NEVER surface in the Files list
+wfdir = os.path.join(_USER_DIR, "workflows")
+sub = os.path.join(wfdir, "sub", "deep")
+os.makedirs(sub, exist_ok=True)
+def _touch(p, when=None, size=10):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("x" * size)
+    if when:
+        os.utime(p, (when, when))
+    return p
+
+now = time.time()
+_touch(os.path.join(wfdir, "a.json"), now - 100)
+_touchb = _touch(os.path.join(wfdir, "sub", "b.json"), now - 50)
+_touchc = _touch(os.path.join(wfdir, "sub", "deep", "c.json"), now - 10)
+# the storage housekeeping inside the workflows folder (a pathological but
+# possible root placement) + a non-json stray
+defroot = wf_store._default_root()
+_touch(os.path.join(defroot, "presets", "zz.json"))
+_touch(os.path.join(defroot, "temp", "zy.json"))
+_touch(os.path.join(wfdir, "not_a_workflow.txt"))
+
+FILES = H[("GET", "/settings_hub/workflows/files")]
+FAV_GET = H[("GET", "/settings_hub/workflows/files-fav")]
+FAV_POST = H[("POST", "/settings_hub/workflows/files-fav")]
+
+r = loop(FILES(FakeRequest(method="GET")))
+j = r.json()
+paths = [f["path"] for f in j["files"]]
+check("files: ok + the default root named",
+      j.get("ok") is True and j.get("root") == wfdir)
+check("files: the nested files are listed with workflows/ paths",
+      "workflows/sub/b.json" in paths and "workflows/sub/deep/c.json" in paths,
+      json.dumps(paths))
+check("files: the root file is listed", "workflows/a.json" in paths)
+check("files: only .json files", all(p.endswith(".json") for p in paths))
+check("files: the storage presets/temp never mix in",
+      not any("presets/" in p or "temp/" in p for p in paths), json.dumps(paths))
+ameta = [f for f in j["files"] if f["path"] == "workflows/a.json"][0]
+check("files: size + mtime carried", ameta["size"] == 10 and abs(ameta["mtime"] - (now - 100)) < 2)
+
+# favorites: toggle on / off, persisted, traversal refused
+r = loop(FAV_GET(FakeRequest(method="GET")))
+check("favorites: an empty list at first", r.json().get("ok") and r.json()["favs"] == [])
+r = loop(FAV_POST(FakeRequest(json_body={"path": "workflows/a.json", "fav": True})))
+check("favorites: toggled on", r.json().get("ok") and r.json()["favs"] == ["workflows/a.json"])
+r = loop(FAV_GET(FakeRequest(method="GET")))
+check("favorites: persisted across reads",
+      r.json()["favs"] == ["workflows/a.json"])
+fav_file = os.path.join(_USER_DIR, "settings_hub", "workflows_favorites.json")
+check("favorites: the file lives in the DEFAULT user dir", os.path.isfile(fav_file))
+r = loop(FAV_POST(FakeRequest(json_body={"path": "workflows/sub/b.json", "fav": True})))
+check("favorites: a second mark appends",
+      r.json()["favs"] == ["workflows/a.json", "workflows/sub/b.json"])
+r = loop(FAV_POST(FakeRequest(json_body={"path": "workflows/a.json", "fav": False})))
+check("favorites: toggled off", r.json()["favs"] == ["workflows/sub/b.json"])
+r = loop(FAV_POST(FakeRequest(json_body={"path": "../escape.json", "fav": True})))
+check("favorites: a traversal path is refused", r.status == 400)
+r = loop(FAV_POST(FakeRequest(json_body={"path": "", "fav": True})))
+check("favorites: an empty path is refused", r.status == 400)
+
+# the storage root re-pointed INTO the workflows folder: its own folder dies
+# from the listing, the rest survives
+custom2 = os.path.join(wfdir, "mystore")
+r = loop(ROOT_POST(FakeRequest(json_body={"path": custom2})))
+check("files: the custom root inside workflows was accepted", r.json().get("ok"))
+r = loop(FILES(FakeRequest(method="GET")))
+paths2 = [f["path"] for f in r.json()["files"]]
+check("files: the storage subtree is excluded from the walk",
+      not any(p.startswith("workflows/mystore/") for p in paths2), json.dumps(paths2))
+check("files: the ordinary workflows survive the custom-root walk",
+      "workflows/a.json" in paths2 and "workflows/sub/deep/c.json" in paths2,
+      json.dumps(paths2))
+check("root: userRel names the custom root relative to the user dir",
+      loop(ROOT_GET(FakeRequest(method="GET"))).json().get("userRel") == "workflows/mystore")
+loop(ROOT_POST(FakeRequest(json_body={"path": ""})))
+r = loop(ROOT_GET(FakeRequest(method="GET")))
+check("root: userRel back to the default layout",
+      r.json().get("userRel") == "settings_hub/workflows", str(r.json().get("userRel")))
+
+try:
+    shutil_ = __import__("shutil")
+    shutil_.rmtree(wfdir, ignore_errors=True)
+    shutil_.rmtree(custom2, ignore_errors=True)
+except Exception:
+    pass
 reset_state()
 
 # ===========================================================================

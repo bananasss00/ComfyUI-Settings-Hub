@@ -287,6 +287,22 @@ function makeFakeApi() {
                 sessions.set(s.id, s);
                 return jsonResp({ ok: true, session: s });
             }
+            // v108: the mass delete of the 🕘 popup ({ids} or {all:true})
+            if (p === "/settings_hub/chat/sessions/delete" && method === "POST") {
+                let body = opts.body;
+                try { body = JSON.parse(body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                let ids = [];
+                if (body.all === true) ids = [...sessions.keys()];
+                else if (Array.isArray(body.ids)) {
+                    if (body.ids.some((x) => !/^[a-f0-9]{8,32}$/.test(x))) {
+                        return jsonResp({ ok: false, error: "bad session id" }, 400);
+                    }
+                    ids = body.ids;
+                } else return jsonResp({ ok: false, error: "ids must be a list" }, 400);
+                let deleted = 0;
+                for (const sid of ids) if (sessions.delete(sid)) deleted++;
+                return jsonResp({ ok: true, deleted, requested: ids.length });
+            }
             if (p === "/settings_hub/chat/gpu" && method === "GET") {
                 return jsonResp({
                     ok: true, configured: !!config.url,
@@ -817,6 +833,102 @@ await settle();
 check("second 🗑 DELETEd the session",
     fakeApi.__calls().some((c) => c.method === "DELETE" && c.url.startsWith("/settings_hub/chat/session/")));
 hooks.closeSessPop();
+
+// ---------------------------------------------------------------------------
+phase("SS (v108) saved-chats MASS management: checkboxes, dynamic select-all, armed deletes");
+
+// seed three saved chats for the bulk playground
+const seedSess = (id, title) =>
+    fakeApi.__sessions().set(id, { id, title, created: 1, updated: 1, messages: [] });
+seedSess("aa11bb22cc33", "Bulk alpha");
+seedSess("bb22cc33dd44", "Bulk beta");
+seedSess("cc33dd44ee55", "Bulk gamma");
+
+await hooks.openSessPop();
+await settle();
+let spop = hooks.sessPopEl();
+check("SS: the mass tools row exists (selall / delself / delall)",
+    !!spop.querySelector('[data-ss="selall"]') &&
+    !!spop.querySelector('[data-ss="delself"]') &&
+    !!spop.querySelector('[data-ss="delall"]'));
+check("SS: every row carries a checkbox",
+    spop.querySelectorAll(".hub-chat-sess-check").length >= 3,
+    String(spop.querySelectorAll(".hub-chat-sess-check").length));
+const selAllBtn = spop.querySelector('[data-ss="selall"]');
+check("SS: the select-all starts as 'Select all'", selAllBtn.textContent.includes("Select all"), selAllBtn.textContent);
+
+// one checkbox change joins the selection; the click itself never opens the chat
+const tabsBeforeCb = hooks.tabs().length;
+const cbA = [...spop.querySelectorAll(".hub-chat-sess-check")].find((c) => c.dataset.sscheck === "aa11bb22cc33");
+cbA.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("SS: a checkbox click does NOT open the chat", hooks.tabs().length === tabsBeforeCb, hooks.tabs().length);
+cbA.checked = true;
+cbA.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+await settle();
+check("SS: the change event joined the selection", hooks.sessSel().includes("aa11bb22cc33"), JSON.stringify(hooks.sessSel()));
+check("SS: the row wears the selected highlight",
+    !!hooks.sessPopEl().querySelector('.hub-chat-sess[data-sid="aa11bb22cc33"].hub-chat-sess-sel'));
+check("SS: the select-all label is still 'Select all' (some unchecked)",
+    hooks.sessPopEl().querySelector('[data-ss="selall"]').textContent.includes("Select all"));
+
+// dynamic select-all: one click checks EVERY visible row -> 'Deselect all'
+hooks.sessPopEl().querySelector('[data-ss="selall"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("SS: select-all checked the whole visible list",
+    hooks.sessSel().includes("aa11bb22cc33") && hooks.sessSel().includes("bb22cc33dd44") && hooks.sessSel().includes("cc33dd44ee55"),
+    JSON.stringify(hooks.sessSel()));
+const selLabel = hooks.sessPopEl().querySelector('[data-ss="selall"]').textContent;
+check("SS: the label flipped to 'Deselect all'", selLabel.includes("Deselect all"), selLabel);
+hooks.sessPopEl().querySelector('[data-ss="selall"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("SS: deselect-all cleared the visible list", hooks.sessSel().length === 0, JSON.stringify(hooks.sessSel()));
+
+// Delete selected: arm -> confirm -> one POST /sessions/delete {ids}; an open
+// tab of a deleted chat closes too
+const openTab = await hooks.createTab("Bulk victim");
+hooks.sessSelSet(["aa11bb22cc33", "bb22cc33dd44", openTab.id]);
+hooks.renderSessTools();
+const delSelBtn = hooks.sessPopEl().querySelector('[data-ss="delself"]');
+delSelBtn.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("SS: delete-selected armed (the pulsing confirm)", hooks.sessBulk()?.mode === "sel", String(hooks.sessBulk()?.mode));
+check("SS: the armed button names the confirm",
+    hooks.sessPopEl().querySelector('[data-ss="delself"]').textContent.includes("Confirm"));
+hooks.sessPopEl().querySelector('[data-ss="delself"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle(12);
+const bulkCall = fakeApi.__calls().filter((c) => c.url === "/settings_hub/chat/sessions/delete").at(-1);
+check("SS: the confirm POSTed one bulk delete",
+    !!bulkCall && bulkCall.method === "POST", JSON.stringify(bulkCall || {}));
+const bulkBody = bulkCall ? JSON.parse(bulkCall.body) : {};
+check("SS: the payload carried exactly the checked ids",
+    Array.isArray(bulkBody.ids) && bulkBody.ids.includes("aa11bb22cc33") &&
+    bulkBody.ids.includes("bb22cc33dd44") && bulkBody.ids.includes(openTab.id) &&
+    !bulkBody.ids.includes("cc33dd44ee55"), JSON.stringify(bulkBody));
+check("SS: the deleted sessions left the server store",
+    !fakeApi.__sessions().has("aa11bb22cc33") && !fakeApi.__sessions().has("bb22cc33dd44"));
+check("SS: the open tab of a deleted chat was closed",
+    !hooks.tabs().some((t) => t.id === openTab.id), JSON.stringify(hooks.tabs()));
+check("SS: the untouched chat survived",
+    fakeApi.__sessions().has("cc33dd44ee55"));
+check("SS: the selection was consumed by the delete", hooks.sessSel().length === 0, JSON.stringify(hooks.sessSel()));
+
+// Delete all: arm -> confirm -> {all:true}; every session dies, an emptied
+// workspace auto-creates a fresh tab (the panel never ends with zero tabs)
+hooks.sessPopEl().querySelector('[data-ss="delall"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("SS: delete-all armed", hooks.sessBulk()?.mode === "all", String(hooks.sessBulk()?.mode));
+hooks.sessPopEl().querySelector('[data-ss="delall"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle(12);
+const allCall = fakeApi.__calls().filter((c) => c.url === "/settings_hub/chat/sessions/delete").at(-1);
+check("SS: the confirm POSTed {all:true}", !!allCall && JSON.parse(allCall.body).all === true, JSON.stringify(allCall || {}));
+check("SS: every SEEDED session is gone",
+    !fakeApi.__sessions().has("cc33dd44ee55") && !fakeApi.__sessions().has("aa11bb22cc33"));
+await settle();
+check("SS: an emptied workspace auto-created one fresh tab",
+    hooks.tabs().length === 1, JSON.stringify(hooks.tabs()));
+hooks.closeSessPop();
+check("SS: closing the popup resets the selection", hooks.sessSel().length === 0);
 
 // ---------------------------------------------------------------------------
 phase("SM degraded py + Off/On");

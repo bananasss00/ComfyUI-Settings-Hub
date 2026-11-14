@@ -1,6 +1,34 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER (v107)
+// SettingsHub - WORKFLOWS MANAGER (v108)
 // ----------------------------------------------------------------------------
+// v108 (owner plan, 4 items):
+//   1. FILES TAB = A REAL FILE MANAGER: the listing moved to the new
+//      GET /settings_hub/workflows/files route (path + SIZE + MTIME per
+//      workflow file, the storage-root housekeeping excluded server-side) and
+//      the tab gained: sorting by date/name/size with an asc/desc toggle,
+//      the last-modified date+time + the size on every row, DATE filters
+//      (from/until) with the quick periods Today / 7d / 30d, a FOLDER filter
+//      (a select over every nesting level, subfolders included), a file-SIZE
+//      range filter (KB), and per-file FAVORITES (★ server-side,
+//      <user>/settings_hub/workflows_favorites.json - root-switch-proof)
+//      with a ★-only filter chip;
+//   2. PATH DISPLAY + FOLDER NAVIGATION: every file row shows its path
+//      relative to the workflows root under the name (long paths ellipsized
+//      through "…" keeping the LAST folders + the file name, the full path on
+//      hover), the search matches the nested folder names too, and a ≡/🌲
+//      view toggle switches the flat list (default) to a FOLDER TREE with
+//      expand/collapse carets at any depth, click-to-enter navigation and
+//      breadcrumbs; returning to ≡ restores the habitual Files view;
+//   3. UNIFIED STORAGE VIEW (py v108): while a custom storage root is
+//      active, the presets/temp of the DEFAULT location stay readable - the
+//      reads cover both roots (an id clash resolves to the active copy, so
+//      no duplicates), the writes go where the data already lives, nothing
+//      is moved or lost on a root switch;
+//   4. PRESETS NEVER MIX INTO FILES: the new /files listing (and the
+//      native /userdata fallback) keep the storage-root presets/temp out of
+//      the ordinary workflow list even when the root is re-pointed INSIDE
+//      the workflows folder.
+//
 // v107 (owner request 2026-11-15: "ты пишешь 'есть бюджет localStorage', но
 //   сам комфи и другие кастом екстеншены тоже сильно раздувают буфер, надежно
 //   ли твое решение? мб лучше хранить temp процессы в зарезервированной папке
@@ -167,9 +195,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v107";
+const WF_WEB_VERSION = "v108";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v107";
+globalThis.__SettingsHubLoaded["workflows"] = "v108";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -181,6 +209,9 @@ const LS_PREF = "settingshub.workflows.pref";  // {keepUnsaved,closeEmptyTemp,wa
 const LS_RECENT = "settingshub.workflows.recent"; // ring buffer of closed tabs
 const Z_PANEL = "99900";               // same layer as the stack / chat panels
 const RECENT_MAX = 15;
+// v108: the Files-tab quick-period bounds ("today" / "7d" / "30d" chips -
+// a lower mtime bound only, so a skewed clock can never hide a fresh file)
+const DAY_MS = 24 * 60 * 60 * 1000;
 // v107: the reopen snapshots of closed TEMP tabs live SERVER-side as
 // temp/<id>.json inside the storage root (see the v107 header note) - the
 // localStorage ring carries only the metadata + the temp id. The caps below
@@ -507,9 +538,29 @@ function getOpenWorkflows() {
 }
 
 /** All the saved workflow FILES (for the Files tab + the ⚠ missing marks).
- *  Rung 1: the frontend store registry; rung 2: the NATIVE /userdata endpoint
- *  (multi-user aware - reading the server folder directly is not). */
+ *  Rung 0 (v108): the pack's own /workflows/files route - path + SIZE +
+ *  MTIME in one shot, and the storage-root housekeeping (presets/, temp/)
+ *  is already excluded server-side, so presets never mix into the list.
+ *  Rung 1: the frontend store registry (no meta - the filters degrade).
+ *  Rung 2: the NATIVE /userdata endpoint (multi-user aware - reading the
+ *  server folder directly is not); meta is parsed when the build carries
+ *  it. Every rung filters out the "settings_hub/" segments from the paths -
+ *  a legacy listing cannot be trusted to have excluded the default storage
+ *  folder (it lives OUTSIDE workflows/, but a hand-copied presets/ folder
+ *  inside it must not surface either). */
 async function getSavedWorkflows() {
+    // v108 rung 0: the pack's own listing (size + mtime in one shot)
+    try {
+        const res = await jfetch("/settings_hub/workflows/files");
+        if (res.json?.ok && Array.isArray(res.json.files)) {
+            return res.json.files.map((f) => ({
+                path: normWfPath(f.path),
+                name: f.name || baseName(f.path),
+                size: Number(f.size) || 0,
+                mtime: Number(f.mtime) || 0,
+            })).filter((f) => f.path && !f.path.toLowerCase().includes("settings_hub/"));
+        }
+    } catch (_) { /* old py - the legacy rungs take over */ }
     const store = wfStoreOf();
     let list = null;
     try { list = store?.workflows ?? store?.persistedWorkflows ?? null; } catch (_) { list = null; }
@@ -517,7 +568,9 @@ async function getSavedWorkflows() {
         const out = [];
         for (const w of list) {
             const p = w?.path || w?.fullPath || null;
-            if (typeof p === "string" && p) out.push({ path: p, name: baseName(p) });
+            if (typeof p === "string" && p) {
+                out.push({ path: p, name: baseName(p), size: 0, mtime: 0 });
+            }
         }
         if (out.length) return out;
     }
@@ -528,13 +581,27 @@ async function getSavedWorkflows() {
             const items = Array.isArray(j) ? j : (Array.isArray(j?.items) ? j.items : []);
             const out = [];
             for (const it of items) {
+                let p = null;
                 if (typeof it === "string") {
-                    const p = it.startsWith("workflows/") ? it : ("workflows/" + it);
-                    out.push({ path: p, name: baseName(p) });
+                    p = it.startsWith("workflows/") ? it : ("workflows/" + it);
                 } else if (it && typeof it === "object") {
-                    const p = it.path || (it.name ? (it.name.startsWith("workflows/") ? it.name : "workflows/" + it.name) : null);
-                    if (p) out.push({ path: p, name: baseName(p) });
+                    p = it.path || (it.name ? (it.name.startsWith("workflows/") ? it.name : "workflows/" + it.name) : null);
                 }
+                if (!p) continue;
+                // meta: field names differ between builds - accept the
+                // number epoch ("mtime"/"modified") and an ISO date string
+                let size = 0, mtime = 0;
+                if (it && typeof it === "object") {
+                    size = Number(it.size) || 0;
+                    mtime = Number(it.mtime) || Number(it.modified) || 0;
+                    if (!mtime && typeof it.modified === "string" && it.modified) {
+                        const t = Date.parse(it.modified);
+                        if (Number.isFinite(t)) mtime = Math.floor(t / 1000);
+                    }
+                }
+                p = normWfPath(p);
+                if (p.toLowerCase().includes("settings_hub/")) continue; // v108: never mix
+                out.push({ path: p, name: baseName(p), size, mtime });
             }
             return out;
         }
@@ -977,6 +1044,252 @@ async function gcTempSnapshots() {
             await deleteTempSnapshot(it.id);
         }
     } catch (_) {}
+}
+
+// ---------------------------------------------------------------------------
+// v108 FILES TAB - sort / filters / favorites / tree. The listing data comes
+// from getSavedWorkflows() (the /workflows/files rung carries size + mtime);
+// everything below shapes it for display. The view state the user expects to
+// STAY (sort, view mode) persists in LS_UI; the session filters (dates,
+// sizes, folder, ★-only) reset with the page like any search box.
+// ---------------------------------------------------------------------------
+
+let filesSort = { key: "mtime", dir: "desc" };  // "mtime" | "name" | "size"
+let filesView = "list";         // "list" (flat, the habitual view) | "tree"
+let filesFav = new Set();       // favorite paths (normalized) - server-backed
+let filesFavsLoaded = false;    // the favorites list has been fetched once
+let filesFavOnly = false;       // the ★-only filter chip
+let filesFolder = "";           // the folder filter (list mode), "" = all
+let filesQuick = "";            // "today" | "7d" | "30d" | ""
+let filesDateFrom = "";         // "YYYY-MM-DD" (inclusive lower mtime bound)
+let filesDateTo = "";           // "YYYY-MM-DD" (inclusive upper mtime bound)
+let fileSizeMin = "";           // KB (string until parsed - an empty box is unbounded)
+let fileSizeMax = "";
+let filesAdvOpen = false;       // the ⚗ advanced-filters row visibility
+let filesTreeFolder = "";       // tree-mode navigation ("" = the root)
+let treeExpanded = new Set();   // the expanded folder paths in tree mode
+
+function loadFilesViewState() {
+    // the persisted bits of LS_UI (sort + view mode) - read once at mount
+    const ui = lsUi();
+    if (ui.filesSort && ["mtime", "name", "size"].includes(ui.filesSort.key)) {
+        filesSort = { key: ui.filesSort.key, dir: ui.filesSort.dir === "asc" ? "asc" : "desc" };
+    }
+    if (ui.filesView === "tree") filesView = "tree";
+}
+
+/** v108: the path RELATIVE to the workflows root - the Files tab displays
+ *  and filters by THIS shape (the storage paths carry the "workflows/"
+ *  prefix; the owner asked for the path under the name relative to the
+ *  workflows folder). */
+function relWfPath(p) {
+    return normWfPath(p).replace(/^workflows\//, "");
+}
+
+function fileFolderOf(p) {
+    const s = relWfPath(p);
+    const i = s.lastIndexOf("/");
+    return i < 0 ? "" : s.slice(0, i);
+}
+
+/** The date filter bounds in ms. Quick periods give a LOWER bound only (a
+ *  skewed clock must not hide a fresh file); the explicit from/until dates
+ *  are inclusive. A date input change clears the quick chip and back. */
+function filesDateBoundFrom() {
+    if (filesQuick === "today") {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        return d.getTime();
+    }
+    if (filesQuick === "7d") return Date.now() - 7 * DAY_MS;
+    if (filesQuick === "30d") return Date.now() - 30 * DAY_MS;
+    if (filesDateFrom) {
+        const t = Date.parse(filesDateFrom + "T00:00:00");
+        if (Number.isFinite(t)) return t;
+    }
+    return null;
+}
+
+function filesDateBoundTo() {
+    if (filesDateTo) {
+        const t = Date.parse(filesDateTo + "T23:59:59.999");
+        if (Number.isFinite(t)) return t;
+    }
+    return null;
+}
+
+function filesActiveFilterCount() {
+    let n = 0;
+    if (filesFolder) n++;
+    if (filesQuick || filesDateFrom || filesDateTo) n++;
+    if (fileSizeMin !== "" || fileSizeMax !== "") n++;
+    return n;
+}
+
+/** Every folder that holds (or leads to) a workflow file - the folder filter
+ *  select and the tree both build from this. Ancestors of file folders are
+ *  included so any nesting level is reachable. */
+function filesFolderList() {
+    const dirs = new Set();
+    for (const f of savedFiles) {
+        const parts = fileFolderOf(f.path).split("/").filter(Boolean);
+        for (let i = 1; i <= parts.length; i++) dirs.add(parts.slice(0, i).join("/"));
+    }
+    return [...dirs].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
+
+/** The filter pipeline (search tokens over name + nested folders, folder,
+ *  date range, size range, ★-only) + the sort. One function - the list mode,
+ *  the tree leaves and the status counts all read the same answer. */
+function filteredSavedFiles() {
+    const toks = filesSearch.toLowerCase().split(/\s+/).filter(Boolean);
+    const fromMs = filesDateBoundFrom();
+    const toMs = filesDateBoundTo();
+    const minB = fileSizeMin !== "" && Number.isFinite(parseFloat(fileSizeMin))
+        ? parseFloat(fileSizeMin) * 1024 : null;
+    const maxB = fileSizeMax !== "" && Number.isFinite(parseFloat(fileSizeMax))
+        ? parseFloat(fileSizeMax) * 1024 : null;
+    const folder = filesView === "tree" ? "" : filesFolder;
+    let list = savedFiles.filter((f) => {
+        const rel = relWfPath(f.path);
+        if (filesFavOnly && !filesFav.has(normWfPath(f.path))) return false;
+        if (folder && !(rel === folder || rel.startsWith(folder + "/"))) return false;
+        if (toks.length) {
+            // the search covers the name AND every nested folder segment
+            if (!toks.every((t) => rel.toLowerCase().includes(t))) return false;
+        }
+        const mt = (f.mtime || 0) * 1000;
+        if (fromMs != null && (!mt || mt < fromMs)) return false;
+        if (toMs != null && (!mt || mt > toMs)) return false;
+        if (minB != null && (f.size || 0) < minB) return false;
+        if (maxB != null && (f.size || 0) > maxB) return false;
+        return true;
+    });
+    const mul = filesSort.dir === "asc" ? 1 : -1;
+    const byName = (a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
+    list.sort((a, b) => {
+        let r = 0;
+        if (filesSort.key === "name") r = byName(a, b);
+        else if (filesSort.key === "size") r = (a.size || 0) - (b.size || 0);
+        else r = (a.mtime || 0) - (b.mtime || 0);
+        // the tie-break is ALWAYS name-ascending (a descending pass must not
+        // reverse the alphabet inside one mtime/size group)
+        if (!r) r = byName(a, b);
+        return r * mul;
+    });
+    return list;
+}
+
+/** The relative path shortened through "…" keeping the LAST folders + the
+ *  file name (the owner's spec); the full path stays on hover (title). */
+function shortPath(p, maxLen = 34) {
+    const s = normWfPath(p);
+    if (s.length <= maxLen) return s;
+    const parts = s.split("/");
+    const name = parts.pop() || "";
+    const keep = [];
+    let used = name.length + 2;
+    for (let i = parts.length - 1; i >= 0; i--) {
+        const seg = parts[i];
+        if (used + seg.length + 1 > maxLen) break;
+        keep.unshift(seg);
+        used += seg.length + 1;
+    }
+    return "…/" + (keep.length ? keep.join("/") + "/" : "") + name;
+}
+
+function fmtSize(n) {
+    const v = Number(n) || 0;
+    if (v <= 0) return "";
+    if (v < 1024) return v + " B";
+    const kb = v / 1024;
+    if (kb < 1024) return kb.toFixed(kb < 10 ? 1 : 0) + " KB";
+    return (kb / 1024).toFixed(1) + " MB";
+}
+
+function fmtDateTime(ts) {
+    if (!ts) return "";
+    try {
+        const d = new Date(ts * 1000);
+        return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
+            " " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    } catch (_) { return ""; }
+}
+
+// --- v108: the server-backed favorites -------------------------------------
+
+async function fetchFileFavs() {
+    try {
+        const res = await jfetch("/settings_hub/workflows/files-fav");
+        if (res.json?.ok && Array.isArray(res.json.favs)) {
+            filesFav = new Set(res.json.favs.map(normWfPath));
+        }
+    } catch (_) { /* old py - the star toggles degrade to a toast */ }
+    filesFavsLoaded = true;
+    return true;
+}
+
+/** Toggle ONE favorite. Optimistic: the star flips right away (a re-render
+ *  must not wait on the network), the server answer settles the truth, a
+ *  failure reverts the flip and names the problem. */
+async function toggleFileFav(path) {
+    const norm = normWfPath(path);
+    if (!norm) return false;
+    const next = !filesFav.has(norm);
+    if (next) filesFav.add(norm); else filesFav.delete(norm);
+    renderAll();
+    const res = await jfetch("/settings_hub/workflows/files-fav", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: norm, fav: next }),
+    });
+    if (res.json?.ok && Array.isArray(res.json.favs)) {
+        filesFav = new Set(res.json.favs.map(normWfPath));
+        renderAll();
+        return true;
+    }
+    if (next) filesFav.delete(norm); else filesFav.add(norm); // revert
+    renderAll();
+    localToast(res.status === 404
+        ? "Could not save the favorite - the server has no files-fav route (old py): update the FULL pack."
+        : "Could not save the favorite - see F12", 3600);
+    return false;
+}
+
+// --- v108: the folder tree (tree view mode) --------------------------------
+
+/** parentDir -> Set(subDirName) over every saved file path. Leaf folders
+ *  (files only, no subfolder) get an empty set so they stay addressable. */
+function buildFolderMap() {
+    const map = new Map();
+    for (const f of savedFiles) {
+        const segs = fileFolderOf(f.path).split("/").filter(Boolean);
+        let acc = "";
+        for (const s of segs) {
+            if (!map.has(acc)) map.set(acc, new Set());
+            map.get(acc).add(s);
+            acc = acc ? acc + "/" + s : s;
+        }
+        if (!map.has(acc)) map.set(acc, new Set());
+    }
+    return map;
+}
+
+/** How many files a folder holds at ANY depth (the folder row's counter). */
+function deepCountIn(dir) {
+    if (!dir) return savedFiles.length;
+    const pre = dir + "/";
+    return savedFiles.filter((f) => relWfPath(f.path).startsWith(pre)).length;
+}
+
+function folderRowHtml(full, label, depth, open, count) {
+    return `<div class="hub-wf-row hub-wf-trow">` +
+        `<button type="button" class="hub-wf-caret" data-act="treefold" data-folder="${esc(full)}" ` +
+        `title="${open ? "Collapse" : "Expand"} this folder (any depth)">${open ? "▾" : "▸"}</button>` +
+        `<button type="button" class="hub-wf-tname" data-act="treeenter" data-folder="${esc(full)}" ` +
+        `title="Enter ${esc(full)}" style="padding-left:${depth * 10}px">${esc(label)}/</button>` +
+        `<span class="hub-wf-tcount">${count}</span>` +
+        `</div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1632,6 +1945,7 @@ function buildDom() {
 
     const ui = lsUi();
     uiTab = ["open", "presets", "files"].includes(ui.tab) ? ui.tab : "open";
+    loadFilesViewState(); // v108: the persisted Files sort + view mode
     lastDpr = curDpr();
     applyPos(ui.x ?? Math.max(16, (window.innerWidth || 1600) - 380), ui.y ?? 90);
     applySize(ui.w ?? DEF_W, ui.h ?? DEF_H);
@@ -1894,43 +2208,155 @@ function presetsTabHtml() {
 function filesTabHtml() {
     // v107: temp tabs reopen from their SERVER snapshot (tempId ->
     // temp/<id>.json; the v106 embed is the fallback) - no file path, the
-    // row is found by ts, carries a (snapshot) badge and its own tooltip
-    const rec = recent.slice(0, RECENT_MAX).map((r) =>
+    // row is found by ts, carries a (snapshot) badge and its own tooltip.
+    // v108: the 🕘 section is a list-mode citizen - the tree view is a pure
+    // file browser and restores the habitual Files view when switched back.
+    const rec = filesView === "list" ? recent.slice(0, RECENT_MAX).map((r) =>
         `<div class="hub-wf-row hub-wf-row-recent" data-path="${esc(r.path || "")}" data-rts="${esc(String(r.ts || 0))}">` +
         `<button type="button" class="hub-wf-name" data-act="reopen" data-path="${esc(r.path || "")}" data-rts="${esc(String(r.ts || 0))}" ` +
         `title="${(r.tempId || r.snap) ? "Snapshot - restores the tab as it was when closed" : esc(r.path || "")}">🕘 ${esc(r.name)}${(r.tempId || r.snap) && !r.path ? " <span class=\"hub-wf-snap\">(snapshot)</span>" : ""}</button>` +
         `<span class="hub-wf-marks"><span class="hub-wf-snap">${esc(fmtDate(Math.floor((r.ts || 0) / 1000)))}</span></span>` +
-        `</div>`).join("");
-    const toks = filesSearch.toLowerCase().split(/\s+/).filter(Boolean);
-    const list = !toks.length ? savedFiles : savedFiles.filter((f) => {
-        const hay = normWfPath(f.path).toLowerCase();
-        return toks.every((t) => hay.includes(t));
-    });
-    const rows = list.slice(0, fileRowsShown).map((f, i) => {
-        const norm = normWfPath(f.path);
-        const openNow = openHasPath(f.path);
-        return `<div class="hub-wf-row${openNow ? " hub-wf-row-active" : ""}" data-fpath="${esc(f.path)}">` +
-            `<input type="checkbox" class="hub-wf-fcheck" data-fcheck="${esc(f.path)}"${fileSel.has(norm) ? " checked" : ""} title="Select for Open selected / Save selected as preset">` +
-            `<button type="button" class="hub-wf-name" data-act="openfile" data-path="${esc(f.path)}" title="${esc(f.path)}">${esc(f.name)}${openNow ? " ●" : ""}</button>` +
-            `</div>`;
-    }).join("");
-    const more = list.length > fileRowsShown
-        ? `<button type="button" class="hub-wf-more" data-act="morefiles">Show more (${list.length - fileRowsShown} hidden)</button>` : "";
+        `</div>`).join("") : "";
+    const list = filteredSavedFiles();
+    const viewBtn = (v, label, title) =>
+        `<button type="button" class="hub-wf-act hub-wf-viewbtn${filesView === v ? " hub-wf-viewbtn-on" : ""}" data-act="filesview" data-view="${v}" title="${title}">${label}</button>`;
+    const sortBtn = (k, label, title) => {
+        const on = filesSort.key === k;
+        const arrow = on ? (filesSort.dir === "asc" ? " ↑" : " ↓") : "";
+        return `<button type="button" class="hub-wf-act hub-wf-sortbtn${on ? " hub-wf-sortbtn-on" : ""}" data-act="filesort" data-key="${k}" ` +
+            `title="${title}${on ? " - click to flip ascending/descending" : ""}">${label}${arrow}</button>`;
+    };
+    const quickChip = (q, label) =>
+        `<button type="button" class="hub-wf-act hub-wf-chip${filesQuick === q ? " hub-wf-chip-on" : ""}" data-act="fquick" data-q="${q}" ` +
+        `title="Show only the files modified ${label.toLowerCase()} (click again to clear)">${label}</button>`;
+    // v108: the advanced filter row (folder / dates / size range) - collapsed
+    // by default, the ⚗ chip counts the ACTIVE filters
+    const adv = !filesAdvOpen ? "" :
+        `<div class="hub-wf-fadv">` +
+        (filesView === "list"
+            ? `<select class="hub-wf-fsel" data-wf="ffolder" title="Folder filter - the nested subfolders are included">` +
+              `<option value=""${!filesFolder ? " selected" : ""}>folder: all</option>` +
+              filesFolderList().map((d) => {
+                  const depth = d.split("/").length - 1;
+                  const label = "\u00a0".repeat(depth * 2) + d.split("/").pop();
+                  return `<option value="${esc(d)}"${filesFolder === d ? " selected" : ""}>${esc(label)}</option>`;
+              }).join("") + `</select>`
+            : `<span class="hub-wf-flabel" title="In tree mode the navigation below filters the folders">folder: tree nav</span>`) +
+        `<input type="date" class="hub-wf-fdate" data-wf="fdatefrom" value="${esc(filesDateFrom)}" title="Modified from (inclusive)" aria-label="Modified from">` +
+        `<input type="date" class="hub-wf-fdate" data-wf="fdateto" value="${esc(filesDateTo)}" title="Modified until (inclusive)" aria-label="Modified until">` +
+        `<span class="hub-wf-fnum-wrap"><input type="number" class="hub-wf-fnum" data-wf="fsizemin" min="0" step="any" placeholder="min" value="${esc(fileSizeMin)}" title="Size min, KB">` +
+        `<span class="hub-wf-flabel">–</span>` +
+        `<input type="number" class="hub-wf-fnum" data-wf="fsizemax" min="0" step="any" placeholder="max" value="${esc(fileSizeMax)}" title="Size max, KB">` +
+        `<span class="hub-wf-flabel">KB</span></span>` +
+        `<button type="button" class="hub-wf-act" data-act="fclear" title="Clear every advanced filter (folder, dates, size)">✕</button>` +
+        `</div>`;
+    // v108: the rows - the flat list or the folder tree. Both share the
+    // savedFileRowHtml rows (checkbox, name, path sub-line, ★) and the
+    // fileRowsShown cap.
+    let rows, more = "";
+    if (filesView === "tree") {
+        const map = buildFolderMap();
+        const out = [];
+        let shown = 0, capHit = false;
+        const renderDir = (dir, depth) => {
+            if (capHit) return;
+            const kids = [...(map.get(dir) || [])].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+            for (const k of kids) {
+                const full = dir ? dir + "/" + k : k;
+                const open = treeExpanded.has(full);
+                out.push(folderRowHtml(full, k, depth, open, deepCountIn(full)));
+                if (open) renderDir(full, depth + 1);
+            }
+            for (const f of list.filter((x) => fileFolderOf(x.path) === dir)) {
+                if (shown >= fileRowsShown) { capHit = true; break; }
+                shown++;
+                out.push(savedFileRowHtml(f, depth));
+            }
+        };
+        renderDir(filesTreeFolder, 0);
+        rows = out.join("");
+        if (capHit) more = `<button type="button" class="hub-wf-more" data-act="morefiles">Show more</button>`;
+    } else {
+        rows = list.slice(0, fileRowsShown).map((f) => savedFileRowHtml(f, 0)).join("");
+        more = list.length > fileRowsShown
+            ? `<button type="button" class="hub-wf-more" data-act="morefiles">Show more (${list.length - fileRowsShown} hidden)</button>` : "";
+    }
+    const crumbs = filesView === "tree" ? crumbsHtml() : "";
     return `<div class="hub-wf-toolbar">` +
         // v102: the search + actions are PINNED above the scroll container -
-        // the field stays visible while the file list scrolls (v101 put it
-        // between the sections and it scrolled away with the body)
-        `<input type="text" class="hub-wf-search" data-wf="filesearch" placeholder="filter: flux detail…" value="${esc(filesSearch)}" spellcheck="false">` +
+        // the field stays visible while the file list scrolls
+        `<input type="text" class="hub-wf-search" data-wf="filesearch" placeholder="filter: name or nested folder…" value="${esc(filesSearch)}" spellcheck="false">` +
         `<button type="button" class="hub-wf-act" data-act="openselected" title="Open every checked file">▶ Open selected</button>` +
         `<button type="button" class="hub-wf-act" data-act="saveselection" title="Save the checked files as a preset WITHOUT opening them">💾 Save selected as preset</button>` +
         `</div>` +
-        `<div class="hub-wf-scroll">` +
-        `<div class="hub-wf-sect">🕘 Recently closed</div>` +
-        `<div class="hub-wf-list hub-wf-list-recent">${rec || `<div class="hub-wf-emptylist">Nothing closed yet</div>`}</div>` +
-        `<div class="hub-wf-sect">All saved workflows</div>` +
-        `<div class="hub-wf-list">${rows || `<div class="hub-wf-emptylist">${savedFilesLoaded ? "No saved workflow files found" : "Reading the workflow files…"}</div>`}${more}</div>` +
+        // v108: the file-manager row - sort (date/name/size, asc/desc on the
+        // active one), the list/tree view toggle, the ★-only chip, the ⚗
+        // advanced filters and the quick periods
+        `<div class="hub-wf-tools2">` +
+        sortBtn("mtime", "date", "Sort by last modified") +
+        sortBtn("name", "name", "Sort by file name") +
+        sortBtn("size", "size", "Sort by file size") +
+        viewBtn("list", "≡", "Flat list (the default Files view)") +
+        viewBtn("tree", "🌲", "Folder tree - expand/collapse any depth, enter folders, breadcrumbs") +
+        `<button type="button" class="hub-wf-act hub-wf-chip${filesFavOnly ? " hub-wf-chip-on" : ""}" data-act="favonly" title="Show only the favorites (★)">★${filesFav.size ? " " + filesFav.size : ""}</button>` +
+        `<button type="button" class="hub-wf-act hub-wf-chip${filesAdvOpen ? " hub-wf-advbtn-on" : ""}" data-act="fadv" title="Advanced filters: folder, modified date range, file size range">⚗${filesActiveFilterCount() ? " " + filesActiveFilterCount() : ""}</button>` +
+        quickChip("today", "Today") +
+        quickChip("7d", "7d") +
+        quickChip("30d", "30d") +
         `</div>` +
-        `<div class="hub-wf-status">${savedFilesLoaded ? savedFiles.length + " file(s)" : "reading…"} · ${fileSel.size} selected</div>`;
+        adv +
+        `<div class="hub-wf-scroll">` +
+        (filesView === "list"
+            ? `<div class="hub-wf-sect">🕘 Recently closed</div>` +
+              `<div class="hub-wf-list hub-wf-list-recent">${rec || `<div class="hub-wf-emptylist">Nothing closed yet</div>`}</div>` +
+              `<div class="hub-wf-sect">All saved workflows</div>`
+            : `<div class="hub-wf-sect">${filesTreeFolder ? "📁 " + esc(filesTreeFolder) : "📁 Folder tree"}</div>` + crumbs) +
+        `<div class="hub-wf-list">${rows || `<div class="hub-wf-emptylist">${savedFilesLoaded
+            ? (filesView === "tree" && filesTreeFolder
+                ? "This folder is empty (or the filters hide everything)"
+                : (savedFiles.length ? "Nothing matches the filters" : "No saved workflow files found"))
+            : "Reading the workflow files…"}</div>`}${more}</div>` +
+        `</div>` +
+        `<div class="hub-wf-status">${savedFilesLoaded ? (filesView === "tree"
+            ? list.length + " match(es)"
+            : list.length + " of " + savedFiles.length + " file(s)") : "reading…"}` +
+        ` · ★ ${filesFav.size} · ${fileSel.size} selected` +
+        `${filesView === "tree" && filesTreeFolder ? " · in " + esc(filesTreeFolder) : ""}</div>`;
+}
+
+/** v108: the tree-mode breadcrumbs (workflows › sub › …) - every crumb is a
+ *  jump back up; the root crumb leaves the navigation. */
+function crumbsHtml() {
+    const parts = filesTreeFolder ? filesTreeFolder.split("/") : [];
+    const crumbs = [`<button type="button" class="hub-wf-crumb" data-act="treecrumb" data-folder="" title="Back to the workflows root">🗂 workflows</button>`];
+    let acc = "";
+    for (const p of parts) {
+        acc = acc ? acc + "/" + p : p;
+        crumbs.push(`<span class="hub-wf-crumbs-sep">›</span>` +
+            `<button type="button" class="hub-wf-crumb${acc === filesTreeFolder ? " hub-wf-crumb-on" : ""}" data-act="treecrumb" data-folder="${esc(acc)}" title="Back to ${esc(acc)}">${esc(p)}</button>`);
+    }
+    return `<div class="hub-wf-crumbs">${crumbs.join("")}</div>`;
+}
+
+/** One saved-file row (list + tree share it): checkbox, the name with the
+ *  relative path sub-line (ellipsized, full path on hover), the size + the
+ *  last-modified date/time, and the ★ favorite toggle. */
+function savedFileRowHtml(f, depth = 0) {
+    const norm = normWfPath(f.path);
+    const rel = relWfPath(norm);
+    const openNow = openHasPath(f.path);
+    const fav = filesFav.has(norm);
+    const ind = depth ? ` style="padding-left:${depth * 10 + 5}px"` : "";
+    const meta = [f.mtime ? fmtDateTime(f.mtime) : "", fmtSize(f.size)].filter(Boolean).join(" · ");
+    return `<div class="hub-wf-row${openNow ? " hub-wf-row-active" : ""}" data-fpath="${esc(f.path)}"${ind}>` +
+        `<input type="checkbox" class="hub-wf-fcheck" data-fcheck="${esc(f.path)}"${fileSel.has(norm) ? " checked" : ""} title="Select for Open selected / Save selected as preset">` +
+        `<span class="hub-wf-filecol">` +
+        `<button type="button" class="hub-wf-name" data-act="openfile" data-path="${esc(f.path)}" title="${esc(rel)}">${esc(f.name)}${openNow ? " ●" : ""}</button>` +
+        `<span class="hub-wf-filesub" title="${esc(rel)}">${esc(shortPath(rel))}${meta ? " · " + esc(meta) : ""}</span>` +
+        `</span>` +
+        `<button type="button" class="hub-wf-favbtn${fav ? " hub-wf-favbtn-on" : ""}" data-act="filefav" data-path="${esc(f.path)}" ` +
+        `title="${fav ? "Remove from favorites" : "Add to favorites (★)"}">${fav ? "★" : "☆"}</button>` +
+        `</div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1999,6 +2425,69 @@ async function onBodyClick(e) {
         }
         case "moreopen": openRowsShown += SHOW_MORE_STEP; renderAll(); return;
         case "morefiles": fileRowsShown += SHOW_MORE_STEP; renderAll(); return;
+        // ---- v108 Files tab: the file-manager controls --------------------
+        case "filesort": {
+            const k = btn.dataset.key;
+            if (filesSort.key === k) filesSort.dir = filesSort.dir === "asc" ? "desc" : "asc";
+            else filesSort = { key: k, dir: k === "name" ? "asc" : "desc" };
+            saveUi({ filesSort });
+            renderAll();
+            return;
+        }
+        case "filesview": {
+            const v = btn.dataset.view === "tree" ? "tree" : "list";
+            if (filesView !== v) {
+                filesView = v;
+                saveUi({ filesView });
+                fileRowsShown = ROW_LIST_CAP;
+                renderAll(); // v108: back to ≡ restores the habitual Files view
+            }
+            return;
+        }
+        case "favonly": {
+            filesFavOnly = !filesFavOnly;
+            fileRowsShown = ROW_LIST_CAP;
+            renderAll();
+            return;
+        }
+        case "fadv": { filesAdvOpen = !filesAdvOpen; renderAll(); return; }
+        case "fclear": {
+            filesFolder = "";
+            filesDateFrom = "";
+            filesDateTo = "";
+            fileSizeMin = "";
+            fileSizeMax = "";
+            fileRowsShown = ROW_LIST_CAP;
+            renderAll();
+            return;
+        }
+        case "fquick": {
+            const q = btn.dataset.q || "";
+            filesQuick = filesQuick === q ? "" : q; // click again clears
+            filesDateFrom = "";
+            filesDateTo = "";
+            fileRowsShown = ROW_LIST_CAP;
+            renderAll();
+            return;
+        }
+        case "filefav": {
+            if (btn.dataset.path) void toggleFileFav(btn.dataset.path);
+            return;
+        }
+        case "treefold": {
+            const d = btn.dataset.folder || "";
+            if (treeExpanded.has(d)) treeExpanded.delete(d);
+            else treeExpanded.add(d);
+            renderAll();
+            return;
+        }
+        case "treeenter":
+        case "treecrumb": {
+            filesTreeFolder = btn.dataset.folder || "";
+            fileRowsShown = ROW_LIST_CAP;
+            renderAll();
+            return;
+        }
         case "switch": {
             const p = presets.find((x) => x.id === btn.dataset.pid);
             if (p) openPlanPop(p, btn);
@@ -2146,6 +2635,38 @@ function onBodyChange(e) {
         if (el.checked) fileSel.add(norm);
         else fileSel.delete(norm);
         renderAll(); // refresh the "N selected" status line
+        return;
+    }
+    // ---- v108 Files tab: the advanced filter inputs ------------------------
+    if (el.matches('[data-wf="ffolder"]')) {
+        filesFolder = el.value || "";
+        fileRowsShown = ROW_LIST_CAP;
+        renderAll();
+        return;
+    }
+    if (el.matches('[data-wf="fdatefrom"]')) {
+        filesDateFrom = el.value || "";
+        filesQuick = ""; // the explicit date wins over the quick chip
+        fileRowsShown = ROW_LIST_CAP;
+        renderAll();
+        return;
+    }
+    if (el.matches('[data-wf="fdateto"]')) {
+        filesDateTo = el.value || "";
+        fileRowsShown = ROW_LIST_CAP;
+        renderAll();
+        return;
+    }
+    if (el.matches('[data-wf="fsizemin"]')) {
+        fileSizeMin = el.value === "" ? "" : el.value;
+        fileRowsShown = ROW_LIST_CAP;
+        renderAll();
+        return;
+    }
+    if (el.matches('[data-wf="fsizemax"]')) {
+        fileSizeMax = el.value === "" ? "" : el.value;
+        fileRowsShown = ROW_LIST_CAP;
+        renderAll();
         return;
     }
 }
@@ -2720,10 +3241,13 @@ function openWfSettingsPop() {
         `<button type="button" class="hub-cs-chip" data-wf-btn="rootdef">default</button></span></div>` +
         `<div class="hub-cs-info" data-wf="rootinfo"></div>` +
         `<div class="hub-cs-hint">Enter applies the folder, Esc reverts it. Switching the folder NEVER moves ` +
-        `presets - each location keeps its own presets/ folder (ONE file per preset: ` +
-        `presets/&lt;id&gt;.json - copy a file to transfer that preset); the root choice itself lives in the DEFAULT ` +
-        `user folder (workflows_root.json). The reopen snapshots of closed temp tabs live in the SAME root's ` +
-        `reserved temp/ folder (one &lt;id&gt;.json per closed tab, while the tab figures in 🕘 Recently closed). ` +
+        `data: the presets/temp of the DEFAULT location stay readable while a custom root is active ` +
+        `(an id present in both resolves to the active copy, writes go where the data already lives - ` +
+        `no duplicates, no loss; ONE file per preset: presets/&lt;id&gt;.json - copy a file to transfer that ` +
+        `preset); the root choice itself lives in the DEFAULT user folder (workflows_root.json), and so do ` +
+        `the Files-tab favorites (workflows_favorites.json). The reopen snapshots of closed temp tabs live ` +
+        `in the SAME root's reserved temp/ folder (one &lt;id&gt;.json per closed tab, while the tab figures ` +
+        `in 🕘 Recently closed) - and the presets/temp housekeeping NEVER mixes into the Files list. ` +
         `🗑 on a preset card deletes it (click twice). Hidden panel: ` +
         `the mini panel (🗂) or ComfyUI Settings → SettingsHub → 'Mini panel'.</div>`;
     document.body.appendChild(pop);
@@ -2828,6 +3352,11 @@ async function refreshOpen(force = false) {
 async function refreshSavedFiles() {
     savedFiles = await getSavedWorkflows();
     savedFilesLoaded = true;
+    if (!filesFavsLoaded) {
+        // v108: the ★ marks load once per session; a stale answer must not
+        // sit in the DOM when the Files tab is the visible one
+        await fetchFileFavs();
+    }
     fileSel = new Set([...fileSel].filter((p) => savedFiles.some((f) => normWfPath(f.path) === p)));
     // the tab may have rendered its "Reading the workflow files…" placeholder
     // while this was in flight - the completed list must land in the DOM
@@ -2960,6 +3489,41 @@ export function __workflowsTestHooks() {
         savedFiles: () => savedFiles.slice(),
         savedFilesLoaded: () => savedFilesLoaded,
         refreshSavedFiles: () => refreshSavedFiles(),
+        // v108 Files-tab file manager: state + the pure helpers for the tests
+        filesState: () => ({
+            sort: { ...filesSort }, view: filesView,
+            favOnly: filesFavOnly, folder: filesFolder,
+            quick: filesQuick, dateFrom: filesDateFrom, dateTo: filesDateTo,
+            sizeMin: fileSizeMin, sizeMax: fileSizeMax,
+            advOpen: filesAdvOpen, treeFolder: filesTreeFolder,
+            treeExpanded: [...treeExpanded],
+        }),
+        filesFav: () => [...filesFav],
+        filesFavsLoaded: () => filesFavsLoaded,
+        fetchFileFavs,
+        toggleFileFav,
+        filteredSavedFiles,
+        filesFolderList,
+        buildFolderMap,
+        shortPath,
+        relWfPath,
+        fmtSize,
+        fmtDateTime,
+        setFilesView: (v) => { filesView = v === "tree" ? "tree" : "list"; },
+        setFilesSort: (k, d) => { filesSort = { key: k, dir: d === "asc" ? "asc" : "desc" }; },
+        setFilesFilters: (patch = {}) => {
+            if ("folder" in patch) filesFolder = patch.folder || "";
+            if ("quick" in patch) filesQuick = patch.quick || "";
+            if ("dateFrom" in patch) filesDateFrom = patch.dateFrom || "";
+            if ("dateTo" in patch) filesDateTo = patch.dateTo || "";
+            if ("sizeMin" in patch) fileSizeMin = patch.sizeMin ?? "";
+            if ("sizeMax" in patch) fileSizeMax = patch.sizeMax ?? "";
+            if ("favOnly" in patch) filesFavOnly = !!patch.favOnly;
+            if ("treeFolder" in patch) filesTreeFolder = patch.treeFolder || "";
+            if ("advOpen" in patch) filesAdvOpen = !!patch.advOpen;
+        },
+        toggleTreeFolder: (d) => { if (treeExpanded.has(d)) treeExpanded.delete(d); else treeExpanded.add(d); renderAll(); },
+        enterTreeFolder: (d) => { filesTreeFolder = d || ""; renderAll(); },
         refreshPresets: () => refreshPresets(),
         refreshOpen: (f) => refreshOpen(f),
         renderAll: () => renderAll(),

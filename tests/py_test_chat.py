@@ -1407,6 +1407,49 @@ check("v92 the queue flag flips back off",
       resp_json(r)["config"]["auto_unload_llm_on_queue"] is False)
 
 # ---------------------------------------------------------------------------
+phase("v108 sessions bulk delete: {ids} / {all:true} / validation")
+
+BULK = chat.PromptServer.instance.routes.handlers[
+    ("POST", "/settings_hub/chat/sessions/delete")]
+
+bs1 = chat._new_session("Bulk one")
+bs1["messages"] = [{"role": "user", "text": "one", "ts": 1}]
+chat._write_session(bs1)
+bs2 = chat._new_session("Bulk two")
+chat._write_session(bs2)
+bs3 = chat._new_session("Bulk keep")
+chat._write_session(bs3)
+
+r = run(BULK(FakeRequest(json_body={"ids": [bs1["id"], bs2["id"], "deadbeef0000"]})))
+j = resp_json(r)
+check("bulk: ok, both known ids deleted, the unknown counted as gone",
+      j["ok"] and j["deleted"] == 2 and j["requested"] == 3, j)
+check("bulk: the first session folder died",
+      not os.path.isdir(chat._session_dir(bs1["id"])))
+check("bulk: the second session folder died",
+      not os.path.isdir(chat._session_dir(bs2["id"])))
+check("bulk: the untouched session survived",
+      chat._read_session(bs3["id"]) is not None)
+
+r = run(BULK(FakeRequest(json_body={"ids": ["nothex!!"]})))
+check("bulk: a bad id is refused", resp_json(r).get("ok") is not True)
+r = run(BULK(FakeRequest(json_body={"ids": "not-a-list"})))
+check("bulk: a non-list ids is refused", resp_json(r).get("ok") is not True)
+r = run(BULK(FakeRequest(json_body={"ids": ["a0"] * 2000})))
+check("bulk: an oversized id list is refused", resp_json(r).get("ok") is not True)
+r = run(BULK(FakeRequest(json_body={})))
+check("bulk: no ids and no all -> refused", resp_json(r).get("ok") is not True)
+
+r = run(BULK(FakeRequest(json_body={"all": True})))
+j = resp_json(r)
+check("bulk: all:true wipes every session", j["ok"] and j["deleted"] >= 1, j)
+check("bulk: the last session is gone too",
+      not os.path.isdir(chat._session_dir(bs3["id"])))
+r = run(BULK(FakeRequest(json_body={"all": True})))
+check("bulk: a repeated all:true is a harmless no-op",
+      resp_json(r).get("ok") and resp_json(r)["deleted"] == 0)
+
+# ---------------------------------------------------------------------------
 
 print()
 print("py_test_chat: %d passed, %d failed" % (PASS, FAIL))

@@ -146,6 +146,21 @@
 //       viewport-clamped like the hub one.
 // ============================================================================
 
+// v108 (owner plan item 1 - CHAT MASS MANAGEMENT): the 🕘 Saved-chats popup
+// grew the multi-select: every row carries a CHECKBOX, the toolbar gained
+// ONE dynamic «Select all / Deselect all» button (by analogy with the save
+// form of the Workflows manager - any unchecked row => "Select all"),
+// «🗑 Delete selected» and «🗑 Delete all». Both deletes confirm with the
+// panel's armed second click (the button pulses red for 2.6 s, the next
+// click executes; the per-row 🗑 keeps its own arm). The bulk delete goes
+// through the new POST /chat/sessions/delete route ({ids: [...]} or
+// {all: true}) - ONE server lock, the attachment blobs die with each
+// session folder exactly like the single DELETE; every deleted chat that is
+// open in a tab closes (an emptied workspace auto-creates a fresh tab, the
+// panel never ends with zero tabs). The selection survives the search
+// re-renders (a module-level Set) and resets when the popup closes.
+// ============================================================================
+
 // v98 (owner request 2026-11-13: "в llm чате такая же проблема - нету
 //   скролинга вкладок" - the same defect the Paste Stack had before v97):
 // the CHAT tab strip scrolls horizontally with the MOUSE WHEEL - the strip
@@ -161,7 +176,7 @@
 // v87 self-report (single-source version, docs/plan-versions.md): the last
 // FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["chat"] = "v98";
+globalThis.__SettingsHubLoaded["chat"] = "v108";
 
 import { app } from "../../scripts/app.js";
 // v90: the shared UI font scale - the chat ⚙ hosts the same row as the hub
@@ -205,6 +220,12 @@ let runClearArm = 0;      // the 🗑 armed timestamp (destructive confirm)
 let streamHostEl = null;  // v93: the live-stream container (runEl in one-shot)
 let clearArm = null, clearArmTs = 0, sessArm = null, sessArmTs = 0;
 const CLEAR_ARM_MS = 2600, SESS_ARM_MS = 2600;
+// v108: the saved-chats MASS MANAGEMENT (the 🕘 popup): the checked rows,
+// the armed bulk confirm and the last rendered list (the dynamic Select-all
+// label and the counters need it between fetches).
+let sessSel = new Set();
+let sessBulk = null;          // {mode: "sel"|"all", ts, t}
+let sessListCache = [];       // the sessions the popup currently shows
 // v87 popups (single instance each, body-level fixed): settings ⚙, prompt 📜, GPU ⚡
 let setPop = null, promptPop = null, gpuPop = null;
 // v87 page-zoom tracking (devicePixelRatio changes with Ctrl +/- / ctrl-pinch)
@@ -806,6 +827,9 @@ let sessFetchSeq = 0;
 
 function closeSessPop() {
     sessFetchSeq++;   // an in-flight render must not fill a closed popup
+    sessSel.clear();  // v108: the selection lives only while the popup is open
+    if (sessBulk) { clearTimeout(sessBulk.t); sessBulk = null; }
+    sessListCache = [];
     try { sessPop?.remove(); } catch (_) {}
     sessPop = null;
     try { window.removeEventListener("mousedown", onSessPopDown, true); } catch (_) {}
@@ -824,7 +848,9 @@ function onSessPopKey(e) {
 function sessRowHtml(s) {
     const open = tabs.some((t) => t.id === s.id);
     const armed = sessArm === s.id && Date.now() - sessArmTs <= SESS_ARM_MS;
-    return `<div class="hub-chat-sess${s.id === activeId ? " hub-chat-sess-on" : ""}" data-sid="${s.id}">` +
+    const sel = sessSel.has(s.id);
+    return `<div class="hub-chat-sess${s.id === activeId ? " hub-chat-sess-on" : ""}${sel ? " hub-chat-sess-sel" : ""}" data-sid="${s.id}">` +
+        `<input type="checkbox" class="hub-chat-sess-check" data-sscheck="${s.id}"${sel ? " checked" : ""} title="Select for mass delete">` +
         `<span class="hub-chat-sess-main">` +
         `<span class="hub-chat-sess-title">${esc(s.title || "(untitled)")}</span>` +
         (s.hit ? `<span class="hub-chat-sess-hit" title="${esc(s.hit)}">${esc(s.hit)}</span>` : "") +
@@ -835,6 +861,57 @@ function sessRowHtml(s) {
         `<button type="button" class="hub-chat-sess-del${armed ? " hub-chat-sess-del-armed" : ""}" ` +
         `title="${armed ? "Click again to DELETE the dialog with its files" : "Delete the dialog (asks twice)"}">🗑</button>` +
         `</div>`;
+}
+
+// v108: the mass-management toolbar of the 🕘 popup. The Select-all label is
+// DYNAMIC (the save-form contract: any unchecked row => "Select all", else
+// "Deselect all") and both 🗑 buttons carry the armed second click - the
+// armed one pulses red until the timer (or the execution) clears it.
+function renderSessTools() {
+    if (!sessPop) return;
+    const selBtn = sessPop.querySelector('[data-ss="selall"]');
+    const delSel = sessPop.querySelector('[data-ss="delself"]');
+    const delAll = sessPop.querySelector('[data-ss="delall"]');
+    if (!selBtn || !delSel || !delAll) return;
+    const ids = sessListCache.map((s) => s.id);
+    const allSel = ids.length > 0 && ids.every((id) => sessSel.has(id));
+    selBtn.textContent = allSel ? "Deselect all" : "Select all";
+    selBtn.title = allSel
+        ? "Uncheck every chat in the current list"
+        : "Check every chat in the current list (the search filter decides what 'all' is)";
+    const armedSel = sessBulk?.mode === "sel" && Date.now() - sessBulk.ts <= SESS_ARM_MS;
+    const armedAll = sessBulk?.mode === "all" && Date.now() - sessBulk.ts <= SESS_ARM_MS;
+    delSel.textContent = armedSel
+        ? `⚠ Confirm: delete ${sessSel.size}`
+        : `🗑 Delete selected${sessSel.size ? " (" + sessSel.size + ")" : ""}`;
+    delSel.title = armedSel
+        ? "Click AGAIN to delete the checked chats with their files"
+        : "Delete every CHECKED chat with its files (asks twice)";
+    delSel.classList.toggle("hub-chat-sess-bulk-armed", armedSel);
+    delAll.textContent = armedAll
+        ? `⚠ Confirm: delete ALL (${sessListCache.length})`
+        : `🗑 Delete all${sessListCache.length ? " (" + sessListCache.length + ")" : ""}`;
+    delAll.title = armedAll
+        ? "Click AGAIN to delete EVERY saved chat with its files"
+        : "Delete EVERY saved chat with its files (asks twice)";
+    delAll.classList.toggle("hub-chat-sess-bulk-armed", armedAll);
+}
+
+/** v108: arm (or confirm) a bulk delete. Returns "confirm" on the second
+ *  click inside the window - the caller executes; otherwise arms and shows
+ *  the pulsing button for SESS_ARM_MS. */
+function armBulkDelete(mode) {
+    if (sessBulk && sessBulk.mode === mode && Date.now() - sessBulk.ts <= SESS_ARM_MS) {
+        clearTimeout(sessBulk.t);
+        sessBulk = null;
+        renderSessTools();
+        return "confirm";
+    }
+    clearTimeout(sessBulk?.t);
+    sessBulk = { mode, ts: Date.now(),
+        t: setTimeout(() => { sessBulk = null; renderSessTools(); }, SESS_ARM_MS) };
+    renderSessTools();
+    return "armed";
 }
 
 async function renderSessList() {
@@ -851,9 +928,11 @@ async function renderSessList() {
         return;
     }
     const list = res.json.sessions || [];
+    sessListCache = list; // v108: the tools' labels + counters read this
     listEl.innerHTML = list.length ? list.map(sessRowHtml).join("")
         : (q ? `<div class="hub-chat-sess-empty">nothing matches the search</div>`
              : `<div class="hub-chat-sess-empty">No saved chats yet</div>`);
+    renderSessTools();
 }
 
 function openSessPop() {
@@ -868,6 +947,14 @@ function openSessPop() {
         `placeholder="search… (title, text or both)" ` +
         `title="Live multi-word search: every word must match the chat title OR its message text - together they cover both. A matched content line is shown under the title.">` +
         `<button type="button" class="hub-cs-chip" data-ss="refresh" title="Re-run the search">↻</button>` +
+        `</div>` +
+        // v108: the MASS MANAGEMENT row - the dynamic select-all (the save-
+        // form contract), the two armed deletes. One server round-trip per
+        // delete (POST /chat/sessions/delete).
+        `<div class="hub-chat-sess-tools">` +
+        `<button type="button" class="hub-cs-chip" data-ss="selall" title="Check every chat in the current list">Select all</button>` +
+        `<button type="button" class="hub-cs-chip hub-chat-sess-danger" data-ss="delself" title="Delete every CHECKED chat with its files (asks twice)">🗑 Delete selected</button>` +
+        `<button type="button" class="hub-cs-chip hub-chat-sess-danger" data-ss="delall" title="Delete EVERY saved chat with its files (asks twice)">🗑 Delete all</button>` +
         `</div>` +
         // v91 (owner 8d): export / import the ACTIVE chat as a JSON file.
         `<div class="hub-cp-btns">` +
@@ -903,6 +990,66 @@ function openSessPop() {
         }
     });
     pop.querySelector('[data-ss="refresh"]').addEventListener("click", () => void renderSessList());
+    // ---- v108: the mass management -----------------------------------------
+    pop.querySelector('[data-ss="selall"]').addEventListener("click", () => {
+        const ids = sessListCache.map((s) => s.id);
+        if (!ids.length) { localToast("No saved chats to select"); return; }
+        const allSel = ids.every((id) => sessSel.has(id));
+        if (allSel) for (const id of ids) sessSel.delete(id);
+        else for (const id of ids) sessSel.add(id);
+        void renderSessList(); // re-render the checkboxes + the dynamic label
+    });
+    pop.querySelector('[data-ss="delself"]').addEventListener("click", async () => {
+        if (!sessSel.size) { localToast("Nothing selected - check the chats to delete"); return; }
+        if (armBulkDelete("sel") === "armed") {
+            localToast("⚠ Click 🗑 Delete selected AGAIN to delete " + sessSel.size + " chat(s) (files included)", 3200);
+            return;
+        }
+        const ids = [...sessSel];
+        const res = await jfetch("/settings_hub/chat/sessions/delete", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids }),
+        });
+        if (res.json?.ok) {
+            for (const id of ids) {
+                sessSel.delete(id);
+                if (tabs.some((t) => t.id === id)) closeTab(id); // closes open chats too
+            }
+            localToast("Deleted " + res.json.deleted + " chat(s)");
+            void renderSessList();
+        } else {
+            localToast("Delete failed: " + (res.json?.error || "HTTP " + res.status));
+        }
+    });
+    pop.querySelector('[data-ss="delall"]').addEventListener("click", async () => {
+        if (!sessListCache.length) { localToast("No saved chats yet"); return; }
+        if (armBulkDelete("all") === "armed") {
+            localToast("⚠ Click 🗑 Delete all AGAIN to delete EVERY saved chat (files included)", 3200);
+            return;
+        }
+        const res = await jfetch("/settings_hub/chat/sessions/delete", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ all: true }),
+        });
+        if (res.json?.ok) {
+            sessSel.clear();
+            for (const t of [...tabs]) closeTab(t.id); // the sessions are gone - close every tab (a fresh one auto-creates)
+            localToast("Deleted " + res.json.deleted + " chat(s)");
+            void renderSessList();
+        } else {
+            localToast("Delete failed: " + (res.json?.error || "HTTP " + res.status));
+        }
+    });
+    // v108: the checkbox changes never bubble into "open this chat"
+    pop.addEventListener("change", (e) => {
+        const cb = e.target?.closest?.(".hub-chat-sess-check");
+        if (!cb) return;
+        const sid = cb.dataset.sscheck;
+        if (cb.checked) sessSel.add(sid); else sessSel.delete(sid);
+        const row = cb.closest(".hub-chat-sess");
+        if (row) row.classList.toggle("hub-chat-sess-sel", cb.checked);
+        renderSessTools();
+    });
     // v91 (owner 8d): export = download the ACTIVE chat; import = file picker
     // -> POST /chat/import -> a new tab opens.
     pop.querySelector('[data-ss="export"]').addEventListener("click", () => exportSession(activeTab()));
@@ -915,6 +1062,9 @@ function openSessPop() {
     });
     pop.addEventListener("mousedown", (e) => e.stopPropagation());
     pop.addEventListener("click", async (e) => {
+        // v108: a checkbox click is a selection toggle (handled in change) -
+        // it must not fall through to the open-chat branch below
+        if (e.target?.closest?.(".hub-chat-sess-check")) return;
         const del = e.target?.closest?.(".hub-chat-sess-del");
         const row = e.target?.closest?.(".hub-chat-sess");
         if (del && row) {
@@ -3503,6 +3653,13 @@ export function __chatTestHooks() {
         sessQuery: () => sessQuery,
         setSessQuery: (q) => { sessQuery = q; },
         renderSessList,
+        // v108: the saved-chats mass management introspection for the tests
+        sessSel: () => [...sessSel],
+        sessListCache: () => sessListCache.map((s) => ({ ...s })),
+        sessBulk: () => (sessBulk ? { mode: sessBulk.mode } : null),
+        armBulkDelete,
+        renderSessTools,
+        sessSelSet: (ids) => { sessSel.clear(); for (const id of ids || []) sessSel.add(id); },
         fmtTok,
         addFiles,
         clearPending,

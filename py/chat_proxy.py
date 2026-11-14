@@ -231,6 +231,9 @@ _TEXT_LIKE = {"txt", "md", "json", "csv", "log", "py", "js", "css", "html",
 _SID_RE = re.compile(r"^[a-f0-9]{8,32}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+# v108: the mass-delete route caps the id list (a body must stay bounded;
+# the sessions count itself is kept low by _evict_sessions anyway)
+MAX_BULK_DELETE_IDS = 1000
 
 _lock = asyncio.Lock()
 
@@ -2124,6 +2127,47 @@ async def chat_session_delete(request):
     async with _lock:
         shutil.rmtree(_session_dir(sid), ignore_errors=True)
     return web.json_response({"ok": True, "gone": sid})
+
+
+@PromptServer.instance.routes.post("/settings_hub/chat/sessions/delete")
+async def chat_sessions_bulk_delete(request):
+    """v108: MASS DELETE of saved chats (the 🕘 popup's «Delete selected» /
+    «Delete all»). Body JSON is EITHER {ids: [...]} - exactly those dialogs
+    die (an unknown id counts as already gone, it is not an error) - OR
+    {all: true} - EVERY session dies (the owner's explicit confirm is the
+    client's armed second click). One lock round, each session folder (its
+    attachment blobs included) is removed exactly like the single DELETE.
+    Ids are strict-hex validated; the list is capped at MAX_BULK_DELETE_IDS.
+    Runs AFTER the sessions/ create route in the file, but the extra path
+    segment makes the routes unambiguous for aiohttp."""
+    try:
+        body = await request.json()
+    except Exception:
+        return _jerr("bad json")
+    if not isinstance(body, dict):
+        return _jerr("bad body")
+    ids = []
+    if body.get("all") is True:
+        ids = [b["id"] for b in _list_sessions()]
+    else:
+        raw = body.get("ids")
+        if not isinstance(raw, list):
+            return _jerr("ids must be a list")
+        if len(raw) > MAX_BULK_DELETE_IDS:
+            return _jerr("too many ids (max %d)" % MAX_BULK_DELETE_IDS)
+        for x in raw:
+            if not isinstance(x, str) or not _SID_RE.match(x):
+                return _jerr("bad session id")
+            ids.append(x)
+    deleted = 0
+    async with _lock:
+        for sid in ids:
+            d = _session_dir(sid)
+            if os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+                deleted += 1
+    return web.json_response({"ok": True, "deleted": deleted,
+                              "requested": len(ids)})
 
 
 @PromptServer.instance.routes.post("/settings_hub/chat/session/{sid}/clear")
