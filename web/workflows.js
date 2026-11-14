@@ -1,6 +1,23 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER (v102)
+// SettingsHub - WORKFLOWS MANAGER (v103)
 // ----------------------------------------------------------------------------
+// v103 (owner feedback round 2):
+//   1. the resize GRIP of the stack/chat panels now wears the workflows
+//      marker (the border corner + hover highlight) - styles.css;
+//   2. (answer) presets + embedded temp snapshots live in ONE server file -
+//      <user>/settings_hub/workflows/presets.json; the 🕘 recently-closed
+//      ring buffer is browser localStorage, not the server;
+//   3. the Files "🕘 Recently closed" group was capped at 30% WITHOUT
+//      overflow - 15 rows painted straight over "All saved workflows". The
+//      group now scrolls INSIDE its cap;
+//   4. (answer) the radio in the save form picks the preset's activePath -
+//      the tab that ▶ Switch focuses on the canvas after the apply; temp
+//      rows are disabled there (a snapshot has no file path);
+//   5. the save form got the Select all / Deselect all toggle (one dynamic
+//      button - unchecked rows exist => "Select all", else "Deselect all");
+//   6. the Open tab got the same multi-word filter as Presets/Files (name +
+//      path, pinned above the list, Esc clears).
+//
 // v102 (owner feedback on v101 - six fixes):
 //   1. the ⚙ settings popup no longer stretches across the whole screen (the
 //      width cap of the stack/chat settings pops);
@@ -59,11 +76,11 @@ import { app } from "../../scripts/app.js";
 import { launcherHostsMinimized, launcherSetCollapsed, registerLauncherPanel } from "./launcher.js";
 import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel } from "./global_settings.js";
 
-// v102 self-report (single-source version, docs/plan-versions.md): the stamp
+// self-report (single-source version, docs/plan-versions.md): the stamp
 // of the LAST functional change of this file - the entry's EXPECTED manifest
 // verifies it.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v102";
+globalThis.__SettingsHubLoaded["workflows"] = "v103";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -771,6 +788,7 @@ let fileSel = new Set();            // the Files-tab selection (normalized paths
 let chipMoved = false;              // the chip drag-vs-click discriminator
 let presetsSearch = "";
 let filesSearch = "";
+let openSearch = "";       // v103: the multi-word filter of the Open tab
 let pollT = null;
 let pollSeq = 0;
 let lastOpenSig = "";
@@ -1347,7 +1365,16 @@ function renderAll() {
 
 function openTabHtml() {
     const unsaved = openTabs.some((t) => t.isModified && t.isPersisted);
-    const rows = openTabs.slice(0, MAX_OPEN_ROWS).map((t, i) => {
+    // v103: the same multi-word filter the Presets/Files tabs have (tokens
+    // over the name + the path; a token matches when the haystack contains it)
+    const toks = openSearch.toLowerCase().split(/\s+/).filter(Boolean);
+    // the haystack mirrors what the row SHOWS: the name, the file path and
+    // the visible "temp" badge (typing temp finds the temporary tabs)
+    const list = !toks.length ? openTabs : openTabs.filter((t) => {
+        const hay = [t.name || "", t.path || "", t.isTemporary ? "temp" : ""].join(" ").toLowerCase();
+        return toks.every((tok) => hay.includes(tok));
+    });
+    const rows = list.slice(0, MAX_OPEN_ROWS).map((t, i) => {
         if (i >= openRowsShown) return "";
         const locked = lockedKeys.has(t.key);
         const marks = [
@@ -1363,10 +1390,15 @@ function openTabHtml() {
             `<button type="button" class="hub-wf-closebtn${armedClose?.key === t.key ? " hub-wf-armed" : ""}" data-act="close" data-key="${esc(t.key)}" title="${(t.isModified || t.isTemporary) ? (armedClose?.key === t.key ? "Click AGAIN to confirm closing the UNSAVED tab" : "Close (unsaved - click twice)") : "Close this tab"}">✕</button>` +
             `</div>`;
     }).join("");
-    const more = openTabs.length > openRowsShown
-        ? `<button type="button" class="hub-wf-more" data-act="moreopen">Show more (${openTabs.length - openRowsShown} hidden)</button>`
+    const more = list.length > openRowsShown
+        ? `<button type="button" class="hub-wf-more" data-act="moreopen">Show more (${list.length - openRowsShown} hidden)</button>`
         : "";
-    return `<div class="hub-wf-acts">` +
+    return `<div class="hub-wf-toolbar">` +
+        // v103: the Open-tab search - pinned above the scroll like the Files
+        // search; Esc clears (tokens match the tab name and its file path)
+        `<input type="text" class="hub-wf-search" data-wf="opensearch" placeholder="filter: flux inpaint…" value="${esc(openSearch)}" spellcheck="false">` +
+        `</div>` +
+        `<div class="hub-wf-acts">` +
         `<button type="button" class="hub-wf-act" data-act="closesaved" title="Close every saved + unmodified tab (locks 📌 and the active tab stay)">🧹 Close saved</button>` +
         `<button type="button" class="hub-wf-act" data-act="closeothers" title="Same, but the active tab stays even when it is clean">🧹 Close other saved</button>` +
         `<button type="button" class="hub-wf-act${unsaved ? "" : " hub-wf-dim"}" data-act="saveall" title="Save every modified tab that has a disk file">💾 Save all${unsaved ? " *" : ""}</button>` +
@@ -1375,8 +1407,8 @@ function openTabHtml() {
         // v102: the rows scroll INSIDE .hub-wf-scroll - the actions stay
         // pinned on top and the status bar stays pinned at the bottom (v101
         // scrolled the whole body, so the status slid under the list)
-        `<div class="hub-wf-scroll">${rows || `<div class="hub-wf-emptylist">Nothing is open (or this ComfyUI build does not expose its tab list to extensions)</div>`}${more}</div>` +
-        `<div class="hub-wf-status">${openTabs.length} open${unsaved ? " · unsaved work present" : ""}${queueRunning ? " · ⚠ generation running" : ""}</div>`;
+        `<div class="hub-wf-scroll">${rows || `<div class="hub-wf-emptylist">${toks.length ? "Nothing matches the filter" : "Nothing is open (or this ComfyUI build does not expose its tab list to extensions)"}</div>`}${more}</div>` +
+        `<div class="hub-wf-status">${toks.length ? list.length + " of " : ""}${openTabs.length} open${unsaved ? " · unsaved work present" : ""}${queueRunning ? " · ⚠ generation running" : ""}</div>`;
 }
 
 function presetCardHtml(p) {
@@ -1427,9 +1459,15 @@ function saveFormHtml() {
             `</label>`;
     }).join("");
     const target = f.mode === "update" ? (presets.find((p) => p.id === f.targetPid)?.name || "preset") : null;
+    // v103: ONE dynamic toggle - any unchecked row => "Select all", otherwise
+    // "Deselect all" (the owner asked for a single two-state button)
+    const allChecked = f.rows.length > 0 && f.rows.every((r) => r.checked);
     return `<div class="hub-wf-saveform">` +
         `<div class="hub-wf-sf-title">${f.mode === "update" ? "Update '" + esc(target) + "'" : "Save current tabs as a preset"}</div>` +
         `<input type="text" class="hub-wf-sf-namein" data-wf="sfname" placeholder="Workspace ${presets.length + 1}" value="${esc(f.name || "")}" spellcheck="false">` +
+        (f.rows.length
+            ? `<div class="hub-wf-sf-tools"><button type="button" class="hub-wf-act" data-wf-btn="sftoggle" title="${allChecked ? "Uncheck every tab" : "Check every tab (temp tabs become snapshots)"}">${allChecked ? "Deselect all" : "Select all"}</button></div>`
+            : "") +
         `<div class="hub-wf-sf-rows">${rows || `<div class="hub-wf-emptylist">Nothing is open</div>`}</div>` +
         `<div class="hub-wf-sf-acts">` +
         (f.hasModified ? `<button type="button" class="hub-wf-act" data-wf-btn="savemods" title="Save the modified tabs to their files first">💾 Save modified first</button>` : "") +
@@ -1554,6 +1592,14 @@ async function onBodyClick(e) {
         case "merge": return void commitFormSave("merge", saveForm?.targetPid || null);
         case "cancelsave": { saveForm = null; renderAll(); return; }
         case "savemods": return void saveModifiedFromForm();
+        // v103: the Select all / Deselect all toggle of the save form
+        case "sftoggle": {
+            if (!saveForm || !saveForm.rows.length) return;
+            const allChecked = saveForm.rows.every((r) => r.checked);
+            for (const r of saveForm.rows) r.checked = !allChecked;
+            renderAll();
+            return;
+        }
         case "moreopen": openRowsShown += SHOW_MORE_STEP; renderAll(); return;
         case "morefiles": fileRowsShown += SHOW_MORE_STEP; renderAll(); return;
         case "switch": {
@@ -1718,6 +1764,18 @@ function onBodyInput(e) {
         }
         return;
     }
+    if (el.matches('[data-wf="opensearch"]')) {
+        // v103: the Open-tab filter - same live-refilter + caret restore
+        // pattern as the Files search
+        openSearch = el.value || "";
+        openRowsShown = ROW_LIST_CAP;
+        renderAll();
+        const inp = panel?.querySelector('[data-wf="opensearch"]');
+        if (inp && inp !== document.activeElement) {
+            try { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } catch (_) {}
+        }
+        return;
+    }
     if (el.matches('[data-wf="sfname"]')) {
         if (saveForm) saveForm.name = el.value || "";
         return;
@@ -1727,9 +1785,10 @@ function onBodyInput(e) {
 function onBodyKeydown(e) {
     const el = e.target;
     if (!el) return;
-    if (el.matches('[data-wf="presetsearch"], [data-wf="filesearch"]') && e.key === "Escape") {
+    if (el.matches('[data-wf="presetsearch"], [data-wf="filesearch"], [data-wf="opensearch"]') && e.key === "Escape") {
         el.value = "";
         if (el.matches('[data-wf="presetsearch"]')) presetsSearch = "";
+        else if (el.matches('[data-wf="opensearch"]')) openSearch = "";
         else filesSearch = "";
         renderAll();
         return;

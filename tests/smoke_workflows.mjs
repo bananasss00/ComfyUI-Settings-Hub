@@ -41,6 +41,10 @@
 //       ACTIVE tab focuses a neighbor first, an emptied workspace re-opens a
 //       blank tab, and the pinned layout (status bar + Files search + save
 //       form outside the .hub-wf-scroll) + the ⚙ popup width cap.
+//   WJ  v103: the Recently-closed group scrolls INSIDE its 30% cap (it used
+//       to paint over the saved list), the save-form Select all / Deselect
+//       all dynamic toggle, the Open-tab multi-word filter (rows + status +
+//       Esc clears), the grip-marker parity in styles.css (stack/chat = wf).
 //
 // Run from the extension root:  node tests/smoke_workflows.mjs  (jsdom)
 // ============================================================================
@@ -837,13 +841,13 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v102", /"workflows":\s*"v102"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v103", /"workflows":\s*"v103"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v102", ENTRY_SRC.includes("web build: v102 - WORKFLOWS MANAGER FIXES"));
-check("styles.css?v=102", ENTRY_SRC.includes("styles.css?v=102"));
-check("the module self-reports v102",
+check("the entry banner names v103", ENTRY_SRC.includes("web build: v103 - WORKFLOWS MANAGER FEEDBACK ROUND 2"));
+check("styles.css?v=103", ENTRY_SRC.includes("styles.css?v=103"));
+check("the module self-reports v103",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v102"'));
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v103"'));
 check("the workflows module uses the --sh-fs scale (v90 rule)",
     (fs.readFileSync(path.join(WEB, "styles.css"), "utf8").match(/hub-wf-panel[\s\S]{0,400}?--sh-fs/) !== null));
 check("the modal guard hides the workflows panel",
@@ -1009,7 +1013,9 @@ await settle();
     check("v102 layout: the Open tab has exactly ONE scroll container",
         !!scrl && bodyL.querySelectorAll(".hub-wf-scroll").length === 1);
     check("v102 layout: the action row is pinned ABOVE the scroll",
-        bodyL.firstElementChild.className.includes("hub-wf-acts") && bodyL.children[1] === scrl);
+        // v103: the Open-tab search toolbar sits before the acts row - the
+        // contract is acts(±toolbar) directly above the scroll container
+        bodyL.querySelector(".hub-wf-acts").nextElementSibling === scrl);
     check("v102 layout: the rows live INSIDE the scroll container",
         !!scrl.querySelector(".hub-wf-row"));
     check("v102 layout: the status bar is OUTSIDE the scroll (pinned at the bottom)",
@@ -1095,6 +1101,135 @@ await settle();
     check("v102 last-tab close: the blank-tab command fired",
         appStub.commands.includes("Comfy.NewBlankWorkflow") && appStub.commands.length > cmdsBefore,
         JSON.stringify(appStub.commands.slice(cmdsBefore)));
+}
+
+// --- 9) v103: the Recently-closed group scrolls INSIDE its cap, the save
+//        form got Select/Deselect all, the Open tab got a filter
+{
+    // 9a) the recents cap: 15 entries in the ring -> the group box carries
+    // its own overflow; the saved section stays OUTSIDE the capped box
+    hooks.resetRecent();
+    for (let i = 0; i < 15; i++) {
+        hooks.recordRecent({ path: "workflows/rec" + i + ".json", name: "rec" + i + ".json" });
+    }
+    check("WJ scene: 15 recents recorded", hooks.recent().length === 15, String(hooks.recent().length));
+    hooks.setTab("files");
+    await settle();
+    const scrlR = pnl().querySelector(".hub-wf-body .hub-wf-scroll");
+    const recBox = scrlR?.querySelector(".hub-wf-list-recent");
+    check("WJ recents: 15 rows render in the capped group",
+        !!recBox && recBox.querySelectorAll(".hub-wf-row-recent").length === 15,
+        String(recBox?.querySelectorAll(".hub-wf-row-recent").length));
+    check("WJ recents: the 'All saved workflows' section is OUTSIDE the recent box (no overlap)",
+        !!recBox && ![...recBox.querySelectorAll(".hub-wf-sect")].some((s) => s.textContent.includes("All saved")) &&
+        [...scrlR.querySelectorAll(".hub-wf-sect")].some((s) => s.textContent.includes("All saved")));
+    check("WJ recents CSS: the group scrolls INSIDE its 30% cap (overflow-y added)",
+        /\.hub-wf-list-recent\s*\{[^}]*max-height:\s*30%/.test(cssSrc) &&
+        /\.hub-wf-list-recent\s*\{[^}]*overflow-y:\s*auto/.test(cssSrc));
+
+    // 9b) the save-form Select all / Deselect all toggle
+    wfStore.openWorkflows = [
+        makeTab({ path: "workflows/a.json" }),
+        makeTab({ path: "workflows/b.json", isModified: true }),
+        makeTab({ name: "Sketch", isTemporary: true, isPersisted: false, nodes: [1] }),
+    ];
+    wfStore.activeWorkflow = wfStore.openWorkflows[0];
+    await hooks.refreshOpen(true);
+    hooks.openSaveForm("new");
+    await settle();
+    const formW = pnl().querySelector(".hub-wf-saveform");
+    const togBtn = () => pnl().querySelector('.hub-wf-saveform [data-wf-btn="sftoggle"]');
+    check("WJ sftoggle: the button exists (a row is unchecked -> 'Select all')",
+        !!togBtn() && togBtn().textContent === "Select all", togBtn()?.textContent);
+    togBtn().click();
+    await settle();
+    const checksW1 = [...pnl().querySelectorAll(".hub-wf-saveform [data-wf-check]")];
+    check("WJ sftoggle: Select all checks EVERY row (temp included)",
+        checksW1.length === 3 && checksW1.every((c) => c.checked),
+        String(checksW1.map((c) => c.checked)));
+    check("WJ sftoggle: the label flipped to 'Deselect all'",
+        togBtn()?.textContent === "Deselect all", togBtn()?.textContent);
+    check("WJ sftoggle: the state reached saveForm (collectFormItems sees 3 rows)",
+        hooks.saveForm().rows.every((r) => r.checked));
+    togBtn().click();
+    await settle();
+    const checksW2 = [...pnl().querySelectorAll(".hub-wf-saveform [data-wf-check]")];
+    check("WJ sftoggle: Deselect all unchecks EVERY row",
+        checksW2.length === 3 && checksW2.every((c) => !c.checked),
+        String(checksW2.map((c) => c.checked)));
+    check("WJ sftoggle: the label flipped back to 'Select all'",
+        togBtn()?.textContent === "Select all", togBtn()?.textContent);
+    const collEmpty = hooks.collectFormItems();
+    check("WJ sftoggle: nothing checked -> collectFormItems returns no items",
+        Array.isArray(collEmpty.items) && collEmpty.items.length === 0);
+    // one manual check -> the label flips to Select all again (dynamic, not sticky)
+    checksW2[0].checked = true;
+    checksW2[0].dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    check("WJ sftoggle: after one manual check the label is 'Select all' (not 'Deselect all')",
+        togBtn()?.textContent === "Select all", togBtn()?.textContent);
+    await pnl().querySelector('.hub-wf-saveform [data-wf-btn="cancelsave"]').click();
+    await settle();
+
+    // 9c) the Open-tab filter (name + path tokens, Esc clears)
+    wfStore.openWorkflows = [
+        makeTab({ path: "workflows/flux_main.json" }),
+        makeTab({ path: "workflows/upscale.json" }),
+        makeTab({ name: "Sketch", isTemporary: true, isPersisted: false, nodes: [1] }),
+    ];
+    wfStore.activeWorkflow = wfStore.openWorkflows[0];
+    await hooks.refreshOpen(true);
+    hooks.setTab("open");
+    await settle();
+    const openSearch = () => pnl().querySelector('.hub-wf-body [data-wf="opensearch"]');
+    check("WJ opensearch: the field renders pinned ABOVE the rows",
+        !!openSearch() && openSearch().closest(".hub-wf-toolbar") !== null);
+    openSearch().value = "flux";
+    openSearch().dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+    let openRowsW = [...pnl().querySelectorAll(".hub-wf-body .hub-wf-scroll .hub-wf-row")];
+    check("WJ opensearch: 'flux' leaves only the flux row",
+        openRowsW.length === 1 && openRowsW[0].textContent.includes("flux_main"),
+        JSON.stringify(openRowsW.map((r) => r.textContent)));
+    check("WJ opensearch: the status counts '1 of 3 open'",
+        pnl().querySelector(".hub-wf-status").textContent.includes("1 of 3 open"));
+    openSearch().value = "flux main";
+    openSearch().dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+    openRowsW = [...pnl().querySelectorAll(".hub-wf-body .hub-wf-scroll .hub-wf-row")];
+    check("WJ opensearch: multi-word tokens AND together (flux + main -> 1 row)",
+        openRowsW.length === 1, String(openRowsW.length));
+    openSearch().value = "nosuchtoken";
+    openSearch().dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+    check("WJ opensearch: an empty result shows the 'Nothing matches' placeholder",
+        pnl().querySelector(".hub-wf-body .hub-wf-scroll .hub-wf-emptylist")?.textContent.includes("Nothing matches the filter"));
+    openSearch().value = "temp";
+    openSearch().dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+    openRowsW = [...pnl().querySelectorAll(".hub-wf-body .hub-wf-scroll .hub-wf-row")];
+    check("WJ opensearch: a temp tab is reachable by its name too",
+        openRowsW.length === 1 && openRowsW[0].textContent.includes("Sketch"),
+        JSON.stringify(openRowsW.map((r) => r.textContent)));
+    openSearch().dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle();
+    openRowsW = [...pnl().querySelectorAll(".hub-wf-body .hub-wf-scroll .hub-wf-row")];
+    check("WJ opensearch: Esc clears the filter (all 3 rows back)",
+        openRowsW.length === 3 && pnl().querySelector('[data-wf="opensearch"]').value === "",
+        String(openRowsW.length));
+
+    // 9d) the grip-marker parity: stack + chat wear the workflows marker
+    const wfGrip = /\.hub-wf-grip\s*\{[^}]*border-right:\s*2px solid/.test(cssSrc);
+    const stackGrip = /\.hub-stack-grip\s*\{[^}]*border-right:\s*2px solid/.test(cssSrc) &&
+        /\.hub-stack-grip:hover\s*\{[^}]*opacity:\s*1/.test(cssSrc);
+    const chatGrip = /\.hub-chat-grip\s*\{[^}]*border-right:\s*2px solid/.test(cssSrc) &&
+        /\.hub-chat-grip:hover\s*\{[^}]*opacity:\s*1/.test(cssSrc);
+    check("WJ grips: the old gradient triangle is gone from stack/chat",
+        !/\.hub-stack-grip\s*\{[^}]*linear-gradient/.test(cssSrc) &&
+        !/\.hub-chat-grip\s*\{[^}]*linear-gradient/.test(cssSrc));
+    check("WJ grips: stack/chat carry the wf marker (border corner + hover)",
+        wfGrip && stackGrip && chatGrip);
+    hooks.resetRecent();
 }
 
 // ===========================================================================

@@ -1,5 +1,5 @@
 """tests/py_test_workflows.py - offline checks for the workflows routes (v101 storage,
-v102 bumps the pack version stamp together with the entry).
+v103 bumps the pack version stamp together with the entry).
 
 Runs WITHOUT ComfyUI: `server`, `aiohttp` and `folder_paths` are stubbed in
 sys.modules before the module under test is imported, so the route
@@ -216,7 +216,7 @@ check("health: ok", r.status == 200 and j.get("ok") is True)
 check("health: version matches the source constant",
       j.get("version") == wf_store.WORKFLOWS_SERVER_VERSION,
       "%s vs %s" % (j.get("version"), wf_store.WORKFLOWS_SERVER_VERSION))
-check("health: version is v102", j.get("version") == "v102", str(j.get("version")))
+check("health: version is v103", j.get("version") == "v103", str(j.get("version")))
 check("health: default dir", j.get("dir") == os.path.join(_USER_DIR, "settings_hub", "workflows"), j.get("dir"))
 check("health: no custom root yet", j.get("custom") is None)
 check("health: writable", j.get("writable") is True)

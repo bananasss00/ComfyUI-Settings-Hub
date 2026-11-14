@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v102 - WORKFLOWS MANAGER FIXES (owner feedback on v101, six fixes): the tab activation now swaps the CANVAS via app.loadGraphData - the v101 store-open rung only flipped the tab-strip state, so clicking a workflow / ▶ Switch / ＋ Add changed the tab but kept the previous graph on the canvas; snapshots of temp tabs that were never activated (no changeTracker) are read from the store's in-memory content strings - 'Save new' with checked temp rows works again; the ⚙ popup got the width cap of the stack/chat settings pops (v101 stretched it across the screen); the lists scroll in their own container so the status bar stays pinned at the bottom and the Files-tab search stays pinned on top; closing the ACTIVE tab focuses a neighbor first and an emptied workspace re-opens a blank tab (frontend service parity); /userdata opens bind to the saved file instead of forking an orphan unsaved copy. v101: presets of open tabs (path items + snapshots of temp tabs), smart-diff ▶ Switch with a plan preview + ↩ Undo, ＋ Add, ↻ Update (overwrite/merge), protected bulk close with 📌 locks, 💾 Save all, 🕘 recent buffer, multi-word file search, export/import, the v84-mechanics storage folder. First run starts MINIMIZED into the taskbar. Stale-cache guard: EXPECTED manifest verifies every module.");
+console.info("[SettingsHub] web build: v103 - WORKFLOWS MANAGER FEEDBACK ROUND 2: the stack/chat resize grips wear the workflows marker (border corner + hover); the Files 'Recently closed' group scrolls INSIDE its 30% cap instead of painting over 'All saved workflows'; the save form got the Select all / Deselect all toggle (one dynamic button); the Open tab got the same multi-word filter as Presets/Files (name + path, Esc clears). v102: the tab activation swaps the CANVAS via app.loadGraphData; snapshots of never-activated temp tabs save correctly; the ⚙ popup width cap; pinned status bar + Files search. v101: presets of open tabs (path items + snapshots of temp tabs), smart-diff ▶ Switch with a plan preview + ↩ Undo, ＋ Add, ↻ Update (overwrite/merge), protected bulk close with 📌 locks, 💾 Save all, 🕘 recent buffer, multi-word file search, export/import, the v84-mechanics storage folder. First run starts MINIMIZED into the taskbar. Stale-cache guard: EXPECTED manifest verifies every module.");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v102 - WORKFLOWS MANAGER FIXES (owner fee
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=102", import.meta.url).href;
+    link.href = new URL("styles.css?v=103", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -51,7 +51,7 @@ console.info("[SettingsHub] web build: v102 - WORKFLOWS MANAGER FIXES (owner fee
 // ONE stale cached file silently removed every "Pin to Settings Hub" menu
 // item and the sync hooks. The detector keeps its diagnostic value but is
 // NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v102";
+globalThis.__SettingsHubBuild = "v103";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -104,7 +104,7 @@ const FILES = [
         "launcher": "v101",       // v101: the 4th taskbar item (workflows) + text+dot badges
         "stack": "v100",          // Paste Stack (+ v100: reliable connections for ALL real clipboard shapes + search focus + group counts)
         "chat": "v98",            // LLM Chat (+ v98: tab-strip wheel scroll + reveal the active chip)
-        "workflows": "v102",     // Workflows Manager (+ v102: canvas-swap activation, temp-tab snapshots, pinned layout, setpop width)
+        "workflows": "v103",     // Workflows Manager (+ v103: recents scroll cap, save-form Select/Deselect all, Open-tab search)
         "compare": "v83",         // Image Compare A/B panel (v83 display fix)
         "context_menu": "v93",    // "Pin to Settings Hub" menus (+ v93 hub window RMB Rename/Materialize)
         "core": "v93",            // (+ v93 hub DOM resolver registry for the window menu)

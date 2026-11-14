@@ -3124,14 +3124,19 @@ button.hub-pin-back {
 
 .hub-stack-grip {
     position: absolute;
-    right: 0;
-    bottom: 0;
-    width: 16px;
-    height: 16px;
+    right: 1px;
+    bottom: 1px;
+    width: 14px;
+    height: 14px;
     cursor: nwse-resize;
-    background: linear-gradient(135deg, transparent 50%, #4a4a6e 50%);
-    border-bottom-right-radius: 5px;
+    border-right: 2px solid #3d4a80;
+    border-bottom: 2px solid #3d4a80;
+    border-bottom-right-radius: 6px;
+    opacity: 0.7;
 }
+/* v103: the workflows grip marker (border corner + hover) replaced the old
+   gradient triangle - the owner picked the workflows look for all panels */
+.hub-stack-grip:hover { opacity: 1; border-color: #6a7ac0; }
 
 .hub-stack-chip {
     position: fixed;
@@ -5210,16 +5215,21 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
 
 .hub-chat-status-err { color: #ff9d9d; }
 
-/* the resize grip - the compare/stack pattern */
+/* the resize grip - v103: the workflows marker (border corner + hover),
+   identical to .hub-wf-grip and .hub-stack-grip */
 .hub-chat-grip {
     position: absolute;
-    right: 0;
-    bottom: 0;
-    width: 16px;
-    height: 16px;
+    right: 1px;
+    bottom: 1px;
+    width: 14px;
+    height: 14px;
     cursor: nwse-resize;
-    background: linear-gradient(135deg, transparent 50%, #4a4a6e 50%);
+    border-right: 2px solid #3d4a80;
+    border-bottom: 2px solid #3d4a80;
+    border-bottom-right-radius: 6px;
+    opacity: 0.7;
 }
+.hub-chat-grip:hover { opacity: 1; border-color: #6a7ac0; }
 
 /* the minimized chip */
 .hub-chat-chip {
@@ -6172,7 +6182,28 @@ body.sh-modal-open .hub-sh-note {
     padding: 2px 2px 0;
     user-select: none;
 }
-.hub-wf-list-recent { max-height: 30%; }
+/* v103: the cap existed since v101 but WITHOUT overflow - 15 recent rows
+   painted straight over the "All saved workflows" section below. The group
+   is now its own little scroll area: capped at 30% of the panel, scrolling
+   INSIDE, the saved list always starts right below the cap. */
+.hub-wf-list-recent {
+    max-height: 30%;
+    overflow-y: auto;
+    padding-right: 2px;
+}
+.hub-wf-list-recent::-webkit-scrollbar { width: 8px; }
+.hub-wf-list-recent::-webkit-scrollbar-thumb { background: #33335a; border-radius: 4px; }
+.hub-wf-list-recent::-webkit-scrollbar-track { background: transparent; }
+.hub-wf-list-recent { scrollbar-width: thin; scrollbar-color: #33335a transparent; }
+
+/* v103: the save-form tool row (the Select/Deselect all toggle) */
+.hub-wf-sf-tools {
+    display: flex;
+    justify-content: flex-end;
+    flex: 0 0 auto;
+    user-select: none;
+}
+.hub-wf-sf-tools .hub-wf-act { padding: 2px 7px; }
 
 /* preset cards */
 .hub-wf-card {
