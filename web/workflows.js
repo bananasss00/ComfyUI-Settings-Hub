@@ -1,6 +1,31 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER (v106)
+// SettingsHub - WORKFLOWS MANAGER (v107)
 // ----------------------------------------------------------------------------
+// v107 (owner request 2026-11-15: "ты пишешь 'есть бюджет localStorage', но
+//   сам комфи и другие кастом екстеншены тоже сильно раздувают буфер, надежно
+//   ли твое решение? мб лучше хранить temp процессы в зарезервированной папке
+//   для settings_hub\workflows пока они фигурируют в recently closed?"):
+//   TEMP SNAPSHOTS MOVED SERVER-SIDE:
+//   * the reopen graphs of closed TEMP tabs no longer live in localStorage -
+//     ComfyUI itself and the other custom extensions bloat the SAME origin
+//     quota, so the v106 embedded snapshot could silently vanish exactly
+//     when it was needed. The 🕘 ring keeps only the METADATA (name, ts,
+//     path?, tempId?) - a closed temp tab uploads its graph to the SERVER:
+//     temp/<id>.json in a RESERVED subfolder of the workflows storage root
+//     (next to presets/, the same re-pointable root, py v107 routes);
+//   * the 🕘 reopen fetches temp/<id> through the snapshot ladder - a
+//     missing file (or an old py without the routes) degrades to the v106
+//     localStorage embed when one exists, then to the path reopen. The
+//     RECENT_SNAP_CAP / RECENT_BUDGET ladders below still guard that
+//     fallback, but they no longer limit a server-backed snapshot (the
+//     server cap is MAX_SNAPSHOT_BYTES = 10 MB, one file per tab);
+//   * lifecycle: the entry leaving the ring (the 15-row cap, the same-name
+//     dedupe) deletes ITS file; the boot GC removes orphans NOT referenced
+//     by this browser's ring AND older than a day (conservative - a
+//     snapshot another browser still points at is never touched);
+//   * the server keeps MAX_TEMP_FILES = 40 newest snapshots per root, so
+//     the folder stays bounded even when a client never cleans up.
+//
 // v106 (owner feedback round 4):
 //   1. the armed 🗑 delete on the BOTTOM preset card jumped the list scroll
 //      to the very top (every arm/confirm re-rendered .hub-wf-body via
@@ -142,9 +167,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v106";
+const WF_WEB_VERSION = "v107";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v106";
+globalThis.__SettingsHubLoaded["workflows"] = "v107";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -156,11 +181,19 @@ const LS_PREF = "settingshub.workflows.pref";  // {keepUnsaved,closeEmptyTemp,wa
 const LS_RECENT = "settingshub.workflows.recent"; // ring buffer of closed tabs
 const Z_PANEL = "99900";               // same layer as the stack / chat panels
 const RECENT_MAX = 15;
-// v106: the reopen snapshots of temp tabs live in localStorage (~5MB per
-// origin) - one huge graph must not crowd the other entries out; over-budget
-// entries degrade to name-only from the OLDEST side (persistRecent)
+// v107: the reopen snapshots of closed TEMP tabs live SERVER-side as
+// temp/<id>.json inside the storage root (see the v107 header note) - the
+// localStorage ring carries only the metadata + the temp id. The caps below
+// now bound the FALLBACK embed only (an old py without the temp routes or a
+// failed upload): one huge graph must not crowd the other entries out;
+// over-budget entries degrade to name-only from the OLDEST side
+// (persistRecent)
 const RECENT_SNAP_CAP = 400000;          // chars of JSON per single entry
 const RECENT_BUDGET = 2500000;           // total chars of JSON across the ring
+// v107: the boot GC deletes a server temp snapshot that NO ring entry
+// references AND that is older than this - anything younger may still be
+// pointed at by another browser's ring, a day-old orphan is a leftover
+const TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const ARM_MS = 2500;                   // double-click confirm window (✕ / 🗑)
 const TAB_SEQ = 30;                    // ms between tab operations (ChangeTracker settle)
 const ITEM_LIST_CAP = 12;              // preset card: items shown before "+N more"
@@ -648,7 +681,7 @@ async function closeWorkflowTab(w, opts = {}) {
         try {
             await activateNeighborBeforeClose(w, store);
             await store.closeWorkflow(w.ref, { warnIfUnsaved: !forceClean });
-            recordRecent(w, snap);
+            await recordRecent(w, snap); // v107: awaited - the temp upload is part of the close
             await ensureSomeTab();
             return { ok: true, via: "store" };
         } catch (_) {}
@@ -659,7 +692,7 @@ async function closeWorkflowTab(w, opts = {}) {
         if (cmd && typeof cmd.execute === "function") {
             await activateWorkflow(w);
             await cmd.execute("Workspace.CloseWorkflow");
-            recordRecent(w, snap);
+            await recordRecent(w, snap); // v107: awaited (see above)
             return { ok: true, via: "command" };
         }
     } catch (_) {}
@@ -791,7 +824,15 @@ async function loadServerState() {
     await probeServer();
     // a version-mismatch note does NOT block the read: an older-but-alive
     // server still serves its preset list (the note just says "restart")
-    if (serverState) await refreshPresets();
+    if (serverState) {
+        await refreshPresets();
+        // v107: after the first healthy probe - one silent GC pass over the
+        // temp folder (stale orphans not referenced by the ring, > 1 day)
+        if (!tempGcDone && presetsLoaded) {
+            tempGcDone = true;
+            void gcTempSnapshots();
+        }
+    }
     return !!(serverState && presetsLoaded);
 }
 
@@ -867,20 +908,94 @@ async function setRootPath(raw) {
 }
 
 // ---------------------------------------------------------------------------
+// v107: server-side temp snapshots - temp/<id>.json in the storage root.
+// The recently-closed ring keeps only the metadata; the reopen graphs live
+// here while the tabs figure in 🕘 Recently closed (the owner's contract).
+// An old py without the routes answers 404 - every helper degrades and the
+// v106 localStorage embed takes over.
+// ---------------------------------------------------------------------------
+
+/** Store ONE reopen snapshot: POST /workflows/temp {name, graph} ->
+ *  {ok, id}. Never throws - {ok:false} makes recordRecent fall back to the
+ *  v106 localStorage embed. */
+async function saveTempSnapshot(name, graph) {
+    try {
+        const res = await jfetch("/settings_hub/workflows/temp", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: name || "Unsaved", graph }),
+        });
+        if (res.json?.ok && typeof res.json.id === "string" && res.json.id) {
+            return { ok: true, id: res.json.id };
+        }
+        return { ok: false, error: (res.json && res.json.error) || ("HTTP " + (res.status || "?")) };
+    } catch (e) {
+        return { ok: false, error: String((e && e.message) || e) };
+    }
+}
+
+/** Fetch ONE reopen snapshot: GET /workflows/temp/{id} -> the graph object
+ *  or null (gone / corrupt / old py). */
+async function fetchTempSnapshot(id) {
+    if (!id) return null;
+    try {
+        const res = await jfetch("/settings_hub/workflows/temp/" + encodeURIComponent(id));
+        if (res.json?.ok && res.json.graph && typeof res.json.graph === "object") {
+            return res.json.graph;
+        }
+    } catch (_) {}
+    return null;
+}
+
+/** Delete ONE temp snapshot (entry eviction / boot GC). Fire-and-forget
+ *  safe: an already-missing file answers ok:true existed:false. */
+async function deleteTempSnapshot(id) {
+    if (!id) return;
+    try {
+        await jfetch("/settings_hub/workflows/temp/" + encodeURIComponent(id), { method: "DELETE" });
+    } catch (_) {}
+}
+
+let tempGcDone = false; // one silent boot GC pass per page load
+
+/** v107 boot GC: the reserved temp folder must not outlive the ring forever.
+ *  Deletes server snapshots that are NOT referenced by this browser's ring
+ *  AND older than a day (the conservative age keeps a snapshot another
+ *  browser may still point at alive; with a 15-row ring a day-old orphan is
+ *  a leftover in practice). Best-effort, silent, once per page load. */
+async function gcTempSnapshots() {
+    if (!serverState) return;
+    try {
+        const res = await jfetch("/settings_hub/workflows/temp");
+        const items = res.json?.ok && Array.isArray(res.json.items) ? res.json.items : null;
+        if (!items) return; // old py without the route - the embed fallback rules
+        const keep = new Set(recent.map((r) => r.tempId).filter(Boolean));
+        const cutoff = Date.now() - TEMP_MAX_AGE_MS;
+        for (const it of items) {
+            if (!it || typeof it.id !== "string" || keep.has(it.id)) continue;
+            if (Number(it.ts || 0) * 1000 > cutoff) continue;
+            await deleteTempSnapshot(it.id);
+        }
+    } catch (_) {}
+}
+
+// ---------------------------------------------------------------------------
 // Recently-closed ring buffer (🕘 Files & Recent)
 // ---------------------------------------------------------------------------
 
 let recent = lsJson(LS_RECENT, []);
 if (!Array.isArray(recent)) recent = [];
 sanitizeRecent(); // v106: drop the legacy ".null" garbage + unrestorable rows
-/** v106: prune the reopen buffer to what can actually be reopened - a path
+/** v107: prune the reopen buffer to what can actually be reopened - a path
  *  entry needs a real file path (the ".null" suffix is the garbage ComfyUI
  *  builds for unsaved tabs, it can never exist in userdata), a temp entry
- *  needs its embedded snapshot. Runs on boot over the loaded localStorage
- *  and is exported for the tests. */
+ *  needs its server temp id (v107) or its embedded snapshot (the v106
+ *  fallback). Runs on boot over the loaded localStorage and is exported for
+ *  the tests. */
 function sanitizeRecent() {
     const ok = (r) => r && typeof r === "object" &&
-        (r.snap !== null && typeof r.snap === "object" ||
+        (typeof r.tempId === "string" && r.tempId ||
+            r.snap !== null && typeof r.snap === "object" ||
             (typeof r.path === "string" && r.path &&
                 !r.path.toLowerCase().endsWith(".null")));
     recent = recent.filter(ok).slice(0, RECENT_MAX);
@@ -894,9 +1009,8 @@ function reloadRecent() {
 }
 
 function persistRecent() {
-    // v106: the newest entries keep their snapshots, the older ones degrade
-    // to path/name-only once the total JSON crosses RECENT_BUDGET (a hard
-    // quota error would silently drop the WHOLE buffer - saveJson swallows)
+    // the v106 degrade ladder guards the FALLBACK embeds only now - an
+    // entry carrying a server tempId has no snap and is a few dozen chars
     let used = 0;
     const list = recent.slice(0, RECENT_MAX).map((r) => {
         if (!r || !r.snap) return r;
@@ -906,31 +1020,66 @@ function persistRecent() {
     saveJson(LS_RECENT, list);
 }
 
-/** The recently-closed ring. v106: a TEMP tab (no real file behind it - the
+/** The recently-closed ring. v107: a TEMP tab (no real file behind it - the
  *  autosave-ish "Unsaved Workflow (N).json" names never materialize in
  *  userdata, and the duplicate suffix builds "... (2).null") is recorded
- *  WITH the graph snapshot taken at close time and WITHOUT the fake path, so
- *  the 🕘 reopen restores the graph instead of 404-ing a userdata fetch. A
- *  modified PERSISTED tab embeds its unsaved state too - the reopen shows
- *  what was on screen, not the stale disk copy. Empty temps and snapshots
- *  over RECENT_SNAP_CAP are not recorded (a recent row must always open).
- *  snap is captured by closeWorkflowTab BEFORE the store drops the ref. */
+ *  WITH its graph - but the graph payload is uploaded to the SERVER
+ *  (temp/<id>.json, a reserved subfolder of the workflows storage root) and
+ *  the ring entry keeps only {name, ts, tempId}. localStorage cannot be the
+ *  guarantee anymore: ComfyUI and the other custom extensions share the
+ *  same origin quota. The v106 embed stays as the fallback when the server
+ *  has no temp routes (an old py) or the upload fails - RECENT_SNAP_CAP
+ *  bounds THAT fallback. A modified PERSISTED tab keeps its unsaved state
+ *  the same way (server first, embed fallback) - the reopen shows what was
+ *  on screen, not the stale disk copy. Empty temps and snapshots that are
+ *  BOTH too large for the server AND the fallback cap are not recorded (a
+ *  recent row must always open). snap is captured by closeWorkflowTab
+ *  BEFORE the store drops the ref. Resolves {ok, tempId?} for the tests. */
 function recordRecent(w, snap = null) {
-    if (!w) return;
+    if (!w) return Promise.resolve({ ok: false });
     const temp = !!w.isTemporary || !w.path;
     // a ".null" path is never a real file - treat the tab as temp-like
     const garbagePath = !!w.path && normWfPath(w.path).toLowerCase().endsWith(".null");
     const path = (!temp && !garbagePath) ? normWfPath(w.path) : null;
     const name = w.name || (path ? baseName(path) : "Unsaved");
-    if (!path && (!snap || w.isEmpty)) return; // nothing reopenable - skip
-    if (snap) {
-        try { if (JSON.stringify(snap).length > RECENT_SNAP_CAP) snap = null; } catch (_) { snap = null; }
-        if (!snap && !path) return;
-    }
+    if (!path && (!snap || w.isEmpty)) return Promise.resolve({ ok: false }); // nothing reopenable - skip
+    const prev = recent;
     const same = (r) => path ? r.path === path : (!r.path && r.name === name);
-    recent = [{ path, name, ts: Date.now(), ...(snap ? { snap } : {}) },
-        ...recent.filter((r) => !same(r))].slice(0, RECENT_MAX);
-    persistRecent();
+    return (async () => {
+        let tempId = null, embed = null;
+        if (snap) {
+            const saved = await saveTempSnapshot(name, snap);
+            if (saved.ok) {
+                tempId = saved.id; // the payload lives server-side now
+            } else {
+                // fallback: the v106 localStorage embed (small graphs only)
+                try { if (JSON.stringify(snap).length <= RECENT_SNAP_CAP) embed = snap; } catch (_) {}
+                if (!embed && !path) return { ok: false, tooLarge: true };
+            }
+        }
+        recent = [{ path, name, ts: Date.now(),
+                ...(tempId ? { tempId } : {}), ...(embed ? { snap: embed } : {}) },
+            ...prev.filter((r) => !same(r))].slice(0, RECENT_MAX);
+        dropEvictedTemps(prev);
+        persistRecent();
+        return { ok: true, tempId };
+    })();
+}
+
+/** v107: fire-and-forget deletion of the temp snapshots that just LEFT the
+ *  ring (the 15-row slice + the same-name dedupe). The ring carries no
+ *  graph payloads anymore, so a stranded id would keep its server file
+ *  forever - "the folder holds the temp processes WHILE they figure in
+ *  recently closed" (the owner's contract). */
+function dropEvictedTemps(prev) {
+    const keep = new Set(recent.map((r) => r.tempId).filter(Boolean));
+    const seen = new Set();
+    for (const r of prev) {
+        if (!r || typeof r.tempId !== "string" || !r.tempId) continue;
+        if (seen.has(r.tempId) || keep.has(r.tempId)) continue;
+        seen.add(r.tempId);
+        void deleteTempSnapshot(r.tempId);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1743,12 +1892,13 @@ function presetsTabHtml() {
 }
 
 function filesTabHtml() {
-    // v106: temp tabs reopen from their embedded snapshot (no file path) -
-    // the row is found by ts, carries a (snapshot) badge and its own tooltip
+    // v107: temp tabs reopen from their SERVER snapshot (tempId ->
+    // temp/<id>.json; the v106 embed is the fallback) - no file path, the
+    // row is found by ts, carries a (snapshot) badge and its own tooltip
     const rec = recent.slice(0, RECENT_MAX).map((r) =>
         `<div class="hub-wf-row hub-wf-row-recent" data-path="${esc(r.path || "")}" data-rts="${esc(String(r.ts || 0))}">` +
         `<button type="button" class="hub-wf-name" data-act="reopen" data-path="${esc(r.path || "")}" data-rts="${esc(String(r.ts || 0))}" ` +
-        `title="${r.snap ? "Snapshot - restores the tab as it was when closed" : esc(r.path || "")}">🕘 ${esc(r.name)}${r.snap && !r.path ? " <span class=\"hub-wf-snap\">(snapshot)</span>" : ""}</button>` +
+        `title="${(r.tempId || r.snap) ? "Snapshot - restores the tab as it was when closed" : esc(r.path || "")}">🕘 ${esc(r.name)}${(r.tempId || r.snap) && !r.path ? " <span class=\"hub-wf-snap\">(snapshot)</span>" : ""}</button>` +
         `<span class="hub-wf-marks"><span class="hub-wf-snap">${esc(fmtDate(Math.floor((r.ts || 0) / 1000)))}</span></span>` +
         `</div>`).join("");
     const toks = filesSearch.toLowerCase().split(/\s+/).filter(Boolean);
@@ -1913,16 +2063,23 @@ async function onBodyClick(e) {
             return;
         }
         case "reopen": {
-            // v106: a temp entry reopens from its EMBEDDED SNAPSHOT - never a
-            // /userdata fetch (that was the 404 on "Unsaved Workflow (N)")
+            // v107: a temp entry reopens from its SERVER snapshot
+            // (temp/<id>.json in the storage root) - never a /userdata fetch
+            // (that was the 404 on "Unsaved Workflow (N)"). The v106
+            // localStorage embed is the fallback (an old py / a lost file),
+            // then a real path entry keeps the by-path reopen.
             const entry = recent.find((r) => String(r.ts || 0) === btn.dataset.rts)
                 || recent.find((r) => r.path && r.path === btn.dataset.path);
-            if (entry?.snap) {
-                const r = await openSnapshotWorkflow(entry.name, entry.snap);
+            let graph = entry?.tempId ? await fetchTempSnapshot(entry.tempId) : null;
+            if (!graph && entry?.snap) graph = entry.snap; // v106 fallback
+            if (graph) {
+                const r = await openSnapshotWorkflow(entry.name, graph);
                 if (!r.ok) localToast("Could not restore the snapshot - see F12");
             } else if (btn.dataset.path) {
                 const r = await openWorkflowByPath(btn.dataset.path);
                 if (!r.ok) localToast(r.missing ? "The file no longer exists" : "Could not open - see F12");
+            } else if (entry?.tempId) {
+                localToast("The temp snapshot is gone from the server storage");
             } else {
                 localToast("This temp tab was too large to keep a snapshot - it cannot be reopened");
             }
@@ -2565,7 +2722,9 @@ function openWfSettingsPop() {
         `<div class="hub-cs-hint">Enter applies the folder, Esc reverts it. Switching the folder NEVER moves ` +
         `presets - each location keeps its own presets/ folder (ONE file per preset: ` +
         `presets/&lt;id&gt;.json - copy a file to transfer that preset); the root choice itself lives in the DEFAULT ` +
-        `user folder (workflows_root.json). 🗑 on a preset card deletes it (click twice). Hidden panel: ` +
+        `user folder (workflows_root.json). The reopen snapshots of closed temp tabs live in the SAME root's ` +
+        `reserved temp/ folder (one &lt;id&gt;.json per closed tab, while the tab figures in 🕘 Recently closed). ` +
+        `🗑 on a preset card deletes it (click twice). Hidden panel: ` +
         `the mini panel (🗂) or ComfyUI Settings → SettingsHub → 'Mini panel'.</div>`;
     document.body.appendChild(pop);
     wfPop = pop;
@@ -2843,6 +3002,14 @@ export function __workflowsTestHooks() {
         recordRecent,
         reloadRecent,      // v106: the boot read + the ".null" garbage prune
         sanitizeRecent,
+        // v107: the server-side temp snapshot store (temp/<id>.json)
+        saveTempSnapshot,
+        fetchTempSnapshot,
+        deleteTempSnapshot,
+        gcTempSnapshots,
+        setTempGcDone: (v) => { tempGcDone = !!v; },
+        tempGcDone: () => tempGcDone,
+        TEMP_MAX_AGE_MS,
         openPlanPop: (pid, anchor) => {
             const p = presets.find((x) => x.id === pid);
             if (p) openPlanPop(p, anchor || null);

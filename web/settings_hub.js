@@ -24,7 +24,7 @@ import { app } from "../../scripts/app.js";
 // v30.3/v35: build banner - makes the running web build verifiable in F12
 // (field debugging: "is the new file actually loaded?" stops being a guess;
 // a stale cached module was a real suspect three times already).
-console.info("[SettingsHub] web build: v106 - SCROLL-STABLE CONFIRMS + SNAPSHOT REOPENS: the armed 🗑 delete (and every other same-tab re-render - the single ✕, Show more, search, Select/Deselect all) no longer jumps the list scroll to the top - renderAll keeps the .hub-wf-scroll anchor of the SAME tab; clicking a closed TEMP process in 🕘 Recently closed no longer 404s a /userdata fetch ('Unsaved Workflow (N).json' and the garbage '... (2).null' paths) - the close embeds a graph SNAPSHOT of the temp tab into its recent entry and the reopen restores it through the snapshot ladder (a modified saved tab embeds its unsaved state too); legacy '.null' garbage entries are pruned on boot. v105: CLOSE MENU + PRESETS AUTO-RETRY: the Open-tab mass close (Close saved / Close other saved / the new Close all with pinned 📌 staying) moved into ONE 🧹 Close ▾ dropdown - the row stays compact; a failed boot-time presets read now HEALS (retried on the poll tick + on every Presets-tab open, 'Reading presets…' instead of the misleading 'No presets yet' - presets appeared empty after a refresh until a save); the Presets status line names the live server pack ('srv vNNN') and the health probe compares it against this web build - an OLDER server = 'RESTART ComfyUI' (a page refresh only swaps the web half; the old py process kept saving the legacy presets.json), a NEWER one = 'hard refresh (Ctrl+F5)'. v104: WORKFLOWS STORAGE: ONE FILE PER PRESET - presets/<id>.json inside the storage root instead of the single presets.json array; copy one file to transfer that preset, temp snapshots stay INSIDE the preset file, the legacy presets.json is split by a one-time automatic migration (the original is kept as presets.json.bak). v103: the stack/chat resize grips wear the workflows marker; the Files 'Recently closed' group scrolls INSIDE its 30% cap; the save-form Select all / Deselect all toggle; the Open-tab multi-word filter. v102: the tab activation swaps the CANVAS via app.loadGraphData; snapshots of never-activated temp tabs save correctly; the ⚙ popup width cap; pinned status bar + Files search. v101: presets of open tabs (path items + snapshots of temp tabs), smart-diff ▶ Switch with a plan preview + ↩ Undo, ＋ Add, ↻ Update (overwrite/merge), protected bulk close with 📌 locks, 💾 Save all, 🕘 recent buffer, multi-word file search, export/import, the v84-mechanics storage folder. First run starts MINIMIZED into the taskbar. Stale-cache guard: EXPECTED manifest verifies every module.");
+console.info("[SettingsHub] web build: v107 - SERVER-SIDE TEMP SNAPSHOTS + STACK STORAGE TOGGLER: the reopen graphs of closed TEMP tabs moved OUT of localStorage (ComfyUI itself and the other extensions bloat the same origin quota - the owner asked 'надежно ли твое решение?') - the 🕘 ring keeps only the metadata, every closed temp tab uploads its graph to temp/<id>.json in a RESERVED subfolder of the workflows storage root (py v107 routes), the reopen fetches it back through the snapshot ladder (the v106 localStorage embed stays as the fallback for an old py), an entry leaving the ring deletes its file, a boot GC drops day-old orphans, the server keeps the 40 newest per root; the STACK header gained a 🌐/@wf STORAGE TOGGLER - the shared stack and the per-workflow store exist SIMULTANEOUSLY out of the box and the segments switch the active store with one click (the ⚙ 'Stack scope' select is GONE - the owner removed the setting). v106: SCROLL-STABLE CONFIRMS + SNAPSHOT REOPENS: the armed 🗑 delete (and every other same-tab re-render - the single ✕, Show more, search, Select/Deselect all) no longer jumps the list scroll to the top - renderAll keeps the .hub-wf-scroll anchor of the SAME tab; clicking a closed TEMP process in 🕘 Recently closed no longer 404s a /userdata fetch ('Unsaved Workflow (N).json' and the garbage '... (2).null' paths) - the close embeds a graph SNAPSHOT of the temp tab into its recent entry and the reopen restores it through the snapshot ladder (a modified saved tab embeds its unsaved state too); legacy '.null' garbage entries are pruned on boot. v105: CLOSE MENU + PRESETS AUTO-RETRY: the Open-tab mass close (Close saved / Close other saved / the new Close all with pinned 📌 staying) moved into ONE 🧹 Close ▾ dropdown - the row stays compact; a failed boot-time presets read now HEALS (retried on the poll tick + on every Presets-tab open, 'Reading presets…' instead of the misleading 'No presets yet' - presets appeared empty after a refresh until a save); the Presets status line names the live server pack ('srv vNNN') and the health probe compares it against this web build - an OLDER server = 'RESTART ComfyUI' (a page refresh only swaps the web half; the old py process kept saving the legacy presets.json), a NEWER one = 'hard refresh (Ctrl+F5)'. v104: WORKFLOWS STORAGE: ONE FILE PER PRESET - presets/<id>.json inside the storage root instead of the single presets.json array; copy one file to transfer that preset, temp snapshots stay INSIDE the preset file, the legacy presets.json is split by a one-time automatic migration (the original is kept as presets.json.bak). v103: the stack/chat resize grips wear the workflows marker; the Files 'Recently closed' group scrolls INSIDE its 30% cap; the save-form Select all / Deselect all toggle; the Open-tab multi-word filter. v102: the tab activation swaps the CANVAS via app.loadGraphData; snapshots of never-activated temp tabs save correctly; the ⚙ popup width cap; pinned status bar + Files search. v101: presets of open tabs (path items + snapshots of temp tabs), smart-diff ▶ Switch with a plan preview + ↩ Undo, ＋ Add, ↻ Update (overwrite/merge), protected bulk close with 📌 locks, 💾 Save all, 🕘 recent buffer, multi-word file search, export/import, the v84-mechanics storage folder. First run starts MINIMIZED into the taskbar. Stale-cache guard: EXPECTED manifest verifies every module.");
 
 // Load CSS via link tag to avoid module MIME type errors. The version query
 // busts styles.css staleness on every build (safe: plain stylesheet, no
@@ -32,7 +32,7 @@ console.info("[SettingsHub] web build: v106 - SCROLL-STABLE CONFIRMS + SNAPSHOT 
 (function loadStyles() {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = new URL("styles.css?v=106", import.meta.url).href;
+    link.href = new URL("styles.css?v=107", import.meta.url).href;
     document.head.appendChild(link);
 })();
 
@@ -51,7 +51,7 @@ console.info("[SettingsHub] web build: v106 - SCROLL-STABLE CONFIRMS + SNAPSHOT 
 // ONE stale cached file silently removed every "Pin to Settings Hub" menu
 // item and the sync hooks. The detector keeps its diagnostic value but is
 // NO LONGER allowed to disable the pack.
-globalThis.__SettingsHubBuild = "v106";
+globalThis.__SettingsHubBuild = "v107";
 globalThis.__SettingsHubLoaded = {};
 
 // Import order matters: core/sync first, then feature modules. A failure in
@@ -68,7 +68,7 @@ const FILES = [
     "./launcher.js",        // v91: the MINI PANEL - chat/stack toggles + collapse target + ＋ hub
     "./stack.js",           // v70: Paste Stack - floating clipboard panel
     "./chat.js",            // v89: LLM Chat - named settings fields + ctx fill + chat search + own prompts path
-    "./workflows.js",       // v106: Workflows Manager - scroll-stable confirms, snapshot reopens of temp tabs
+    "./workflows.js",       // v107: Workflows Manager - server-side temp snapshots, storage toggler
     "./compare.js",         // v73: Image Compare - A/B wipe/fade/blink/diff panel
     "./context_menu.js",    // "📌 Pin to Settings Hub" menus + batch picker
 ];
@@ -102,9 +102,9 @@ const FILES = [
         "hub_ui_renderer": "v94", // DOM widget rendering (+ v94 rename commit refresh + popup grace)
         "sync_manager": "v70",    // reactive sync hooks
         "launcher": "v101",       // v101: the 4th taskbar item (workflows) + text+dot badges
-        "stack": "v100",          // Paste Stack (+ v100: reliable connections for ALL real clipboard shapes + search focus + group counts)
+        "stack": "v101",          // Paste Stack (+ v101: the header 🌐/@wf STORAGE TOGGLER - both stores exist at once, the ⚙ scope select is gone)
         "chat": "v98",            // LLM Chat (+ v98: tab-strip wheel scroll + reveal the active chip)
-        "workflows": "v106",     // Workflows Manager (+ v106: the scroll-stable re-renders + the 🕘 snapshot reopens of temp tabs)
+        "workflows": "v107",     // Workflows Manager (+ v107: the server-side temp snapshots - temp/<id>.json in the storage root; the ring keeps only the metadata)
         "compare": "v83",         // Image Compare A/B panel (v83 display fix)
         "context_menu": "v93",    // "Pin to Settings Hub" menus (+ v93 hub window RMB Rename/Materialize)
         "core": "v93",            // (+ v93 hub DOM resolver registry for the window menu)

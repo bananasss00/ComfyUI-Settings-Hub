@@ -1,6 +1,26 @@
 // ============================================================================
-// SettingsHub - Paste Stack (v83): standalone floating clipboard panel
+// SettingsHub - Paste Stack (v101): standalone floating clipboard panel
 // ----------------------------------------------------------------------------
+// v101 (owner request 2026-11-15: "надо сделать чтобы для стакера было сразу
+//   два хранилища: глобальное и в процессе. и туглер который позволяет быстро
+//   перелючаться между глобальным хранилищем и процесса. а настройку тогда
+//   можно убрать что включала хранение во всех рабочих процессах"):
+//   BOTH STORES OUT OF THE BOX + A HEADER TOGGLER:
+//   * the SHARED stack and the PER-WORKFLOW store exist SIMULTANEOUSLY - no
+//     mode decides which one is "real" anymore. The server keeps both stores
+//     all the time (py v77 ?wf= routing was already store-per-id), so both
+//     sides keep their entries untouched no matter which one is on screen
+//     (the same never-move contract, AGENTS.md 5.1 rule 7).
+//   * the header badge grew into the TOGGLER: two segments [🌐 | @wf], the
+//     active one is highlighted, a click switches the ACTIVE store with the
+//     full re-mount (the exact setStackScope path of v77). The state follows
+//     the reload (localStorage, the same key) - the toggler IS the setting.
+//   * the ⚙ popup LOST the "Stack scope" select - the owner removed the
+//     setting explicitly; the header toggler is the only control left. The
+//     switching semantics are unchanged: no copies, no moves, 🗑 clears only
+//     the ACTIVE store, the per-workflow binding id still lives in
+//     app.graph.extra.settingshubStackId (inside the workflow file).
+// ============================================================================
 // v97 (owner request 2026-11-12: "когда в стаке много вкладок, они вылезают
 //   за границы - надо чтобы они могли скролиться колесом мыши" + "редактиро-
 //   вание работает только для текстовых записей; надо добавить возможность
@@ -127,7 +147,7 @@
 // v89 self-report (single-source version, docs/plan-versions.md): the
 // last FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["stack"] = "v100";
+globalThis.__SettingsHubLoaded["stack"] = "v101";
 
 // ============================================================================
 // A floating clipboard-history panel that lives ALONGSIDE the hub (owner
@@ -588,10 +608,13 @@ export function setNodeCapture(v) {
 }
 
 // ---------------------------------------------------------------------------
-// v77: stack scope - shared (one stack for every workflow, the pre-v77
-// behavior and the default) vs per-workflow (every workflow keeps its own
-// entries). The mode is a client setting; switching it NEVER migrates data
-// (AGENTS.md 5.1 rule 7) - each scope keeps its own store.
+// v77 -> v101: the stack scope. v77 made it a client SETTING (shared OR
+// per-workflow); v101 (owner) turned it into TWO ALWAYS-PRESENT stores with
+// a header toggler - the shared store and the per-workflow store coexist,
+// the toggler picks which one the panel shows. Switching NEVER migrates
+// data (AGENTS.md 5.1 rule 7) - each store keeps its own entries. The
+// localStorage key persists the TOGGLER state (which store is on screen),
+// not a mode that hides the other store.
 // ---------------------------------------------------------------------------
 
 const WF_ID_KEY = "settingshubStackId";   // in app.graph.extra (workflow file)
@@ -726,11 +749,8 @@ function openStkSettingsPop() {
         `<select class="hub-cs-sel" data-stk="max">` +
         STACK_MAX_CHOICES.map((n) => `<option value="${n}">${n}${n === STACK_MAX_DEFAULT ? " · default" : ""}</option>`).join("") +
         `</select></label>` +
-        `<label class="hub-cs-row"><span>Stack scope (v77)</span>` +
-        `<select class="hub-cs-sel" data-stk="scope">` +
-        `<option value="global">Shared - all workflows (default)</option>` +
-        `<option value="workflow">Per-workflow</option>` +
-        `</select></label>` +
+        // v101: the "Stack scope" select is GONE (the owner removed the
+        // setting) - the header 🌐/@wf toggler is the only scope control
         // v96: auto-capture of canvas copies (nodes + groups) into the stack
         `<label class="hub-cs-row"><span>Capture canvas copies (nodes)</span>` +
         `<select class="hub-cs-sel" data-stk="nodecap">` +
@@ -753,15 +773,15 @@ function openStkSettingsPop() {
         `panel; the way back is the mini panel (📋 toggle) or ComfyUI Settings → ` +
         `SettingsHub → 'Mini panel'. The folder shown above ("Now: …") is where ` +
         `the entries AND stack_root.json live - copy it out of this popup any time. ` +
-        `Switching the scope or the folder never moves ` +
-        `entries - each location/scope keeps its own. 🗑 in the panel header clears ` +
-        `the entries.</div>`;
+        `The 🌐/@wf header toggler switches between the SHARED and the ` +
+        `PER-WORKFLOW storage; the toggle or a folder change never moves ` +
+        `entries - each store keeps its own. 🗑 in the panel header clears ` +
+        `the ACTIVE store.</div>`;
     document.body.appendChild(pop);
     stkPop = pop;
 
     const onSel = pop.querySelector('[data-stk="on"]');
     const maxSel = pop.querySelector('[data-stk="max"]');
-    const scopeSel = pop.querySelector('[data-stk="scope"]');
     const rootIn = pop.querySelector('[data-stk="root"]');
     const rootInfo = pop.querySelector('[data-stk="rootinfo"]');
 
@@ -776,11 +796,8 @@ function openStkSettingsPop() {
         maxSel.value = String(setStackMax(maxSel.value));
         renderAll();
     });
-    scopeSel.value = getStackScope();
-    scopeSel.addEventListener("change", () => {
-        scopeSel.value = setStackScope(scopeSel.value);
-        // setStackScope re-mounts on a change - this popup dies with the panel
-    });
+    // v101: the scope select listener is gone with the row - setStackScope
+    // is wired ONLY to the header toggler now
     // v96: the node-capture toggle (affects the AUTO Ctrl+C path only)
     const nodecapSel = pop.querySelector('[data-stk="nodecap"]');
     nodecapSel.value = isNodeCaptureEnabled() ? "1" : "0";
@@ -2549,19 +2566,25 @@ function renderBadge() {
     if (chip) chip.querySelector(".hub-stack-chip-count").textContent = String(stackItems.length);
 }
 
-/** v77: the header scope badge - visible only in per-workflow mode, so the
- *  active scope is never a hidden dimension. */
+/** v101: the header STORAGE TOGGLER - the v77 "@workflow" badge grew into a
+ *  real two-segment switch (both stores exist all the time, the active one
+ *  is highlighted). The tooltips spell out what a click does BEFORE it does
+ *  it - the active store must never be a hidden dimension (the v77 rule). */
 function renderScope() {
-    const el = headEl?.querySelector(".hub-stack-scope");
-    if (!el) return;
-    if (getStackScope() === "workflow") {
-        el.style.display = "";
-        el.textContent = "@workflow";
-        el.title = "Per-workflow stack: THIS workflow keeps its own entries (the binding id is saved inside the workflow file)";
-    } else {
-        el.style.display = "none";
-        el.textContent = "";
+    const cur = getStackScope();
+    for (const seg of headEl?.querySelectorAll(".hub-stack-scopeseg") || []) {
+        const on = seg.dataset.stkscope === cur;
+        seg.classList.toggle("hub-stack-scopeseg-on", on);
+        seg.setAttribute("aria-pressed", on ? "true" : "false");
     }
+    const gl = headEl?.querySelector('.hub-stack-scopeseg[data-stkscope="global"]');
+    const wf = headEl?.querySelector('.hub-stack-scopeseg[data-stkscope="workflow"]');
+    if (gl) gl.title = cur === "global"
+        ? "ACTIVE: the SHARED stack - one stack for every workflow. Click @wf to give this workflow its own stack."
+        : "Switch to the SHARED stack (one stack for every workflow) - this workflow's own entries stay in its store.";
+    if (wf) wf.title = cur === "workflow"
+        ? "ACTIVE: THIS workflow keeps its own entries (the binding id is saved inside the workflow file). Click 🌐 to see the shared stack."
+        : "Give THIS workflow its own stack (the binding id is saved inside the workflow file) - the shared stack keeps its entries.";
 }
 
 function renderNote() {
@@ -4506,11 +4529,16 @@ function buildDom() {
     panel.innerHTML =
         `<div class="hub-stack-head" title="Drag to move">` +
         `<span class="hub-stack-ico">📋</span><span class="hub-stack-title">Stack</span>` +
-        `<span class="hub-stack-scope" style="display:none"></span>` +
+        // v101: the STORAGE TOGGLER - both stores exist all the time, the
+        // segments pick which one the panel shows (the ⚙ select is gone)
+        `<span class="hub-stack-scopetgl" role="group" aria-label="Stack storage">` +
+        `<button type="button" class="hub-stack-scopeseg" data-stkscope="global">🌐</button>` +
+        `<button type="button" class="hub-stack-scopeseg" data-stkscope="workflow">@wf</button>` +
+        `</span>` +
         `<span class="hub-stack-count">0</span>` +
         // v88: the stack manages itself - ⚙ opens ITS OWN settings popup
         // (the rows the hub ⚙ used to host)
-        `<button type="button" class="hub-btn hub-stack-sett" title="Stack settings (On/Off, max entries, scope, storage folder)">⚙</button>` +
+        `<button type="button" class="hub-btn hub-stack-sett" title="Stack settings (On/Off, max entries, storage folder)">⚙</button>` +
         `<button type="button" class="hub-btn hub-stack-clear" title="Clear ALL entries (click twice to confirm)">🗑</button>` +
         `<button type="button" class="hub-btn hub-stack-min" title="Minimize to chip">–</button>` +
         // v75: no [✕] close button - the panel is dismissed via its OWN ⚙
@@ -4571,6 +4599,13 @@ function buildDom() {
     panel.querySelector(".hub-stack-sett").addEventListener("click", () => openStkSettingsPop());
     panel.querySelector(".hub-stack-clear").addEventListener("click", (e) => panelClearAll(e.currentTarget));
     panel.querySelector(".hub-stack-min").addEventListener("click", () => setMinimized(true));
+    // v101: the header storage toggler - a segment click switches the ACTIVE
+    // store (the same setStackScope path the ⚙ select used; the re-mount on a
+    // change redraws the list, the badge and the empty state). makeDraggable
+    // already lets header buttons through, so the segments never drag-move.
+    for (const seg of panel.querySelectorAll(".hub-stack-scopeseg")) {
+        seg.addEventListener("click", () => setStackScope(seg.dataset.stkscope || "global"));
+    }
     // v75: the hide/close wiring is intentionally absent - see buildDom().
     // v92 (owner #6): the chip is draggable (below) - a DRAG release must not
     // also fire this click and unfold the panel; only a plain click opens.

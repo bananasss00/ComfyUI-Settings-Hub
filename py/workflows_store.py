@@ -39,6 +39,30 @@ store or the native /userdata endpoint). A "snapshot" item embeds the graph
 JSON of a TEMPORARY (unsaved) tab INSIDE the preset file itself (kept as
 is, v104) - the snapshot travels with the preset it belongs to.
 
+v107: the REOPEN snapshots of closed TEMP tabs (the 🕘 Recently-closed ring)
+moved OUT of browser localStorage - the owner: "сам комфи и другие кастом
+extensions тоже сильно раздувают буфер" (ComfyUI itself and the other
+custom extensions bloat the same origin quota, so an embedded snapshot
+could silently vanish). The ring keeps only the METADATA; every graph
+payload lives server-side as temp/<id>.json in a RESERVED subfolder of the
+active storage root (next to presets/, the same re-pointable root):
+
+    temp/<temp-id>.json
+    {
+      "id": "<uuid_hex_12>",
+      "name": "Unsaved Workflow (3)",
+      "ts": 1763200000,
+      "graph": { ... the workflow JSON as closed ... }
+    }
+
+The client uploads at close time, fetches on the 🕘 reopen and deletes when
+the entry leaves the ring; a boot GC removes stale orphans (older than a
+day, not referenced by this browser's ring - a conservative rule that
+never touches a snapshot another browser may still point at). MAX_TEMP_FILES
+keeps a root bounded even when a client never cleans up. An old py (no
+temp routes) degrades the panel back to the v106 embedded-snapshot
+behavior - the localStorage fallback stays wired.
+
 Migration (one-time, automatic, on the first storage touch of a root): a
 root that still holds the legacy v101-v103 single-file store gets its
 presets.json array split into presets/<id>.json files, and the original is
@@ -76,6 +100,14 @@ can never hide the way back. Routes:
     DELETE /settings_hub/workflows/preset/{pid}
     POST   /settings_hub/workflows/import       -> one preset object OR
                                             {presets: [...], overwrite?}
+    GET    /settings_hub/workflows/temp         -> {ok, items: [{id, name,
+                                            ts}]} (v107, no graphs)
+    POST   /settings_hub/workflows/temp         -> {name?, graph} - store one
+                                            reopen snapshot (v107)
+    GET    /settings_hub/workflows/temp/{tid}   -> {ok, id, name, ts, graph}
+                                            (v107)
+    DELETE /settings_hub/workflows/temp/{tid}   -> {ok, gone, existed}
+                                            (v107)
 
 Changing the root NEVER moves or copies presets (AGENTS.md 5.1 rules 7/12):
 each location keeps its own presets/ folder, the new one starts empty. The
@@ -115,12 +147,20 @@ MAX_NAME_CHARS = 80
 MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024
 MAX_PATH_CHARS = 300
 MAX_ACTIVE_PATH_CHARS = MAX_PATH_CHARS
+# v107: the temp-snapshot folder cap (a root must stay bounded even when a
+# client never cleans its recently-closed evictions up - multi-browser).
+MAX_TEMP_FILES = 40
 
 _ID_RE = re.compile(r"^[a-f0-9]{8,32}$")
 # v101: import/legacy ids may be wider - still a strict path-safe charset.
 _ID_LOOSE_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
 
 _lock = asyncio.Lock()
+# v107: a monotonic write counter for the temp snapshots - the mtime
+# tie-break is NOT reliable on every filesystem (overlayfs quantizes it),
+# so same-second writes order by THIS counter instead (the MAX_TEMP_FILES
+# eviction really drops the OLDEST writes, not the lucky-name ones)
+_temp_seq = 0
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +285,7 @@ _load_root_override()
 
 _LEGACY_NAME = "presets.json"
 _PRESETS_DIR_NAME = "presets"
+_TEMP_DIR_NAME = "temp"  # v107: the reopen snapshots of TEMP tabs
 
 
 def _legacy_presets_path():
@@ -265,9 +306,23 @@ def _preset_file(pid):
     return os.path.join(_presets_dir(), pid + ".json")
 
 
+def _temp_dir():
+    """v107: the RESERVED temp-snapshot folder of the ACTIVE root - sits
+    next to presets/ and follows the same re-pointable storage root."""
+    return os.path.join(_workflows_root(), _TEMP_DIR_NAME)
+
+
+def _temp_file(tid):
+    """temp/<id>.json - `tid` is ALWAYS matched against _ID_RE (strict hex,
+    server-generated) before this is used as a path, so the file name cannot
+    traverse."""
+    return os.path.join(_temp_dir(), tid + ".json")
+
+
 def _ensure_dirs():
     try:
         os.makedirs(_presets_dir(), exist_ok=True)
+        os.makedirs(_temp_dir(), exist_ok=True)  # v107: the temp snapshots
     except Exception:
         pass
 
@@ -382,6 +437,105 @@ def _delete_preset_file(pid):
         return True
     except OSError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# v107: temp-snapshot files - the reopen payloads of closed TEMP tabs.
+# The recently-closed ring in the browser keeps only the metadata; every
+# graph lives here as temp/<id>.json (uploaded at close, fetched on the
+# 🕘 reopen, deleted when the entry leaves the ring / the boot GC drops a
+# stale orphan). Writes are atomic like the preset files.
+# ---------------------------------------------------------------------------
+
+def _write_temp_file(obj):
+    """Atomic write of ONE temp snapshot file (tmp + os.replace)."""
+    try:
+        os.makedirs(_temp_dir(), exist_ok=True)
+    except Exception:
+        return False
+    f = _temp_file(obj["id"])
+    tmp = f + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, ensure_ascii=False)
+        os.replace(tmp, f)
+        return True
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def _read_temp_file(tid):
+    """Parse ONE temp snapshot (None when missing/corrupt/id-disagreeing).
+    The id is re-validated here - a wire value can never reach the
+    filesystem unchecked."""
+    if not isinstance(tid, str) or not _ID_RE.match(tid):
+        return None
+    try:
+        with open(_temp_file(tid), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if isinstance(data, dict) and data.get("id") == tid:
+        return data
+    return None
+
+
+def _delete_temp_file(tid):
+    try:
+        os.unlink(_temp_file(tid))
+        return True
+    except OSError:
+        return False
+
+
+def _list_temp_files():
+    """[{id, name, ts}] of every temp snapshot in the ACTIVE root, newest
+    first - NO graphs (the list feeds the client boot GC and diagnostics;
+    the payloads are fetched one-by-one). Ties on ts (a burst of closes
+    inside one second) break by the monotonic write counter (seq) - the
+    filesystem mtime proved non-monotonic under overlayfs."""
+    out = []
+    try:
+        names = sorted(os.listdir(_temp_dir()))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        tid = name[:-len(".json")]
+        if not _ID_RE.match(tid):
+            continue
+        it = _read_temp_file(tid)
+        if it is None:
+            continue
+        out.append({"id": tid, "name": it.get("name") or "",
+                    "ts": int(it.get("ts", 0) or 0),
+                    "_s": int(it.get("seq", 0) or 0)})
+    out.sort(key=lambda it: (-it["ts"], -it["_s"]))
+    for it in out:
+        it.pop("_s", None)
+    return out
+
+
+def _count_temp_files():
+    """Cheap temp counter for /health (no parsing)."""
+    try:
+        return len([n for n in os.listdir(_temp_dir())
+                    if n.endswith(".json")])
+    except OSError:
+        return 0
+
+
+def _evict_temp_files():
+    """Keep the folder bounded: the OLDEST temp snapshots beyond
+    MAX_TEMP_FILES are deleted (newest-by-ts win). Best effort - a locked
+    file skips itself. Runs after every PUT."""
+    for it in _list_temp_files()[MAX_TEMP_FILES:]:
+        _delete_temp_file(it["id"])
 
 
 def _sorted_presets(presets):
@@ -560,13 +714,14 @@ async def workflows_health(request):
         "default": _default_root(),
         "writable": writable,
         "presets": n,
+        "temp": _count_temp_files(),  # v107: the temp-snapshot counter
     })
 
 
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v106"
+WORKFLOWS_SERVER_VERSION = "v107"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -883,3 +1038,99 @@ async def workflows_import(request):
             imported.append(preset)
     return web.json_response({"ok": True, "imported": len(imported),
                               "presets": imported})
+
+
+# ---------------------------------------------------------------------------
+# v107: temp-snapshot routes - the reopen payloads of closed TEMP tabs.
+# The browser recently-closed ring stores ONLY the metadata; these routes
+# carry the graphs. All mutations run under the module lock; every answer is
+# a JSON object with ok:true|false (never a bare error page).
+# ---------------------------------------------------------------------------
+
+@PromptServer.instance.routes.get("/settings_hub/workflows/temp")
+async def workflows_temp_list(request):
+    """The temp-snapshot index of the ACTIVE root: {ok, items: [{id, name,
+    ts}]} - NO graphs (the payloads are fetched one-by-one on a reopen).
+    Feeds the client boot GC (it deletes the stale orphans no recently-
+    closed entry references) and the owner's folder hygiene."""
+    return web.json_response({"ok": True, "items": _list_temp_files()})
+
+
+@PromptServer.instance.routes.post("/settings_hub/workflows/temp")
+async def workflows_temp_put(request):
+    """Store ONE reopen snapshot of a closed TEMP tab. Body JSON
+    {name?, graph}: the graph must be JSON-serializable and within
+    MAX_SNAPSHOT_BYTES (the same budget the preset snapshots use). The id is
+    server-generated strict hex; the oldest files beyond MAX_TEMP_FILES are
+    evicted after the write. The client deletes the file when the
+    recently-closed entry leaves the ring."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    graph = body.get("graph") if isinstance(body, dict) else None
+    if graph is None:
+        return web.json_response(
+            {"ok": False, "error": "graph is required"}, status=400)
+    try:
+        blob = json.dumps(graph, ensure_ascii=False)
+    except Exception:
+        return web.json_response(
+            {"ok": False, "error": "snapshot graph is not serializable"},
+            status=400)
+    size = len(blob.encode("utf-8"))
+    if size > MAX_SNAPSHOT_BYTES:
+        return web.json_response(
+            {"ok": False, "error": "snapshot too large: %d bytes (max %d)"
+             % (size, MAX_SNAPSHOT_BYTES)}, status=413)
+    name = _sanitize_name(body.get("name") if isinstance(body, dict) else None) \
+        or "Unsaved"
+    now = int(time.time())
+    global _temp_seq
+    _temp_seq += 1
+    async with _lock:
+        tid = uuid.uuid4().hex[:12]
+        while os.path.exists(_temp_file(tid)):
+            tid = uuid.uuid4().hex[:12]
+        if not _write_temp_file({"id": tid, "name": name, "ts": now,
+                                 "seq": _temp_seq, "graph": graph}):
+            return web.json_response(
+                {"ok": False, "error": "could not write the temp snapshot"},
+                status=500)
+        _evict_temp_files()
+    return web.json_response({"ok": True, "id": tid, "name": name, "ts": now})
+
+
+@PromptServer.instance.routes.get("/settings_hub/workflows/temp/{tid}")
+async def workflows_temp_get(request):
+    """ONE temp snapshot: {ok, id, name, ts, graph}. 404 on an unknown id -
+    the client answers "the snapshot is gone" and falls back (a saved-file
+    reopen by path when the entry carries one)."""
+    tid = request.match_info.get("tid", "")
+    if not _ID_RE.match(tid):
+        return web.json_response({"ok": False, "error": "bad id"}, status=400)
+    it = _read_temp_file(tid)
+    if it is None:
+        return web.json_response(
+            {"ok": False, "error": "no such snapshot"}, status=404)
+    return web.json_response({
+        "ok": True,
+        "id": tid,
+        "name": it.get("name") or "",
+        "ts": int(it.get("ts", 0) or 0),
+        "graph": it.get("graph"),
+    })
+
+
+@PromptServer.instance.routes.delete("/settings_hub/workflows/temp/{tid}")
+async def workflows_temp_delete(request):
+    """Delete ONE temp snapshot (the entry left the recently-closed ring, or
+    the boot GC dropped a stale orphan). Idempotent: an already-missing id
+    answers ok:true with existed:false (a client cleanup may race the server
+    MAX_TEMP_FILES eviction)."""
+    tid = request.match_info.get("tid", "")
+    if not _ID_RE.match(tid):
+        return web.json_response({"ok": False, "error": "bad id"}, status=400)
+    async with _lock:
+        existed = _delete_temp_file(tid)
+    return web.json_response({"ok": True, "gone": tid, "existed": existed})

@@ -672,10 +672,14 @@ phase("SI window states — minimize to chip, restore; NO close button (v75), se
     await settle();
     check("SI: no [✕] close button in the header (v75: removed)",
         !panel().querySelector(".hub-stack-hide"));
-    check("SI: header buttons are exactly ⚙ + 🗑 + [–] (v88: the own settings popup)",
-        [...panel().querySelectorAll(".hub-stack-head button")].map((b) => b.className).join(",") ===
-            "hub-btn hub-stack-sett,hub-btn hub-stack-clear,hub-btn hub-stack-min",
-        [...panel().querySelectorAll(".hub-stack-head button")].map((b) => b.className).join(","));
+    {
+        const cls = [...panel().querySelectorAll(".hub-stack-head button")].map((b) => b.className);
+        check("SI: header buttons are exactly the toggler + gear + trash + minimize (v101: the storage toggler joined the header)",
+            cls.length === 5 && cls[0].includes("hub-stack-scopeseg") && cls[1].includes("hub-stack-scopeseg") &&
+            cls[2] === "hub-btn hub-stack-sett" && cls[3] === "hub-btn hub-stack-clear" && cls[4] === "hub-btn hub-stack-min" &&
+            cls.filter((c) => c.includes("hub-stack-scopeseg-on")).length === 1,
+            cls.join(","));
+    }
     panel().querySelector(".hub-stack-min").click();
     await settle();
     check("SI: [–] hides the panel", panel().style.display === "none");
@@ -693,9 +697,9 @@ phase("SI window states — minimize to chip, restore; NO close button (v75), se
     await settle();
     const stkPop = hooks.stkPopEl();
     check("SI: ⚙ opens the stack's own settings popup", !!stkPop && stkPop.className.includes("hub-stk-setpop"));
-    check("SI: the popup carries the four rows",
+    check("SI: the popup carries the three rows (v101: the scope select is GONE - the header toggler replaced it)",
         !!stkPop.querySelector('[data-stk="on"]') && !!stkPop.querySelector('[data-stk="max"]') &&
-        !!stkPop.querySelector('[data-stk="scope"]') && !!stkPop.querySelector('[data-stk="root"]'));
+        !!stkPop.querySelector('[data-stk="root"]') && !stkPop.querySelector('[data-stk="scope"]'));
     check("SI: Panel row shows On", stkPop.querySelector('[data-stk="on"]').value === "1");
     const maxSelSi = stkPop.querySelector('[data-stk="max"]');
     maxSelSi.value = "200";
@@ -845,10 +849,15 @@ phase("SJ stack settings — own ⚙ popup since v88, the hub hosts nothing");
     const ssrc = fs.readFileSync(path.join(ROOT, "web", "stack.js"), "utf8");
     check("SJ: v88 - the panel ⚙ button exists in the header",
         ssrc.includes("hub-stack-sett") && ssrc.includes("openStkSettingsPop"));
-    check("SJ: v88 - the own popup carries the four rows (On/Off, max, scope, folder)",
+    check("SJ: v88 - the own popup carries the rows (On/Off, max, folder; v101 dropped the scope select)",
         ssrc.includes('data-stk="on"') && ssrc.includes('data-stk="max"') &&
-        ssrc.includes('data-stk="scope"') && ssrc.includes('data-stk="root"') &&
+        ssrc.includes('data-stk="root"') && !ssrc.includes('data-stk="scope"') &&
         ssrc.includes("setStackRootPath(") && ssrc.includes("getStackRootInfo("));
+    check("SJ: v101 - the header STORAGE TOGGLER replaces the scope setting",
+        ssrc.includes("hub-stack-scopetgl") && ssrc.includes('data-stkscope="global"') &&
+        ssrc.includes('data-stkscope="workflow"') &&
+        ssrc.includes('seg.addEventListener("click"') &&
+        !ssrc.includes("Stack scope (v77)"));
     check("SJ: v88 - the popup dies with the panel (teardown closes it)",
         ssrc.includes("closeStkPop();") && ssrc.includes("closeStkPop();  // v88"));
     check("SJ: v91 - the launcher replaces the native stack switch",
@@ -1956,9 +1965,9 @@ phase("TS v77 scope — per-workflow stores, switch, @workflow badge, scoped cle
         lastListGet().url.includes("wf=" + encodeURIComponent(wfId1)), lastListGet().url);
     check("TS: a fresh workflow starts EMPTY (no shared entries leak)",
         cards().length === 0, String(cards().length));
-    check("TS: @workflow badge visible in the header",
-        panel().querySelector(".hub-stack-scope").style.display !== "none" &&
-        panel().querySelector(".hub-stack-scope").textContent === "@workflow");
+    check("TS: the @wf TOGGLER segment is ACTIVE in per-workflow mode",
+        panel().querySelector('.hub-stack-scopeseg[data-stkscope="workflow"]')?.classList.contains("hub-stack-scopeseg-on") === true &&
+        panel().querySelector('.hub-stack-scopeseg[data-stkscope="global"]')?.classList.contains("hub-stack-scopeseg-on") === false);
     check("TS: the empty state explains the workflow scope",
         panel().querySelector(".hub-stack-empty")?.textContent.includes("THIS workflow") === true);
 
@@ -2004,13 +2013,16 @@ phase("TS v77 scope — per-workflow stores, switch, @workflow badge, scoped cle
     check("TS: 🗑 left the shared store alone", fakeApi.__items().length >= 2,
         String(fakeApi.__items().length));
 
-    // back to shared
-    stack.setStackScope("global");
+    // back to shared - VIA THE HEADER TOGGLER this time (the v101 control)
+    panel().querySelector('.hub-stack-scopeseg[data-stkscope="global"]').click();
     await settle();
+    check("TS: a 🌐 segment click switched the scope to shared (the v101 toggler path)",
+        stack.getStackScope() === "global" && !!panel(), stack.getStackScope());
     check("TS: back to shared - the pre-v77 stack renders again",
         cards().length === fakeApi.__items().length && cards().length >= 2, String(cards().length));
-    check("TS: the badge is hidden in shared mode",
-        panel().querySelector(".hub-stack-scope").style.display === "none");
+    check("TS: the 🌐 TOGGLER segment is ACTIVE in shared mode",
+        panel().querySelector('.hub-stack-scopeseg[data-stkscope="global"]')?.classList.contains("hub-stack-scopeseg-on") === true &&
+        panel().querySelector('.hub-stack-scopeseg[data-stkscope="workflow"]')?.classList.contains("hub-stack-scopeseg-on") === false);
     check("TS: shared list GETs carry NO wf param",
         lastListGet() && !lastListGet().url.includes("wf="), lastListGet().url);
 }

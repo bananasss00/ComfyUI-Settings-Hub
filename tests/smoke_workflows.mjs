@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER smoke test (v106)
+// SettingsHub - WORKFLOWS MANAGER smoke test (v107)
 // ----------------------------------------------------------------------------
 // Node ESM + jsdom. Loads the REAL web/workflows.js module exactly like the
 // entry does (a sandbox copies web/ and stubs ../../scripts/app.js with an
@@ -67,6 +67,16 @@
 //       embeds its unsaved state, empty/unserializable temps are not
 //       recorded, ".null" garbage paths are pruned on boot and refused at
 //       record time, the reopen finds the row by ts with the path fallback.
+//   WN  v107: SERVER-SIDE TEMP SNAPSHOTS - the close of a temp tab POSTs its
+//       graph to /workflows/temp (temp/<id>.json in the storage root) and
+//       the localStorage ring keeps ONLY the metadata + tempId (a tiny row -
+//       the owner's localStorage-quota concern); the reopen of a tempId row
+//       fetches the server snapshot through the ladder (NO /userdata fetch),
+//       an entry leaving the 15-row ring DELETEs its server file, the boot
+//       GC removes a stale (> 1 day) orphan while a referenced file and a
+//       fresh orphan (another browser may point at it) stay, and the v106
+//       localStorage embed stays as the FALLBACK when the temp routes are
+//       gone (an old py - the WM phase runs its temp checks in stale mode).
 //
 // Run from the extension root:  node tests/smoke_workflows.mjs  (jsdom)
 // ============================================================================
@@ -149,6 +159,8 @@ function makeFakeApi() {
     let healthVersion = null;        // v105: override -> the mismatch-note test
     let presetsFail = false;         // v105: GET /presets 500 -> the retry test
     let rootCustom = null;
+    let tempMode = "ok";             // v107: "ok" | "stale" (an old py: the temp routes 404)
+    const tempStore = new Map();     // v107: id -> {id, name, ts, graph}
     let savedFiles = [
         { path: "workflows/flux_main.json", name: "flux_main.json" },
         { path: "workflows/flux_detail.json", name: "flux_detail.json" },
@@ -270,6 +282,39 @@ function makeFakeApi() {
                 });
                 return jsonResp({ ok: true, imported: imported.length, presets: imported });
             }
+            // v107: the server-side temp snapshots (temp/<id>.json in the root)
+            if (p === "/settings_hub/workflows/temp" && method === "GET") {
+                if (tempMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                const items = [...tempStore.values()]
+                    .sort((a, b) => b.ts - a.ts).map(({ id, name, ts }) => ({ id, name, ts }));
+                return jsonResp({ ok: true, items });
+            }
+            if (p === "/settings_hub/workflows/temp" && method === "POST") {
+                if (tempMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                let body = {};
+                try { body = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                if (!body.graph || typeof body.graph !== "object") {
+                    return jsonResp({ ok: false, error: "graph is required" }, 400);
+                }
+                const id = (++uidSeq).toString(16).padStart(12, "0"); // strict hex, like the server
+                const rec = { id, name: body.name || "Unsaved", ts: Date.now() / 1000 | 0, graph: body.graph };
+                tempStore.set(id, rec);
+                return jsonResp({ ok: true, id, name: rec.name, ts: rec.ts });
+            }
+            m = p.match(/^\/settings_hub\/workflows\/temp\/([^/]+)$/);
+            if (m) {
+                const tid = decodeURIComponent(m[1]);
+                if (tempMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                if (method === "GET") {
+                    const rec = tempStore.get(tid);
+                    if (!rec) return jsonResp({ ok: false, error: "no such snapshot" }, 404);
+                    return jsonResp({ ok: true, id: tid, name: rec.name, ts: rec.ts, graph: rec.graph });
+                }
+                if (method === "DELETE") {
+                    const had = tempStore.delete(tid);
+                    return jsonResp({ ok: true, gone: tid, existed: had });
+                }
+            }
             // the NATIVE ComfyUI /userdata endpoint (the adapter rung)
             if (p === "/userdata" && method === "GET") {
                 return jsonResp(userdataFiles());
@@ -290,6 +335,8 @@ function makeFakeApi() {
         __setHealthVersion: (v) => { healthVersion = v; },
         __setPresetsFail: (v) => { presetsFail = !!v; },
         __setFiles: (v) => { savedFiles = v; },
+        __tempStore: () => tempStore,
+        __setTempMode: (m) => { tempMode = m; },
     };
     return api;
 }
@@ -882,19 +929,23 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v106", /"workflows":\s*"v106"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v107", /"workflows":\s*"v107"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v106", ENTRY_SRC.includes("web build: v106 - SCROLL-STABLE CONFIRMS + SNAPSHOT REOPENS"));
-check("styles.css?v=106", ENTRY_SRC.includes("styles.css?v=106"));
-check("the module self-reports v106",
+check("the entry banner names v107", ENTRY_SRC.includes("web build: v107 - SERVER-SIDE TEMP SNAPSHOTS + STACK STORAGE TOGGLER"));
+check("styles.css?v=107", ENTRY_SRC.includes("styles.css?v=107"));
+check("the module self-reports v107",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v106"'));
-check("the web stamp literal is v106",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v107"'));
+check("the web stamp literal is v107",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v106"'));
-check("py stamp bumps together (v106)",
+        .includes('const WF_WEB_VERSION = "v107"'));
+check("py stamp bumps together (v107)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v106"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v107"'));
+check("v107 routes registered (temp list/put/get/delete)",
+    [".get(\"/settings_hub/workflows/temp\")", ".post(\"/settings_hub/workflows/temp\")",
+     ".get(\"/settings_hub/workflows/temp/{tid}\")", ".delete(\"/settings_hub/workflows/temp/{tid}\")"]
+        .every((s) => fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8").includes(s)));
 check("the workflows module uses the --sh-fs scale (v90 rule)",
     (fs.readFileSync(path.join(WEB, "styles.css"), "utf8").match(/hub-wf-panel[\s\S]{0,400}?--sh-fs/) !== null));
 check("the modal guard hides the workflows panel",
@@ -1442,7 +1493,7 @@ await settle();
     //      v104 web after a page refresh + a v103 py process kept the old
     //      single-file store - the panel now names the problem)
     // ------------------------------------------------------------------
-    fakeApi.__setHealthVersion("v104"); // one behind the pack (v105)
+    fakeApi.__setHealthVersion("v106"); // one behind the pack (v107)
     await hooks.probeServer();          // presetsLoaded=true -> the poll probes periodically
     hooks.renderAll();
     await settle();
@@ -1450,14 +1501,14 @@ await settle();
     check("WL: an older server pack names 'RESTART ComfyUI' in the red note",
         !!note2 && note2.style.display !== "none" &&
         note2.textContent.includes("RESTART ComfyUI") &&
-        note2.textContent.includes("Server storage pack is v104"),
+        note2.textContent.includes("Server storage pack is v106"),
         note2?.textContent || "(no note)");
     hooks.setTab("presets");
     await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
-        stTxt2.includes("srv v104") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v107"); // ahead of the pack - a stale web file
+        stTxt2.includes("srv v106") && stTxt2.includes("⚠"), stTxt2);
+    fakeApi.__setHealthVersion("v108"); // ahead of the pack - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -1479,33 +1530,36 @@ phase("WM v106: scroll-stable confirms + snapshot reopens of temp tabs");
     const bodyEl = () => pnl().querySelector(".hub-wf-body");
 
     // ------------------------------------------------------------------
-    // 12a) recordRecent: temp tabs record WITH the snapshot, no fake path
+    // 12a) recordRecent: temp tabs record reopenable - this block runs with
+    //      the STALE fake temp routes (an old py): the v106 embed fallback
+    //      is under test; the v107 server path gets its own WN phase
     // ------------------------------------------------------------------
+    fakeApi.__setTempMode("stale"); // old py: the temp routes 404
     hooks.resetRecent();
-    hooks.recordRecent({ name: "Unsaved Workflow (3)", isTemporary: true, isPersisted: false, isEmpty: false },
+    await hooks.recordRecent({ name: "Unsaved Workflow (3)", isTemporary: true, isPersisted: false, isEmpty: false },
         { nodes: [{ id: 1 }], links: [] });
     let wmRec = hooks.recent()[0];
-    check("WM: a closed temp tab records WITH its snapshot embedded",
+    check("WM: a closed temp tab records WITH its snapshot embedded (v106 embed path)",
         hooks.recent().length === 1 && wmRec && wmRec.snap && wmRec.path === null &&
         wmRec.name === "Unsaved Workflow (3)", JSON.stringify(wmRec || null).slice(0, 120));
     const before = hooks.recent().length;
-    hooks.recordRecent({ name: "Empty scratch", isTemporary: true, isPersisted: false, isEmpty: true }, null);
+    await hooks.recordRecent({ name: "Empty scratch", isTemporary: true, isPersisted: false, isEmpty: true }, null);
     check("WM: an empty temp tab without a graph is NOT recorded (no dead rows)",
         hooks.recent().length === before);
-    hooks.recordRecent({ name: "No graph", isTemporary: true, isPersisted: false }, null);
+    await hooks.recordRecent({ name: "No graph", isTemporary: true, isPersisted: false }, null);
     check("WM: an unserializable temp tab is NOT recorded",
         hooks.recent().length === before);
-    hooks.recordRecent({ path: "workflows/Unsaved Workflow (3) (2).null", name: "Unsaved Workflow (3) (2).null" });
+    await hooks.recordRecent({ path: "workflows/Unsaved Workflow (3) (2).null", name: "Unsaved Workflow (3) (2).null" });
     check("WM: the '.null' garbage path is refused at record time",
         hooks.recent().length === before &&
         !hooks.recent().some((r) => (r.path || "").includes(".null")),
         JSON.stringify(hooks.recent()));
-    hooks.recordRecent({ path: "workflows/m.json", name: "m.json", isModified: true }, { nodes: [{ id: 9 }] });
+    await hooks.recordRecent({ path: "workflows/m.json", name: "m.json", isModified: true }, { nodes: [{ id: 9 }] });
     wmRec = hooks.recent()[0];
     check("WM: a MODIFIED saved tab records the path AND its unsaved state",
         wmRec.path === "workflows/m.json" && wmRec.snap && wmRec.snap.nodes?.[0]?.id === 9,
         JSON.stringify(wmRec || null).slice(0, 140));
-    hooks.recordRecent({ name: "Unsaved Workflow (3)", isTemporary: true, isPersisted: false, isEmpty: false },
+    await hooks.recordRecent({ name: "Unsaved Workflow (3)", isTemporary: true, isPersisted: false, isEmpty: false },
         { nodes: [{ id: 2 }], links: [] });
     check("WM: re-closing the same temp tab DEDUPES by name (ts bumps, snap refreshes)",
         hooks.recent().length === 2 &&
@@ -1526,7 +1580,11 @@ phase("WM v106: scroll-stable confirms + snapshot reopens of temp tabs");
     // ------------------------------------------------------------------
     // 12b) the reopen of a snapshot row goes through the SNAPSHOT ladder -
     //      NOT a /userdata fetch (the owner's 404 on "Unsaved Workflow (3)")
+    //      v107: the close uploads the graph to the SERVER (tempId), so the
+    //      ladder check runs in the WN phase; this phase keeps the STALE
+    //      (old-py) embed path alive via the fake temp 404s.
     // ------------------------------------------------------------------
+    fakeApi.__setTempMode("stale"); // simulate an old py: the temp routes are gone
     const tempTab = makeTab({ name: "Unsaved Workflow (3)", isTemporary: true, isPersisted: false, nodes: [1, 2] });
     wfStore.openWorkflows = [tempTab];
     wfStore.activeWorkflow = tempTab;
@@ -1545,7 +1603,7 @@ phase("WM v106: scroll-stable confirms + snapshot reopens of temp tabs");
     check("WM: the armed ✕ closed the temp tab",
         !wfStore.openWorkflows.some((t) => t.name === "Unsaved Workflow (3)"));
     const wmRecent = hooks.recent();
-    check("WM: the close recorded the temp tab with a snapshot (path null)",
+    check("WM: the close recorded the temp tab with an embedded snapshot (old py fallback)",
         wmRecent.length === 1 && wmRecent[0].name === "Unsaved Workflow (3)" &&
         !!wmRecent[0].snap && wmRecent[0].path === null, JSON.stringify(wmRecent[0] || null).slice(0, 140));
 
@@ -1566,6 +1624,7 @@ phase("WM v106: scroll-stable confirms + snapshot reopens of temp tabs");
         udAfter === udBefore &&
         !fakeApi.__calls().slice(callsBeforeClose).some((c) => (c.url || "").includes("Unsaved")),
         JSON.stringify(fakeApi.__calls().slice(callsBeforeClose).map((c) => c.url)));
+    fakeApi.__setTempMode("ok"); // the rest of the suite sees the v107 server
 
     // ------------------------------------------------------------------
     // 12c) the scroll-stable re-renders: arming 🗑 keeps the scroll anchor
@@ -1604,6 +1663,127 @@ phase("WM v106: scroll-stable confirms + snapshot reopens of temp tabs");
     }
     hooks.setTab("open");
     await settle();
+}
+
+// ===========================================================================
+phase("WN v107: server-side temp snapshots (temp/<id>.json) + eviction + boot GC");
+{
+    const bodyEl = () => pnl().querySelector(".hub-wf-body");
+    hooks.resetRecent();
+    fakeApi.__tempStore().clear();
+    await hooks.probeServer(); // the WN server checks need serverState
+
+    // ------------------------------------------------------------------
+    // 14a) the close of a temp tab UPLOADS the graph to the server; the
+    //      localStorage ring keeps only the metadata + tempId
+    // ------------------------------------------------------------------
+    const postCount0 = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/temp" && c.method === "POST").length;
+    await hooks.recordRecent({ name: "Unsaved Workflow (7)", isTemporary: true, isPersisted: false, isEmpty: false },
+        { nodes: [{ id: 7 }], links: [] });
+    const wnPost = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/temp" && c.method === "POST").slice(-1)[0];
+    const wnRec = hooks.recent()[0];
+    check("WN: the close POSTed the graph to /workflows/temp",
+        fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/temp" && c.method === "POST").length === postCount0 + 1 &&
+        !!wnPost?.body && JSON.parse(wnPost.body).graph?.nodes?.[0]?.id === 7 &&
+        JSON.parse(wnPost.body).name === "Unsaved Workflow (7)",
+        wnPost?.body?.slice(0, 140));
+    check("WN: the ring entry carries tempId, NOT the graph",
+        wnRec && typeof wnRec.tempId === "string" && wnRec.tempId &&
+        wnRec.snap === undefined && wnRec.path === null &&
+        fakeApi.__tempStore().has(wnRec.tempId) &&
+        fakeApi.__tempStore().get(wnRec.tempId).graph?.nodes?.[0]?.id === 7,
+        JSON.stringify(wnRec || null).slice(0, 140));
+    const lsRing = JSON.parse(dom.window.localStorage.getItem("settingshub.workflows.recent") || "[]");
+    check("WN: the localStorage ring row is TINY (metadata only - the owner's quota concern)",
+        lsRing.length === 1 && JSON.stringify(lsRing[0]).length < 300 &&
+        !JSON.stringify(lsRing[0]).includes("\"nodes\""),
+        JSON.stringify(lsRing[0] || null));
+
+    // ------------------------------------------------------------------
+    // 14b) the reopen of a tempId row fetches the SERVER snapshot through
+    //      the ladder - and never a /userdata path
+    // ------------------------------------------------------------------
+    hooks.setTab("files");
+    await settle();
+    const wnRow = bodyEl().querySelector('.hub-wf-body [data-act="reopen"][data-rts]');
+    check("WN: the tempId row renders with the (snapshot) badge",
+        !!wnRow && wnRow.textContent.includes("(snapshot)") && !wnRow.getAttribute("data-path"),
+        wnRow?.textContent || "(no row)");
+    const udBeforeWN = fakeApi.__calls().filter((c) => c.url.includes("/userdata")).length;
+    const getBeforeWN = fakeApi.__calls().filter((c) => c.url.startsWith("/settings_hub/workflows/temp/") && c.method === "GET").length;
+    await wnRow.click();
+    await settle(20);
+    check("WN: the reopen fetched the server snapshot and restored the graph",
+        fakeApi.__calls().filter((c) => c.url.startsWith("/settings_hub/workflows/temp/") && c.method === "GET").length === getBeforeWN + 1 &&
+        wfStore.openWorkflows.some((t) => t.__snapshotGraph?.nodes?.[0]?.id === 7),
+        JSON.stringify(wfStore.openWorkflows.map((t) => t.name)));
+    check("WN: the reopen made NO /userdata fetch (the v106 bug is dead for good)",
+        fakeApi.__calls().filter((c) => c.url.includes("/userdata")).length === udBeforeWN);
+
+    // ------------------------------------------------------------------
+    // 14c) the evicted ring rows delete their server files (the owner:
+    //      "пока они фигурируют в recently closed")
+    // ------------------------------------------------------------------
+    const createdIds = [wnRec.tempId];
+    for (let i = 1; i <= 20; i++) {
+        await hooks.recordRecent({ name: "WN temp " + String(i).padStart(2, "0"), isTemporary: true, isPersisted: false, isEmpty: false },
+            { nodes: [{ id: i }], links: [] });
+        createdIds.push(hooks.recent()[0].tempId);
+    }
+    const ringIds = new Set(hooks.recent().map((r) => r.tempId).filter(Boolean));
+    const evicted = createdIds.filter((id) => !ringIds.has(id));
+    const delUrls = fakeApi.__calls().filter((c) => c.url.startsWith("/settings_hub/workflows/temp/") && c.method === "DELETE")
+        .map((c) => decodeURIComponent(c.url.split("/temp/")[1] || ""));
+    check("WN: the ring is capped at RECENT_MAX (15) temp rows",
+        hooks.recent().length === 15, String(hooks.recent().length));
+    check("WN: every evicted temp row issued DELETE for its server file",
+        evicted.length === 6 && evicted.every((id) => delUrls.includes(id)),
+        "evicted=" + evicted.length + " deletes=" + delUrls.length + " ring=" + ringIds.size);
+    check("WN: the evicted files are GONE from the server store, the ring files stay",
+        evicted.every((id) => !fakeApi.__tempStore().has(id)) &&
+        [...ringIds].every((id) => fakeApi.__tempStore().has(id)),
+        "store=" + fakeApi.__tempStore().size);
+
+    // ------------------------------------------------------------------
+    // 14d) the boot GC: a day-old orphan dies, a referenced file and a
+    //      fresh orphan stay (another browser may point at it)
+    // ------------------------------------------------------------------
+    const gRef = [...ringIds][0];
+    const gFresh = "aabbccdd0001";
+    const gOld = "aabbccdd0002";
+    const dayAgo = Math.floor((Date.now() - hooks.TEMP_MAX_AGE_MS - 60000) / 1000);
+    const nowTs = Math.floor(Date.now() / 1000);
+    fakeApi.__tempStore().set(gFresh, { id: gFresh, name: "fresh orphan", ts: nowTs, graph: { nodes: [] } });
+    fakeApi.__tempStore().set(gOld, { id: gOld, name: "stale orphan", ts: dayAgo, graph: { nodes: [] } });
+    hooks.setTempGcDone(false);
+    await hooks.gcTempSnapshots();
+    check("WN: the boot GC deleted the STALE orphan (> 1 day, not referenced)",
+        !fakeApi.__tempStore().has(gOld));
+    check("WN: the boot GC kept the ring-referenced file",
+        fakeApi.__tempStore().has(gRef));
+    check("WN: the boot GC kept the FRESH orphan (< 1 day - another browser may point at it)",
+        fakeApi.__tempStore().has(gFresh), "store=" + fakeApi.__tempStore().size);
+    const gcLoad = await hooks.loadServerState();
+    check("WN: loadServerState ran the one-shot GC pass (tempGcDone latched)",
+        gcLoad && hooks.tempGcDone() === true);
+
+    // ------------------------------------------------------------------
+    // 14e) sanitizeRecent accepts tempId rows and drops the dead ones
+    // ------------------------------------------------------------------
+    dom.window.localStorage.setItem("settingshub.workflows.recent", JSON.stringify([
+        { path: null, name: "server temp", ts: 5, tempId: "aabbccdd0003" },
+        { path: "workflows/real.json", name: "real.json", ts: 6 },
+        { path: null, name: "dead temp", ts: 7 },
+        { path: null, name: "embed temp", ts: 8, snap: { nodes: [] } },
+    ]));
+    hooks.reloadRecent();
+    check("WN: sanitizeRecent keeps tempId + path + embed rows, drops the payload-less temp",
+        hooks.recent().length === 3 &&
+        hooks.recent().some((r) => r.tempId === "aabbccdd0003") &&
+        !hooks.recent().some((r) => r.name === "dead temp"),
+        JSON.stringify(hooks.recent()));
+    hooks.resetRecent();
+    fakeApi.__tempStore().clear();
 }
 
 // ===========================================================================

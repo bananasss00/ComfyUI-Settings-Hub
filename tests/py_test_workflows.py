@@ -197,6 +197,11 @@ PGET = H[("GET", "/settings_hub/workflows/presets")]
 PPOST = H[("POST", "/settings_hub/workflows/presets")]
 PPUT = H[("PUT", "/settings_hub/workflows/preset/{pid}")]
 PDEL = H[("DELETE", "/settings_hub/workflows/preset/{pid}")]
+# v107: the temp-snapshot routes (the reopen payloads of closed TEMP tabs)
+TLIST = H[("GET", "/settings_hub/workflows/temp")]
+TPUT = H[("POST", "/settings_hub/workflows/temp")]
+TGET = H[("GET", "/settings_hub/workflows/temp/{tid}")]
+TDEL = H[("DELETE", "/settings_hub/workflows/temp/{tid}")]
 
 
 def presets_dir(custom=None):
@@ -216,14 +221,21 @@ def presets_file(custom=None):
     return os.path.join(base, "presets.json")
 
 
+def temp_dir(custom=None):
+    """The v107 reserved temp-snapshot folder of the given (or default) root."""
+    base = custom or os.path.join(_USER_DIR, "settings_hub", "workflows")
+    return os.path.join(base, "temp")
+
+
 def reset_state():
-    """Back to the default root, an EMPTY preset folder, no legacy file."""
+    """Back to the default root, an EMPTY preset + temp folder, no legacy file."""
     wf_store._root_custom = None
     import shutil
-    try:
-        shutil.rmtree(presets_dir())
-    except OSError:
-        pass
+    for d in (presets_dir(), temp_dir()):
+        try:
+            shutil.rmtree(d)
+        except OSError:
+            pass
     for f in (presets_file(), presets_file() + ".bak"):
         try:
             os.unlink(f)
@@ -245,11 +257,12 @@ check("health: ok", r.status == 200 and j.get("ok") is True)
 check("health: version matches the source constant",
       j.get("version") == wf_store.WORKFLOWS_SERVER_VERSION,
       "%s vs %s" % (j.get("version"), wf_store.WORKFLOWS_SERVER_VERSION))
-check("health: version is v106", j.get("version") == "v106", str(j.get("version")))
+check("health: version is v107", j.get("version") == "v107", str(j.get("version")))
 check("health: default dir", j.get("dir") == os.path.join(_USER_DIR, "settings_hub", "workflows"), j.get("dir"))
 check("health: no custom root yet", j.get("custom") is None)
 check("health: writable", j.get("writable") is True)
 check("health: presets 0", j.get("presets") == 0)
+check("health: temp counter 0 (v107)", j.get("temp") == 0, str(j.get("temp")))
 
 # ===========================================================================
 print("== root switching (v84 mechanics) ==")
@@ -716,6 +729,115 @@ r = loop(PGET(FakeRequest(method="GET")))
 n_before = len(r.json()["presets"])
 wf_store._read_presets()
 check("persistence: re-read is stable", len(wf_store._read_presets()) == n_before)
+
+# ===========================================================================
+print("== temp snapshots (v107: the reopen payloads of closed TEMP tabs)")
+reset_state()
+
+# empty list
+r = loop(TLIST(FakeRequest(method="GET")))
+check("temp list: empty root -> ok, no items", r.status == 200 and r.json().get("ok") is True
+      and r.json().get("items") == [])
+
+# PUT stores ONE snapshot as temp/<id>.json; the id is strict hex
+r = loop(TPUT(FakeRequest(json_body={"name": "Unsaved Workflow (3)",
+                                     "graph": {"nodes": [{"id": 1}], "links": []}})))
+j = r.json()
+tid1 = j.get("id", "")
+check("temp PUT: ok + strict-hex id", r.status == 200 and j.get("ok") is True
+      and wf_store._ID_RE.match(tid1) is not None, json.dumps(j)[:120])
+check("temp PUT: the file landed in the RESERVED temp/ folder",
+      os.path.isfile(os.path.join(temp_dir(), tid1 + ".json")))
+check("temp PUT: the file is NOT inside presets/",
+      not os.path.exists(os.path.join(presets_dir(), tid1 + ".json")))
+
+# GET returns the graph back
+r = loop(TGET(FakeRequest(method="GET", match_info={"tid": tid1})))
+j = r.json()
+check("temp GET: the graph round-trips", r.status == 200 and j.get("ok") is True
+      and j.get("graph", {}).get("nodes", [{}])[0].get("id") == 1
+      and j.get("name") == "Unsaved Workflow (3)")
+
+# GET of an unknown id -> 404 (the client says 'the snapshot is gone')
+r = loop(TGET(FakeRequest(method="GET", match_info={"tid": "deadbeef0000"})))
+check("temp GET: unknown id -> 404", r.status == 404, str(r.status))
+# bad id shapes never reach the filesystem
+for bad in ("../escape", "x", "ZZZZ", "deadbeef0000/tmp"):
+    r = loop(TGET(FakeRequest(method="GET", match_info={"tid": bad})))
+    check("temp GET: bad id refused (%s)" % bad[:12], r.status == 400, str(r.status))
+
+# PUT without a graph -> 400; unserializable graph -> 400; oversized -> 413
+r = loop(TPUT(FakeRequest(json_body={"name": "NoGraph"})))
+check("temp PUT: no graph -> 400", r.status == 400, str(r.status))
+r = loop(TPUT(FakeRequest(raw_body=b"{bad")))
+check("temp PUT: bad json -> 400", r.status == 400, str(r.status))
+big = {"nodes": ["x" * 1000] * (wf_store.MAX_SNAPSHOT_BYTES // 1000 + 1)}
+r = loop(TPUT(FakeRequest(json_body={"name": "Huge", "graph": big})))
+check("temp PUT: over MAX_SNAPSHOT_BYTES -> 413", r.status == 413, str(r.status))
+
+# name sanitizing + the "Unsaved" default
+r = loop(TPUT(FakeRequest(json_body={"name": "  bad\x01name  " + "y" * 200,
+                                     "graph": {"nodes": []}})))
+nm = r.json().get("name", "")
+check("temp PUT: name sanitized + capped", "\x01" not in nm and len(nm) == wf_store.MAX_NAME_CHARS, repr(nm))
+r = loop(TPUT(FakeRequest(json_body={"graph": {"nodes": []}})))
+check("temp PUT: a missing name becomes Unsaved", r.json().get("name") == "Unsaved")
+
+# the LIST carries metadata only (no graphs leak into the index) - by now
+# the root holds: Unsaved Workflow (3) + the sanitized name + the Unsaved one
+# (the 413-refused Huge and the two 400-refused PUTs stored nothing)
+r = loop(TLIST(FakeRequest(method="GET")))
+items = r.json().get("items", [])
+check("temp list: metadata only (no graphs)", len(items) == 3
+      and all(set(it.keys()) == {"id", "name", "ts"} for it in items),
+      json.dumps(items)[:160])
+check("temp list: sorted newest-first by ts", len(items) >= 2
+      and all(items[i]["ts"] >= items[i + 1]["ts"] for i in range(len(items) - 1)),
+      json.dumps([it["ts"] for it in items]))
+
+# DELETE removes the file; a second delete is IDEMPOTENT (existed:false)
+r = loop(TDEL(FakeRequest(method="DELETE", match_info={"tid": tid1})))
+j = r.json()
+check("temp DELETE: ok + the file is gone", j.get("ok") is True and j.get("existed") is True
+      and not os.path.exists(os.path.join(temp_dir(), tid1 + ".json")))
+r = loop(TDEL(FakeRequest(method="DELETE", match_info={"tid": tid1})))
+j = r.json()
+check("temp DELETE: idempotent on a missing id (the client GC may race)",
+      j.get("ok") is True and j.get("existed") is False, json.dumps(j))
+
+# MAX_TEMP_FILES: the OLDEST beyond the cap are evicted on every PUT (the
+# server stamps its own ts - a client-supplied one is ignored; same-second
+# writes tie-break by the file mtime, so the write order decides)
+for i in range(wf_store.MAX_TEMP_FILES + 5):
+    r = loop(TPUT(FakeRequest(json_body={"name": "T%02d" % i, "ts": i,
+                                         "graph": {"n": i}})))
+n = len(wf_store._list_temp_files())
+check("temp cap: the folder never exceeds MAX_TEMP_FILES",
+      n == wf_store.MAX_TEMP_FILES, str(n))
+kept = [it["name"] for it in wf_store._list_temp_files()]
+check("temp cap: the NEWEST survive the eviction",
+      all("T%02d" % i in kept for i in range(5, wf_store.MAX_TEMP_FILES + 5)),
+      json.dumps(kept[:8]))
+check("temp cap: the OLDEST were evicted",
+      all("T%02d" % i not in kept for i in range(5)))
+
+# the temp folder follows the ACTIVE root (the v84 mechanics apply to it too)
+custom = tempfile.mkdtemp(prefix="shub-wf-temp-custom-")
+loop(ROOT_POST(FakeRequest(json_body={"path": custom})))
+r = loop(TPUT(FakeRequest(json_body={"name": "InCustom", "graph": {"c": 1}})))
+cid = r.json().get("id")
+check("temp: a PUT under the CUSTOM root lands in the custom temp/ folder",
+      os.path.isfile(os.path.join(temp_dir(custom), cid + ".json")))
+check("temp: the DEFAULT root's temp folder did not get the file",
+      not os.path.exists(os.path.join(temp_dir(), cid + ".json")))
+r = loop(ROOT_POST(FakeRequest(json_body={"path": ""})))
+check("temp: back to the default root", r.json().get("custom") is None)
+
+# the health counter reflects the temp folder
+r = loop(HEALTH(FakeRequest(method="GET")))
+check("health: the temp counter counts the default-root files (v107)",
+      r.json().get("temp") == wf_store.MAX_TEMP_FILES, str(r.json().get("temp")))
+reset_state()
 
 # ===========================================================================
 

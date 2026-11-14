@@ -2886,17 +2886,45 @@ button.hub-pin-back {
 .hub-stack-ico { font-size: calc(var(--sh-fs, 1) * 12px); }
 .hub-stack-title { font-weight: 600; color: #fff; letter-spacing: 0.2px; }
 
-/* v77: per-workflow scope badge - sits between the title and the count. */
-.hub-stack-scope {
+/* v101: the header STORAGE TOGGLER (was the v77 "@workflow" badge) - two
+   segments [🌐 | @wf] between the title and the count; the active segment
+   is highlighted. Both stack stores exist all the time, the toggler only
+   picks which one the panel shows. */
+.hub-stack-scopetgl {
+    display: inline-flex;
+    align-items: stretch;
+    margin-left: 6px;
+    border: 1px solid #4a4a6a;
+    border-radius: 8px;
+    overflow: hidden;
+    flex: 0 0 auto;
+}
+
+.hub-stack-scopeseg {
+    appearance: none;
+    border: 0;
+    background: #2a2a3e;
+    color: #9a9ab5;
+    font-size: calc(var(--sh-fs, 1) * 9px);
+    line-height: calc(var(--sh-fs, 1) * 15px);
+    padding: 0 6px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.hub-stack-scopeseg + .hub-stack-scopeseg {
+    border-left: 1px solid #4a4a6a;
+}
+
+.hub-stack-scopeseg:hover {
+    color: #fff;
+    background: #35354e;
+}
+
+.hub-stack-scopeseg-on,
+.hub-stack-scopeseg-on:hover {
     background: #6a4d2e;
     color: #ffd9a0;
-    border: 1px solid #8a6a3e;
-    border-radius: 8px;
-    padding: 0 6px;
-    font-size: calc(var(--sh-fs, 1) * 9px);
-    line-height: calc(var(--sh-fs, 1) * 14px);
-    margin-left: 6px;
-    white-space: nowrap;
 }
 
 .hub-stack-count {
