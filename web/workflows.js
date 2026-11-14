@@ -1,6 +1,24 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER (v109)
+// SettingsHub - WORKFLOWS MANAGER (v110)
 // ----------------------------------------------------------------------------
+// v110 (owner bug report: "где фильтры из плана? вижу только сортировки и
+// туглер для переключения древовидной структуры папок" + "когда включена
+// древовидная структура в files надо чтобы не было пустых папок при поиске"):
+//   1. THE FILTER CHIPS BECAME VISIBLE: the ★-only / ⚗ / Today-7d-30d buttons
+//      borrowed the .hub-wf-chip class, which in styles.css belongs to the
+//      MINIMIZED-panel chip (position:fixed; left:16px; top:16px;
+//      display:none; z-index:99900) - the whole filter row rendered but sat
+//      hidden at the screen corner, so the owner saw "only the sortings and
+//      the tree toggler". The chips now wear their OWN .hub-wf-fchip class
+//      (dashed border marks "filter" buttons) - ⚗ opens the advanced row
+//      (folder select, date from/until, size min-max KB, ✕ clear), ★-only
+//      narrows to the favorites, the quick periods click on/off;
+//   2. THE TREE PRUNES THE DEAD BRANCHES: with an active search OR any
+//      filter (quick period, date range, size range, ★-only) a folder whose
+//      subtree holds NO matching file disappears from the folder tree - no
+//      empty skeleton folders during the search - and the per-folder
+//      counters read the FILTERED list (a count the rows cannot back up is
+//      impossible); without filters the tree shows every real folder.
 // v109 (owner bug report: "менеджер процессов не видит процессов в пресетах
 // (красный восклицательный знак значок) и на вкладке files пусто"):
 //   REGRESSION ROOT CAUSE: ComfyUI nests userdata users INSIDE the user
@@ -209,9 +227,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v109";
+const WF_WEB_VERSION = "v110";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v109";
+globalThis.__SettingsHubLoaded["workflows"] = "v110";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -2244,8 +2262,12 @@ function filesTabHtml() {
         return `<button type="button" class="hub-wf-act hub-wf-sortbtn${on ? " hub-wf-sortbtn-on" : ""}" data-act="filesort" data-key="${k}" ` +
             `title="${title}${on ? " - click to flip ascending/descending" : ""}">${label}${arrow}</button>`;
     };
+    // v110: the filter chips wear their OWN hub-wf-fchip class - they used to
+    // borrow hub-wf-chip, which in CSS is the MINIMIZED-panel chip
+    // (position:fixed; display:none), so the whole ★/⚗/periods row rendered
+    // invisible and the owner saw "only the sortings and the tree toggler"
     const quickChip = (q, label) =>
-        `<button type="button" class="hub-wf-act hub-wf-chip${filesQuick === q ? " hub-wf-chip-on" : ""}" data-act="fquick" data-q="${q}" ` +
+        `<button type="button" class="hub-wf-act hub-wf-fchip${filesQuick === q ? " hub-wf-fchip-on" : ""}" data-act="fquick" data-q="${q}" ` +
         `title="Show only the files modified ${label.toLowerCase()} (click again to clear)">${label}</button>`;
     // v108: the advanced filter row (folder / dates / size range) - collapsed
     // by default, the ⚗ chip counts the ACTIVE filters
@@ -2274,6 +2296,31 @@ function filesTabHtml() {
     let rows, more = "";
     if (filesView === "tree") {
         const map = buildFolderMap();
+        // v110: an active search OR any filter prunes the DEAD branches - a
+        // folder whose subtree holds no matching file disappears from the
+        // tree (the owner's ask: no empty folders during the search), and
+        // the counters read the FILTERED list so a folder row never shows a
+        // count the rows below cannot back up. Without filters the tree is
+        // untouched (every real folder stays addressable).
+        const filtering = !!(filesSearch || filesQuick || filesDateFrom || filesDateTo ||
+            (fileSizeMin !== "" && Number.isFinite(parseFloat(fileSizeMin))) ||
+            (fileSizeMax !== "" && Number.isFinite(parseFloat(fileSizeMax))) || filesFavOnly);
+        const aliveDirs = new Set();
+        if (filtering) {
+            for (const f of list) {
+                const segs = fileFolderOf(f.path).split("/").filter(Boolean);
+                let acc = "";
+                for (const s of segs) {
+                    acc = acc ? acc + "/" + s : s;
+                    aliveDirs.add(acc);
+                }
+            }
+        }
+        const deepCount = (dir) => {
+            if (!dir) return list.length;
+            const pre = dir + "/";
+            return list.reduce((n, f) => n + (relWfPath(f.path).startsWith(pre) ? 1 : 0), 0);
+        };
         const out = [];
         let shown = 0, capHit = false;
         const renderDir = (dir, depth) => {
@@ -2281,8 +2328,9 @@ function filesTabHtml() {
             const kids = [...(map.get(dir) || [])].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
             for (const k of kids) {
                 const full = dir ? dir + "/" + k : k;
+                if (filtering && !aliveDirs.has(full)) continue; // dead branch - pruned
                 const open = treeExpanded.has(full);
-                out.push(folderRowHtml(full, k, depth, open, deepCountIn(full)));
+                out.push(folderRowHtml(full, k, depth, open, deepCount(full)));
                 if (open) renderDir(full, depth + 1);
             }
             for (const f of list.filter((x) => fileFolderOf(x.path) === dir)) {
@@ -2316,8 +2364,8 @@ function filesTabHtml() {
         sortBtn("size", "size", "Sort by file size") +
         viewBtn("list", "≡", "Flat list (the default Files view)") +
         viewBtn("tree", "🌲", "Folder tree - expand/collapse any depth, enter folders, breadcrumbs") +
-        `<button type="button" class="hub-wf-act hub-wf-chip${filesFavOnly ? " hub-wf-chip-on" : ""}" data-act="favonly" title="Show only the favorites (★)">★${filesFav.size ? " " + filesFav.size : ""}</button>` +
-        `<button type="button" class="hub-wf-act hub-wf-chip${filesAdvOpen ? " hub-wf-advbtn-on" : ""}" data-act="fadv" title="Advanced filters: folder, modified date range, file size range">⚗${filesActiveFilterCount() ? " " + filesActiveFilterCount() : ""}</button>` +
+        `<button type="button" class="hub-wf-act hub-wf-fchip${filesFavOnly ? " hub-wf-fchip-on" : ""}" data-act="favonly" title="Show only the favorites (★)">★${filesFav.size ? " " + filesFav.size : ""}</button>` +
+        `<button type="button" class="hub-wf-act hub-wf-fchip${filesAdvOpen ? " hub-wf-advbtn-on" : ""}" data-act="fadv" title="Advanced filters: folder, modified date range, file size range">⚗${filesActiveFilterCount() ? " " + filesActiveFilterCount() : ""}</button>` +
         quickChip("today", "Today") +
         quickChip("7d", "7d") +
         quickChip("30d", "30d") +

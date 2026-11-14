@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER smoke test (v108)
+// SettingsHub - WORKFLOWS MANAGER smoke test (v110)
 // ----------------------------------------------------------------------------
 // Node ESM + jsdom. Loads the REAL web/workflows.js module exactly like the
 // entry does (a sandbox copies web/ and stubs ../../scripts/app.js with an
@@ -960,19 +960,19 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v109", /"workflows":\s*"v109"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v110", /"workflows":\s*"v110"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v109", ENTRY_SRC.includes("web build: v109 - REAL USERDATA ROOTS FOR THE FILES LIST"));
-check("styles.css?v=109", ENTRY_SRC.includes("styles.css?v=109"));
-check("the module self-reports v109",
+check("the entry banner names v110", ENTRY_SRC.includes("web build: v110 - THE INVISIBLE FILTER ROW + THE PRUNED SEARCH TREE"));
+check("styles.css?v=110", ENTRY_SRC.includes("styles.css?v=110"));
+check("the module self-reports v110",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v109"'));
-check("the web stamp literal is v109",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v110"'));
+check("the web stamp literal is v110",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v109"'));
-check("py stamp bumps together (v109)",
+        .includes('const WF_WEB_VERSION = "v110"'));
+check("py stamp bumps together (v110)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v109"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v110"'));
 check("v107 routes registered (temp list/put/get/delete)",
     [".get(\"/settings_hub/workflows/temp\")", ".post(\"/settings_hub/workflows/temp\")",
      ".get(\"/settings_hub/workflows/temp/{tid}\")", ".delete(\"/settings_hub/workflows/temp/{tid}\")"]
@@ -1539,7 +1539,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v110"); // ahead of the pack (v109) - a stale web file
+    fakeApi.__setHealthVersion("v111"); // ahead of the pack (v110) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -1957,7 +1957,7 @@ await settle();
 check("WO: the Today chip keeps only the file modified today",
     JSON.stringify(wfPaths()) === JSON.stringify(["workflows/sub/deep/nested.json"]),
     JSON.stringify(wfPaths()));
-check("WO: the Today chip is highlighted", !!wpanel.querySelector('[data-act="fquick"][data-q="today"].hub-wf-chip-on'));
+check("WO: the Today chip is highlighted", !!wpanel.querySelector('[data-act="fquick"][data-q="today"].hub-wf-fchip-on'));
 wpanel.querySelector('[data-act="fquick"][data-q="today"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
 await settle();
 check("WO: clicking the chip again clears the quick period", wfPaths().length === 3, JSON.stringify(wfPaths()));
@@ -1998,6 +1998,88 @@ await settle();
 check("WO: back to ≡ restores the habitual Files view (the recent section returns)",
     !!wpanel.querySelector(".hub-wf-list-recent") &&
     !wpanel.querySelector(".hub-wf-crumbs"));
+
+// ===========================================================================
+// WO.8b v110: the filter chips are VISIBLE + the tree prunes the dead
+// branches. The chips used to borrow the minimized-panel .hub-wf-chip class
+// (position:fixed; display:none) - the whole ★/⚗/periods row rendered but
+// sat hidden, the owner saw "only the sortings and the tree toggler". And
+// with an active search the folder tree must not show the folders whose
+// subtree holds no matching file (the owner's ask).
+check("WO: the filter chips carry the fchip class, NOT the minimized-chip class",
+    ["fadv", "favonly", "fquick"].flatMap((a) => [...wpanel.querySelectorAll(`[data-act="${a}"]`)])
+        .every((b) => b.classList.contains("hub-wf-fchip") &&
+            b.classList.contains("hub-wf-act") &&
+            b.closest(".hub-wf-tools2") &&
+            !b.classList.contains("hub-wf-chip")));
+check("WO: the fchip CSS is visible (no display:none / position:fixed in the base rule)",
+    (() => {
+        const css = fs.readFileSync(path.join(ROOT, "web", "styles.css"), "utf8");
+        const m = css.match(/\.hub-wf-fchip\s*\{[^}]*\}/);
+        return !!m && !/display\s*:\s*none/.test(m[0]) && !/position\s*:\s*fixed/.test(m[0]) &&
+            css.includes(".hub-wf-fchip-on");
+    })());
+
+// the tree pruning: a second folder chain "other/" with files that never
+// match the search - under the search it must disappear from the tree
+fakeApi.__setWfFiles([
+    { path: "workflows/flux_main.json", name: "flux_main.json", size: 2048, mtime: NOW - 2 * 86400 },
+    { path: "workflows/sub/deep/nested.json", name: "nested.json", size: 512000, mtime: NOW - 5 },
+    { path: "workflows/settings_hub/junk.json", name: "junk.json", size: 1, mtime: NOW - 3 },
+    { path: "workflows/old.json", name: "old.json", size: 4096, mtime: NOW - 20 * 86400 },
+    { path: "workflows/other/keep.json", name: "keep.json", size: 100, mtime: NOW - 60 },
+]);
+hooks.setTab("files");
+await hooks.refreshSavedFiles();
+await settle();
+// determinism: the earlier v108 tree block left sub + sub/deep expanded in
+// the session state - collapse everything before asserting the folds
+for (const d of hooks.filesState().treeExpanded) hooks.toggleTreeFolder(d);
+await settle();
+const wpanelT = hooks.panelEl();
+wpanelT.querySelector('[data-act="filesview"][data-view="tree"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: the unfiltered tree shows every real folder branch",
+    !!wpanelT.querySelector('[data-act="treeenter"][data-folder="sub"]') &&
+    !!wpanelT.querySelector('[data-act="treeenter"][data-folder="other"]'));
+const typeSearch = (v) => {
+    const f = wpanelT.querySelector('[data-wf="filesearch"]');
+    f.value = v;
+    f.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+};
+typeSearch("nested");
+await settle();
+check("WO: the search prunes the dead folder branches (other/ is gone, sub/ stays)",
+    !!wpanelT.querySelector('[data-act="treeenter"][data-folder="sub"]') &&
+    !wpanelT.querySelector('[data-act="treeenter"][data-folder="other"]'));
+wpanelT.querySelector('[data-act="treefold"][data-folder="sub"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+wpanelT.querySelector('[data-act="treefold"][data-folder="sub/deep"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: the alive branch expands to the matching leaf + the counter reads the filtered list",
+    !!wpanelT.querySelector('[data-act="openfile"][data-path="workflows/sub/deep/nested.json"]') &&
+    !!wpanelT.querySelector('[data-act="treeenter"][data-folder="sub/deep"]') &&
+    wpanelT.querySelector('[data-act="treeenter"][data-folder="sub"]').closest(".hub-wf-trow")
+        .querySelector(".hub-wf-tcount").textContent === "1");
+typeSearch("zzznomatch");
+await settle();
+check("WO: a no-match search leaves no folder rows at all",
+    !wpanelT.querySelector("[data-act='treeenter']") &&
+    !!wpanelT.querySelector(".hub-wf-emptylist"));
+typeSearch("");
+await settle();
+wpanelT.querySelector('[data-act="favonly"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: a filter prunes the tree too (★-only leaves only the root favorite file)",
+    !wpanelT.querySelector("[data-act='treeenter']") &&
+    !!wpanelT.querySelector('[data-fpath="workflows/old.json"]'));
+wpanelT.querySelector('[data-act="favonly"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
+check("WO: clearing the filters restores every folder branch",
+    !!wpanelT.querySelector('[data-act="treeenter"][data-folder="other"]') &&
+    !!wpanelT.querySelector('[data-act="treeenter"][data-folder="sub"]'));
+wpanelT.querySelector('[data-act="filesview"][data-view="list"]').dispatchEvent(new dom.window.Event("click", { bubbles: true }));
+await settle();
 
 // the pure helpers (unit level)
 check("WO: shortPath keeps the LAST folders + the name with the ellipsis",

@@ -910,7 +910,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v109"
+WORKFLOWS_SERVER_VERSION = "v110"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")

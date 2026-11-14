@@ -6245,10 +6245,20 @@ body.sh-modal-open .hub-sh-note {
     user-select: none;
 }
 .hub-wf-tools2 .hub-wf-act { padding: 2px 6px; font-size: calc(var(--sh-fs, 1) * 9.5px); }
-.hub-wf-sortbtn-on, .hub-wf-viewbtn-on, .hub-wf-chip-on, .hub-wf-advbtn-on {
+/* v110: the filter chips (★-only / ⚗ / quick periods) wear their OWN class -
+   they used to borrow .hub-wf-chip, which is the MINIMIZED-panel chip
+   (position:fixed; display:none), and the whole filter row rendered
+   invisible; the dashed border marks the "filter" buttons */
+.hub-wf-fchip {
+    border-style: dashed;
+    color: #a9b8ec;
+}
+.hub-wf-fchip:hover { border-color: #6a7ac0; color: #eef2ff; }
+.hub-wf-sortbtn-on, .hub-wf-viewbtn-on, .hub-wf-fchip-on, .hub-wf-advbtn-on {
     background: #31405f;
     color: #fff;
     border-color: #5a6ab0;
+    border-style: solid;
 }
 .hub-wf-fadv {
     display: flex;
