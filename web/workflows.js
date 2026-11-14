@@ -1,6 +1,29 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER (v105)
+// SettingsHub - WORKFLOWS MANAGER (v106)
 // ----------------------------------------------------------------------------
+// v106 (owner feedback round 4):
+//   1. the armed 🗑 delete on the BOTTOM preset card jumped the list scroll
+//      to the very top (every arm/confirm re-rendered .hub-wf-body via
+//      innerHTML - the fresh .hub-wf-scroll started at scrollTop 0), so the
+//      second confirming click needed a scroll hunt back down. renderAll now
+//      KEEPS the scroll anchor of the same tab (and ONLY the same tab - real
+//      tab switches still start at the top). The same class of jumps died at
+//      the other armed confirms (single ✕, Show more, ⚙ search-as-you-type
+//      re-renders, the save-form Select/Deselect all);
+//   2. clicking a closed TEMP process in 🕘 Recently closed fired
+//      GET /userdata/workflows/Unsaved Workflow (3).json -> 404 (and even a
+//      garbage "... (2).null" path - ComfyUI builds unsaved-tab paths with a
+//      null extension): a temp tab has NO real file behind it, reopening by
+//      path can never work. The close now EMBEDS a graph snapshot of the temp
+//      tab into its recent entry (the same payload the presets use), the
+//      reopen restores it via the snapshot ladder instead of a userdata
+//      fetch; a temp tab whose graph cannot be serialized (or that is empty /
+//      over the size cap) is not recorded at all - a recent row always
+//      reopens SOMETHING. The persisted tabs keep the path reopen; a modified
+//      saved tab also embeds its unsaved state, so the reopen shows what the
+//      user actually saw, not the stale disk file. Legacy localStorage
+//      entries with the ".null" garbage paths are pruned on boot;
+//
 // v105 (owner feedback round 3):
 //   1. "Close all" - the 🧹 Close menu (the Open tab) closes EVERY open tab
 //      while the pinned 📌 stay; unsaved tabs inside the batch need the armed
@@ -119,9 +142,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v105";
+const WF_WEB_VERSION = "v106";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v105";
+globalThis.__SettingsHubLoaded["workflows"] = "v106";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -133,6 +156,11 @@ const LS_PREF = "settingshub.workflows.pref";  // {keepUnsaved,closeEmptyTemp,wa
 const LS_RECENT = "settingshub.workflows.recent"; // ring buffer of closed tabs
 const Z_PANEL = "99900";               // same layer as the stack / chat panels
 const RECENT_MAX = 15;
+// v106: the reopen snapshots of temp tabs live in localStorage (~5MB per
+// origin) - one huge graph must not crowd the other entries out; over-budget
+// entries degrade to name-only from the OLDEST side (persistRecent)
+const RECENT_SNAP_CAP = 400000;          // chars of JSON per single entry
+const RECENT_BUDGET = 2500000;           // total chars of JSON across the ring
 const ARM_MS = 2500;                   // double-click confirm window (✕ / 🗑)
 const TAB_SEQ = 30;                    // ms between tab operations (ChangeTracker settle)
 const ITEM_LIST_CAP = 12;              // preset card: items shown before "+N more"
@@ -612,12 +640,15 @@ async function ensureSomeTab() {
 async function closeWorkflowTab(w, opts = {}) {
     if (!w) return { ok: false, error: "no tab" };
     const forceClean = opts.forceClean !== false;
+    // v106: the reopen snapshot must be captured BEFORE the close - the store
+    // may drop the content together with the ref
+    const snap = (w.isTemporary || w.isModified) ? graphJsonOfOpenTab(w) : null;
     const store = wfStoreOf();
     if (store && typeof store.closeWorkflow === "function" && w.ref) {
         try {
             await activateNeighborBeforeClose(w, store);
             await store.closeWorkflow(w.ref, { warnIfUnsaved: !forceClean });
-            recordRecent(w);
+            recordRecent(w, snap);
             await ensureSomeTab();
             return { ok: true, via: "store" };
         } catch (_) {}
@@ -628,7 +659,7 @@ async function closeWorkflowTab(w, opts = {}) {
         if (cmd && typeof cmd.execute === "function") {
             await activateWorkflow(w);
             await cmd.execute("Workspace.CloseWorkflow");
-            recordRecent(w);
+            recordRecent(w, snap);
             return { ok: true, via: "command" };
         }
     } catch (_) {}
@@ -841,12 +872,64 @@ async function setRootPath(raw) {
 
 let recent = lsJson(LS_RECENT, []);
 if (!Array.isArray(recent)) recent = [];
-function persistRecent() { saveJson(LS_RECENT, recent.slice(0, RECENT_MAX)); }
-function recordRecent(w) {
-    if (!w || !w.path) return; // temp tabs have nothing to reopen
-    const path = normWfPath(w.path);
-    recent = [{ path, name: w.name || baseName(path), ts: Date.now() },
-        ...recent.filter((r) => r.path !== path)].slice(0, RECENT_MAX);
+sanitizeRecent(); // v106: drop the legacy ".null" garbage + unrestorable rows
+/** v106: prune the reopen buffer to what can actually be reopened - a path
+ *  entry needs a real file path (the ".null" suffix is the garbage ComfyUI
+ *  builds for unsaved tabs, it can never exist in userdata), a temp entry
+ *  needs its embedded snapshot. Runs on boot over the loaded localStorage
+ *  and is exported for the tests. */
+function sanitizeRecent() {
+    const ok = (r) => r && typeof r === "object" &&
+        (r.snap !== null && typeof r.snap === "object" ||
+            (typeof r.path === "string" && r.path &&
+                !r.path.toLowerCase().endsWith(".null")));
+    recent = recent.filter(ok).slice(0, RECENT_MAX);
+}
+
+function reloadRecent() {
+    const v = lsJson(LS_RECENT, []);
+    recent = Array.isArray(v) ? v : [];
+    sanitizeRecent();
+    persistRecent();
+}
+
+function persistRecent() {
+    // v106: the newest entries keep their snapshots, the older ones degrade
+    // to path/name-only once the total JSON crosses RECENT_BUDGET (a hard
+    // quota error would silently drop the WHOLE buffer - saveJson swallows)
+    let used = 0;
+    const list = recent.slice(0, RECENT_MAX).map((r) => {
+        if (!r || !r.snap) return r;
+        used += JSON.stringify(r.snap).length;
+        return used > RECENT_BUDGET ? { path: r.path, name: r.name, ts: r.ts } : r;
+    });
+    saveJson(LS_RECENT, list);
+}
+
+/** The recently-closed ring. v106: a TEMP tab (no real file behind it - the
+ *  autosave-ish "Unsaved Workflow (N).json" names never materialize in
+ *  userdata, and the duplicate suffix builds "... (2).null") is recorded
+ *  WITH the graph snapshot taken at close time and WITHOUT the fake path, so
+ *  the 🕘 reopen restores the graph instead of 404-ing a userdata fetch. A
+ *  modified PERSISTED tab embeds its unsaved state too - the reopen shows
+ *  what was on screen, not the stale disk copy. Empty temps and snapshots
+ *  over RECENT_SNAP_CAP are not recorded (a recent row must always open).
+ *  snap is captured by closeWorkflowTab BEFORE the store drops the ref. */
+function recordRecent(w, snap = null) {
+    if (!w) return;
+    const temp = !!w.isTemporary || !w.path;
+    // a ".null" path is never a real file - treat the tab as temp-like
+    const garbagePath = !!w.path && normWfPath(w.path).toLowerCase().endsWith(".null");
+    const path = (!temp && !garbagePath) ? normWfPath(w.path) : null;
+    const name = w.name || (path ? baseName(path) : "Unsaved");
+    if (!path && (!snap || w.isEmpty)) return; // nothing reopenable - skip
+    if (snap) {
+        try { if (JSON.stringify(snap).length > RECENT_SNAP_CAP) snap = null; } catch (_) { snap = null; }
+        if (!snap && !path) return;
+    }
+    const same = (r) => path ? r.path === path : (!r.path && r.name === name);
+    recent = [{ path, name, ts: Date.now(), ...(snap ? { snap } : {}) },
+        ...recent.filter((r) => !same(r))].slice(0, RECENT_MAX);
     persistRecent();
 }
 
@@ -881,6 +964,7 @@ let pollSeq = 0;
 let pollN = 0;
 let lastOpenSig = "";
 let lastLoadSig = "";      // v105: the retry render guard's last seen value
+let renderedTab = null;    // v106: the scroll-keep guard's last rendered tab
 
 function openHasPath(p) {
     const norm = normWfPath(p);
@@ -1494,9 +1578,19 @@ function renderAll() {
     renderNote();
     const body = panel.querySelector(".hub-wf-body");
     if (!body) return;
+    // v106: a re-render of the SAME tab must not scroll-jump - the armed 🗑
+    // on the bottom preset card (and the single ✕, Show more, the search
+    // re-renders) used to reset .hub-wf-scroll to the top. A real tab switch
+    // (renderedTab differs) still starts at the top.
+    const keep = renderedTab === uiTab ? body.querySelector(".hub-wf-scroll")?.scrollTop || 0 : 0;
     if (uiTab === "open") body.innerHTML = openTabHtml();
     else if (uiTab === "presets") body.innerHTML = presetsTabHtml();
     else body.innerHTML = filesTabHtml();
+    renderedTab = uiTab;
+    if (keep) {
+        const sc = body.querySelector(".hub-wf-scroll");
+        if (sc) sc.scrollTop = keep;
+    }
 }
 
 function openTabHtml() {
@@ -1649,9 +1743,12 @@ function presetsTabHtml() {
 }
 
 function filesTabHtml() {
+    // v106: temp tabs reopen from their embedded snapshot (no file path) -
+    // the row is found by ts, carries a (snapshot) badge and its own tooltip
     const rec = recent.slice(0, RECENT_MAX).map((r) =>
-        `<div class="hub-wf-row hub-wf-row-recent" data-path="${esc(r.path)}">` +
-        `<button type="button" class="hub-wf-name" data-act="reopen" data-path="${esc(r.path)}" title="${esc(r.path)}">🕘 ${esc(r.name)}</button>` +
+        `<div class="hub-wf-row hub-wf-row-recent" data-path="${esc(r.path || "")}" data-rts="${esc(String(r.ts || 0))}">` +
+        `<button type="button" class="hub-wf-name" data-act="reopen" data-path="${esc(r.path || "")}" data-rts="${esc(String(r.ts || 0))}" ` +
+        `title="${r.snap ? "Snapshot - restores the tab as it was when closed" : esc(r.path || "")}">🕘 ${esc(r.name)}${r.snap && !r.path ? " <span class=\"hub-wf-snap\">(snapshot)</span>" : ""}</button>` +
         `<span class="hub-wf-marks"><span class="hub-wf-snap">${esc(fmtDate(Math.floor((r.ts || 0) / 1000)))}</span></span>` +
         `</div>`).join("");
     const toks = filesSearch.toLowerCase().split(/\s+/).filter(Boolean);
@@ -1816,8 +1913,19 @@ async function onBodyClick(e) {
             return;
         }
         case "reopen": {
-            const r = await openWorkflowByPath(btn.dataset.path);
-            if (!r.ok) localToast(r.missing ? "The file no longer exists" : "Could not open - see F12");
+            // v106: a temp entry reopens from its EMBEDDED SNAPSHOT - never a
+            // /userdata fetch (that was the 404 on "Unsaved Workflow (N)")
+            const entry = recent.find((r) => String(r.ts || 0) === btn.dataset.rts)
+                || recent.find((r) => r.path && r.path === btn.dataset.path);
+            if (entry?.snap) {
+                const r = await openSnapshotWorkflow(entry.name, entry.snap);
+                if (!r.ok) localToast("Could not restore the snapshot - see F12");
+            } else if (btn.dataset.path) {
+                const r = await openWorkflowByPath(btn.dataset.path);
+                if (!r.ok) localToast(r.missing ? "The file no longer exists" : "Could not open - see F12");
+            } else {
+                localToast("This temp tab was too large to keep a snapshot - it cannot be reopened");
+            }
             await refreshOpen(true);
             renderAll();
             return;
@@ -2733,6 +2841,8 @@ export function __workflowsTestHooks() {
         recent: () => recent.slice(),
         resetRecent: () => { recent = []; persistRecent(); },
         recordRecent,
+        reloadRecent,      // v106: the boot read + the ".null" garbage prune
+        sanitizeRecent,
         openPlanPop: (pid, anchor) => {
             const p = presets.find((x) => x.id === pid);
             if (p) openPlanPop(p, anchor || null);

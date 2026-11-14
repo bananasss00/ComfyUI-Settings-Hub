@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER smoke test (v105)
+// SettingsHub - WORKFLOWS MANAGER smoke test (v106)
 // ----------------------------------------------------------------------------
 // Node ESM + jsdom. Loads the REAL web/workflows.js module exactly like the
 // entry does (a sandbox copies web/ and stubs ../../scripts/app.js with an
@@ -57,6 +57,16 @@
 //       and the health probe compares the server pack against this web build:
 //       an older server = "RESTART ComfyUI" (the py half of an update only
 //       activates on restart), a newer one = "hard refresh".
+//   WM  v106: the SCROLL-STABLE confirms (arming the 🗑 delete / the single
+//       ✕ / Show more re-renders keep the .hub-wf-scroll anchor - the bottom
+//       preset card no longer scrolls away before the confirming click; a
+//       real tab switch still starts at the top) + the SNAPSHOT REOPENS: a
+//       closed TEMP tab lands in 🕘 Recently closed WITH its graph embedded
+//       (no fake path -> no /userdata 404 on "Unsaved Workflow (N)", the
+//       reopen goes through the snapshot ladder), a modified saved tab
+//       embeds its unsaved state, empty/unserializable temps are not
+//       recorded, ".null" garbage paths are pruned on boot and refused at
+//       record time, the reopen finds the row by ts with the path fallback.
 //
 // Run from the extension root:  node tests/smoke_workflows.mjs  (jsdom)
 // ============================================================================
@@ -872,19 +882,19 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v105", /"workflows":\s*"v105"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v106", /"workflows":\s*"v106"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v105", ENTRY_SRC.includes("web build: v105 - CLOSE MENU + PRESETS AUTO-RETRY"));
-check("styles.css?v=105", ENTRY_SRC.includes("styles.css?v=105"));
-check("the module self-reports v105",
+check("the entry banner names v106", ENTRY_SRC.includes("web build: v106 - SCROLL-STABLE CONFIRMS + SNAPSHOT REOPENS"));
+check("styles.css?v=106", ENTRY_SRC.includes("styles.css?v=106"));
+check("the module self-reports v106",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v105"'));
-check("the web stamp literal is v105",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v106"'));
+check("the web stamp literal is v106",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v105"'));
-check("py stamp bumps together (v105)",
+        .includes('const WF_WEB_VERSION = "v106"'));
+check("py stamp bumps together (v106)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v105"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v106"'));
 check("the workflows module uses the --sh-fs scale (v90 rule)",
     (fs.readFileSync(path.join(WEB, "styles.css"), "utf8").match(/hub-wf-panel[\s\S]{0,400}?--sh-fs/) !== null));
 check("the modal guard hides the workflows panel",
@@ -1447,7 +1457,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v104") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v106"); // ahead of the pack - a stale web file
+    fakeApi.__setHealthVersion("v107"); // ahead of the pack - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -1459,6 +1469,139 @@ await settle();
     await settle();
     check("WL: the matching server version clears the note",
         !hooks.serverNote(), JSON.stringify(hooks.serverNote()));
+    hooks.setTab("open");
+    await settle();
+}
+
+// ===========================================================================
+phase("WM v106: scroll-stable confirms + snapshot reopens of temp tabs");
+{
+    const bodyEl = () => pnl().querySelector(".hub-wf-body");
+
+    // ------------------------------------------------------------------
+    // 12a) recordRecent: temp tabs record WITH the snapshot, no fake path
+    // ------------------------------------------------------------------
+    hooks.resetRecent();
+    hooks.recordRecent({ name: "Unsaved Workflow (3)", isTemporary: true, isPersisted: false, isEmpty: false },
+        { nodes: [{ id: 1 }], links: [] });
+    let wmRec = hooks.recent()[0];
+    check("WM: a closed temp tab records WITH its snapshot embedded",
+        hooks.recent().length === 1 && wmRec && wmRec.snap && wmRec.path === null &&
+        wmRec.name === "Unsaved Workflow (3)", JSON.stringify(wmRec || null).slice(0, 120));
+    const before = hooks.recent().length;
+    hooks.recordRecent({ name: "Empty scratch", isTemporary: true, isPersisted: false, isEmpty: true }, null);
+    check("WM: an empty temp tab without a graph is NOT recorded (no dead rows)",
+        hooks.recent().length === before);
+    hooks.recordRecent({ name: "No graph", isTemporary: true, isPersisted: false }, null);
+    check("WM: an unserializable temp tab is NOT recorded",
+        hooks.recent().length === before);
+    hooks.recordRecent({ path: "workflows/Unsaved Workflow (3) (2).null", name: "Unsaved Workflow (3) (2).null" });
+    check("WM: the '.null' garbage path is refused at record time",
+        hooks.recent().length === before &&
+        !hooks.recent().some((r) => (r.path || "").includes(".null")),
+        JSON.stringify(hooks.recent()));
+    hooks.recordRecent({ path: "workflows/m.json", name: "m.json", isModified: true }, { nodes: [{ id: 9 }] });
+    wmRec = hooks.recent()[0];
+    check("WM: a MODIFIED saved tab records the path AND its unsaved state",
+        wmRec.path === "workflows/m.json" && wmRec.snap && wmRec.snap.nodes?.[0]?.id === 9,
+        JSON.stringify(wmRec || null).slice(0, 140));
+    hooks.recordRecent({ name: "Unsaved Workflow (3)", isTemporary: true, isPersisted: false, isEmpty: false },
+        { nodes: [{ id: 2 }], links: [] });
+    check("WM: re-closing the same temp tab DEDUPES by name (ts bumps, snap refreshes)",
+        hooks.recent().length === 2 &&
+        hooks.recent()[0].snap?.nodes?.[0]?.id === 2, JSON.stringify(hooks.recent().map((r) => r.name)));
+
+    // the boot prune: a legacy ".null" entry dies on reload, the real one stays
+    dom.window.localStorage.setItem("settingshub.workflows.recent", JSON.stringify([
+        { path: "workflows/Unsaved Workflow (3) (2).null", name: "garbage", ts: 1 },
+        { path: "workflows/real.json", name: "real.json", ts: 2 },
+        { path: null, name: "snapless temp", ts: 3 },
+    ]));
+    hooks.reloadRecent();
+    check("WM: reloadRecent prunes the legacy '.null' + unrestorable rows",
+        hooks.recent().length === 1 && hooks.recent()[0].path === "workflows/real.json",
+        JSON.stringify(hooks.recent()));
+    hooks.resetRecent();
+
+    // ------------------------------------------------------------------
+    // 12b) the reopen of a snapshot row goes through the SNAPSHOT ladder -
+    //      NOT a /userdata fetch (the owner's 404 on "Unsaved Workflow (3)")
+    // ------------------------------------------------------------------
+    const tempTab = makeTab({ name: "Unsaved Workflow (3)", isTemporary: true, isPersisted: false, nodes: [1, 2] });
+    wfStore.openWorkflows = [tempTab];
+    wfStore.activeWorkflow = tempTab;
+    await hooks.refreshOpen(true);
+    hooks.setTab("open");       // a no-op when already on Open - force the re-render
+    hooks.renderAll();
+    await settle();
+    const callsBeforeClose = fakeApi.__calls().length;
+    const udBefore = fakeApi.__calls().filter((c) => c.url.includes("/userdata")).length;
+    // a temp tab needs the armed second click (the panel owns the confirm)
+    const xbtn = () => bodyEl().querySelector('[data-act="close"]');
+    await xbtn().click();
+    await settle();
+    await xbtn().click();
+    await settle(10);
+    check("WM: the armed ✕ closed the temp tab",
+        !wfStore.openWorkflows.some((t) => t.name === "Unsaved Workflow (3)"));
+    const wmRecent = hooks.recent();
+    check("WM: the close recorded the temp tab with a snapshot (path null)",
+        wmRecent.length === 1 && wmRecent[0].name === "Unsaved Workflow (3)" &&
+        !!wmRecent[0].snap && wmRecent[0].path === null, JSON.stringify(wmRecent[0] || null).slice(0, 140));
+
+    hooks.setTab("files");
+    await settle();
+    const snapRow = bodyEl().querySelector('.hub-wf-body [data-act="reopen"][data-rts]');
+    check("WM: the recent row renders with the (snapshot) badge + ts key",
+        !!snapRow && snapRow.textContent.includes("(snapshot)") &&
+        !snapRow.getAttribute("data-path"), snapRow?.textContent || "(no row)");
+    await snapRow.click();
+    await settle(20);
+    check("WM: the reopen restored the temp tab via createTemporary + the graph",
+        wfStore.openWorkflows.some((t) => t.__snapshotGraph &&
+            t.__snapshotGraph.nodes?.length === 2),
+        JSON.stringify(wfStore.openWorkflows.map((t) => t.name)));
+    const udAfter = fakeApi.__calls().filter((c) => c.url.includes("/userdata")).length;
+    check("WM: NO /userdata fetch happened for the temp reopen (no 404)",
+        udAfter === udBefore &&
+        !fakeApi.__calls().slice(callsBeforeClose).some((c) => (c.url || "").includes("Unsaved")),
+        JSON.stringify(fakeApi.__calls().slice(callsBeforeClose).map((c) => c.url)));
+
+    // ------------------------------------------------------------------
+    // 12c) the scroll-stable re-renders: arming 🗑 keeps the scroll anchor
+    // ------------------------------------------------------------------
+    // jsdom has no layout - the scrollTop pair is redefined to OBSERVE the
+    // assignments renderAll makes (the restore of the captured anchor)
+    const scDesc = Object.getOwnPropertyDescriptor(dom.window.Element.prototype, "scrollTop") ||
+        { get: () => 0, set: () => {}, configurable: true };
+    const stLog = [];
+    let stVal = 0;
+    Object.defineProperty(dom.window.Element.prototype, "scrollTop", {
+        configurable: true,
+        get() { return stVal; },
+        set(v) { stLog.push(v); stVal = v; try { scDesc.set?.call(this, v); } catch (_) {} },
+    });
+    try {
+        hooks.setTab("presets");
+        await settle();
+        check("WM: the Presets tab still renders the WL preset",
+            bodyEl().textContent.includes("Night batch"));
+        stLog.length = 0;
+        stVal = 555; // "the user scrolled the list down"
+        await bodyEl().querySelector('[data-act="del"][data-pid="pk1"]').click(); // arm
+        await settle();
+        check("WM: arming the 🗑 delete re-renders AND restores the scroll anchor (555)",
+            stLog.length === 1 && stLog[0] === 555, JSON.stringify(stLog));
+        check("WM: the armed state is visible (the 🗑 carries hub-wf-armed)",
+            !!bodyEl().querySelector('[data-act="del"][data-pid="pk1"].hub-wf-armed'));
+        stLog.length = 0;
+        hooks.setTab("open");
+        await settle();
+        check("WM: a REAL tab switch does not restore the old anchor (no assignment)",
+            stLog.length === 0, JSON.stringify(stLog));
+    } finally {
+        Object.defineProperty(dom.window.Element.prototype, "scrollTop", scDesc);
+    }
     hooks.setTab("open");
     await settle();
 }
