@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER smoke test (v110)
+// SettingsHub - WORKFLOWS MANAGER smoke test (v111)
 // ----------------------------------------------------------------------------
 // Node ESM + jsdom. Loads the REAL web/workflows.js module exactly like the
 // entry does (a sandbox copies web/ and stubs ../../scripts/app.js with an
@@ -960,19 +960,19 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v110", /"workflows":\s*"v110"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v111", /"workflows":\s*"v111"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v110", ENTRY_SRC.includes("web build: v110 - THE INVISIBLE FILTER ROW + THE PRUNED SEARCH TREE"));
-check("styles.css?v=110", ENTRY_SRC.includes("styles.css?v=110"));
-check("the module self-reports v110",
+check("the entry banner names v111", ENTRY_SRC.includes("web build: v111 - THE SMART QUEUE-START UNLOAD"));
+check("styles.css?v=111", ENTRY_SRC.includes("styles.css?v=111"));
+check("the module self-reports v111",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v110"'));
-check("the web stamp literal is v110",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v111"'));
+check("the web stamp literal is v111",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v110"'));
-check("py stamp bumps together (v110)",
+        .includes('const WF_WEB_VERSION = "v111"'));
+check("py stamp bumps together (v111)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v110"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v111"'));
 check("v107 routes registered (temp list/put/get/delete)",
     [".get(\"/settings_hub/workflows/temp\")", ".post(\"/settings_hub/workflows/temp\")",
      ".get(\"/settings_hub/workflows/temp/{tid}\")", ".delete(\"/settings_hub/workflows/temp/{tid}\")"]
@@ -1539,7 +1539,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v111"); // ahead of the pack (v110) - a stale web file
+    fakeApi.__setHealthVersion("v112"); // ahead of the pack (v111) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();

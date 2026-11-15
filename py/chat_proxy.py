@@ -275,7 +275,11 @@ DEFAULT_CONFIG = {
     "auto_unload_llm_on_queue": False,  # v92: when a ComfyUI QUEUE starts
                                # (api "execution_start"), the JS hook unloads
                                # the chat engine (/v1/unload) so its VRAM
-                               # goes back to ComfyUI. Off by default.
+                               # goes back to ComfyUI. v111: the hook sends
+                               # auto:true - the proxy checks the engine
+                               # status FIRST and SKIPS the unload when no
+                               # model is loaded (an unused chat never
+                               # touches the queue). Off by default.
     "oneshot_preset": "",      # v93: the ONE-SHOT mode's own catalog preset
                                # (.txt relative path) - SAME resolution rules
                                # as prompt_preset (wins over oneshot_system,
@@ -1897,7 +1901,11 @@ async def chat_gpu_post(request):
         release         - POST /v1/vram {reserve_mib: null} + restore
                           ComfyUI's original EXTRA_RESERVED + cfg = 0
         unload {wait?}  - POST /v1/unload, then a full release (the model
-                          AND the reservation return their memory)
+                          AND the reservation return their memory);
+                          auto:true (the v111 QUEUE-START hook) checks the
+                          engine status FIRST and SKIPS the whole chain when
+                          no model is loaded (an unused chat must not touch
+                          the queue - the manual button stays force)
         load {model?}   - POST /v1/load {model} (PolyStrata wakes/switches;
                           may take minutes on a big model)
         free_comfy      - ComfyUI's own 'Free model and node cache' (its
@@ -1924,6 +1932,30 @@ async def chat_gpu_post(request):
             "upstream": _vram_status_snapshot(st),
             "reserve_mib": int(cfg.get("vram_reserve_mib") or 0),
         })
+
+    # v111: the QUEUE-START hook (web "execution_start") marks itself with
+    # auto:true - the owner: unloading on EVERY queue run is inefficient when
+    # the chat is not used ("выгружаются модели при каждом запуске очереди
+    # что не эффективно"). The status answers FIRST: no loaded model (or an
+    # unreachable/unconfigured engine - nothing can hold VRAM there) -> the
+    # whole unload chain (/v1/unload + the reserve release + the status
+    # refetch) is SKIPPED with skipped:true and the client stays silent.
+    # Same principle as the v92 auto_free_comfy ("unload only when the models
+    # are still loaded") - now on the LLM side of the same bargain.
+    if action == "unload" and bool(body.get("auto")):
+        st0 = await _upstream_status(cfg)
+        snap0 = _vram_status_snapshot(st0)
+        if not snap0 or not snap0.get("loaded"):
+            reason = ("no LLM server configured" if not cfg.get("url")
+                      else "no LLM model loaded")
+            notes.append("auto unload skipped: " + reason +
+                         " - nothing to unload")
+            return web.json_response({
+                "ok": True, "action": action, "skipped": True,
+                "reason": reason, "notes": notes,
+                "upstream": snap0,
+                "reserve_mib": int(cfg.get("vram_reserve_mib") or 0),
+            })
 
     if not cfg.get("url"):
         return _jerr("no LLM server configured - set the URL in the chat settings first")

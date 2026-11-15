@@ -2,6 +2,17 @@
 // SettingsHub - LLM Chat (v89): floating panel with TABS, OpenAI-compatible
 // upstream through the py proxy (py/chat_proxy.py)
 // ----------------------------------------------------------------------------
+// v111 (owner: "выгружаются модели при каждом запуске очереди что не
+//   эффективно" when the chat is not used): the v92 queue-start hook sent a
+//   BLIND {action:"unload"} on EVERY execution_start (a 30 s cooldown was the
+//   only gate) - with the checkbox on, an unused chat still paid the full
+//   chain on every queue run (/v1/unload + the reserve release + the status
+//   refetch) and an off/unconfigured engine toasted a failure EVERY time.
+//   The hook now sends {action:"unload", auto:true}; the PROXY checks the
+//   engine status FIRST and answers {ok, skipped:true} when no model is
+//   loaded (an unreachable/unconfigured engine cannot hold VRAM either) -
+//   the hook stays SILENT on a skip and toasts only a REAL unload. The
+//   manual ⚡ "Unload model" button keeps the force behavior.
 // v86 (owner request 2026-11-09: "a simple LLM chat in the settings hub, just
 //   for chatting, like the stacker in a separate window, with image and video
 //   support, and some ComfyUI integration"): the CHAT panel:
@@ -176,7 +187,7 @@
 // v87 self-report (single-source version, docs/plan-versions.md): the last
 // FUNCTIONAL change of THIS file - no per-file build stamps anymore.
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["chat"] = "v108";
+globalThis.__SettingsHubLoaded["chat"] = "v111";
 
 import { app } from "../../scripts/app.js";
 // v90: the shared UI font scale - the chat ⚙ hosts the same row as the hub
@@ -1816,7 +1827,7 @@ function openGpuPop() {
         `<label class="hub-cs-row" title="Before every request (chat AND one-shot): unload ComfyUI's own models (only when any are still loaded) so the LLM gets the VRAM. The result shows as a note on the live bubble.">` +
         `<span>Free ComfyUI models before request</span>` +
         `<input type="checkbox" class="hub-cs-chk" data-gpu="freec"></label>` +
-        `<label class="hub-cs-row" title="When a ComfyUI queue starts (execution_start), POST /v1/unload to the LLM engine - its VRAM goes back to ComfyUI for the generation. The next chat message or run wakes the model again (may take minutes).">` +
+        `<label class="hub-cs-row" title="When a ComfyUI queue starts (execution_start), the LLM engine is unloaded so its VRAM goes back to ComfyUI for the generation - but ONLY when the engine actually holds a loaded model (the status is checked first: an unused chat never touches the queue, and a dead engine never toasts a failure). The next chat message or run wakes the model again (may take minutes).">` +
         `<span>Unload the chat model when a ComfyUI queue starts</span>` +
         `<input type="checkbox" class="hub-cs-chk" data-gpu="unq"></label>` +
         `<div class="hub-cs-hint">While a reserve is set, EVERY chat message re-applies it before ` +
@@ -3499,6 +3510,12 @@ export function initChat() {
     // v92 (owner #11): when a ComfyUI QUEUE starts, unload the chat engine so
     // its VRAM goes back to ComfyUI (only when the ⚙ checkbox is on). Wired
     // ONCE per page - the listener survives panel rebuilds and reads cfg live.
+    // v111 (owner): "выгружаются модели при каждом запуске очереди что не
+    // эффективно" when the chat is not used - the hook now sends auto:true
+    // and the PROXY checks the engine status first: no loaded model -> the
+    // whole chain is skipped and this side stays SILENT (no toast noise on
+    // every queue run, no pointless /v1/unload + reserve release + status
+    // refetch). Only a REAL unload toasts.
     if (app?.api?.addEventListener && !queueHookWired) {
         queueHookWired = true;
         try {
@@ -3512,9 +3529,10 @@ export function initChat() {
                         const r = await app.api.fetchApi("/settings_hub/chat/gpu", {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ action: "unload" }),
+                            body: JSON.stringify({ action: "unload", auto: true }),
                         });
                         const j = await r.json().catch(() => null);
+                        if (j?.ok && j?.skipped) return;   // v111: nothing was loaded - silent
                         if (j?.ok) localToast("Chat model unloaded - the VRAM is ComfyUI's now", 4200);
                         else localToast("Chat unload failed: " + (j?.error || "HTTP " + (r?.status || "?")), 4200);
                     } catch (_) {}
@@ -3706,6 +3724,10 @@ export function __chatTestHooks() {
         renderPromptList,
         probe: probeServer,
         setCfg: (c) => { cfg = c; },
+        // v111: the queue-start hook carries a module-level 30 s cooldown -
+        // the smoke tests dispatch execution_start twice in a row and need
+        // the counter back to zero between the cases
+        resetQueueCooldown: () => { lastQueueUnload = 0; },
         setServerState: (s) => { serverState = s; },
         mount: initChat,
         fireResize: onWinResize,

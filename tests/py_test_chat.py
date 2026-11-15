@@ -793,6 +793,69 @@ check("unload released the reservation too",
           for q in FakeClientSession.requests), FakeClientSession.requests[:4])
 check("unload reset the cfg", chat._load_config()["vram_reserve_mib"] == 0)
 
+phase("v111 auto unload (the queue hook): skipped when no model is loaded")
+
+STATUS_JSON_UNLOADED = json.dumps({
+    "model": "test-model", "loaded": False, "elastic": False,
+    "machine": {"gpu": {"total_mib": 24576, "free_mib": 24000}},
+    "vram": {"vram_free_mib": 24000},
+})
+
+seed_config(vram_reserve_mib=0)
+chat._COMFY_EXTRA_ORIG["bytes"] = None
+# the engine ANSWERS and says nothing is loaded -> skip the whole chain
+FakeClientSession.script = [FakeUpstream(200, STATUS_JSON_UNLOADED)]   # GET /status only
+FakeClientSession.requests = []
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "unload", "auto": True})))
+j = resp_json(r)
+check("v111 auto unload skipped on an unloaded engine",
+      j["ok"] is True and j.get("skipped") is True, j)
+check("v111 auto unload did NOT touch the engine (no /unload, no /vram)",
+      not any(q[1] in (UPSTREAM + "/unload", UPSTREAM + "/vram")
+              for q in FakeClientSession.requests),
+      FakeClientSession.requests[:3])
+check("v111 auto unload skip names the reason",
+      any("no LLM model loaded" in n for n in j["notes"]), j["notes"])
+
+# an unreachable engine cannot hold VRAM either - skipped, zero POST noise
+FakeClientSession.script = [FakeUpstream(500, "engine down")]
+FakeClientSession.requests = []
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "unload", "auto": True})))
+j = resp_json(r)
+check("v111 auto unload skipped on a dead engine",
+      j["ok"] is True and j.get("skipped") is True and
+      not any(q[1] == UPSTREAM + "/unload" for q in FakeClientSession.requests), j)
+
+# a LOADED engine: the auto unload runs the FULL chain (status pre-check,
+# /unload, the release, the refetch)
+FakeClientSession.script = [
+    FakeUpstream(200, STATUS_JSON),   # GET /status (the v111 pre-check)
+    FakeUpstream(200, "{}"),          # POST /unload
+    FakeUpstream(200, "{}"),          # POST /vram null (the release)
+    FakeUpstream(200, STATUS_JSON),   # GET /status (the refetch)
+]
+FakeClientSession.requests = []
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "unload", "auto": True})))
+j = resp_json(r)
+check("v111 auto unload runs the full chain on a loaded engine",
+      j["ok"] is True and not j.get("skipped") and
+      any(q[0] == "POST" and q[1] == UPSTREAM + "/unload" for q in FakeClientSession.requests),
+      FakeClientSession.requests[:4])
+
+# the MANUAL button keeps the FORCE behavior even on an unloaded engine
+FakeClientSession.script = [
+    FakeUpstream(200, "{}"),                  # POST /unload
+    FakeUpstream(200, "{}"),                  # POST /vram null
+    FakeUpstream(200, STATUS_JSON_UNLOADED),  # GET /status
+]
+FakeClientSession.requests = []
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "unload"})))
+j = resp_json(r)
+check("v111 manual unload is NOT auto-skipped",
+      j["ok"] is True and not j.get("skipped") and
+      any(q[0] == "POST" and q[1] == UPSTREAM + "/unload" for q in FakeClientSession.requests),
+      FakeClientSession.requests[:3])
+
 phase("v87 gpu POST free_comfy / load / unknown")
 
 r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "free_comfy"})))

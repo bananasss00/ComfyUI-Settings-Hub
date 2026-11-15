@@ -274,7 +274,7 @@ const hooks = chat.__chatTestHooks();
 phase("PA build v95 + version manifest");
 {
     check("PA the entry reports v95", globalThis.__SettingsHubBuild === "v95");
-    check("PA chat self-reports v108 (the chat stamp moved on with the mass-management round)", globalThis.__SettingsHubLoaded?.chat === "v108");
+    check("PA chat self-reports v111 (the chat stamp moved on with the smart queue unload)", globalThis.__SettingsHubLoaded?.chat === "v111");
     check("PA launcher self-reports v101 (the workflows item round)",
         globalThis.__SettingsHubLoaded?.launcher === "v101");
     check("PA core self-reports v93 (unchanged this round)",
@@ -284,9 +284,9 @@ phase("PA build v95 + version manifest");
     check("PA hub_ui_renderer self-reports v94",
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat v98 + renderer v94",
-        entrySrc.includes('"chat": "v108"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the v110 visible filter chips + pruned search tree",
-        entrySrc.includes("web build: v110 - THE INVISIBLE FILTER ROW + THE PRUNED SEARCH TREE"));
+        entrySrc.includes('"chat": "v111"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
+    check("PA the banner names the v111 smart queue-start unload",
+        entrySrc.includes("web build: v111 - THE SMART QUEUE-START UNLOAD"));
 }
 
 // ---------------------------------------------------------------------------

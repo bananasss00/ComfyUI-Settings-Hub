@@ -56,6 +56,11 @@
 //   SQ  (v87) ⚡ opens the GPU popup: the state line renders from
 //       GET /chat/gpu, the buttons POST the actions (reserve/unload/load/
 //       free_comfy/release) and the notes render.
+//   SQ2 (v111) the QUEUE-START hook (execution_start) unloads the chat
+//       engine ONLY when it actually holds a loaded model: auto:true is
+//       sent, the proxy pre-checks the status and SKIPS silently when the
+//       chat was not used (no toast, no reserve touch); a loaded engine
+//       unloads with the toast; the checkbox off = no request at all.
 //   SV  (v89) ⚙ NAMED FIELDS: every number sits in a .hub-cs-cell with a
 //       visible non-empty .hub-cs-lab label (11 cells incl. context size
 //       and timeout); the labels carry the field names.
@@ -152,6 +157,11 @@ function makeFakeApi() {
     let healthMode = "ok";        // "ok" | "missing" | "http"
     let sseMode = true;           // /send answers SSE (true) or JSON (false)
     let hangSend = false;         // SF: the send request hangs until aborted
+    // v111: the LLM engine's loaded state (the auto unload contract lives on
+    // it) + the ComfyUI api event bus - the execution_start queue hook wires
+    // onto it exactly like on the real api
+    let llmLoaded = false;
+    const listeners = new Map();
     // v88: the model registry (the PolyStrata /api/models shape) + the prompt
     // catalog (the models/LLM/prompts scan) - scriptable per phase
     let modelItems = [
@@ -176,6 +186,13 @@ function makeFakeApi() {
 
     const api = {
         apiURL: (p) => p,
+        // v111: the ComfyUI api event bus - the queue-start hook (initChat)
+        // wires onto it exactly like on the real api; __dispatch fires it
+        addEventListener(type, cb) {
+            if (!listeners.has(type)) listeners.set(type, new Set());
+            listeners.get(type).add(cb);
+        },
+        removeEventListener(type, cb) { const s = listeners.get(type); if (s) s.delete(cb); },
         fetchApi: async (u, opts = {}) => {
             const method = (opts.method || "GET").toUpperCase();
             calls.push({ url: u, method, body: opts.body });
@@ -217,6 +234,7 @@ function makeFakeApi() {
                     if (k in body) config[k] = String(body[k] || "");
                 if ("prompt_preset" in body) config.prompt_preset = String(body.prompt_preset || "");
                 if ("prompts_dir" in body) config.prompts_dir = String(body.prompts_dir || "");
+                if ("auto_unload_llm_on_queue" in body) config.auto_unload_llm_on_queue = !!body.auto_unload_llm_on_queue;
                 const masked = { ...config, key: config.key ? config.key.slice(0, 2) + "****" + config.key.slice(-4) : "" };
                 return jsonResp({ ok: true, config: masked });
             }
@@ -306,7 +324,7 @@ function makeFakeApi() {
             if (p === "/settings_hub/chat/gpu" && method === "GET") {
                 return jsonResp({
                     ok: true, configured: !!config.url,
-                    upstream: { model: "qwen-vl", loaded: true, free_mib: 5120, total_mib: 24576, elastic: false },
+                    upstream: { model: "qwen-vl", loaded: llmLoaded, free_mib: 5120, total_mib: 24576, elastic: false },
                     reserve_mib: config.vram_reserve_mib || 0,
                     comfy_reserved: (config.vram_reserve_mib || 0) > 0,
                 });
@@ -328,7 +346,18 @@ function makeFakeApi() {
                         reserve_mib: 0 });
                 }
                 if (act === "unload") {
+                    // v111: mirror the py contract - the AUTO unload (the
+                    // queue hook's auto:true) is SKIPPED when no model is
+                    // loaded; the manual button stays force
+                    if (body.auto && !llmLoaded) {
+                        return jsonResp({ ok: true, action: act, skipped: true,
+                            reason: "no LLM model loaded",
+                            notes: ["auto unload skipped: no LLM model loaded - nothing to unload"],
+                            upstream: { model: "qwen-vl", loaded: false, free_mib: 23000, total_mib: 24576, elastic: false },
+                            reserve_mib: config.vram_reserve_mib || 0 });
+                    }
                     config.vram_reserve_mib = 0;
+                    llmLoaded = false;
                     return jsonResp({ ok: true, action: act, notes: ["model unloaded - all of its VRAM is back", "server reserve released"],
                         upstream: { model: "qwen-vl", loaded: false, free_mib: 23000, total_mib: 24576, elastic: false },
                         reserve_mib: 0 });
@@ -473,6 +502,9 @@ function makeFakeApi() {
         __setSse: (v) => { sseMode = !!v; },
         __setHang: (v) => { hangSend = !!v; },
         __config: () => config,
+        // v111: the queue-hook harness - the loaded flag + the api event bus
+        __setLlmLoaded: (v) => { llmLoaded = !!v; },
+        __dispatch: (type) => { for (const cb of [...(listeners.get(type) || [])]) { try { cb({ type }); } catch (_) {} } },
     };
     return api;
 }
@@ -1130,6 +1162,9 @@ await settle();
 // ---------------------------------------------------------------------------
 phase("SQ (v87) ⚡ GPU popup: state + actions");
 
+// v111: the fake engine's default is UNLOADED (the SQ2 contract) - this
+// phase still exercises the LOADED picture (state line, reserve notes)
+fakeApi.__setLlmLoaded(true);
 hooks.openGpuPop();
 await settle();
 const gPop = hooks.gpuPopEl();
@@ -1161,6 +1196,52 @@ check("free_comfy action POSTed",
         String(c.body).includes('"action":"free_comfy"')));
 hooks.closeGpuPop();
 check("gpu popup closed", !hooks.gpuPopEl());
+
+// ---------------------------------------------------------------------------
+phase("SQ2 (v111) the queue-start hook unloads ONLY when the LLM holds a model");
+
+// the owner: "выгружаются модели при каждом запуске очереди что не
+// эффективно" when the chat is not used. The v92 hook fired a blind unload
+// on EVERY execution_start; now it sends auto:true and the (fake) proxy
+// skips when the engine holds no model - the client stays silent.
+hooks.setCfg({ ...hooks.cfg(), auto_unload_llm_on_queue: true });
+const gpuPosts = () => fakeApi.__calls().filter((c) => c.url === "/settings_hub/chat/gpu" && c.method === "POST");
+const toastsNow = () => [...document.querySelectorAll(".hub-sh-note")].map((t) => t.textContent);
+
+fakeApi.__setLlmLoaded(false);            // the chat was NOT used
+hooks.resetQueueCooldown();
+const posts0 = gpuPosts().length;
+const toasts0 = toastsNow().length;
+fakeApi.__dispatch("execution_start");
+await settle();
+check("SQ2: the queue start POSTed the AUTO unload",
+    gpuPosts().length === posts0 + 1 &&
+    String(gpuPosts().at(-1).body).includes('"action":"unload"') &&
+    String(gpuPosts().at(-1).body).includes('"auto":true'),
+    JSON.stringify(gpuPosts().at(-1)?.body));
+check("SQ2: an unloaded engine is skipped SILENTLY (no toast)",
+    toastsNow().length === toasts0 &&
+    !toastsNow().includes("Chat model unloaded - the VRAM is ComfyUI's now"));
+check("SQ2: the skip left the reserve untouched",
+    (hooks.cfg().vram_reserve_mib || 0) === 0, hooks.cfg().vram_reserve_mib);
+
+// a LOADED engine (the chat was used): the unload really runs + the toast
+fakeApi.__setLlmLoaded(true);
+hooks.resetQueueCooldown();
+fakeApi.__dispatch("execution_start");
+await settle();
+check("SQ2: a loaded engine really unloads (the toast confirms)",
+    toastsNow().includes("Chat model unloaded - the VRAM is ComfyUI's now") &&
+    gpuPosts().length === posts0 + 2, JSON.stringify(toastsNow().slice(-2)));
+
+// the checkbox off: the hook exits before ANY request
+hooks.setCfg({ ...hooks.cfg(), auto_unload_llm_on_queue: false });
+hooks.resetQueueCooldown();
+const posts1 = gpuPosts().length;
+fakeApi.__dispatch("execution_start");
+await settle();
+check("SQ2: the checkbox off - no gpu POST at all",
+    gpuPosts().length === posts1, JSON.stringify(gpuPosts().slice(-1)));
 
 // ---------------------------------------------------------------------------
 phase("SW (v89) context fill: the status line shows used/available");
