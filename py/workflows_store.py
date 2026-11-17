@@ -431,6 +431,7 @@ def _mgr_dir(*parts):
 def _ensure_mgr_dirs():
     _ensure_dir(_mgr_dir("undo"))
     _ensure_dir(_mgr_dir("recent"))
+    _ensure_dir(_mgr_dir("filesops"))   # v116: the Files-delete undo manifests
 
 
 def _mgr_write_json(folder, fid, obj):
@@ -885,6 +886,99 @@ _version_seq = 0    # the monotonic write counter - the same-second tie-break
 _PRESET_SIGNIFICANT_FIELDS = ("name", "items", "activePath", "activeItemId",
                               "category", "tags", "fav")
 
+# v116 (plan 5.1): the preset version PAYLOADS live in the shared object
+# store (py/workflows_history.store_preset_payload - the same Git/CAS store
+# as the process revisions); the per-preset manifest JSON only references
+# the blob: {storage: {backend, blob[, commit]}, rawHash, size, ...}. The
+# migration imports every legacy embedded-payload file, verifies the byte
+# length + SHA-256 after the import, and only then rewrites the manifest
+# (idempotent: a manifest that already carries storage is skipped; a file
+# the store refused stays untouched and retries on the next run).
+
+
+def _migrate_preset_versions():
+    """One idempotent pass over EVERY readable root's preset_versions/:
+    legacy manifests (the full preset embedded under 'preset') import their
+    canonical payload bytes into the shared store, verify the read-back and
+    rewrite the manifest with a storage reference + the precomputed listing
+    metadata. A failure leaves the file untouched (the next run retries) -
+    the payload is never deleted before the verification succeeded."""
+    if _wf_hist is None:
+        return
+    for root in _roots_all():
+        vbase = os.path.join(root, _PRESET_VERSIONS_DIR)
+        try:
+            pids = os.listdir(vbase)
+        except OSError:
+            continue
+        for pid in sorted(pids):
+            vdir = os.path.join(vbase, pid)
+            if not os.path.isdir(vdir):
+                continue
+            for name in sorted(os.listdir(vdir)):
+                if not name.endswith(".json"):
+                    continue
+                f = os.path.join(vdir, name)
+                rec = _mgr_read_json(vdir, name[:-len(".json")])
+                if not isinstance(rec, dict) or rec.get("storage"):
+                    continue   # already migrated (or not a manifest)
+                prev = rec.get("preset")
+                if not isinstance(prev, dict):
+                    continue   # nothing to import (a damaged file stays)
+                try:
+                    payload = json.dumps(prev, ensure_ascii=False).encode("utf-8")
+                except (TypeError, ValueError):
+                    continue
+                rid = rec.get("revisionId")
+                if not isinstance(rid, str) or not _ID_RE.match(rid):
+                    continue
+                st = _wf_hist.store_preset_payload(pid, rid, payload)
+                if not st.get("ok"):
+                    continue   # retry on the next run - the file stays
+                # verify BEFORE the manifest rewrite (plan 5.1: 'to verify
+                # byte length and SHA-256 after write/read')
+                back = _wf_hist.read_preset_payload(
+                    {"backend": st.get("backend"), "blob": st.get("blob"),
+                     "rawHash": st.get("rawHash")})
+                if back is None or len(back) != len(payload):
+                    continue
+                snap_bytes = _preset_snapshot_bytes(prev)
+                rec2 = {k: v for k, v in rec.items() if k != "preset"}
+                rec2["storage"] = {"backend": st["backend"], "blob": st["blob"]}
+                if st.get("commit"):
+                    rec2["storage"]["commit"] = st["commit"]
+                rec2["rawHash"] = st.get("rawHash")
+                rec2["size"] = len(payload)
+                rec2["itemCount"] = len(prev.get("items") or [])
+                rec2["snapshotBytes"] = snap_bytes
+                rec2["migrated"] = int(time.time())
+                tmp = f + ".tmp"
+                try:
+                    with open(tmp, "w", encoding="utf-8") as fh:
+                        json.dump(rec2, fh, ensure_ascii=False)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.replace(tmp, f)
+                except Exception:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    continue
+
+
+def _preset_snapshot_bytes(prev):
+    """The serialized snapshot-graph sum of ONE preset object (the listing
+    metadata, computed once at archive/migration time)."""
+    snap_bytes = 0
+    try:
+        for it in (prev or {}).get("items") or []:
+            if isinstance(it, dict) and it.get("kind") == "snapshot":
+                snap_bytes += len(json.dumps(it.get("graph"), ensure_ascii=False))
+    except (TypeError, ValueError):
+        snap_bytes = -1
+    return snap_bytes
+
 
 def _versions_dir_for(pid, home=None):
     """The versions folder in the SAME root the preset lives in (the plan:
@@ -935,6 +1029,9 @@ def preset_versions_changed(old, new):
 
 def _archive_preset_version(pid, changed_by):
     """Snapshot the CURRENT preset into preset_versions/<pid>/<rid>.json.
+    v116 (plan 5.1): the payload goes to the SHARED object store (one Git
+    repository / CAS namespace with the process revisions - content dedupe
+    across all presets); the manifest keeps only the reference + metadata.
     Returns (rid, None) or (None, error). Never touches the current file."""
     cur = _load_preset_file(pid)
     if cur is None:
@@ -945,14 +1042,40 @@ def _archive_preset_version(pid, changed_by):
     global _version_seq
     _version_seq += 1
     rid = uuid.uuid4().hex[:16]
+    try:
+        payload = json.dumps(cur, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError) as e:
+        return None, "the preset is not serializable: " + str(e)[:120]
+    st = None
+    if _wf_hist is not None:
+        st = _wf_hist.store_preset_payload(pid, rid, payload)
+        if not st.get("ok"):
+            return None, "the shared store refused the payload: " \
+                + str(st.get("error", "?"))[:120]
     rec = {
         "revisionId": rid,
         "presetId": pid,
         "createdAt": int(time.time()),
         "seq": _version_seq,         # the monotonic tie-break (same-second)
         "changedBy": changed_by,     # overwrite | merge | put | import | restore
-        "preset": cur,               # the FULL previous preset object
     }
+    if st:
+        rec["storage"] = {"backend": st["backend"], "blob": st["blob"]}
+        if st.get("commit"):
+            rec["storage"]["commit"] = st["commit"]
+        rec["rawHash"] = st.get("rawHash")
+        rec["size"] = len(payload)
+    else:
+        # an old py without the history module - the v112 embedded shape
+        # keeps the versions working (the migration imports them later)
+        rec["preset"] = cur
+    rec["itemCount"] = len(cur.get("items") or [])
+    rec["snapshotBytes"] = _preset_snapshot_bytes(cur)
+    # v116: the listing metadata (the plan: the list answers metadata and
+    # NEVER reads a blob) - the display fields ride the small manifest
+    for k in ("name", "category", "tags", "fav", "activeItemId"):
+        if k in cur:
+            rec[k] = cur[k]
     try:
         _ensure_dir(vdir)
         f = os.path.join(vdir, rid + ".json")
@@ -995,7 +1118,8 @@ def _prune_preset_versions(pid):
 def _list_preset_versions(pid):
     """The revision METADATA list (newest first) - NO graph payloads (the
     plan: the list answers metadata; the payload loads for restore/compare
-    only)."""
+    only). v116: the migrated manifests carry their metadata precomputed -
+    the listing never reads a blob."""
     vdir = _versions_dir_for(pid)
     out = []
     if not vdir:
@@ -1009,14 +1133,22 @@ def _list_preset_versions(pid):
         rec = _mgr_read_json(vdir, rid)
         if not rec or rec.get("presetId") != pid:
             continue
+        if rec.get("storage"):
+            out.append({
+                "revisionId": rid,
+                "createdAt": rec.get("createdAt"),
+                "seq": int(rec.get("seq", 0) or 0),
+                "changedBy": rec.get("changedBy"),
+                "name": rec.get("name"),
+                "category": rec.get("category"),
+                "tags": rec.get("tags") or [],
+                "fav": bool(rec.get("fav")),
+                "itemCount": int(rec.get("itemCount") or 0),
+                "snapshotBytes": rec.get("snapshotBytes"),
+                "size": int(rec.get("size") or 0),
+            })
+            continue
         prev = rec.get("preset") or {}
-        snap_bytes = 0
-        try:
-            for it in prev.get("items") or []:
-                if isinstance(it, dict) and it.get("kind") == "snapshot":
-                    snap_bytes += len(json.dumps(it.get("graph"), ensure_ascii=False))
-        except (TypeError, ValueError):
-            snap_bytes = -1
         out.append({
             "revisionId": rid,
             "createdAt": rec.get("createdAt"),
@@ -1027,28 +1159,62 @@ def _list_preset_versions(pid):
             "tags": prev.get("tags") or [],
             "itemCount": len(prev.get("items") or []),
             "fav": bool(prev.get("fav")),
-            "snapshotBytes": snap_bytes,
+            "snapshotBytes": _preset_snapshot_bytes(prev),
         })
     out.sort(key=lambda v: (-(v.get("createdAt") or 0), -v.get("seq", 0)))
     return out
 
 
 def _read_preset_version(pid, rid):
+    """ONE archived revision - the FULL previous preset object. v116: the
+    migrated manifests resolve the payload from the SHARED object store
+    (rawHash verified); the legacy embedded shape still reads directly."""
     vdir = _versions_dir_for(pid)
     if not vdir or not isinstance(rid, str) or not _ID_RE.match(rid):
         return None
     rec = _mgr_read_json(vdir, rid)
-    if rec and rec.get("presetId") == pid:
-        return rec
-    return None
+    if not rec or rec.get("presetId") != pid:
+        return None
+    if rec.get("storage"):
+        if _wf_hist is None:
+            return None
+        payload = _wf_hist.read_preset_payload(rec.get("storage"))
+        if payload is None:
+            return None   # integrity failed - refuse, never serve lies
+        try:
+            prev = json.loads(payload.decode("utf-8"))
+        except Exception:
+            return None
+        if not isinstance(prev, dict):
+            return None
+        return {**rec, "preset": prev}
+    return rec
 
 
 def _delete_preset_versions(pid):
     """The preset deletion takes its history with it (an explicit armed
-    confirm already guarded the UI) - no orphans without a UI."""
+    confirm already guarded the UI) - no orphans without a UI. v116 (plan
+    5.1): the shared-store blobs the revisions uniquely own are reclaimed
+    (cross-referenced against the rest of the store); the git backend keeps
+    its reachable chain and reports nothing."""
     vdir = _versions_dir_for(pid)
     if not vdir:
         return
+    storages = []
+    try:
+        for name in os.listdir(vdir):
+            if not name.endswith(".json"):
+                continue
+            rec = _mgr_read_json(vdir, name[:-len(".json")])
+            if isinstance(rec, dict) and rec.get("storage"):
+                storages.append(rec.get("storage"))
+    except OSError:
+        pass
+    if storages and _wf_hist is not None:
+        try:
+            _wf_hist.reclaim_preset_blobs(storages)
+        except Exception:
+            pass
     shutil.rmtree(vdir, ignore_errors=True)
 
 
@@ -1375,7 +1541,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v115"
+WORKFLOWS_SERVER_VERSION = "v116"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -2046,6 +2212,288 @@ async def workflows_files_fav_post(request):
 
 
 # ---------------------------------------------------------------------------
+# v116 (plan 7, THE OWNER'S CUT): the Files tab bulk operations. The owner
+# asked for Delete only ("кнопки move/copy не надо - передумал. delete
+# кнопка - надо"), so the Files selection bar gets exactly one mass action:
+# DELETE the selected FILES. The plan's safety contract applies in full:
+#   * the History is NEVER touched - a deleted file's process keeps its
+#     revisions (orphaned) and re-links when a file with the same UUID
+#     appears again;
+#   * the preflight snapshots + VERIFIES every file BEFORE anything is
+#     deleted - any failure aborts untouched (409);
+#   * per-file results, no silent partial success;
+#   * Undo (2 h TTL) restores the exact bytes from the verified snapshots
+#     into free paths only - a path taken by a newer file is skipped and
+#     reported, never overwritten;
+#   * the derived index rows + favorites + process locations follow the
+#     delete immediately (no ghost rows, no dead stars).
+# ---------------------------------------------------------------------------
+
+FILEOPS_MAX_FILES = 40            # one batch, one undo manifest
+FILEOPS_UNDO_TTL_S = 2 * 60 * 60  # the undo window (the tx TTL is 6 h)
+
+
+def _fileops_dir():
+    return _mgr_dir("filesops")
+
+
+def _fileops_txids():
+    """Every tx snapshot id the LIVE undo manifests still reference (the
+    GC protection hook in py/workflows_history)."""
+    out = []
+    for fid in _mgr_list(_fileops_dir()):
+        rec = _mgr_read_json(_fileops_dir(), fid)
+        if not isinstance(rec, dict):
+            continue
+        if int(rec.get("ts", 0) or 0) + FILEOPS_UNDO_TTL_S <= int(time.time()):
+            continue   # an expired manifest protects nothing
+        for f in rec.get("files") or []:
+            txid = f.get("txId") if isinstance(f, dict) else None
+            if isinstance(txid, str) and txid:
+                out.append(txid)
+    return out
+
+
+def _fileops_gc_locked():
+    """Drop the expired undo manifests (the snapshots die with their own
+    TTL; the manifest only blocks the count-based GC while it lives)."""
+    now = int(time.time())
+    for fid in _mgr_list(_fileops_dir()):
+        rec = _mgr_read_json(_fileops_dir(), fid)
+        if not isinstance(rec, dict) or \
+                now - int(rec.get("ts", 0) or 0) > FILEOPS_UNDO_TTL_S:
+            _mgr_delete(_fileops_dir(), fid)
+
+
+@PromptServer.instance.routes.post("/settings_hub/workflows/files/delete")
+async def workflows_files_delete(request):
+    """DELETE the selected workflow files. Body {paths: ['workflows/<rel>',
+    ...]}. Everything validates BEFORE the first unlink (plan 7.6/7.7):
+    library-relative paths only, traversal/symlink checks, the batch cap,
+    a verified safety snapshot per file. A preflight failure answers 409
+    with per-file reasons and deletes NOTHING."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    paths = body.get("paths") if isinstance(body, dict) else None
+    if not isinstance(paths, list) or not paths:
+        return web.json_response({"ok": False, "error": "paths (a non-empty list) are required"},
+                                 status=400)
+    if len(paths) > FILEOPS_MAX_FILES:
+        return web.json_response(
+            {"ok": False,
+             "error": "too many files in one batch (max %d)" % FILEOPS_MAX_FILES,
+             "limit": FILEOPS_MAX_FILES}, status=400)
+    scope = _request_user_scope(request)
+    # 1) validate + locate every path (nothing touched yet)
+    plan = []
+    for raw in paths:
+        res = {"path": raw, "ok": False, "removed": False}
+        rel = _clean_item_path(raw)
+        if not rel:
+            res["error"] = "bad path"
+            plan.append(res)
+            continue
+        res["path"] = rel
+        phys, _wroot = _resolve_library_file(request, rel)
+        if not phys:
+            res["error"] = "the path escapes the library"
+            plan.append(res)
+            continue
+        if not os.path.isfile(phys):
+            res["error"] = "not a regular file (missing?)"
+            plan.append(res)
+            continue
+        res["phys"] = phys
+        res["ok"] = True
+        plan.append(res)
+    if any(not p["ok"] for p in plan):
+        return web.json_response(
+            {"ok": False, "stage": "validate",
+             "error": "some paths are invalid - nothing was deleted",
+             "results": [{k: v for k, v in p.items() if k != "phys"}
+                         for p in plan]}, status=400)
+    # 2) the preflight: snapshot + VERIFY every file (plan 7.6: a failed
+    #    snapshot stops the batch BEFORE the first deletion)
+    for p in plan:
+        try:
+            with open(p["phys"], "rb") as fh:
+                old = fh.read()
+        except OSError as e:
+            p["ok"] = False
+            p["error"] = "read failed: " + str(e)[:100]
+            continue
+        tx = _wf_hist.make_tx_snapshot(p["path"], old)
+        if not tx.get("ok"):
+            p["ok"] = False
+            p["error"] = "the safety snapshot failed: " + str(tx.get("error", "?"))[:100]
+            continue
+        back = _wf_hist.read_tx_snapshot(tx.get("txId"))
+        if back is None or _sha256_bytes(back) != tx.get("hash"):
+            p["ok"] = False
+            p["error"] = "the safety snapshot failed verification"
+            continue
+        p["txId"] = tx.get("txId")
+        p["hash"] = tx.get("hash")
+        p["bytes"] = len(old)
+    if any(not p["ok"] for p in plan):
+        return web.json_response(
+            {"ok": False, "stage": "preflight",
+             "error": "the safety snapshot failed - NOTHING was deleted",
+             "results": [{k: v for k, v in p.items() if k != "phys"}
+                         for p in plan]}, status=409)
+    # 3) the removals (every file verified above)
+    now = int(time.time())
+    opid = uuid.uuid4().hex[:16]
+    removed = []
+    for p in plan:
+        try:
+            os.remove(p["phys"])
+            p["removed"] = True
+            removed.append(p)
+        except OSError as e:
+            p["error"] = "remove failed: " + str(e)[:100]
+    failed = [p for p in plan if not p.get("removed")]
+    # 4) the undo manifest (only the actually-removed files are restorable)
+    manifest = {
+        "opId": opid, "op": "delete", "ts": now,
+        "expiresAt": now + FILEOPS_UNDO_TTL_S,
+        "files": [{"path": p["path"], "txId": p.get("txId"),
+                   "hash": p.get("hash"), "bytes": p.get("bytes")}
+                  for p in removed],
+    }
+    undo = None
+    if removed:
+        _ensure_dir(_fileops_dir())
+        if _mgr_write_json(_fileops_dir(), opid, manifest):
+            undo = {"opId": opid, "expiresAt": manifest["expiresAt"]}
+    # 5) the consistency sweep: index rows, favorites, process locations
+    dropped = 0
+    if removed and _wf_index is not None:
+        try:
+            fr = _wf_index.forget_paths(user_scope=scope,
+                                        rel_paths=[p["path"] for p in removed])
+            dropped = int(fr.get("removed") or 0)
+        except Exception:
+            dropped = 0
+    detached = []
+    if removed and _wf_hist is not None:
+        try:
+            d = _wf_hist.detach_locations([p["path"] for p in removed])
+            detached = d.get("detached") or []
+        except Exception:
+            detached = []
+    if removed:
+        try:
+            favs = _read_file_favs()
+            gone = set(p["path"] for p in removed)
+            favs2 = [f for f in favs if f not in gone]
+            if len(favs2) != len(favs):
+                _write_file_favs(favs2)
+        except Exception:
+            pass
+    return web.json_response({
+        "ok": not failed,
+        "opId": opid,
+        "results": [{k: v for k, v in p.items() if k != "phys"} for p in plan],
+        "removed": len(removed),
+        "failed": len(failed),
+        "indexRowsDropped": dropped,
+        "locationsDetached": len([d for d in detached if d.get("removed")]),
+        "undo": undo,
+        "note": "the process history is NEVER deleted with the files"
+                if removed else None,
+    }, status=200 if not failed else 207)
+
+
+@PromptServer.instance.routes.post("/settings_hub/workflows/files/undo")
+async def workflows_files_undo(request):
+    """Undo the LAST Files batch operation (plan 7.6). For a delete: every
+    file's exact bytes come back from its VERIFIED tx snapshot - only into
+    a FREE path (a newer file at the same path is skipped and reported,
+    never overwritten). The index rows refresh and the discovery re-binds
+    the restored files immediately. The undo manifest dies after use."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    opid = body.get("opId") if isinstance(body, dict) else None
+    if not isinstance(opid, str) or not _ID_RE.match(opid):
+        return web.json_response({"ok": False, "error": "bad opId"}, status=400)
+    rec = _mgr_read_json(_fileops_dir(), opid)
+    if not isinstance(rec, dict) or rec.get("opId") != opid:
+        return web.json_response(
+            {"ok": False, "error": "no such operation (expired or already undone)"},
+            status=404)
+    now = int(time.time())
+    if now - int(rec.get("ts", 0) or 0) > FILEOPS_UNDO_TTL_S:
+        _mgr_delete(_fileops_dir(), opid)
+        return web.json_response({"ok": False, "error": "the undo window (2 h) expired"},
+                                 status=410)
+    if rec.get("op") != "delete":
+        return web.json_response({"ok": False, "error": "unknown operation type"},
+                                 status=400)
+    results = []
+    restored = []
+    for f in rec.get("files") or []:
+        rel = f.get("path")
+        res = {"path": rel, "restored": False}
+        phys, _wroot = _resolve_library_file(request, rel)
+        if not phys:
+            res["error"] = "the path escapes the library"
+            results.append(res)
+            continue
+        if os.path.exists(phys):
+            res["error"] = "the path is taken by a newer file - skipped (never overwritten)"
+            results.append(res)
+            continue
+        snap = _wf_hist.read_tx_snapshot(f.get("txId"))
+        if snap is None:
+            res["error"] = "the safety snapshot is gone (expired)"
+            results.append(res)
+            continue
+        if f.get("hash") and _sha256_bytes(snap) != f.get("hash"):
+            res["error"] = "the safety snapshot failed the hash check"
+            results.append(res)
+            continue
+        try:
+            os.makedirs(os.path.dirname(phys), exist_ok=True)
+            tmp = phys + ".undo-tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(snap)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, phys)
+            res["restored"] = True
+            restored.append(rel)
+        except OSError as e:
+            res["error"] = "restore failed: " + str(e)[:100]
+        results.append(res)
+    # the consistency sweep back: fresh index rows + immediate re-binding
+    if restored:
+        if _wf_index is not None:
+            try:
+                _wf_index.refresh_paths(user_scope=_request_user_scope(request),
+                                        root_dirs=_workflows_user_dirs(request),
+                                        rel_paths=restored)
+            except Exception:
+                pass
+        if _wf_hist is not None:
+            try:
+                _wf_hist.expire_reconcile_cache()
+            except Exception:
+                pass
+    _mgr_delete(_fileops_dir(), opid)
+    n_ok = len(restored)
+    return web.json_response({
+        "ok": n_ok == len(rec.get("files") or []) and n_ok > 0,
+        "restored": n_ok,
+        "results": results,
+    })
+
+
+# ---------------------------------------------------------------------------
 # v112 (plan 3.1): SERVER-SIDE UNDO SNAPSHOTS. Before the Workflow Manager
 # runs a destructive apply plan it captures the FULL workspace state - every
 # open tab's path/key/modified/temp flags AND the actual graph JSON of the
@@ -2332,6 +2780,86 @@ def _request_user_scope(request):
     return "default"
 
 
+def _resolve_library_file(request, rel):
+    """v116 (plan 3.6): the ONE hardened locator of a library file. The
+    client-supplied 'workflows/<rel>' path is normalized, bound to a REAL
+    walk root, and SYMLINK-CHECKED: the resolved real path must still sit
+    inside the resolved root - a link pointing outside the library can
+    never be read, written or deleted through the manager routes. Returns
+    (physical_path, root_dir) or (None, None)."""
+    if not isinstance(rel, str) or not rel:
+        return None, None
+    sub = rel[len("workflows/"):] if rel.startswith("workflows/") else rel
+    if not sub or sub.startswith("/") or "\\" in sub:
+        return None, None
+    for wroot in _workflows_user_dirs(request):
+        cand = os.path.normpath(os.path.join(wroot, sub))
+        if not _is_inside(cand, wroot):
+            continue
+        try:
+            real_cand = os.path.realpath(cand)
+            real_root = os.path.realpath(wroot)
+        except Exception:
+            continue
+        if not _is_inside(real_cand, real_root):
+            continue   # a symlink escape - refuse silently but firmly
+        return real_cand, wroot
+    return None, None
+
+
+def _changes_status(disk, cur):
+    """v116 (plan 4.2/11.5): the 'Changes since checkpoint' state - the
+    v112 code compared rawHash, so a canvas move or a formatting-only save
+    claimed a workflow change. The layered hashes tell the real states:
+      unchanged            - the working graph is identical, nothing else moved
+      presentation_changed - only the confirmed canvas/layout metadata moved
+      metadata_changed     - the graph is the same, unclassified extension
+                             metadata moved
+      workflow_changed     - nodes/links/widgets (the working graph) moved
+      unknown              - no fresh index row / a profile mismatch / the
+                             revision carries no layered hashes
+    `disk` is the index row dict {raw_hash, workflow_hash, presentation_hash,
+    extension_hash, profile}; `cur` is the current revision manifest."""
+    if not disk or not isinstance(cur, dict):
+        return "unknown"
+    if not cur.get("workflowHash") or not disk.get("workflow_hash"):
+        return "unknown"   # an old revision without the layered hashes
+    if (disk.get("profile") or "") != (cur.get("normalizationProfileVersion") or ""):
+        return "unknown"   # different normalization profiles never compare
+    if disk.get("workflow_hash") != cur.get("workflowHash"):
+        return "workflow_changed"
+    if (disk.get("extension_hash") or None) != (cur.get("extensionHash") or None):
+        return "metadata_changed"
+    if (disk.get("presentation_hash") or None) != (cur.get("presentationHash") or None):
+        return "presentation_changed"
+    return "unchanged"
+
+
+_STATUS_LABELS = {
+    "unchanged": "No workflow changes",
+    "presentation_changed": "Canvas changed only",
+    "metadata_changed": "Metadata changed",
+    "workflow_changed": "Workflow changed",
+    "unknown": "Status unavailable - refresh the index",
+}
+
+
+def _index_rows_for_scope(scope, columns):
+    """One SELECT of the index rows for a scope (the callers shape them)."""
+    if _wf_index is None:
+        return []
+    try:
+        import sqlite3
+        conn = sqlite3.connect(_wf_index._db_path(), timeout=10)
+        rows = conn.execute(
+            "SELECT %s FROM workflow_files WHERE user_scope=?" % columns,
+            (scope,)).fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
 @PromptServer.instance.routes.get("/settings_hub/workflows/index/status")
 async def workflows_index_status(request):
     """The index stats for the UI: files/errors/too-large counters, the last
@@ -2409,12 +2937,41 @@ async def workflows_index_search(request):
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/index/duplicates")
 async def workflows_index_duplicates(request):
-    """The plan 5.3 duplicate/similarity groups over the indexed library."""
+    """The plan 5.3 duplicate/similarity groups over the indexed library.
+    v116: the answer also carries the STRUCTURAL candidates (the same node
+    class set, everything else differs - candidates ONLY, never merged)."""
     if _wf_index is None:
         return web.json_response({"ok": False, "error": "index module unavailable"},
                                  status=404)
     scope = _request_user_scope(request)
     res = _wf_index.duplicate_groups(user_scope=scope)
+    res["ok"] = "error" not in res
+    return web.json_response(res)
+
+
+@PromptServer.instance.routes.get("/settings_hub/workflows/index/notes")
+async def workflows_index_notes(request):
+    """v116 (plan 4.6): the NOTES search - process notes, revision titles
+    and revision notes over ONE SQLite table (FTS5 when available, a tested
+    LIKE fallback otherwise). The search NEVER reads a Git blob: the notes
+    index is maintained by the history mutations and rebuildable from the
+    manifests (rebuild=1 forces a restore pass)."""
+    if _wf_index is None or _wf_hist is None:
+        return web.json_response({"ok": False, "error": "index module unavailable"},
+                                 status=404)
+    qp = request.query
+    q = qp.get("q") or ""
+    if qp.get("rebuild") in ("1", "true"):
+        try:
+            procs = _wf_hist.list_processes(_request_user_scope(request))
+            revs = []
+            for p in procs:
+                for r in _wf_hist.list_revisions(p.get("processId")):
+                    revs.append(r)
+            _wf_index.notes_rebuild(procs, revs)
+        except Exception:
+            pass
+    res = _wf_index.search_notes(q=q, limit=int(qp.get("limit") or 40))
     res["ok"] = "error" not in res
     return web.json_response(res)
 
@@ -2437,6 +2994,28 @@ except Exception:  # pragma: no cover - direct/test imports
 if _wf_hist is not None:
     _wf_hist.set_base_dir(os.path.join(_user_dir(), "settings_hub",
                                        MGR_DIR_NAME))
+    # v116 (plan 7.6): the tx snapshots a Files-delete undo manifest still
+    # references are protected from the count-based tx GC while the 2 h
+    # undo window lives (the TTL still wins).
+    _wf_hist.TX_PROTECT_HOOK = _fileops_txids
+
+
+_pv_migrated = False
+
+
+def _pv_migrate_once():
+    """v116 (plan 5.1): the ONE-shot idempotent import of the legacy
+    embedded preset-version payloads into the shared object store. Runs on
+    the first version-listing/read of the session; a failure keeps the
+    legacy files untouched (the next session retries)."""
+    global _pv_migrated
+    if _pv_migrated:
+        return
+    _pv_migrated = True
+    try:
+        _migrate_preset_versions()
+    except Exception:
+        pass
 
 
 def _resolve_rel_path_from_request(raw):
@@ -2447,30 +3026,33 @@ def _resolve_rel_path_from_request(raw):
     return p
 
 
+def _sha256_bytes(data):
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
 @PromptServer.instance.routes.get("/settings_hub/workflows/history/processes")
 async def workflows_history_processes(request):
     """The process list (discovered from the indexed ComfyUI UUIDs) with the
     compact fields the row UI needs: names, revision counts, stable flags,
-    per-location 'changes since checkpoint' statuses."""
+    per-location 'changes since checkpoint' statuses.
+    v116 (plan 4.2): the status is the LAYERED comparison - unchanged /
+    presentation_changed / metadata_changed / workflow_changed / unknown
+    (the v112 rawHash compare claimed a workflow change for a canvas move).
+    v116 (plan 4.5): the list + the rows are SCOPE-filtered."""
     if _wf_hist is None:
         return web.json_response({"ok": False, "error": "history module unavailable"},
                                  status=404)
     scope = _request_user_scope(request)
-    procs = _wf_hist.list_processes()
-    # the per-location 'changes since checkpoint' status: the index row hash
-    # vs the process's current revision rawHash (plan 5.7.3)
-    changed = {}
-    if _wf_index is not None:
-        try:
-            import sqlite3
-            conn = sqlite3.connect(_wf_index._db_path(), timeout=10)
-            for row in conn.execute(
-                    "SELECT rel_path, raw_hash FROM workflow_files "
-                    "WHERE user_scope=?", (scope,)).fetchall():
-                changed[row[0]] = row[1]
-            conn.close()
-        except Exception:
-            changed = {}
+    procs = _wf_hist.list_processes(scope)
+    # the per-location layered comparison (plan 4.2)
+    rows = _index_rows_for_scope(
+        scope,
+        "rel_path, raw_hash, workflow_hash, presentation_hash, "
+        "extension_hash, normalization_profile_version")
+    changed = {r[0]: {"raw_hash": r[1], "workflow_hash": r[2],
+                      "presentation_hash": r[3], "extension_hash": r[4],
+                      "profile": r[5]} for r in rows}
     out = []
     for p in procs:
         cur = None
@@ -2478,13 +3060,17 @@ async def workflows_history_processes(request):
             cur = _wf_hist._read_revision(p["currentRevisionId"])
         locs = []
         for loc in p.get("locations") or []:
-            cur_hash = changed.get(loc.get("path") or "")
+            st = _changes_status(changed.get(loc.get("path") or ""), cur)
             locs.append({
                 "path": loc.get("path"),
                 "isPrimary": bool(loc.get("isPrimary")),
                 "mtimeNs": loc.get("mtimeNs"),
-                "changesSinceCheckpoint": bool(cur and cur_hash and
-                                               cur_hash != cur.get("rawHash")),
+                "changeStatus": st,
+                "statusLabel": _STATUS_LABELS.get(st, st),
+                # the boolean stays for the older UI builds
+                "changesSinceCheckpoint": st in ("presentation_changed",
+                                                 "metadata_changed",
+                                                 "workflow_changed"),
             })
         out.append({
             "processId": p["processId"],
@@ -2564,18 +3150,15 @@ async def workflows_history_checkpoint(request):
                                       "error": "the tab graph is not serializable"}, status=400)
     elif rel_path:
         # a DISK checkpoint: read the exact bytes of the library file
+        # (v116: the hardened locator - symlink escapes refuse)
         data = None
-        for wroot in _workflows_user_dirs(request):
-            cand = os.path.join(wroot, rel_path[len("workflows/"):]
-                                if rel_path.startswith("workflows/") else rel_path)
-            cand = os.path.normpath(cand)
-            if _is_inside(cand, wroot) and os.path.isfile(cand):
-                try:
-                    with open(cand, "rb") as fh:
-                        data = fh.read()
-                except OSError:
-                    data = None
-                break
+        phys, _wroot = _resolve_library_file(request, rel_path)
+        if phys and os.path.isfile(phys):
+            try:
+                with open(phys, "rb") as fh:
+                    data = fh.read()
+            except OSError:
+                data = None
         if data is None:
             return web.json_response({"ok": False, "error": "the file is gone"},
                                      status=404)
@@ -2583,7 +3166,8 @@ async def workflows_history_checkpoint(request):
         return web.json_response(
             {"ok": False, "error": "a graph or a path is required"}, status=400)
     r = _wf_hist.record_checkpoint_for_path(rel_path, data, note=note,
-                                            source=source, title=title)
+                                            source=source, title=title,
+                                            scope=_request_user_scope(request))
     if not r.get("ok"):
         return web.json_response(r, status=500)
     # the Files index stays in sync after a history mutation
@@ -2593,36 +3177,41 @@ async def workflows_history_checkpoint(request):
 @PromptServer.instance.routes.get("/settings_hub/workflows/history/resolve")
 async def workflows_history_resolve(request):
     """The binding of ONE library path: the process + the statuses the row
-    UI shows ('Checkpoint available' / 'Changes since checkpoint')."""
+    UI shows. v116 (plan 4.2): the layered 5-state status replaces the
+    rawHash compare; v116 (plan 4.5): the binding lookup is scope-aware."""
     if _wf_hist is None:
         return web.json_response({"ok": False, "error": "history module unavailable"},
                                  status=404)
     rel = _resolve_rel_path_from_request(request.query.get("path"))
     if not rel:
         return web.json_response({"ok": False, "error": "bad path"}, status=400)
-    p = _wf_hist.resolve_path_process(rel)
+    scope = _request_user_scope(request)
+    p = _wf_hist.resolve_path_process(rel, scope)
     if not p:
         return web.json_response({"ok": True, "bound": False})
     cur = _wf_hist._read_revision(p.get("currentRevisionId")) \
         if p.get("currentRevisionId") else None
-    # the disk hash from the index (fresh scan needed for accuracy)
-    disk_hash = None
-    if _wf_index is not None:
-        try:
-            import sqlite3
-            scope = _request_user_scope(request)
-            conn = sqlite3.connect(_wf_index._db_path(), timeout=10)
-            row = conn.execute(
-                "SELECT raw_hash FROM workflow_files WHERE user_scope=? AND "
-                "rel_path=?", (scope, rel)).fetchone()
-            conn.close()
-            if row:
-                disk_hash = row[0]
-        except Exception:
-            disk_hash = None
+    # the disk row from the index (fresh scan needed for accuracy)
+    disk = None
+    rows = _index_rows_for_scope(
+        scope,
+        "rel_path, raw_hash, workflow_hash, presentation_hash, "
+        "extension_hash, normalization_profile_version")
+    for r in rows:
+        if r[0] == rel:
+            disk = {"raw_hash": r[1], "workflow_hash": r[2],
+                    "presentation_hash": r[3], "extension_hash": r[4],
+                    "profile": r[5]}
+            break
+    st = _changes_status(disk, cur)
     return web.json_response({
         "ok": True,
         "bound": True,
+        "changeStatus": st,
+        "statusLabel": _STATUS_LABELS.get(st, st),
+        "changesSinceCheckpoint": st in ("presentation_changed",
+                                         "metadata_changed",
+                                         "workflow_changed"),
         "process": {
             "processId": p["processId"],
             "workflowId": p.get("workflowId"),
@@ -2631,8 +3220,6 @@ async def workflows_history_resolve(request):
             "revisionCount": len(_wf_hist.list_revisions(p["processId"])),
             "hasCheckpoints": bool(p.get("currentRevisionId")),
         },
-        "changesSinceCheckpoint": bool(cur and disk_hash and
-                                       disk_hash != cur.get("rawHash")),
     })
 
 
@@ -2711,9 +3298,13 @@ async def workflows_history_process_delete(request):
     хвостами" - erase the WHOLE process: every revision, the process
     manifest, every location binding and the CAS blobs no other revision
     references. Body {deleteFiles: true} ALSO removes the physical workflow
-    files of every location - each file is safety-snapshotted (a tx copy
-    with the 6h TTL) BEFORE the unlink and every per-file result is
-    reported back so the UI can name exactly what happened. When the files
+    files of every location.
+    v116 (plan 3.5): the deletion is TWO-PHASE - the preflight (read +
+    VERIFY the tx safety snapshot of EVERY file) runs first and any failure
+    aborts untouched; a file removal failure KEEPS the process and its
+    whole history ({stage: "files", partial: true}) so metadata can never
+    outlive its files. v116 (plan 3.6): every location goes through the
+    hardened locator (realpath-bound to the library roots). When the files
     are gone their derived-index rows are dropped too - a stale row would
     let the discovery reconcile resurrect the erased process from a ghost
     location on the next throttled pass."""
@@ -2727,53 +3318,74 @@ async def workflows_history_process_delete(request):
         body = {}
     delete_files = bool(body.get("deleteFiles")) if isinstance(body, dict) else False
 
-    def _remove_file(rel):
-        """The remover the store calls for every location: validate the
-        library-relative path against the REAL roots (never an arbitrary
-        filesystem path), snapshot the bytes, then unlink. A missing file
-        is a fine outcome (already gone); a failure is reported, never
-        raised - the process erasure itself must not wedge."""
+    def _locate_or_result(rel):
+        """The common hardened validation: returns (phys, None) or
+        (None, result_dict)."""
         res = {"path": rel, "removed": False, "snapshot": None}
         if not isinstance(rel, str) or not rel.startswith("workflows/"):
             res["error"] = "outside the workflows library"
-            return res
-        target = None
-        for wroot in _workflows_user_dirs(request):
-            cand = os.path.normpath(os.path.join(
-                wroot, rel[len("workflows/"):]))
-            if _is_inside(cand, wroot):
-                target = cand
-                break
-        if not target:
+            return None, res
+        phys, _wroot = _resolve_library_file(request, rel)
+        if not phys:
             res["error"] = "the path escapes the library"
+            return None, res
+        return phys, res
+
+    def _preflight(rel):
+        """PHASE 0 for ONE location: validate, read, snapshot, VERIFY the
+        snapshot read-back. ok=False anywhere stops the whole delete."""
+        phys, res = _locate_or_result(rel)
+        if not phys:
+            res["ok"] = False
             return res
-        if not os.path.isfile(target):
-            res["reason"] = "missing"   # already gone - not an error
+        if not os.path.isfile(phys):
+            res.update({"ok": True, "reason": "missing"})   # already gone
             return res
         try:
-            with open(target, "rb") as fh:
+            with open(phys, "rb") as fh:
                 old = fh.read()
         except OSError as e:
-            res["error"] = "read failed: " + str(e)[:100]
+            res.update({"ok": False, "error": "read failed: " + str(e)[:100]})
             return res
         tx = _wf_hist.make_tx_snapshot(rel, old)
         if not tx.get("ok"):
-            res["error"] = ("the safety snapshot failed: "
-                            + str(tx.get("error", "?"))[:100])
+            res.update({"ok": False,
+                        "error": "the safety snapshot failed: "
+                                 + str(tx.get("error", "?"))[:100]})
             return res
-        res["snapshot"] = tx.get("txId")
+        txid = tx.get("txId")
+        # plan 3.4/3.5: the snapshot must be VERIFIED before it can protect
+        # anything - read it back and compare the SHA-256
+        back = _wf_hist.read_tx_snapshot(txid)
+        if back is None or _sha256_bytes(back) != tx.get("hash"):
+            res.update({"ok": False,
+                        "error": "the safety snapshot failed verification"})
+            return res
+        res.update({"ok": True, "snapshot": txid, "bytes": len(old)})
+        return res
+
+    def _remove_file(rel):
+        """PHASE 1 for ONE location: the preflight already verified a
+        snapshot - unlink and report."""
+        phys, res = _locate_or_result(rel)
+        if not phys:
+            return res
+        if not os.path.isfile(phys):
+            res["reason"] = "missing"   # already gone - not an error
+            return res
         try:
-            os.remove(target)
+            os.remove(phys)
             res["removed"] = True
-            res["bytes"] = len(old)
         except OSError as e:
             res["error"] = "remove failed: " + str(e)[:100]
         return res
 
     r = _wf_hist.delete_process(pid, delete_files=delete_files,
-                                file_remover=_remove_file if delete_files else None)
+                                file_remover=_remove_file if delete_files else None,
+                                file_preflight=_preflight if delete_files else None)
     if not r.get("ok"):
-        return web.json_response(r, status=400)
+        # plan 3.5: a preflight/partial failure is a CONFLICT, not a crash
+        return web.json_response(r, status=409)
     dropped = 0
     if delete_files and _wf_index is not None:
         try:
@@ -2794,12 +3406,12 @@ async def workflows_history_badges(request):
     user must see at a glance which workflows carry saved versions. One
     small answer for the whole tab: {rel_path: {count, stable}} for the
     processes that HAVE revisions (the rest costs nothing). An old pack
-    without this route simply shows no badges."""
+    without this route simply shows no badges. v116: scope-filtered."""
     if _wf_hist is None:
         return web.json_response({"ok": False, "error": "history module unavailable"},
                                  status=404)
     try:
-        badges = _wf_hist.revision_badges()
+        badges = _wf_hist.revision_badges(_request_user_scope(request))
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)[:200]}, status=500)
     return web.json_response({"ok": True, "badges": badges})
@@ -2809,9 +3421,22 @@ async def workflows_history_badges(request):
 async def workflows_history_restore(request):
     """Restore a revision. mode 'open-copy' (DEFAULT - never writes) returns
     the exact bytes for the client to open as an independent tab. mode
-    'replace' + path OVERWRITES the file: the transaction safety snapshot is
-    MANDATORY first (a preflight failure refuses the replace), then an
-    atomic tmp+fsync+replace write, rollback from the snapshot on failure."""
+    'replace' + path OVERWRITES the file.
+    v116 (plan 3.4): the replace path is HARDENED -
+      1. the revision must BELONG to the pid in the URL (404 on a mismatch
+         - the v115 route accepted any pid with a valid rid);
+      2. the target path must be a CURRENT LOCATION of that process (the
+         silent rebinding of an arbitrary path is gone);
+      3. the target file must exist and be READABLE - a missing/unreadable
+         target refuses the replace and suggests the open-copy flow (the
+         v115 code snapshotted empty bytes and kept going);
+      4. the safety snapshot is VERIFIED (read-back SHA-256) before any
+         write, the new bytes land via tmp + fsync + atomic os.replace
+         (+ a best-effort directory fsync), and a failure rolls back from
+         the verified snapshot - a failed rollback keeps the snapshot and
+         names its tx id;
+      5. the derived index row of the file is refreshed in place so the
+         next query answers with the fresh hashes."""
     if _wf_hist is None:
         return web.json_response({"ok": False, "error": "history module unavailable"},
                                  status=404)
@@ -2822,6 +3447,15 @@ async def workflows_history_restore(request):
     except Exception:
         body = {}
     mode = (body.get("mode") if isinstance(body, dict) else None) or "open-copy"
+    # 1) the revision manifest + OWNERSHIP check (plan 3.4/3.6)
+    rec = _wf_hist._read_revision(rid)
+    if not rec:
+        return web.json_response({"ok": False, "error": "no such revision"},
+                                 status=404)
+    if isinstance(pid, str) and pid and rec.get("processId") != pid:
+        return web.json_response(
+            {"ok": False, "error": "the revision does not belong to this process"},
+            status=404)
     data = _wf_hist.read_revision_bytes(rid)
     if data is None:
         return web.json_response({"ok": False, "error": "no readable revision"},
@@ -2831,37 +3465,55 @@ async def workflows_history_restore(request):
     rel = _resolve_rel_path_from_request(body.get("path") if isinstance(body, dict) else None)
     if not rel:
         return web.json_response({"ok": False, "error": "replace needs a path"}, status=400)
-    # 1) the transaction safety snapshot BEFORE any destructive step
-    old = None
-    for wroot in _workflows_user_dirs(request):
-        cand = os.path.join(wroot, rel[len("workflows/"):]
-                            if rel.startswith("workflows/") else rel)
-        cand = os.path.normpath(cand)
-        if _is_inside(cand, wroot) and os.path.isfile(cand):
-            try:
-                with open(cand, "rb") as fh:
-                    old = fh.read()
-            except OSError:
-                old = None
-            break
-    tx = _wf_hist.make_tx_snapshot(rel, old if old is not None else b"")
+    # 2) the path must be a CURRENT LOCATION of this process (plan 3.4:
+    #    never a silent rebinding of an arbitrary library path)
+    proc = _wf_hist._read_process(pid) if pid else None
+    loc_paths = set()
+    for loc in (proc or {}).get("locations") or []:
+        lp = loc.get("path")
+        if isinstance(lp, str):
+            loc_paths.add(lp)
+    if proc is not None and loc_paths and rel not in loc_paths:
+        return web.json_response(
+            {"ok": False,
+             "error": "the path is not a location of this process - use "
+                      "Open version (a copy) instead of Replace"},
+            status=400)
+    # 3) the target: hardened locate + MUST exist and read cleanly
+    phys, _wroot = _resolve_library_file(request, rel)
+    if not phys:
+        return web.json_response({"ok": False, "error": "the path escapes the library"},
+                                 status=400)
+    if not os.path.isfile(phys):
+        return web.json_response(
+            {"ok": False,
+             "error": "the target file does not exist - use Open version "
+                      "(a copy) to bring it back as a new file"},
+            status=400)
+    try:
+        with open(phys, "rb") as fh:
+            old = fh.read()
+    except OSError as e:
+        return web.json_response(
+            {"ok": False, "error": "the target file is not readable ("
+                     + str(e)[:100] + ") - nothing was changed"},
+            status=500)
+    # 4) the VERIFIED transaction safety snapshot BEFORE any destructive step
+    tx = _wf_hist.make_tx_snapshot(rel, old)
     if not tx.get("ok"):
         return web.json_response(
             {"ok": False, "error": "the safety snapshot failed: " + tx.get("error", "?")},
             status=500)
-    # 2) the atomic replace (tmp + fsync + os.replace)
-    target = None
-    for wroot in _workflows_user_dirs(request):
-        cand = os.path.join(wroot, rel[len("workflows/"):]
-                            if rel.startswith("workflows/") else rel)
-        cand = os.path.normpath(cand)
-        if _is_inside(cand, wroot):
-            target = cand
-            break
-    if not target:
-        return web.json_response({"ok": False, "error": "the path escapes the library"},
-                                 status=400)
+    back = _wf_hist.read_tx_snapshot(tx.get("txId"))
+    if back is None or _sha256_bytes(back) != tx.get("hash"):
+        return web.json_response(
+            {"ok": False,
+             "error": "the safety snapshot failed verification - nothing was changed",
+             "txId": tx.get("txId")}, status=500)
+    # 5) the atomic replace (tmp + fsync + os.replace + dir fsync)
+    target = phys
     tmp = target + ".restore-tmp"
+    rolled = False
     try:
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(tmp, "wb") as fh:
@@ -2869,8 +3521,16 @@ async def workflows_history_restore(request):
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, target)
+        try:
+            dfd = os.open(os.path.dirname(target), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except Exception:
+            pass   # the directory fsync is best-effort (platform-dependent)
     except Exception as e:
-        # 3) the rollback from the verified snapshot
+        # 6) the rollback from the VERIFIED snapshot
         rolled = False
         snap = _wf_hist.read_tx_snapshot(tx.get("txId"))
         if snap is not None and os.path.isfile(target):
@@ -2889,13 +3549,25 @@ async def workflows_history_restore(request):
         return web.json_response({
             "ok": False,
             "error": "the replace failed (" + str(e)[:120] + ")"
-                     + (" - rolled back from the safety snapshot" if rolled else
-                        " - the safety snapshot " + str(tx.get("txId")) + " is kept"),
+                     + (" - rolled back from the verified safety snapshot" if rolled else
+                        " - the VERIFIED safety snapshot " + str(tx.get("txId"))
+                          + " is kept for a manual recovery"),
             "txId": tx.get("txId"),
         }, status=500)
+    # 7) the derived index row of the restored file refreshes in place
+    refreshed = 0
+    if _wf_index is not None:
+        try:
+            fr = _wf_index.refresh_paths(
+                user_scope=_request_user_scope(request),
+                root_dirs=_workflows_user_dirs(request), rel_paths=[rel])
+            refreshed = int(fr.get("updated") or 0)
+        except Exception:
+            refreshed = 0
     return web.json_response({"ok": True, "mode": "replace", "path": rel,
                               "txId": tx.get("txId"),
-                              "rollbackAvailable": True})
+                              "rollbackAvailable": True,
+                              "indexRefreshed": refreshed})
 
 
 @PromptServer.instance.routes.post("/settings_hub/workflows/history/process/{pid}/import")
@@ -2915,42 +3587,98 @@ async def workflows_history_import_disk(request):
         return web.json_response({"ok": False, "error": "a library path is required"},
                                  status=400)
     data = None
-    for wroot in _workflows_user_dirs(request):
-        cand = os.path.join(wroot, rel[len("workflows/"):]
-                            if rel.startswith("workflows/") else rel)
-        cand = os.path.normpath(cand)
-        if _is_inside(cand, wroot) and os.path.isfile(cand):
-            try:
-                with open(cand, "rb") as fh:
-                    data = fh.read()
-            except OSError:
-                data = None
-            break
+    phys, _wroot = _resolve_library_file(request, rel)
+    if phys and os.path.isfile(phys):
+        try:
+            with open(phys, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            data = None
     if data is None:
         return web.json_response({"ok": False, "error": "the file is gone"}, status=404)
     note = body.get("note") if isinstance(body, dict) else None
     r = _wf_hist.record_checkpoint_for_path(rel, data, note=note,
                                             source="import",
-                                            title=(body.get("title") if isinstance(body, dict) else None))
+                                            title=(body.get("title") if isinstance(body, dict) else None),
+                                            scope=_request_user_scope(request))
     return web.json_response(r, status=200 if r.get("ok") else 500)
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/history/storage")
 async def workflows_history_storage(request):
-    """The transparent storage stats (plan: the size shows the COMPRESSED
-    physical bytes, never the uncompressed sum)."""
+    """The transparent storage stats (plan 5.4): the PHYSICAL bytes of the
+    shared store, the catalog metadata, the tx snapshots, the undo/recent
+    service files, the SQLite index and the preset-version manifests, next
+    to the LOGICAL payload sum - logical and physical are never mixed."""
     if _wf_hist is None:
         return web.json_response({"ok": False, "error": "history module unavailable"},
                                  status=404)
-    return web.json_response(_wf_hist.storage_stats())
+    st = _wf_hist.storage_stats()
+    # the manager service folders + the derived index (physical bytes)
+    def _dir_bytes(path):
+        total = 0
+        count = 0
+        for dp, _dn, fns in os.walk(path):
+            for fn in fns:
+                try:
+                    total += os.path.getsize(os.path.join(dp, fn))
+                    count += 1
+                except OSError:
+                    pass
+        return total, count
+    undo_b, undo_n = _dir_bytes(_mgr_dir("undo"))
+    recent_b, recent_n = _dir_bytes(_mgr_dir("recent"))
+    idx_b = 0
+    if _wf_index is not None:
+        try:
+            dbp = _wf_index._db_path()
+            if os.path.isfile(dbp):
+                idx_b = os.path.getsize(dbp)
+        except Exception:
+            idx_b = 0
+    # the preset-version manifests live in every readable root
+    pv_b = 0
+    pv_n = 0
+    for root in _roots_all():
+        b2, n2 = _dir_bytes(os.path.join(root, _PRESET_VERSIONS_DIR))
+        pv_b += b2
+        pv_n += n2
+    phys = (int(st.get("physicalBytes") or 0) + int(st.get("historyMetadataBytes") or 0)
+            + int(st.get("txSnapshotBytes") or 0))
+    st["serviceUndoBytes"] = undo_b
+    st["serviceUndoFiles"] = undo_n
+    st["serviceRecentBytes"] = recent_b
+    st["presetVersionManifestBytes"] = pv_b
+    st["presetVersionManifests"] = pv_n
+    st["indexBytes"] = idx_b
+    st["totalPhysicalBytes"] = phys + undo_b + recent_b + pv_b + idx_b
+    return web.json_response(st)
 
 
 @PromptServer.instance.routes.post("/settings_hub/workflows/history/maintenance")
 async def workflows_history_maintenance(request):
-    """Housekeeping outside the checkpoint critical section."""
+    """Housekeeping outside the checkpoint critical section.
+    v116 (plan 5.3): body {"action": "compact"} runs the COMPACT HISTORY -
+    the preflight report, the verified rebuild, the atomic switch (never
+    automatic, never on an ordinary Save/Checkpoint/Delete). Without an
+    action the default repack runs."""
     if _wf_hist is None:
         return web.json_response({"ok": False, "error": "history module unavailable"},
                                  status=404)
+    action = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            action = body.get("action")
+    except Exception:
+        action = None
+    if action == "compact":
+        try:
+            loop_ = asyncio.get_event_loop()
+            rep = await loop_.run_in_executor(None, _wf_hist.compact_history)
+            return web.json_response(rep, status=200 if rep.get("ok") else 500)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)[:200]}, status=500)
     return web.json_response(_wf_hist.run_maintenance())
 
 
@@ -2963,7 +3691,9 @@ async def workflows_history_maintenance(request):
 @PromptServer.instance.routes.get("/settings_hub/workflows/preset/{pid}/versions")
 async def workflows_preset_versions(request):
     """The revision METADATA list of ONE preset (newest first) - no graph
-    payloads; the payload loads for a restore/compare only."""
+    payloads; the payload loads for a restore/compare only. v116: the
+    legacy payloads migrate into the shared store once per session."""
+    _pv_migrate_once()
     pid = request.match_info.get("pid", "")
     if not _ID_LOOSE_RE.match(pid):
         return web.json_response({"ok": False, "error": "bad id"}, status=400)
@@ -3047,33 +3777,57 @@ def _node_registry():
 
 def _model_lookup(names):
     """The model-file existence check via folder_paths (feature-detected).
-    Returns {name: bool} for the names whose folder we could actually
-    probe; unknown names stay unchecked (status 'unknown')."""
+    v116 (plan 8/11.7): the map carries THREE outcomes - True (found),
+    False (the folder_paths API is alive, the applicable folders were
+    actually probed and the file is NOT there -> 'missing'), and ABSENT
+    (folder_paths unavailable or the name cannot be classified ->
+    'unknown'). The v112 map only ever contained the found models, so a
+    genuinely missing checkpoint reported 'unknown' and hid a real gap.
+    Custom model folders are covered too (folder_paths.folder_names when
+    the runtime exposes it), and nested relative paths resolve through
+    get_full_path."""
     out = {}
     if not names:
         return out
     try:
         import folder_paths
-        get_full = getattr(folder_paths, "get_full_path", None)
-        if not callable(get_full):
-            return out
-        for name in names:
-            found = None
-            for folder in ("checkpoints", "loras", "vae", "controlnet",
-                           "upscale_models", "unet", "clip", "style_models",
-                           "hypernetworks", "gligen", "ipadapter", "instantid"):
-                try:
-                    p = get_full(folder, name)
-                except Exception:
-                    p = None
-                if p and os.path.isfile(p):
-                    found = folder
-                    break
-            if found is not None:
-                out[name] = True
-            # an unprobed name stays absent from the map (status 'unknown')
     except Exception:
-        pass
+        return out   # every name stays unchecked -> status 'unknown'
+    get_full = getattr(folder_paths, "get_full_path", None)
+    if not callable(get_full):
+        return out
+    categories = ["checkpoints", "loras", "vae", "controlnet",
+                  "upscale_models", "unet", "clip", "style_models",
+                  "hypernetworks", "gligen", "ipadapter", "instantid"]
+    extra = getattr(folder_paths, "folder_names", None)
+    if isinstance(extra, dict):
+        for k in extra.keys():
+            if isinstance(k, str) and k not in categories:
+                categories.append(k)
+    model_ext_re = re.compile(
+        r"\.(safetensors|ckpt|pt|pth|sft|bin|onnx)$", re.IGNORECASE)
+    for name in names:
+        if not isinstance(name, str) or not name:
+            continue
+        found = None
+        probed = False
+        for folder in categories:
+            try:
+                p = get_full(folder, name)
+            except Exception:
+                p = None
+            probed = True
+            if p and os.path.isfile(p):
+                found = folder
+                break
+        if found is not None:
+            out[name] = True
+        elif probed and (model_ext_re.search(name) or "/" in name
+                         or "\\" in name):
+            # the API is alive and the applicable folders were really
+            # probed - a model-looking name that is nowhere is MISSING
+            out[name] = False
+        # an unclassifiable name stays absent from the map (status 'unknown')
     return out
 
 
@@ -3088,19 +3842,16 @@ async def workflows_index_inspect(request):
     if not rel:
         return web.json_response({"ok": False, "error": "bad path"}, status=400)
     scope = _request_user_scope(request)
-    # read the EXACT file bytes from the library
+    # read the EXACT file bytes from the library (v116: the hardened locator
+    # - a symlink pointing outside the library refuses)
     data = None
-    for wroot in _workflows_user_dirs(request):
-        cand = os.path.join(wroot, rel[len("workflows/"):]
-                            if rel.startswith("workflows/") else rel)
-        cand = os.path.normpath(cand)
-        if _is_inside(cand, wroot) and os.path.isfile(cand):
-            try:
-                with open(cand, "rb") as fh:
-                    data = fh.read()
-            except OSError:
-                data = None
-            break
+    phys, _wroot = _resolve_library_file(request, rel)
+    if phys and os.path.isfile(phys):
+        try:
+            with open(phys, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            data = None
     if data is None:
         return web.json_response({"ok": False, "error": "the file is gone"}, status=404)
     payload = _wf_index.inspect_payload(data)

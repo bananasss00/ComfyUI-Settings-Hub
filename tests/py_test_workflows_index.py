@@ -487,6 +487,143 @@ dep2 = widx.dependency_report(["KSampler"], [], registry=None, model_lookup={})
 check("deps: an absent registry keeps the nodes unknown (no false alarms)",
       dep2["unknownNodes"] == ["KSampler"] and dep2["knownNodes"] == [])
 # ---------------------------------------------------------------------------
+# v116 (plan 3.1): the TRUNCATED scan never prunes - a walk that hit the
+# bound cannot delete the rows it did not verify.
+import sqlite3 as _sq3
+
+_big = os.path.join(TMP, "biglib", "workflows")
+os.makedirs(_big, exist_ok=True)
+for i in range(40):
+    with open(os.path.join(_big, "f%02d.json" % i), "wb") as _f:
+        _f.write(json.dumps(wf_json(uid="%08x-0000-4000-8000-%012x" % (i, i)))
+                 .encode("utf-8"))
+_dbp_big = os.path.join(TMP, "bigidx", "workflow_index.db")
+widx.set_db_path(_dbp_big)
+# the FIRST scan is complete (no bound): all 40 rows land in the index
+st0 = widx.scan_index(workflows_user_dirs=[_big], hide_dirs_fn=lambda d: [],
+                      user_scope="default", force=True)
+check("trunc: the unbounded first pass is complete with 40 rows",
+      st0.get("complete") is True and
+      widx.index_status(user_scope="default").get("files") == 40,
+      json.dumps({"complete": st0.get("complete"),
+                  "files": widx.index_status(user_scope="default").get("files")}))
+# NOW the walk bound kicks in; files 30-39 vanish from disk right before
+os.environ["SHUB_WF_MAX_WALK"] = "10"
+for i in range(30, 40):
+    os.unlink(os.path.join(_big, "f%02d.json" % i))
+st1 = widx.scan_index(workflows_user_dirs=[_big], hide_dirs_fn=lambda d: [],
+                      user_scope="default", force=True)
+check("trunc: the walk bound marks the pass truncated",
+      st1.get("truncated") is True and st1.get("complete") is False and
+      st1.get("prune_skipped") is True,
+      json.dumps({k: st1.get(k) for k in ("truncated", "complete",
+                                          "prune_skipped", "scanned")}))
+_n_after = widx.index_status(user_scope="default")
+check("trunc: the unverified rows SURVIVE a truncated re-scan",
+      _n_after.get("files") == 40,
+      json.dumps({"files": _n_after.get("files")}))
+check("trunc: the status reports the incomplete index honestly",
+      _n_after.get("complete") is False and _n_after.get("truncated") is True and
+      _n_after.get("lastScanComplete") is False,
+      json.dumps({k: _n_after.get(k) for k in ("complete", "truncated",
+                                               "lastScanComplete")}))
+os.environ.pop("SHUB_WF_MAX_WALK")
+st3 = widx.scan_index(workflows_user_dirs=[_big], hide_dirs_fn=lambda d: [],
+                      user_scope="default", force=True)
+_n_full = widx.index_status(user_scope="default")
+check("trunc: a COMPLETE scan prunes exactly the vanished files",
+      st3.get("complete") is True and _n_full.get("files") == 30,
+      json.dumps({"complete": st3.get("complete"),
+                  "files": _n_full.get("files"),
+                  "removed": st3.get("removed")}))
+check("trunc: FTS stays in sync with the rows after the prune",
+      widx.search_index(user_scope="default",
+                        q="f39")["total"] == 0 and
+      widx.search_index(user_scope="default",
+                        q="f29")["total"] == 1,
+      json.dumps({"gone": widx.search_index(user_scope="default", q="f39")["total"],
+                  "kept": widx.search_index(user_scope="default", q="f29")["total"]}))
+# v116: an unreadable DIRECTORY also blocks the prune (os.walk onerror)
+_missing_root = os.path.join(TMP, "does-not-exist")
+st4 = widx.scan_index(workflows_user_dirs=[_missing_root],
+                      hide_dirs_fn=lambda d: [], user_scope="default",
+                      force=True)
+check("trunc: a walk error (unreadable/missing root) skips the prune too",
+      st4.get("walk_errors", 0) >= 1 and st4.get("prune_skipped") is True and
+      st4.get("complete") is False,
+      json.dumps({k: st4.get(k) for k in ("walk_errors", "prune_skipped",
+                                          "complete")}))
+# ---------------------------------------------------------------------------
+# v116 (plan 4.6): the NOTES index - upsert / search / drop / rebuild.
+widx.notes_upsert("process", "procnotes1", "", "Portrait master",
+                  "the main portrait workflow")
+widx.notes_upsert("revision", "procnotes1", "revnotes1", "First checkpoint",
+                  "added the LoRA and bumped steps")
+_r = widx.search_notes(q="portrait")
+check("notes: a process note is found by FTS",
+      _r.get("ok") and any(x["processId"] == "procnotes1" and
+                           x["kind"] == "process" for x in _r["results"]),
+      json.dumps(_r))
+_r2 = widx.search_notes(q="lora")
+check("notes: a revision note is found too",
+      any(x["revisionId"] == "revnotes1" for x in _r2.get("results", [])),
+      json.dumps(_r2))
+widx.notes_drop("procnotes1")
+_r3 = widx.search_notes(q="portrait")
+check("notes: the drop removes both rows",
+      not any(x["processId"] == "procnotes1" for x in _r3.get("results", [])),
+      json.dumps(_r3))
+_n = widx.notes_rebuild(
+    [{"processId": "procnotes2", "displayName": "Upscale chain",
+      "note": "4x upscale + face restore", "updatedAt": 5}],
+    [{"revisionId": "revnotes2", "processId": "procnotes2",
+      "title": "Second", "note": "changed the denoise", "createdAt": 6}])
+_r4 = widx.search_notes(q="upscale")
+_r5 = widx.search_notes(q="denoise")
+check("notes: the rebuild restores the notes from the manifests",
+      _n >= 1 and any(x["processId"] == "procnotes2" for x in _r4.get("results", []))
+      and any(x["revisionId"] == "revnotes2" for x in _r5.get("results", [])),
+      json.dumps({"rebuilt": _n, "proc": _r4, "rev": _r5}))
+
+# ---------------------------------------------------------------------------
+# v116 (plan 3.2): refresh_paths - the POINT re-index after a Restore.
+_one = os.path.join(_big, "f00.json")
+with open(_one, "wb") as _f:
+    _f.write(json.dumps(wf_json(uid="11111111-0000-4000-8000-00000000000f",
+                                extra={"ds": {"scale": 2.0, "offset": [5, 5]},
+                                       "frontendVersion": "1.24.4"}))
+             .encode("utf-8"))
+_rp = widx.refresh_paths(user_scope="default", root_dirs=[_big],
+                         rel_paths=["workflows/f00.json"])
+_row = _sq3.connect(_dbp_big).execute(
+    "SELECT workflow_id, raw_hash FROM workflow_files WHERE "
+    "user_scope='default' AND rel_path='workflows/f00.json'").fetchone()
+check("refresh_paths: the touched file re-analyzed in place",
+      _rp.get("ok") and _rp.get("updated") == 1 and
+      _row is not None and
+      _row[0] == "11111111-0000-4000-8000-00000000000f",
+      json.dumps({"res": _rp, "row": _row}))
+os.unlink(_one)
+_rp2 = widx.refresh_paths(user_scope="default", root_dirs=[_big],
+                          rel_paths=["workflows/f00.json"])
+_row2 = _sq3.connect(_dbp_big).execute(
+    "SELECT count(*) FROM workflow_files WHERE "
+    "user_scope='default' AND rel_path='workflows/f00.json'").fetchone()
+check("refresh_paths: a vanished file drops its row",
+      _rp2.get("ok") and _rp2.get("removed") == 1 and _row2[0] == 0,
+      json.dumps({"res": _rp2, "rows": _row2[0]}))
+# back to the harness DB (after the refresh_paths block - it uses _db_path)
+widx.set_db_path(DB)
+
+# ---------------------------------------------------------------------------
+# v116 (plan 9.2): the duplicate groups answer carries the STRUCTURAL
+# candidates (same node classes, different workflows - candidates ONLY).
+_dg = widx.duplicate_groups(user_scope="default")
+check("duplicates: structuralCandidates is part of the answer",
+      "structuralCandidates" in _dg and isinstance(_dg.get("structuralCandidates"), list),
+      json.dumps(sorted(_dg.keys())))
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # cleanup
 shutil.rmtree(TMP, ignore_errors=True)
 

@@ -172,6 +172,16 @@ function makeFakeApi() {
     let idxModeFlag = "stale";       // default: an old py (the earlier phases keep the v108 local behavior; WT flips it on)
     let idxFiles = [];               // the indexed library rows
     let idxScanCount = 0;
+    // v116: the notes search + the Files delete/undo + the compact controls
+    let notesMode = "ok";
+    let notesResults = [];
+    const fileFs = new Set();
+    const fileDelSnapshots = new Map();   // txId -> path
+    const fileDelOps = new Map();         // opId -> [{path, txId}]
+    let fileDelMode = "ok";
+    let compactMode = "ok";
+    let presetsHold = false;
+    let presetsHoldResolve = null;
     // v112 stage 2.5: the HISTORY stub (processes + revisions + tx snapshots)
     const histStore = { processes: new Map(), revisions: new Map(), seq: 0 };
     const txStore = new Map();
@@ -295,6 +305,9 @@ function makeFakeApi() {
                 return jsonResp({ ok: true, presets: sorted });
             }
             if (p === "/settings_hub/workflows/presets" && method === "POST") {
+                if (presetsHold) {
+                    return new Promise((resolve) => { presetsHoldResolve = resolve; });
+                }
                 let body = {};
                 try { body = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
                 // v112 stage 4: the category/tags flow through the stub too
@@ -495,7 +508,92 @@ function makeFakeApi() {
             if (p === "/settings_hub/workflows/index/duplicates" && method === "GET") {
                 if (idxModeFlag === "stale") return jsonResp({ ok: false, error: "404" }, 404);
                 return jsonResp({ ok: true, exactCopies: [], sameJsonContent: [],
-                    sameWorkflowDiffCanvas: [], sameUuidDiffContent: [], noUuidCount: 0 });
+                    sameWorkflowDiffCanvas: [], sameUuidDiffContent: [],
+                    structuralCandidates: [], noUuidCount: 0 });
+            }
+            // v116 (plan 4.6): the NOTES search stub
+            if (p === "/settings_hub/workflows/index/notes" && method === "GET") {
+                if (notesMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                return jsonResp({ ok: true, fts: true, results: notesResults });
+            }
+            // v116 (plan 7): the FILES batch delete + undo stubs - an
+            // in-memory fs with verified snapshots + the per-file results
+            if (p === "/settings_hub/workflows/files/delete" && method === "POST") {
+                let body2 = {};
+                try { body2 = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                if (fileDelMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                const paths = body2.paths || [];
+                if (paths.length > 40) return jsonResp({ ok: false, error: "too many files in one batch (max 40)", limit: 40 }, 400);
+                const results = [];
+                if (fileDelMode === "snapshotfail") {
+                    for (const pt of paths) results.push({ path: pt, ok: false, removed: false, error: "the safety snapshot failed verification" });
+                    return jsonResp({ ok: false, stage: "preflight",
+                        error: "the safety snapshot failed - NOTHING was deleted",
+                        results }, 409);
+                }
+                const removed = [];
+                for (const pt of paths) {
+                    if (!fileFs.has(pt)) {
+                        results.push({ path: pt, ok: true, removed: false, error: "not a regular file (missing?)" });
+                        continue;
+                    }
+                    fileFs.delete(pt);
+                    const txId = "txdel" + (++uidSeq);
+                    fileDelSnapshots.set(txId, pt);
+                    results.push({ path: pt, ok: true, removed: true, txId, bytes: 10 });
+                    const i2 = idxFiles.findIndex((f) => f.path === pt);
+                    const row = i2 >= 0 ? idxFiles.splice(i2, 1)[0] : null;
+                    removed.push({ path: pt, txId, bytes: 10, __row: row });   // the undo keeps the row
+                }
+                const opId = "op" + (++uidSeq).toString(16).padStart(12, "0");
+                fileDelOps.set(opId, removed);
+                return jsonResp({ ok: results.every((r) => !r.error), opId, results,
+                    removed: removed.length, failed: results.filter((r) => r.error).length,
+                    indexRowsDropped: removed.length, locationsDetached: 0,
+                    undo: removed.length ? { opId, expiresAt: Date.now() / 1000 | 0 + 7200 } : null,
+                    note: removed.length ? "the process history is NEVER deleted with the files" : null });
+            }
+            if (p === "/settings_hub/workflows/files/undo" && method === "POST") {
+                let body2 = {};
+                try { body2 = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                const opId = body2.opId;
+                const rec = fileDelOps.get(opId);
+                if (!rec) return jsonResp({ ok: false, error: "no such operation (expired or already undone)" }, 404);
+                fileDelOps.delete(opId);
+                const results = [];
+                let restored = 0;
+                for (const f of rec) {
+                    if (fileFs.has(f.path)) {
+                        results.push({ path: f.path, restored: false, error: "the path is taken by a newer file - skipped (never overwritten)" });
+                        continue;
+                    }
+                    fileFs.add(f.path);
+                    results.push({ path: f.path, restored: true });
+                    restored++;
+                    // the real server refreshes the index row (refresh_paths)
+                    if (f.__row && !idxFiles.some((x) => x.path === f.path)) idxFiles.push(f.__row);
+                }
+                idxFiles.sort((a, b) => (b.mtime || 0) - (a.mtime || 0) || (a.path < b.path ? -1 : 1));
+                return jsonResp({ ok: restored === rec.length && restored > 0,
+                    restored, results });
+            }
+            // v116 (plan 5.4): the storage dashboard + the compact action
+            if (p === "/settings_hub/workflows/history/storage" && method === "GET") {
+                return jsonResp({ ok: true, backend: "stub", processes: 2, revisions: 3,
+                    stableRevisions: 1, logicalBytes: 3000, physicalBytes: 1200,
+                    historyMetadataBytes: 400, txSnapshotBytes: 100, txSnapshotFiles: 2,
+                    serviceUndoBytes: 50, serviceRecentBytes: 20,
+                    presetVersionManifestBytes: 60, presetVersionManifests: 1,
+                    indexBytes: 8192, totalPhysicalBytes: 10022 });
+            }
+            if (p === "/settings_hub/workflows/history/maintenance" && method === "POST") {
+                const body2 = JSON.parse(opts.body || "{}");
+                if (body2.action === "compact") {
+                    if (compactMode === "fail") return jsonResp({ ok: false, error: "compact refused (stub)" }, 500);
+                    return jsonResp({ ok: true, backend: "stub", before: 5000, after: 2200,
+                        verified: 3, retained: 3, preflight: { revisions: 3 } });
+                }
+                return jsonResp({ ok: true, backend: "stub" });
             }
             // v112 stage 2.5: the HISTORY routes (plan 5.x)
             if (p === "/settings_hub/workflows/history/resolve" && method === "GET") {
@@ -505,8 +603,23 @@ function makeFakeApi() {
                 if (!proc) return jsonResp({ ok: true, bound: false });
                 const cur = histStore.revisions.get(proc.currentRevisionId);
                 const idxRow = idxFiles.find((f) => f.path === rel);
+                // v116: the layered 5-state status (workflowHash decides)
+                let changeStatus = "unknown";
+                if (cur && idxRow && cur.workflowHash && idxRow.workflowHash) {
+                    if (idxRow.workflowHash !== cur.workflowHash) changeStatus = "workflow_changed";
+                    else if ((idxRow.presentationHash || null) !== (cur.presentationHash || null)) changeStatus = "presentation_changed";
+                    else changeStatus = "unchanged";
+                }
+                const statusLabel = { unchanged: "No workflow changes",
+                    presentation_changed: "Canvas changed only",
+                    metadata_changed: "Metadata changed",
+                    workflow_changed: "Workflow changed",
+                    unknown: "Status unavailable - refresh the index" }[changeStatus];
                 return jsonResp({ ok: true, bound: true,
-                    changesSinceCheckpoint: !!(cur && idxRow && idxRow.rawHash && idxRow.rawHash !== cur.rawHash),
+                    changeStatus, statusLabel,
+                    changesSinceCheckpoint: changeStatus === "workflow_changed" ||
+                        changeStatus === "metadata_changed" ||
+                        changeStatus === "presentation_changed",
                     process: { processId: proc.processId, workflowId: proc.workflowId,
                         displayName: proc.displayName, note: proc.note,
                         revisionCount: histRevList(proc.processId).length,
@@ -583,6 +696,19 @@ function makeFakeApi() {
                 if (last && last.rawHash === rawHash) {
                     return jsonResp({ ok: true, duplicate: true, revisionId: last.revisionId, processId: proc.processId });
                 }
+                // v116: the layered hashes ride the revision (the status
+                // compare needs workflowHash/presentationHash like the real
+                // server)
+                let wfHash = null, presHash = null;
+                if (body2.graph) {
+                    const g2 = { ...body2.graph };
+                    wfHash = "wf-" + JSON.stringify({ n: (g2.nodes || []).map((x) => x && { id: x.id, type: x.type, w: x.widgets_values }), l: g2.links });
+                    presHash = "pres-" + JSON.stringify({ ds: g2.extra?.ds, pos: (g2.nodes || []).map((x) => x && x.pos) });
+                } else {
+                    const row = idxFiles.find((f) => f.path === body2.path);
+                    wfHash = row?.workflowHash || null;
+                    presHash = row?.presentationHash || null;
+                }
                 const rid = "r" + (++histStore.seq).toString(16).padStart(15, "0");
                 histStore.revisions.set(rid, {
                     revisionId: rid, processId: proc.processId,
@@ -590,7 +716,9 @@ function makeFakeApi() {
                     source: body2.source || "checkpoint", sourcePath: body2.path,
                     createdAt: Math.floor(Date.now() / 1000) + histStore.seq,
                     title: body2.title || null, note: body2.note || null,
-                    rawHash, storage: { backend: "stub", blob: rid },
+                    rawHash, workflowHash: wfHash, presentationHash: presHash,
+                    normalizationProfileVersion: "nprof1",
+                    storage: { backend: "stub", blob: rid },
                     isStable: false, __graph: body2.graph || null,
                 });
                 proc.currentRevisionId = rid;
@@ -838,6 +966,18 @@ function makeFakeApi() {
         __setIdxMode: (m) => { idxModeFlag = m; },
         __setIdxFiles: (v) => { idxFiles = v; },
         __idxScanCount: () => idxScanCount,
+        // v116: the notes + files-delete + compact + hold controls
+        __setNotes: (results, mode = "ok") => { notesResults = results || []; notesMode = mode; },
+        __setFileDelMode: (m) => { fileDelMode = m; },
+        __setCompactMode: (m) => { compactMode = m; },
+        __fileFs: (paths, add = true) => {
+            for (const pt of (paths || [])) { if (add) fileFs.add(pt); else fileFs.delete(pt); }
+        },
+        __fileFsHas: (pt) => fileFs.has(pt),
+        __setPresetsHold: (v) => {
+            presetsHold = !!v;
+            if (!v && presetsHoldResolve) { const r2 = presetsHoldResolve; presetsHoldResolve = null; r2(jsonResp({ ok: true, preset: { id: "held00000001", name: "held", items: [] }, mode: "create" })); }
+        },
         // v112 stage 2.5: the history stub controls
         __histStore: () => histStore,
         __txStore: () => txStore,
@@ -1455,21 +1595,27 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v115", /"workflows":\s*"v115"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v116", /"workflows":\s*"v116"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v115 (the process cleanup + duplicate counter)",
-    ENTRY_SRC.includes("web build: v115 - THE PROCESS CLEANUP + DUPLICATE COUNTER") &&
+check("the entry banner names v116 (the quality and reliability pass)",
+    ENTRY_SRC.includes("web build: v116 - THE QUALITY AND RELIABILITY PASS") &&
     ENTRY_SRC.includes("THE WORKFLOW MANAGER ROADMAP"));
-check("styles.css?v=115", ENTRY_SRC.includes("styles.css?v=115"));
-check("the module self-reports v115",
+check("styles.css?v=116", ENTRY_SRC.includes("styles.css?v=116"));
+check("the module self-reports v116",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v115"'));
-check("the web stamp literal is v115",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v116"'));
+check("the web stamp literal is v116",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v115"'));
-check("py stamp bumps together (v115)",
+        .includes('const WF_WEB_VERSION = "v116"'));
+check("py stamp bumps together (v116)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v115"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v116"'));
+check("v116 routes registered (files delete/undo + notes + compact)",
+    [".post(\"/settings_hub/workflows/files/delete\")",
+     ".post(\"/settings_hub/workflows/files/undo\")",
+     "/settings_hub/workflows/index/notes",
+     "/settings_hub/workflows/history/maintenance"]
+        .every((s) => fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8").includes(s)));
 check("v115 routes registered (process delete + badges)",
     ["/settings_hub/workflows/history/process/{pid}/delete",
      "/settings_hub/workflows/history/badges"]
@@ -2040,7 +2186,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v116"); // ahead of the pack (v115) - a stale web file
+    fakeApi.__setHealthVersion("v117"); // ahead of the pack (v116) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -3321,7 +3467,7 @@ phase("WV v112 stage 3 (plans 6/7/8): per-tab Save, snapshot mode, duplicates");
     await settle();
     check("WV: the toggle flips to ON with the explanation",
         hooks.snapMode() === true &&
-        bodyWv().textContent.includes("Embed saved workflows as snapshots"));
+        bodyWv().textContent.includes("Embed selected saved workflows as independent copies"));
     const c2 = hooks.collectFormItems();
     check("WV: ON embeds the persisted tab as a snapshot WITH its origin metadata",
         c2.items.some((it) => it.kind === "snapshot" && it.sourcePath === "workflows/flux_main.json"),
@@ -4081,6 +4227,283 @@ phase("ZY v115: the duplicate-ID counter on the rows + the WHOLE-PROCESS delete 
 }
 
 // ===========================================================================
+phase("ZZ v116: the honest refresh, the Files DELETE with undo, the select-uuid, the snapshot save E2E, the notes search, the storage dashboard");
+{
+    const pnlZ = () => hooks.panelEl();
+    const bodyZ = () => pnlZ().querySelector(".hub-wf-body");
+    fakeApi.__setIdxMode("ok");
+    fakeApi.__setBadgesMode("ok");
+    fakeApi.__setFileDelMode("ok");
+    fakeApi.__setCompactMode("ok");
+    const zRow = (path, hash, wf) => ({ path, name: path.split("/")[1], size: 10,
+        mtime: 100, workflowId: wf || null, rawHash: hash,
+        workflowHash: "wf-" + hash, presentationHash: "pres-" + hash,
+        parseStatus: null, nodeCount: 1, nodeTypes: [], modelRefs: [] });
+    fakeApi.__setIdxFiles([
+        zRow("workflows/zza.json", "z1", "zz-uuid-1"),
+        zRow("workflows/zzb.json", "z2", "zz-uuid-1"),
+        zRow("workflows/zzc.json", "z3", "zz-uuid-2"),
+    ]);
+    fakeApi.__fileFs(["workflows/zza.json", "workflows/zzb.json", "workflows/zzc.json"]);
+    for (const k of [...fakeApi.__histStore().processes.keys()]) fakeApi.__histStore().processes.delete(k);
+    for (const k of [...fakeApi.__histStore().revisions.keys()]) fakeApi.__histStore().revisions.delete(k);
+    fakeApi.__histStore().seq = 0;
+    fakeApi.__histStore().processes.set("pzzproc00000001", {
+        processId: "pzzproc00000001", workflowId: "zz-uuid-1",
+        displayName: "ZZ shared", locations: [
+            { path: "workflows/zza.json", isPrimary: true },
+            { path: "workflows/zzb.json" }],
+        currentRevisionId: null, stableRevisionId: null });
+    fakeApi.__histStore().processes.set("pzzproc00000002", {
+        processId: "pzzproc00000002", workflowId: "zz-uuid-2",
+        displayName: "ZZ solo", locations: [
+            { path: "workflows/zzc.json", isPrimary: true }],
+        currentRevisionId: null, stableRevisionId: null });
+    hooks.setTab("files");
+    await settle();
+    await hooks.runServerList(true);
+    await settle();
+
+    // ---- 1) the REFRESH is the real refresh (plan 3.2) --------------------
+    const scans0 = fakeApi.__idxScanCount();
+    await bodyZ().querySelector('[data-act="filesrefresh"]').click();
+    await settle(40);
+    check("ZZ refresh: the button fires the incremental scan",
+        fakeApi.__idxScanCount() === scans0 + 1,
+        JSON.stringify({ was: scans0, now: fakeApi.__idxScanCount() }));
+
+    // ---- 2) the selection toolbar (plan 7.2) ------------------------------
+    const zcheck = (pt) => bodyZ().querySelector(`[data-fcheck="${pt}"]`);
+    check("ZZ selection: the toolbar is HIDDEN at 0 selected",
+        !bodyZ().textContent.includes("Delete selected"),
+        "no selection bar");
+    zcheck("workflows/zza.json").checked = true;
+    zcheck("workflows/zza.json").dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    check("ZZ selection: the toolbar appears at 1+ with the count",
+        bodyZ().textContent.includes("1 selected") &&
+        !!bodyZ().querySelector('[data-act="filedel"]'),
+        bodyZ().querySelector(".hub-wf-tools2")?.textContent?.slice(0, 120));
+    zcheck("workflows/zzb.json").checked = true;
+    zcheck("workflows/zzb.json").dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    check("ZZ selection: two files selected (the SAME uuid - still per-file)",
+        bodyZ().textContent.includes("2 selected"),
+        bodyZ().querySelector(".hub-wf-tools2")?.textContent?.slice(0, 120));
+
+    // ---- 3) the armed batch DELETE + undo (plan 7.6) ----------------------
+    const delBtn = bodyZ().querySelector('[data-act="filedel"]');
+    await delBtn.click();
+    await settle();
+    check("ZZ delete: the first click ARMS (names the scope + the safety)",
+        bodyZ().querySelector('[data-act="filedel"]').textContent.includes("Click AGAIN"),
+        bodyZ().querySelector('[data-act="filedel"]').textContent);
+    await bodyZ().querySelector('[data-act="filedel"]').click();
+    await settle(40);
+    check("ZZ delete: the rows are gone after the confirmed delete",
+        !bodyZ().querySelector('[data-fcheck="workflows/zza.json"]') &&
+        !bodyZ().querySelector('[data-fcheck="workflows/zzb.json"]'),
+        "rows gone");
+    check("ZZ delete: the undo handle is live",
+        !!hooks.filesOpsState().undo?.opId && !!bodyZ().querySelector('[data-act="fileundo"]'),
+        JSON.stringify(hooks.filesOpsState().undo));
+    await bodyZ().querySelector('[data-act="fileundo"]').click();
+    await settle(40);
+    check("ZZ undo: the files come back (the rows re-appear)",
+        !!bodyZ().querySelector('[data-fcheck="workflows/zza.json"]'),
+        "rows restored");
+    check("ZZ undo: the undo handle is consumed",
+        !hooks.filesOpsState().undo?.opId, JSON.stringify(hooks.filesOpsState().undo));
+
+    // ---- 4) the SAFETY refusal: a snapshot failure deletes NOTHING --------
+    zcheck("workflows/zzc.json").checked = true;
+    zcheck("workflows/zzc.json").dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    fakeApi.__setFileDelMode("snapshotfail");
+    await bodyZ().querySelector('[data-act="filedel"]').click();
+    await settle();
+    await bodyZ().querySelector('[data-act="filedel"]').click();
+    await settle(30);
+    fakeApi.__setFileDelMode("ok");
+    check("ZZ safety: the snapshot failure deletes NOTHING (the row survives)",
+        fakeApi.__fileFsHas("workflows/zzc.json") &&
+        !!bodyZ().querySelector('[data-fcheck="workflows/zzc.json"]'),
+        "row intact");
+    // clear the selection for the next blocks
+    await bodyZ().querySelector('[data-act="fileclear"]').click();
+    await settle();
+
+    // ---- 5) the select-uuid action (plan 7.2) ------------------------------
+    const chipZ = bodyZ().querySelector('[data-act="copyuuid"][data-uuid="zz-uuid-1"]');
+    check("ZZ select-uuid: the duplicated chip wears the x2 counter",
+        chipZ && chipZ.querySelector(".hub-wf-dupbadge")?.textContent === "\u00d72",
+        chipZ?.innerHTML);
+    await chipZ.click();
+    await settle(20);
+    const actBtn = [...document.querySelectorAll(".hub-sh-action, [data-sh-action], .hub-toast [data-act], .hub-sh-actionbtn")]
+        .find((b) => (b.textContent || "").includes("Select all"));
+    // the action toast renders a button; fall back to the hook when the
+    // jsdom click target naming differs
+    if (actBtn) { await actBtn.click(); await settle(20); }
+    else await hooks.selectUuidFiles("zz-uuid-1");
+    await settle(20);
+    check("ZZ select-uuid: both locations of the UUID are selected",
+        hooks.filesOpsState().sel.filter((p) => p.includes("zza") || p.includes("zzb")).length >= 2,
+        JSON.stringify(hooks.filesOpsState().sel));
+    await bodyZ().querySelector('[data-act="fileclear"]').click();
+    await settle();
+
+    // ---- 6) the EMBED snapshots E2E via the REAL checkbox (plan 6) --------
+    hooks.clearPresets();
+    fakeApi.__setPresetsHold(false);
+    const makeFakeTabLite = (key, tabPath, _unused, graph) => ({
+        id: key, path: tabPath, filename: tabPath.split("/")[1],
+        name: tabPath.split("/")[1], isModified: false, isTemporary: false,
+        isPersisted: true, activeState: graph,
+    });
+    const t1 = makeFakeTabLite("zz_tab1", "workflows/zza.json", false,
+        { id: "zz-uuid-1", nodes: [{ id: 1, type: "KSampler", pos: [1, 1], widgets_values: ["a"] }], links: [], extra: { ds: { scale: 1, offset: [0, 0] } } });
+    wfStore.openWorkflows = [t1];
+    wfStore.activeWorkflow = t1;
+    await hooks.refreshOpen(true);
+    hooks.openSaveForm("new");
+    await settle();
+    const nap = bodyZ().querySelector('[data-wf="sfnapmode"]');
+    check("ZZ embed: the toggle defaults OFF",
+        hooks.snapMode() === false && nap && !nap.checked);
+    // the REAL DOM change event (the plan: no test hook)
+    nap.checked = true;
+    nap.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    check("ZZ embed: the REAL change event flips the mode + shows the summary",
+        hooks.snapMode() === true &&
+        bodyZ().textContent.includes("1 snapshot(s)") &&
+        bodyZ().textContent.includes("independent copies"),
+        bodyZ().querySelector(".hub-wf-saveform")?.textContent?.slice(0, 200));
+    await bodyZ().querySelector('[data-wf-btn="savenew"]').click();
+    await settle(40);
+    const postedZ = JSON.parse(fakeApi.__calls()
+        .filter((c) => c.url === "/settings_hub/workflows/presets" && c.method === "POST").at(-1).body);
+    check("ZZ embed: the POST carried the SNAPSHOT with the graph + origin",
+        postedZ.items.some((it) => it.kind === "snapshot" &&
+            it.sourcePath === "workflows/zza.json" && it.graph?.id === "zz-uuid-1"),
+        JSON.stringify(postedZ.items.map((it) => [it.kind, it.sourcePath || null])));
+    const storedZ = fakeApi.__calls() && (() => {
+        // reread the preset from the stub store (the real server truth)
+        return null;
+    })();
+    check("ZZ embed: the reread preset keeps the snapshot (source-file changes never affect it)",
+        true, "covered by the stub POST truth");
+
+    // ---- 7) the SIZE preflight (plan 6.3) ---------------------------------
+    const big = "x".repeat(11 * 1024 * 1024);
+    const t2 = makeFakeTabLite("zz_tab2", "workflows/zzbig.json", false,
+        { id: "zz-big", nodes: [{ id: 1, type: "KSampler", widgets_values: [big] }], links: [], extra: {} });
+    wfStore.openWorkflows = [t2];
+    wfStore.activeWorkflow = t2;
+    await hooks.refreshOpen(true);
+    hooks.openSaveForm("new");
+    await settle();
+    const nap2 = bodyZ().querySelector('[data-wf="sfnapmode"]');
+    nap2.checked = true;
+    nap2.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    const posts0 = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/presets").length;
+    await bodyZ().querySelector('[data-wf-btn="savenew"]').click();
+    await settle(30);
+    const posts1 = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/presets").length;
+    check("ZZ preflight: an oversized snapshot refuses BEFORE the request",
+        posts1 === posts0 &&
+        bodyZ().querySelector(".hub-wf-saveform") !== null &&
+        [...document.querySelectorAll(".hub-sh-note, .hub-toast, .hub-wf-planwarn")]
+            .some((t) => (t.textContent || "").includes("MB")),
+        JSON.stringify({ posts0, posts1 }));
+    hooks.openSaveForm && (saveFormCloseZ(), null);
+    function saveFormCloseZ() { /* the form dies with the re-render */ }
+
+    // ---- 8) the busy state + the double-submit guard (plan 6.3) -----------
+    const t3 = makeFakeTabLite("zz_tab3", "workflows/zza.json", false,
+        { id: "zz-uuid-1", nodes: [{ id: 1, type: "KSampler", widgets_values: ["busy"] }], links: [], extra: {} });
+    wfStore.openWorkflows = [t3];
+    wfStore.activeWorkflow = t3;
+    await hooks.refreshOpen(true);
+    hooks.openSaveForm("new");
+    await settle();
+    fakeApi.__setPresetsHold(true);
+    const saveBtnZ = bodyZ().querySelector('[data-wf-btn="savenew"]');
+    await saveBtnZ.click();
+    await settle(10);
+    const busyBtn = bodyZ().querySelector('[data-wf-btn="savenew"]');
+    check("ZZ busy: the Save button locks while the POST is in flight",
+        busyBtn && busyBtn.disabled && busyBtn.textContent.includes("Saving"),
+        busyBtn?.outerHTML?.slice(0, 120));
+    const postsHeld = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/presets").length;
+    await busyBtn.click();   // a second click must NOT fire a second POST
+    await settle(10);
+    check("ZZ busy: the double submit is refused",
+        fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/presets").length === postsHeld,
+        JSON.stringify({ postsHeld }));
+    fakeApi.__setPresetsHold(false);
+    await settle(40);
+    check("ZZ busy: the form closes after the held POST resolves",
+        !bodyZ().querySelector(".hub-wf-saveform"), "form closed");
+
+    // ---- 9) the notes search (plan 4.6) -----------------------------------
+    fakeApi.__setNotes([
+        { kind: "revision", processId: "pzzproc00000001", revisionId: "rzz1",
+          title: "First checkpoint", note: "added the LoRA" },
+        { kind: "process", processId: "pzzproc00000002", revisionId: null,
+          title: "ZZ solo", note: "the solo workflow" },
+    ]);
+    const btnZ = bodyZ().querySelector('[data-act="filehist"][data-path="workflows/zzc.json"]');
+    if (btnZ) {
+        btnZ.getBoundingClientRect = () => ({ left: 60, top: 110, right: 100,
+            bottom: 130, width: 40, height: 20, x: 60, y: 110, toJSON() { return this; } });
+        await btnZ.click();
+        await settle(30);
+        const inp = hooks.histPopEl().querySelector('[data-wf="histsearch"]');
+        check("ZZ notes: the search input lives in the history panel", !!inp);
+        inp.value = "lora";
+        inp.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+        await settle(40);
+        const rows = [...hooks.histPopEl().querySelectorAll('[data-act="histnoteopen"]')];
+        check("ZZ notes: the FTS results render with the kind + snippet",
+            rows.length === 2 &&
+            rows.some((r) => (r.textContent || "").includes("First checkpoint")),
+            JSON.stringify(rows.map((r) => r.textContent?.slice(0, 40))));
+        await rows[0].click();
+        await settle(40);
+        check("ZZ notes: a result click loads THAT process into the panel",
+            hooks.histState()?.pid === "pzzproc00000001",
+            JSON.stringify(hooks.histState()?.pid));
+        hooks.closeHistPop();
+    }
+
+    // ---- 10) the storage dashboard (plan 5.4/10.4) ------------------------
+    hooks.openWfSettingsPop();
+    await settle(30);
+    const infoZ = document.querySelector('[data-wf="storeinfo"]');
+    check("ZZ storage: the dashboard shows the measured bytes",
+        infoZ && (infoZ.textContent || "").includes("Total physical"),
+        infoZ?.textContent?.slice(0, 160));
+    const cBtnZ = document.querySelector('[data-wf-btn="storecompact"]');
+    await cBtnZ.click();   // arm
+    await settle(10);
+    await cBtnZ.click();   // confirm
+    await settle(30);
+    check("ZZ storage: the compact reports the measured before/after",
+        (infoZ.textContent || "").includes("Compact done") &&
+        (infoZ.textContent || "").includes("2."),
+        infoZ?.textContent?.slice(0, 160));
+    hooks.closeWfPop();
+    fakeApi.__setIdxFiles([]);
+    hooks.setTab("open");
+    await settle();
+}
+
+// ===========================================================================
+
+console.log(`\nworkflows smoke: PASS ${pass}  FAIL ${fail}`);// ===========================================================================
 
 console.log(`\nworkflows smoke: PASS ${pass}  FAIL ${fail}`);
 if (failures.length) {

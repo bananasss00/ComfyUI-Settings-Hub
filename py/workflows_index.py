@@ -62,6 +62,29 @@ MAX_SEARCH_TEXT_CHARS = 20000           # the FTS payload budget per file
 MAX_ERROR_CHARS = 200
 NORMALIZATION_PROFILE_VERSION = "nprof1"
 SCHEMA_VERSION = "1"
+# v116 (plan 3.1): the per-pass walk bound. The bound no longer lies: a
+# truncated pass is reported (stats + meta) and the vanished-row prune is
+# SKIPPED - unverified rows are never deleted. Tests shrink the bound
+# through SHUB_WF_MAX_WALK instead of hardcoding a second limit.
+MAX_WALK_FILES = 30000
+# v116 (plan 3.2): a Refresh that lands while another scan runs JOINS it
+# (waits up to this many seconds for the lock) instead of failing with
+# "a scan is already running".
+SCAN_JOIN_TIMEOUT_S = 120
+
+
+def _walk_limit():
+    """The effective per-pass walk bound (SHUB_WF_MAX_WALK overrides the
+    default for tests; a broken value falls back to the default)."""
+    raw = os.environ.get("SHUB_WF_MAX_WALK")
+    if raw:
+        try:
+            v = int(raw)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return MAX_WALK_FILES
 
 _DB_DIRNAME = "index"
 _DB_NAME = "workflow_index.db"
@@ -428,6 +451,17 @@ def _ensure_schema(conn):
     c = conn
     c.execute("CREATE TABLE IF NOT EXISTS meta ("
               "key TEXT PRIMARY KEY, value TEXT)")
+    # v116 (plan 4.6): the NOTES index - process + revision annotations live
+    # in ONE small table mirrored into FTS when FTS5 exists. The search must
+    # find a note WITHOUT reading any Git blob (plan 4.6); the rows are
+    # maintained by the history module's mutation hooks and rebuildable from
+    # the manifests alone (notes_rebuild).
+    c.execute("CREATE TABLE IF NOT EXISTS history_notes ("
+              "kind TEXT NOT NULL,"        # 'process' | 'revision'
+              "pid TEXT NOT NULL,"
+              "rid TEXT NOT NULL,"         # '' for a process note
+              "title TEXT, note TEXT, updated_at INTEGER,"
+              "PRIMARY KEY (kind, pid, rid))")
     c.execute("CREATE TABLE IF NOT EXISTS workflow_files ("
               "user_scope TEXT NOT NULL,"
               "root_key TEXT NOT NULL,"
@@ -512,10 +546,24 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                user_scope="default", force=False, progress=None):
     """ONE incremental pass over the library. Returns a stats dict.
     Runs in a WORKER THREAD (the caller wraps it in asyncio.to_thread) -
-    the event loop never blocks (plan 4.4)."""
+    the event loop never blocks (plan 4.4).
+
+    v116 (plan 3.1): the pass is HONEST about its completeness. A walk that
+    hit the file bound (truncated) or swallowed directory errors leaves the
+    index INCOMPLETE: the vanished-row prune is skipped entirely (plan:
+    'unverified rows are never deleted' - a truncated walk must not be able
+    to erase the tail of a big library), the stats carry
+    prune_skipped/walk_errors/complete and the meta table remembers
+    last_scan_complete so index_status can answer 'is the index actually
+    current?' without re-walking anything."""
     db = db or _db_path()
-    if not _scan_lock.acquire(blocking=False):
+    # v116 (plan 3.2): JOIN semantics - a second scan request waits for the
+    # running one (up to SCAN_JOIN_TIMEOUT_S) instead of answering
+    # "a scan is already running"; the waiter then performs its own pass
+    # (cheap: the fresh rows skip via the same mtime signature).
+    if not _scan_lock.acquire(blocking=True, timeout=SCAN_JOIN_TIMEOUT_S):
         return {"ok": False, "error": "a scan is already running",
+                "busy": True,
                 "scanned": 0, "indexed": 0, "changed": 0, "errors": 0,
                 "removed": 0, "skipped_same": 0, "too_large": 0}
     try:
@@ -524,16 +572,25 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
         stats = {"ok": True, "scanned": 0, "indexed": 0, "changed": 0,
                  "errors": 0, "removed": 0, "skipped_same": 0,
                  "too_large": 0, "truncated": False,
+                 "prune_skipped": False, "walk_errors": 0,
+                 "complete": True,
                  "db": db, "fts": _fts_enabled(db),
                  "profile": NORMALIZATION_PROFILE_VERSION}
         seen_keys = set()
-        MAX_WALK = 30000
+        MAX_WALK = _walk_limit()
+
+        def _walk_err(_err):
+            # plan 3.1: a directory whose listing failed is NOT proof that
+            # its files are gone - the pass may not claim completeness
+            stats["walk_errors"] += 1
+
         conn = _connect(db)
         try:
             fts = _ensure_fts(conn)
             for root_key, root_dir, hides in _scan_roots(
                     workflows_user_dirs or [], hide_dirs_fn or (lambda d: [])):
-                for dirpath, dirnames, filenames in os.walk(root_dir):
+                for dirpath, dirnames, filenames in os.walk(root_dir,
+                                                            onerror=_walk_err):
                     # built-in defense: the storage internals (the settings_hub
                     # namespace: presets/temp/manager housekeeping) are NEVER
                     # indexed, even when the caller forgets its hide list
@@ -557,6 +614,7 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                         stats["scanned"] += 1
                         if stats["scanned"] > MAX_WALK:
                             stats["truncated"] = True
+                            stats["complete"] = False
                             break
                         try:
                             st = os.stat(full)
@@ -636,20 +694,40 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                             progress(stats)
                     if stats["truncated"]:
                         break
-            # prune the rows whose files vanished (plan 4.4 reconciliation)
-            with _db_lock:
-                rows = conn.execute(
-                    "SELECT rowid, user_scope, root_key, rel_path "
-                    "FROM workflow_files WHERE user_scope=?",
-                    (user_scope,)).fetchall()
-                for rowid, us, rk, rp in rows:
-                    if (us, rk, rp) not in seen_keys:
-                        conn.execute("DELETE FROM workflow_files WHERE rowid=?",
-                                     (rowid,))
-                        if fts:
-                            conn.execute("DELETE FROM workflow_fts WHERE rowid=?",
+            # v116 (plan 3.1): prune the rows whose files vanished ONLY when
+            # the walk was complete AND error-free. A truncated pass (or one
+            # with unreadable directories) has NOT verified the whole library
+            # - deleting the unverified rows could erase the tail of a big
+            # library or drop rows behind a transiently unreadable folder.
+            if stats["walk_errors"]:
+                stats["complete"] = False
+            if stats["truncated"] or stats["walk_errors"]:
+                stats["prune_skipped"] = True
+            else:
+                with _db_lock:
+                    rows = conn.execute(
+                        "SELECT rowid, user_scope, root_key, rel_path "
+                        "FROM workflow_files WHERE user_scope=?",
+                        (user_scope,)).fetchall()
+                    for rowid, us, rk, rp in rows:
+                        if (us, rk, rp) not in seen_keys:
+                            conn.execute("DELETE FROM workflow_files WHERE rowid=?",
                                          (rowid,))
-                        stats["removed"] += 1
+                            if fts:
+                                conn.execute("DELETE FROM workflow_fts WHERE rowid=?",
+                                             (rowid,))
+                            stats["removed"] += 1
+            # v116: the completeness flag is durable - the next index_status
+            # answers 'is the index actually current?' without a re-walk.
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                    ("last_scan_complete", "1" if stats["complete"] else "0"))
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                    ("last_scan_scope", user_scope))
+            except sqlite3.DatabaseError:
+                pass
             conn.commit()
         finally:
             conn.close()
@@ -704,15 +782,323 @@ def forget_paths(db=None, user_scope="default", rel_paths=()):
     return {"ok": True, "removed": removed, "busy": False}
 
 
+def refresh_paths(db=None, user_scope="default", root_dirs=None,
+                   rel_paths=()):
+    """v116 (plan 3.2): the POINT re-index of specific library paths - the
+    route layer calls this after a Restore/Checkpoint touched one file, so
+    the answer of the next query carries the fresh hashes without waiting
+    for the next full scan. A path that no longer exists under ANY root has
+    its row dropped (the same contract the scan prune follows). The
+    root_key follows the first root that contains the file - the same
+    first-root-wins precedence the walk and the Files listing use."""
+    paths = [p for p in (rel_paths or ()) if isinstance(p, str) and p]
+    if not paths:
+        return {"ok": True, "updated": 0, "removed": 0}
+    db = db or _db_path()
+    if _scan_lock.acquire(blocking=True, timeout=10):
+        try:
+            with _db_lock:
+                init_db(db)
+            fts = _fts_enabled(db)
+            updated = removed = 0
+            with _db_lock:
+                conn = _connect(db)
+                try:
+                    for rel in sorted(set(paths)):
+                        rec = sig = mtime_sec = None
+                        found = None
+                        for i, wroot in enumerate(root_dirs or []):
+                            sub = rel[len("workflows/"):] \
+                                if rel.startswith("workflows/") else rel
+                            cand = os.path.normpath(os.path.join(wroot, sub))
+                            if not os.path.isfile(cand):
+                                continue
+                            found = ("root%d" % i, cand)
+                            break
+                        if not found:
+                            rows = conn.execute(
+                                "SELECT rowid FROM workflow_files WHERE "
+                                "user_scope=? AND rel_path=?",
+                                (user_scope, rel)).fetchall()
+                            for (rowid,) in rows:
+                                conn.execute("DELETE FROM workflow_files "
+                                             "WHERE rowid=?", (rowid,))
+                                if fts:
+                                    conn.execute("DELETE FROM workflow_fts "
+                                                 "WHERE rowid=?", (rowid,))
+                                removed += 1
+                            continue
+                        root_key, full = found
+                        try:
+                            st = os.stat(full)
+                            with open(full, "rb") as fh:
+                                raw = fh.read()
+                        except OSError:
+                            continue   # transient - not a confirmed removal
+                        rec, _err = analyze_workflow_bytes(raw)
+                        sig = (st.st_size, st.st_mtime_ns,
+                               getattr(st, "st_ino", 0))
+                        mtime_sec = int(st.st_mtime)
+                        fn = rel.rsplit("/", 1)[-1]
+                        rel_dir = rel[len("workflows/"):]
+                        folder = (rel_dir.rsplit("/", 1)[0]
+                                  if "/" in rel_dir else "")
+                        final_search = ((rel + " " + fn + " " + rec["search_text"])
+                                        if rec["search_text"] else (rel + " " + fn))
+                        conn.execute(
+                            "INSERT OR REPLACE INTO workflow_files "
+                            "(user_scope, root_key, rel_path, name, folder,"
+                            " size_bytes, mtime_ns, inode, mtime_sec,"
+                            " workflow_id, raw_hash, canonical_hash,"
+                            " workflow_hash, presentation_hash,"
+                            " extension_hash, structural_hash,"
+                            " normalization_profile_version, extra_summary,"
+                            " node_count, node_types, node_titles,"
+                            " model_refs, search_text, parse_status,"
+                            " parse_error, indexed_at)"
+                            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (user_scope, root_key, rel, fn, folder,
+                             sig[0], sig[1], sig[2], mtime_sec,
+                             rec["workflow_id"], rec["raw_hash"],
+                             rec["canonical_hash"], rec["workflow_hash"],
+                             rec["presentation_hash"], rec["extension_hash"],
+                             rec["structural_hash"], NORMALIZATION_PROFILE_VERSION,
+                             json.dumps(rec["extra_summary"], ensure_ascii=False),
+                             rec["node_count"],
+                             json.dumps(rec["node_types"], ensure_ascii=False),
+                             json.dumps(rec["node_titles"], ensure_ascii=False),
+                             json.dumps(rec["model_refs"], ensure_ascii=False),
+                             final_search, rec["parse_status"],
+                             rec["parse_error"], int(time.time())))
+                        if fts:
+                            rowid = conn.execute(
+                                "SELECT rowid FROM workflow_files WHERE "
+                                "user_scope=? AND rel_path=?",
+                                (user_scope, rel)).fetchone()
+                            if rowid:
+                                _fts_sync(conn, rowid[0], final_search)
+                        updated += 1
+                    conn.commit()
+                finally:
+                    conn.close()
+            return {"ok": True, "updated": updated, "removed": removed}
+        except sqlite3.DatabaseError as e:
+            return {"ok": False, "error": str(e)[:MAX_ERROR_CHARS],
+                    "updated": 0, "removed": 0}
+        finally:
+            _scan_lock.release()
+    return {"ok": True, "updated": 0, "removed": 0, "busy": True}
+
+
+# ---------------------------------------------------------------------------
+# v116 (plan 4.6): the NOTES search index. Process notes, revision titles
+# and revision notes live in ONE small SQLite table (history_notes) mirrored
+# into FTS when FTS5 exists - the search NEVER reads a Git blob. The history
+# module's mutation hooks keep it fresh; notes_rebuild restores it from the
+# manifests alone (a dropped/corrupt table self-heals on the next search).
+# ---------------------------------------------------------------------------
+
+_NOTES_BUILT_KEY = "notes_built_v1"
+
+
+def _notes_ensure_schema(conn):
+    _ensure_schema(conn)
+    row = conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table' "
+                       "AND name='history_notes'").fetchone()
+    if not row or not row[0]:
+        _ensure_schema(conn)
+    if _fts_available(conn):
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS history_notes_fts "
+                     "USING fts5(text, kind UNINDEXED, pid UNINDEXED, "
+                     "rid UNINDEXED)")
+
+
+def notes_upsert(kind, pid, rid, title=None, note=None, updated_at=None):
+    """Index ONE note (kind 'process' with rid='' or 'revision'). Best
+    effort: a broken index must never break a checkpoint (the notes search
+    answers 'no results' until the next rebuild)."""
+    if not isinstance(pid, str) or not pid:
+        return False
+    kind = "revision" if kind == "revision" else "process"
+    rid = rid if isinstance(rid, str) else ""
+    db = _db_path()
+    if not os.path.isfile(db):
+        return False
+    try:
+        with _db_lock:
+            conn = _connect(db)
+            try:
+                _notes_ensure_schema(conn)
+                conn.execute(
+                    "INSERT OR REPLACE INTO history_notes "
+                    "(kind, pid, rid, title, note, updated_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (kind, pid, rid,
+                     (title or None) if isinstance(title, str) else None,
+                     (note or None) if isinstance(note, str) else None,
+                     int(updated_at or time.time())))
+                if _fts_available(conn):
+                    text = " ".join(x for x in (title, note) if x)
+                    conn.execute("DELETE FROM history_notes_fts WHERE pid=? "
+                                 "AND rid=? AND kind=?", (pid, rid, kind))
+                    conn.execute("INSERT INTO history_notes_fts "
+                                 "(text, kind, pid, rid) VALUES (?,?,?,?)",
+                                 (text or "", kind, pid, rid))
+                conn.commit()
+            finally:
+                conn.close()
+        return True
+    except sqlite3.DatabaseError:
+        return False
+
+
+def notes_drop(pid=None, kind=None, rid=None):
+    """Drop note rows (all of a process, or one kind/rid)."""
+    if pid is not None and not isinstance(pid, str):
+        return False
+    db = _db_path()
+    if not os.path.isfile(db):
+        return False
+    try:
+        with _db_lock:
+            conn = _connect(db)
+            try:
+                _notes_ensure_schema(conn)
+                where, args = ["1=1"], []
+                if pid is not None:
+                    where.append("pid=?")
+                    args.append(pid)
+                if kind:
+                    where.append("kind=?")
+                    args.append("revision" if kind == "revision" else "process")
+                if rid is not None:
+                    where.append("rid=?")
+                    args.append(rid)
+                conn.execute("DELETE FROM history_notes WHERE " +
+                             " AND ".join(where), args)
+                if _fts_available(conn):
+                    fwhere, fargs = [], []
+                    if pid is not None:
+                        fwhere.append("pid=?")
+                        fargs.append(pid)
+                    if kind:
+                        fwhere.append("kind=?")
+                        fargs.append("revision" if kind == "revision"
+                                     else "process")
+                    if rid is not None:
+                        fwhere.append("rid=?")
+                        fargs.append(rid)
+                    if fwhere:
+                        conn.execute("DELETE FROM history_notes_fts WHERE " +
+                                     " AND ".join(fwhere), fargs)
+                conn.commit()
+            finally:
+                conn.close()
+        return True
+    except sqlite3.DatabaseError:
+        return False
+
+
+def notes_rebuild(processes, revisions):
+    """Restore the notes index from the manifests ALONE (plan 4.6). The
+    caller passes the manifest dicts it already read (the history module
+    owns them) - one write per row, idempotent."""
+    n = 0
+    for p in (processes or []):
+        if not isinstance(p, dict):
+            continue
+        pid = p.get("processId")
+        if isinstance(pid, str) and (p.get("note") or p.get("displayName")):
+            notes_upsert("process", pid, "", p.get("displayName"),
+                         p.get("note"), p.get("updatedAt"))
+            n += 1
+    for r in (revisions or []):
+        if not isinstance(r, dict):
+            continue
+        pid = r.get("processId")
+        rid = r.get("revisionId")
+        if isinstance(pid, str) and isinstance(rid, str) and \
+                (r.get("note") or r.get("title")):
+            notes_upsert("revision", pid, rid, r.get("title"), r.get("note"),
+                         r.get("createdAt"))
+            n += 1
+    return n
+
+
+def search_notes(db=None, q=None, limit=40):
+    """The notes search (plan 4.6): process + revision annotations matching
+    a free-text query. FTS when available, a tested LIKE fallback otherwise.
+    Returns [{kind, processId, revisionId, title, note}]."""
+    db = db or _db_path()
+    out = {"ok": True, "results": [], "fts": False}
+    q = str(q or "").strip()
+    if not q:
+        return out
+    limit = max(1, min(int(limit or 40), 100))
+    try:
+        with _db_lock:
+            init_db(db)
+            conn = _connect(db)
+            try:
+                _notes_ensure_schema(conn)
+                fts = _fts_available(conn)
+                out["fts"] = fts
+                if fts:
+                    fts_q = " ".join('\"%s\"*' % t.replace('"', "")
+                                     for t in q.split()[:8])
+                    rows = conn.execute(
+                        "SELECT kind, pid, rid FROM history_notes_fts "
+                        "WHERE history_notes_fts MATCH ? LIMIT ?",
+                        (fts_q, limit)).fetchall()
+                    for kind, pid, rid in rows:
+                        r2 = conn.execute(
+                            "SELECT title, note FROM history_notes WHERE "
+                            "kind=? AND pid=? AND rid=?",
+                            (kind, pid, rid)).fetchone()
+                        if r2:
+                            out["results"].append({
+                                "kind": kind, "processId": pid,
+                                "revisionId": rid or None,
+                                "title": r2[0], "note": r2[1]})
+                else:
+                    toks = [t.replace("%", "").replace("_", " ")
+                            for t in q.split()[:8]]
+                    where = ["(" + " AND ".join(
+                        "(title LIKE ? OR note LIKE ?)" for _ in toks) + ")"]
+                    args = []
+                    for t in toks:
+                        args.extend(["%" + t + "%", "%" + t + "%"])
+                    rows = conn.execute(
+                        "SELECT kind, pid, rid, title, note FROM "
+                        "history_notes WHERE " + where[0] +
+                        " LIMIT ?", args + [limit]).fetchall()
+                    for kind, pid, rid, title, note in rows:
+                        out["results"].append({
+                            "kind": kind, "processId": pid,
+                            "revisionId": rid or None,
+                            "title": title, "note": note})
+                conn.commit()
+            finally:
+                conn.close()
+    except sqlite3.DatabaseError as e:
+        out["ok"] = False
+        out["error"] = str(e)[:MAX_ERROR_CHARS]
+    return out
+
+
 def index_status(db=None, user_scope="default"):
     """The stats for the UI: how many files are indexed, the last scan, the
-    profile, whether FTS is live. Cheap - never walks the filesystem."""
+    profile, whether FTS is live. Cheap - never walks the filesystem.
+    v116 (plan 3.1/4.7): the answer also says whether the LAST scan was
+    COMPLETE (lastScanComplete / complete / truncated) - a truncated index
+    must never pose as a full one (the UI shows 'incomplete - rebuild')."""
     db = db or _db_path()
     out = {"ok": True, "db_exists": os.path.isfile(db), "files": 0,
            "errors": 0, "too_large": 0, "last_scan": 0,
            "profile": NORMALIZATION_PROFILE_VERSION,
            "schema_version": SCHEMA_VERSION, "fts": False,
-           "db_bytes": 0}
+           "db_bytes": 0, "complete": True, "lastScanComplete": None,
+           "truncated": False}
     if not out["db_exists"]:
         return out
     out["db_bytes"] = os.path.getsize(db)
@@ -731,6 +1117,18 @@ def index_status(db=None, user_scope="default"):
                 out["errors"] = int(row[1] or 0)
                 out["too_large"] = int(row[2] or 0)
                 out["last_scan"] = int(row[3] or 0)
+                mrow = conn.execute(
+                    "SELECT key, value FROM meta WHERE key IN "
+                    "('last_scan_complete', 'last_scan_scope')").fetchall()
+                md = {k: v for k, v in (mrow or [])}
+                if "last_scan_complete" in md:
+                    out["lastScanComplete"] = md["last_scan_complete"] == "1"
+                    out["complete"] = out["lastScanComplete"]
+                    out["truncated"] = not out["complete"]
+                if "last_scan_scope" in md and md["last_scan_scope"] != user_scope:
+                    # the flag belongs to ANOTHER scope - this scope's rows
+                    # may be older than the last complete pass
+                    out["complete"] = False
                 conn.commit()
             finally:
                 conn.close()
@@ -1065,11 +1463,29 @@ def duplicate_groups(db=None, user_scope="default"):
                 no_uuid = conn.execute(
                     "SELECT count(*) FROM workflow_files WHERE user_scope=? "
                     "AND workflow_id IS NULL", (user_scope,)).fetchone()[0]
+                # v116 (plan 9.2): the STRUCTURAL candidates - the same node
+                # class set, but everything else differs. Candidates ONLY:
+                # the UI must never present them as duplicates and nothing
+                # ever merges/links by similarity automatically.
+                structural = groups("structural_hash")
+                # structural candidates = structural groups whose members are
+                # NOT all the same workflow (a real duplicate group would
+                # make the candidate row noise); the plain list is enough -
+                # the client labels them 'candidates only'
+                real_structural = []
+                for h in structural:
+                    row = conn.execute(
+                        "SELECT count(DISTINCT workflow_hash) FROM "
+                        "workflow_files WHERE user_scope=? AND "
+                        "structural_hash=?", (user_scope, h)).fetchone()
+                    if row and row[0] > 1:
+                        real_structural.append(h)
                 out.update({
                     "exactCopies": exact,
                     "sameJsonContent": same_json,
                     "sameWorkflowDiffCanvas": same_wf_diff_canvas,
                     "sameUuidDiffContent": same_id_diff_content,
+                    "structuralCandidates": real_structural,
                     "noUuidCount": int(no_uuid or 0),
                 })
             finally:

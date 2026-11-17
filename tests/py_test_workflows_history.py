@@ -392,10 +392,17 @@ check("v113 cache: a fresh process is resolvable immediately",
       r4.get("ok") and _p3 is not None and
       _p3.get("processId") == r4.get("processId"),
       json.dumps({"ok": r4.get("ok"), "resolved": _p3.get("processId") if _p3 else None}))
-_u3 = hist._proc_cache["by_uuid"].get("33333333-3333-3333-3333-333333333333")
+# v116 (plan 4.5): the uuid/path maps are scope-partitioned
+# {scope: {key: pid}} - the default scope holds every pre-v116 binding
+_u3 = (hist._proc_cache["by_uuid"].get("default") or {}
+       ).get("33333333-3333-3333-3333-333333333333")
 check("v113 cache: the uuid map holds the fresh binding",
       _u3 == r4.get("processId"),
       json.dumps({"map": _u3, "want": r4.get("processId")}))
+check("v116 scope: the fresh manifest carries its scope field",
+      hist._manifest_scope(hist._proc_cache["by_pid"].get(r4.get("processId")))
+      == "default",
+      json.dumps(hist._manifest_scope(hist._proc_cache["by_pid"].get(r4.get("processId")))))
 
 # ---------------------------------------------------------------------------
 # 16) v114 (owner request): the version-cleanup flow - delete SPECIFIC
@@ -601,7 +608,24 @@ def _remover(rel):
     if rel.endswith("boom.json"):
         raise RuntimeError("disk on fire")
     return {"path": rel, "removed": True, "bytes": 123, "snapshot": "tx-1"}
-_d = hist.delete_process(_fk, delete_files=True, file_remover=_remover)
+# v116 (plan 3.5): the preflight phase runs FIRST - any failure aborts
+# everything before a single byte is touched
+_calls2 = []
+def _preflight(rel):
+    _calls2.append(rel)
+    if rel.endswith("gone.json"):
+        return {"path": rel, "ok": False, "error": "not readable"}
+    return {"path": rel, "ok": True, "txId": "tx-pre"}
+_dpre = hist.delete_process(_fk, delete_files=True, file_remover=_remover,
+                            file_preflight=_preflight)
+check("v116 preflight: a failing preflight aborts the WHOLE delete",
+      not _dpre.get("ok") and _dpre.get("stage") == "preflight" and
+      hist._read_process(_fk) is not None and
+      len(hist.list_revisions(_fk)) == 1 and
+      _calls == [],   # the remover never ran
+      json.dumps({k: _dpre.get(k) for k in ("ok", "stage", "error")}))
+_d = hist.delete_process(_fk, delete_files=True, file_remover=_remover,
+                         file_preflight=lambda rel: {"path": rel, "ok": True})
 _by_path = {f.get("path"): f for f in _d.get("files") or []}
 check("v115 full delete: every location was offered to the remover",
       sorted(_calls) == ["workflows/boom.json", "workflows/del1.json",
@@ -611,10 +635,25 @@ check("v115 full delete: the file results are reported verbatim",
       _by_path.get("workflows/gone.json", {}).get("reason") == "missing" and
       "disk on fire" in (_by_path.get("workflows/boom.json", {}).get("error") or ""),
       json.dumps(_d.get("files")))
-check("v115 full delete: the erasure still completes with a failing remover",
-      _d.get("ok") and _d.get("deletedRevisions") == 1 and
+# v116 (plan 3.5): a partial file failure KEEPS the process + its history -
+# the v115 behavior (erase the history behind failing files) was the bug
+check("v116 partial delete: the failure keeps the process AND the history",
+      not _d.get("ok") and _d.get("stage") == "files" and
+      _d.get("partial") is True and
+      hist._read_process(_fk) is not None and
+      len(hist.list_revisions(_fk)) == 1 and
+      _fk in hist._proc_cache["by_pid"],
+      json.dumps({k: _d.get(k) for k in ("ok", "stage", "partial",
+                                         "error")}))
+# the retry without the hostile file completes the erasure
+_d2 = hist.delete_process(_fk, delete_files=True,
+                          file_remover=lambda rel: {"path": rel, "removed": True},
+                          file_preflight=lambda rel: {"path": rel, "ok": True})
+check("v116 partial delete: the retry after fixing the files erases fully",
+      _d2.get("ok") and _d2.get("deletedRevisions") == 1 and
       hist._read_process(_fk) is None and
-      _fk not in hist._proc_cache["by_pid"], json.dumps({k: _d.get(k) for k in ("ok", "deletedRevisions")}))
+      _fk not in hist._proc_cache["by_pid"],
+      json.dumps({k: _d2.get(k) for k in ("ok", "deletedRevisions")}))
 
 # (2b) the CAS backend reclaims the REAL bytes: identical content across two
 # processes dedupes to ONE blob - it survives while any other revision
@@ -646,6 +685,204 @@ check("v115 cas: deleting process B reclaims the unreferenced blob",
       not os.path.isfile(hist3._cas_blob_path(_oid)),
       json.dumps({k: db.get(k) for k in ("ok", "freedBytes")}))
 shutil.rmtree(cas2_tmp, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+# v116 (plan 3.3): the UUID REBIND - a file whose content now carries UUID B
+# must leave process A's locations and join B's - atomically, with A's
+# history INTACT (orphaned history is legal and restorable).
+import sqlite3 as _sq3
+
+def _idx_exec(sql, args=()):
+    conn = _sq3.connect(widx._db_path())
+    try:
+        conn.execute(sql, args)
+        conn.commit()
+    finally:
+        conn.close()
+
+_hist_rebind_base = os.path.join(TMP, "settings_hub", "workflows_manager")
+RA = "aaaaaaaa-1111-1111-1111-111111111111"
+RB = "bbbbbbbb-2222-2222-2222-222222222222"
+write_lib("rebind.json", wf_bytes(RA, seed="A1"))
+widx.scan_index(workflows_user_dirs=[LIB], hide_dirs_fn=lambda d: [],
+                user_scope="default", force=True)
+hist._reconcile_ts[0] = 0
+hist.reconcile_processes("default")
+_pa = hist.resolve_path_process("workflows/rebind.json", "default")
+check("v116 rebind: the file binds to the UUID-A process",
+      _pa is not None and _pa.get("workflowId") == RA,
+      json.dumps({"got": (_pa or {}).get("workflowId")}))
+_pid_a = (_pa or {}).get("processId")
+ra1 = hist.record_checkpoint_for_path("workflows/rebind.json",
+                                      wf_bytes(RA, seed="A2"),
+                                      source="checkpoint")
+check("v116 rebind: process A owns a revision",
+      ra1.get("ok") and ra1.get("processId") == _pid_a, json.dumps(ra1.get("error")))
+# the file content flips to UUID B (the same physical path)
+write_lib("rebind.json", wf_bytes(RB, seed="B1"))
+widx.scan_index(workflows_user_dirs=[LIB], hide_dirs_fn=lambda d: [],
+                user_scope="default", force=True)
+hist._reconcile_ts[0] = 0
+hist.reconcile_processes("default")
+_pb = hist.resolve_path_process("workflows/rebind.json", "default")
+check("v116 rebind: the path now belongs ONLY to the UUID-B process",
+      _pb is not None and _pb.get("workflowId") == RB,
+      json.dumps({"got": (_pb or {}).get("workflowId")}))
+_pa2 = hist._read_process(_pid_a)
+check("v116 rebind: process A has NO location anymore",
+      _pa2 is not None and not (_pa2.get("locations") or []),
+      json.dumps(_pa2.get("locations") if _pa2 else None))
+check("v116 rebind: process A keeps its HISTORY (orphaned but restorable)",
+      len(hist.list_revisions(_pid_a)) == 1 and
+      hist.read_revision_bytes(ra1["revisionId"]) == wf_bytes(RA, seed="A2"),
+      json.dumps({"revs": len(hist.list_revisions(_pid_a))}))
+
+# v116 (plan 4.5): the SAME rel_path in TWO roots must not bind twice - the
+# root_key tie-break follows the scan order (first root wins)
+def _bulk_row(root_key, rel, uid, mtime):
+    _idx_exec("INSERT OR REPLACE INTO workflow_files (user_scope, root_key, "
+              "rel_path, name, folder, size_bytes, mtime_ns, inode, mtime_sec, "
+              "workflow_id, raw_hash, canonical_hash, workflow_hash, "
+              "presentation_hash, extension_hash, structural_hash, "
+              "normalization_profile_version, extra_summary, node_count, "
+              "node_types, node_titles, model_refs, search_text, parse_status, "
+              "parse_error, indexed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              ("default", root_key, rel, rel.rsplit("/", 1)[-1], "", 10,
+               mtime, 0, mtime, uid, "h" + rel, "h" + rel, "w" + rel,
+               "p" + rel, "e" + rel, "s" + rel, "nprof1", "{}", 1, "[]",
+               "[]", "[]", rel, "ok", None, mtime))
+
+_bulk_row("root0", "workflows/tworoots.json",
+          "cccccccc-3333-3333-3333-333333333333", 111)
+_bulk_row("root1", "workflows/tworoots.json",
+          "dddddddd-4444-4444-4444-444444444444", 222)
+hist._reconcile_ts[0] = 0
+hist.reconcile_processes("default")
+_tr = hist.resolve_path_process("workflows/tworoots.json", "default")
+check("v116 multi-root: the same rel_path binds to the FIRST root's UUID only",
+      _tr is not None and
+      _tr.get("workflowId") == "cccccccc-3333-3333-3333-333333333333",
+      json.dumps({"got": (_tr or {}).get("workflowId")}))
+_bmap = (hist._proc_cache["by_uuid"].get("default") or {})
+check("v116 multi-root: the second root's UUID never got a process",
+      _bmap.get("dddddddd-4444-4444-4444-444444444444") is None,
+      json.dumps({"second": _bmap.get("dddddddd-4444-4444-4444-444444444444")}))
+
+# ---------------------------------------------------------------------------
+# v116 (plan 3.3/4.4): reconcile processes the WHOLE index in chunks - the
+# v115 [:5000] cut silently dropped the tail. 5005 rows; the LAST five rows
+# carry fresh UUIDs: they MUST get processes (the tail was reached).
+hist.RECONCILE_BATCH = 500
+_bulk_uuid = "eeeeeeee-5555-5555-5555-%012d"
+_fresh_uuids = ["f%08d-f000-4000-8000-0000000000%02d" % (i, i) for i in range(1, 6)]
+for i in range(1, 5006):
+    uid = _bulk_uuid % (i % 10) if i <= 5000 else _fresh_uuids[i - 5001]
+    _bulk_row("root0", "workflows/bulk/%d.json" % i, uid, i)
+hist._reconcile_ts[0] = 0
+hist.reconcile_processes("default")
+_checkmap = hist._proc_cache["by_uuid"].get("default") or {}
+_missed = [u for u in _fresh_uuids if _checkmap.get(u) is None]
+check("v116 bulk: 5005 index rows processed with NO tail cut",
+      not _missed,
+      json.dumps({"missed": _missed}))
+_lastproc = hist.resolve_path_process("workflows/bulk/5005.json", "default")
+check("v116 bulk: the very LAST row resolved to its process",
+      _lastproc is not None and _lastproc.get("workflowId") == _fresh_uuids[4],
+      json.dumps({"got": (_lastproc or {}).get("workflowId")}))
+
+# v116 (plan 7.8): detach_locations - the Files-delete route unbinds the
+# deleted paths, the history stays
+_det = hist.detach_locations(["workflows/bulk/5005.json"])
+_after = (hist._proc_cache["by_uuid"].get("default") or {}).get(_fresh_uuids[4])
+_locs_after = [l.get("path") for l in
+               (hist._read_process(_after or "") or {}).get("locations") or []]
+check("v116 detach_locations: the path left the process",
+      _det.get("ok") and "workflows/bulk/5005.json" not in _locs_after,
+      json.dumps({"locs": _locs_after}))
+hist.expire_reconcile_cache()
+check("v116 expire_reconcile_cache: the next reconcile re-runs immediately",
+      hist._reconcile_ts[0] == 0)
+
+# ---------------------------------------------------------------------------
+# v116 (plan 5.1): the SHARED object store for the Preset payloads - the
+# same store as the process revisions (content dedupe across BOTH kinds).
+_pp = hist._ensure_process("presetstore-uuid-1", scope="default")
+_pr1 = hist.create_revision(_pp[0]["processId"],
+                            b'{"shared": "payload", "nodes": []}',
+                            {"source": "checkpoint"})
+_st = hist.store_preset_payload("preset1", "revpreset1",
+                                b'{"preset": "payload", "items": []}')
+check("v116 preset store: the payload stores ok",
+      _st.get("ok") and _st.get("blob") and _st.get("rawHash"),
+      json.dumps({k: _st.get(k) for k in ("ok", "error")}))
+_back = hist.read_preset_payload({"backend": _st.get("backend"),
+                                  "blob": _st.get("blob"),
+                                  "rawHash": _st.get("rawHash")})
+check("v116 preset store: the exact bytes read back",
+      _back == b'{"preset": "payload", "items": []}',
+      json.dumps({"got": (_back or b"")[:40].decode("utf-8", "replace")}))
+_bad = hist.read_preset_payload({"backend": _st.get("backend"),
+                                 "blob": _st.get("blob"),
+                                 "rawHash": "0" * 64})
+check("v116 preset store: a broken rawHash refuses to serve",
+      _bad is None)
+# the CAS reclamation protects cross-referenced blobs (plan 7.8/5.3)
+if hist.backend_kind() == "cas":
+    if _pr1.get("ok") and \
+            _pr1["revision"]["storage"]["blob"] == _st.get("blob"):
+        _freed, _n = hist.reclaim_preset_blobs(
+            [{"backend": "cas", "blob": _st.get("blob")}])
+        check("v116 preset store: a blob still referenced by a revision survives",
+              _n == 0 and os.path.isfile(hist._cas_blob_path(_st.get("blob"))),
+              json.dumps({"freed": _freed, "n": _n}))
+    else:
+        _freed, _n = hist.reclaim_preset_blobs(
+            [{"backend": "cas", "blob": _st.get("blob")}])
+        check("v116 preset store: an unreferenced CAS blob is reclaimed",
+              _n == 1 and not os.path.isfile(hist._cas_blob_path(_st.get("blob"))),
+              json.dumps({"freed": _freed, "n": _n}))
+
+# ---------------------------------------------------------------------------
+# v116 (plan 5.3): COMPACT HISTORY - the verified rebuild + the atomic
+# switch. Two revisions, one deleted (its manifest is gone), compact keeps
+# ONLY the retained one and every retained blob survives byte-exact.
+_rk1 = hist.record_checkpoint_for_path("workflows/rebind.json",
+                                       wf_bytes(RB, seed="C1"),
+                                       source="checkpoint")
+_rk2 = hist.record_checkpoint_for_path("workflows/rebind.json",
+                                       wf_bytes(RB, seed="C2"),
+                                       source="checkpoint")
+hist.delete_revision(_rk1["revisionId"])   # the oldest goes (current survives)
+_rep = hist.compact_history()
+check("v116 compact: the preflight reports counts + sizes",
+      _rep.get("ok") and _rep.get("preflight", {}).get("revisions", 0) >= 1,
+      json.dumps({k: _rep.get(k) for k in ("ok", "error")}))
+check("v116 compact: every retained revision survives byte-exact",
+      hist.read_revision_bytes(_rk2["revisionId"]) == wf_bytes(RB, seed="C2"),
+      json.dumps({"backend": _rep.get("backend")}))
+check("v116 compact: the deleted revision stays deleted",
+      hist.read_revision_bytes(_rk1["revisionId"]) is None)
+check("v116 compact: the store answers (fsck clean on git)",
+      hist.verify_store().get("ok") is True,
+      json.dumps(hist.verify_store()))
+# a new checkpoint works on the compacted store (the ref chain is alive)
+_rk3 = hist.record_checkpoint_for_path("workflows/rebind.json",
+                                       wf_bytes(RB, seed="C3"),
+                                       source="checkpoint")
+check("v116 compact: the store accepts new checkpoints after the rebuild",
+      _rk3.get("ok") and not _rk3.get("duplicate"),
+      json.dumps({k: _rk3.get(k) for k in ("ok", "error", "duplicate")}))
+
+# v116 (plan 5.4): the storage stats carry the logical/physical split
+_ss = hist.storage_stats()
+check("v116 stats: the logical/physical split + the tx counters",
+      _ss.get("ok") and isinstance(_ss.get("logicalBytes"), int) and
+      isinstance(_ss.get("physicalBytes"), int) and
+      isinstance(_ss.get("historyMetadataBytes"), int) and
+      isinstance(_ss.get("txSnapshotBytes"), int) and
+      "txSnapshotFiles" in _ss,
+      json.dumps({k: _ss.get(k) for k in ("ok", "logicalBytes",
+                                          "physicalBytes")}))
 
 # ---------------------------------------------------------------------------
 shutil.rmtree(TMP, ignore_errors=True)

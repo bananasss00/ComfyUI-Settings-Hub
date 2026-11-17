@@ -130,6 +130,15 @@ def make_json_response_cls():
     web_stub = types.SimpleNamespace()
     web_stub.json_response = staticmethod(
         lambda data, status=200, headers=None: FakeResponse(data, status, headers))
+
+    # v116: the restore open-copy mode returns a raw bytes Response
+    class _RawResponse:
+        def __init__(self, body=None, content_type=None):
+            self.body = body
+            self.content_type = content_type
+            self.status = 200
+
+    web_stub.Response = _RawResponse
     return web_stub
 
 
@@ -147,6 +156,9 @@ fp_stub.get_user_directory = lambda: _USER_DIR
 sys.modules["folder_paths"] = fp_stub
 
 sys.path.insert(0, ROOT)
+# v116: the store's sibling fallback imports (workflows_index/
+# workflows_history) resolve through the py/ directory
+sys.path.insert(0, os.path.join(ROOT, "py"))
 
 # The route registrars read PromptServer.instance at import time.
 FakePromptServer.instance = FakePromptServer()
@@ -1425,6 +1437,287 @@ check("import: the category/tags transfer",
       imp.get("category") == "Video" and imp.get("tags") == ["testing"],
       json.dumps({k: imp.get(k) for k in ("category", "tags")}))
 loop(PDEL(FakeRequest(match_info={"pid": imp["id"]})))
+
+reset_state()
+# ===========================================================================
+# v116: the P0 data-safety + shared-store + Files-delete routes.
+# ===========================================================================
+
+LIBDIR = os.path.join(_USER_DIR, "default", "workflows")
+os.makedirs(LIBDIR, exist_ok=True)
+MGRDIR = os.path.join(_USER_DIR, "settings_hub", "workflows_manager")
+wf_store._wf_index.set_db_path(os.path.join(MGRDIR, "index", "workflow_index.db"))
+wf_store._wf_hist.set_base_dir(MGRDIR)
+
+HIST = H[("POST", "/settings_hub/workflows/history/checkpoint")]
+HPROC = H[("GET", "/settings_hub/workflows/history/processes")]
+HRESOLVE = H[("GET", "/settings_hub/workflows/history/resolve")]
+HRESTORE = H[("POST", "/settings_hub/workflows/history/process/{pid}/restore/{rid}")]
+HPDEL = H[("POST", "/settings_hub/workflows/history/process/{pid}/delete")]
+FDEL = H[("POST", "/settings_hub/workflows/files/delete")]
+FUNDO = H[("POST", "/settings_hub/workflows/files/undo")]
+HSTORAGE = H[("GET", "/settings_hub/workflows/history/storage")]
+HMAINT = H[("POST", "/settings_hub/workflows/history/maintenance")]
+HNOTES = H[("GET", "/settings_hub/workflows/index/notes")]
+HBADGES = H[("GET", "/settings_hub/workflows/history/badges")]
+
+def wf_v116(uid, seed="s1"):
+    return {"id": uid, "revision": 1,
+            "nodes": [{"id": 1, "type": "KSampler", "pos": [0, 0],
+                       "widgets_values": [seed]}],
+            "links": [], "extra": {"ds": {"scale": 1.0, "offset": [0, 0]},
+                                   "frontendVersion": "1.24.4"},
+            "version": 0.4}
+
+def lib_write(name, obj):
+    pth = os.path.join(LIBDIR, name)
+    with open(pth, "wb") as fh:
+        fh.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+    return pth
+
+def lib_read(name):
+    with open(os.path.join(LIBDIR, name), "rb") as fh:
+        return fh.read()
+
+# ---- 3.4: the Restore hardening -------------------------------------------
+lib_write("r1.json", wf_v116("rrrrrrrr-1111-1111-1111-111111111111", seed="v1"))
+r = loop(HIST(FakeRequest(json_body={"path": "workflows/r1.json",
+                                     "source": "disk"})))
+check("v116 restore setup: the checkpoint lands",
+      r.json().get("ok"), json.dumps(r.json()))
+_pid = r.json()["processId"]
+rid1 = r.json()["revisionId"]
+lib_write("r1.json", wf_v116("rrrrrrrr-1111-1111-1111-111111111111", seed="v2"))
+r = loop(HIST(FakeRequest(json_body={"path": "workflows/r1.json",
+                                     "source": "disk"})))
+rid2 = r.json()["revisionId"]
+# a SECOND process for the cross-ownership probe
+lib_write("r2.json", wf_v116("ssssssss-2222-2222-2222-222222222222"))
+r = loop(HIST(FakeRequest(json_body={"path": "workflows/r2.json",
+                                     "source": "disk"})))
+_pid2 = r.json()["processId"]
+rid_x = r.json()["revisionId"]   # the OTHER process's revision
+# 1) the pid/rid ownership: restore pid2's revision under pid1 -> 404
+r = loop(HRESTORE(FakeRequest(match_info={"pid": _pid, "rid": rid_x},
+                              json_body={"mode": "open-copy"})))
+_jown = r.json() if hasattr(r, "json") else {"status": r.status}
+check("v116 restore: ANOTHER process's revision refuses (404)",
+      r.status == 404 and _jown.get("ok") is False,
+      json.dumps({"status": r.status, "j": _jown}))
+r = loop(HRESTORE(FakeRequest(match_info={"pid": _pid, "rid": rid1},
+                              json_body={"mode": "replace",
+                                         "path": "workflows/r2.json"})))
+check("v116 restore: a NON-LOCATION path refuses",
+      r.status == 400, json.dumps({"status": r.status, "j": r.json()}))
+# 2) a MISSING target refuses the replace (no empty-byte backup path)
+os.unlink(os.path.join(LIBDIR, "r1.json"))
+r = loop(HRESTORE(FakeRequest(match_info={"pid": _pid, "rid": rid1},
+                              json_body={"mode": "replace",
+                                         "path": "workflows/r1.json"})))
+check("v116 restore: a MISSING target refuses with the copy suggestion",
+      r.status == 400 and "Open version" in (r.json().get("error") or ""),
+      json.dumps({"status": r.status, "j": r.json()}))
+# 3) the happy path: replace + verified snapshot + atomic write + index refresh
+lib_write("r1.json", wf_v116("rrrrrrrr-1111-1111-1111-111111111111", seed="v3"))
+r = loop(HRESTORE(FakeRequest(match_info={"pid": _pid, "rid": rid1},
+                              json_body={"mode": "replace",
+                                         "path": "workflows/r1.json"})))
+check("v116 restore: the replace succeeds with a snapshot + index refresh",
+      r.json().get("ok") and r.json().get("rollbackAvailable") and
+      json.loads(lib_read("r1.json")).get("nodes", [{}])[0].get("widgets_values") == ["v1"],
+      json.dumps(r.json()))
+check("v116 restore: the derived index row refreshed in place",
+      r.json().get("indexRefreshed") == 1, json.dumps(r.json()))
+# 4) the rollback: a failing os.replace keeps the OLD bytes from the snapshot
+import unittest.mock as _umock
+old_replace = os.replace
+def _boom(a, b):
+    if str(b).endswith(".json") and "restore-tmp" in str(a):
+        raise OSError("injected failure")
+    return old_replace(a, b)
+with _umock.patch("os.replace", side_effect=_boom):
+    r = loop(HRESTORE(FakeRequest(match_info={"pid": _pid, "rid": rid1},
+                                  json_body={"mode": "replace",
+                                             "path": "workflows/r1.json"})))
+check("v116 restore: the injected write failure ROLLS BACK from the snapshot",
+      r.status == 500 and "rolled back" in (r.json().get("error") or "") and
+      json.loads(lib_read("r1.json")).get("nodes", [{}])[0].get("widgets_values") == ["v1"],
+      json.dumps({"status": r.status, "j": r.json()}))
+
+# ---- 4.2: the layered change status ---------------------------------------
+wf_store._wf_index.scan_index(
+    workflows_user_dirs=wf_store._workflows_user_dirs(FakeRequest()),
+    hide_dirs_fn=wf_store._files_hide_dirs, user_scope="default", force=True)
+r = loop(HRESOLVE(FakeRequest(query={"path": "workflows/r2.json"})))
+check("v116 status: an untouched location answers 'unchanged'",
+      r.json().get("changeStatus") == "unchanged", json.dumps(r.json()))
+# a canvas-only save (pos changed, graph identical) -> presentation_changed
+lib_write("r2.json", wf_v116("ssssssss-2222-2222-2222-222222222222"))
+lib_write("r2.json", {"id": "ssssssss-2222-2222-2222-222222222222",
+                      "revision": 1,
+                      "nodes": [{"id": 1, "type": "KSampler", "pos": [999, 999],
+                                 "widgets_values": ["s1"]}],
+                      "links": [],
+                      "extra": {"ds": {"scale": 2.0, "offset": [1, 1]},
+                                "frontendVersion": "1.24.4"},
+                      "version": 0.4})
+wf_store._wf_index.scan_index(
+    workflows_user_dirs=wf_store._workflows_user_dirs(FakeRequest()),
+    hide_dirs_fn=wf_store._files_hide_dirs, user_scope="default", force=True)
+r = loop(HRESOLVE(FakeRequest(query={"path": "workflows/r2.json"})))
+check("v116 status: a canvas-only save answers 'presentation_changed'",
+      r.json().get("changeStatus") == "presentation_changed" and
+      r.json().get("statusLabel") == "Canvas changed only",
+      json.dumps(r.json()))
+# a widget change -> workflow_changed
+lib_write("r2.json", wf_v116("ssssssss-2222-2222-2222-222222222222", seed="CHANGED"))
+wf_store._wf_index.scan_index(
+    workflows_user_dirs=wf_store._workflows_user_dirs(FakeRequest()),
+    hide_dirs_fn=wf_store._files_hide_dirs, user_scope="default", force=True)
+r = loop(HRESOLVE(FakeRequest(query={"path": "workflows/r2.json"})))
+check("v116 status: a widget change answers 'workflow_changed'",
+      r.json().get("changeStatus") == "workflow_changed", json.dumps(r.json()))
+# an unknown status: no index row at all
+r = loop(HRESOLVE(FakeRequest(query={"path": "workflows/ghost.json"})))
+check("v116 status: an unbound path answers bound:false",
+      r.json().get("bound") is False, json.dumps(r.json()))
+
+# ---- 3.5: the process delete preflight ------------------------------------
+wf_store._wf_hist._reconcile_ts[0] = 0
+wf_store._wf_hist.reconcile_processes("default")
+r = loop(HPDEL(FakeRequest(match_info={"pid": _pid2},
+                           json_body={"deleteFiles": True})))
+check("v116 proc delete: the happy path erases files + history",
+      r.json().get("ok") and r.json().get("deletedRevisions") == 1 and
+      not os.path.exists(os.path.join(LIBDIR, "r2.json")),
+      json.dumps(r.json()))
+check("v116 proc delete: the index rows of the deleted files dropped",
+      r.json().get("indexRowsDropped", 0) >= 1, json.dumps(r.json()))
+# a preflight failure (an unreadable file) aborts with NOTHING deleted
+lib_write("r3.json", wf_v116("tttttttt-3333-3333-3333-333333333333"))
+r = loop(HIST(FakeRequest(json_body={"path": "workflows/r3.json",
+                                     "source": "disk"})))
+pid3 = r.json()["processId"]
+os.chmod(os.path.join(LIBDIR, "r3.json"), 0o000)
+r = loop(HPDEL(FakeRequest(match_info={"pid": pid3},
+                           json_body={"deleteFiles": True})))
+os.chmod(os.path.join(LIBDIR, "r3.json"), 0o644)
+check("v116 proc delete: the preflight failure deletes NOTHING (409, history kept)",
+      r.status == 409 and r.json().get("stage") == "preflight" and
+      wf_store._wf_hist._read_process(pid3) is not None and
+      os.path.exists(os.path.join(LIBDIR, "r3.json")),
+      json.dumps({"status": r.status, "j": r.json()}))
+
+# ---- plan 7: the Files batch delete + undo ---------------------------------
+lib_write("d1.json", wf_v116("dddddddd-1111-1111-1111-111111111111"))
+lib_write("d2.json", wf_v116("dddddddd-2222-2222-2222-222222222222"))
+lib_write("d3.json", wf_v116("dddddddd-3333-3333-3333-333333333333"))
+wf_store._wf_index.scan_index(
+    workflows_user_dirs=wf_store._workflows_user_dirs(FakeRequest()),
+    hide_dirs_fn=wf_store._files_hide_dirs, user_scope="default", force=True)
+r = loop(HIST(FakeRequest(json_body={"path": "workflows/d1.json",
+                                     "source": "disk"})))
+check("v116 files delete setup: d1 owns a process + location",
+      r.json().get("ok"), json.dumps(r.json()))
+r = loop(FDEL(FakeRequest(json_body={"paths": ["workflows/d1.json",
+                                               "workflows/d2.json"]})))
+jd = r.json()
+check("v116 files delete: two files removed with per-file results",
+      jd.get("ok") and jd.get("removed") == 2 and
+      not os.path.exists(os.path.join(LIBDIR, "d1.json")) and
+      not os.path.exists(os.path.join(LIBDIR, "d2.json")) and
+      os.path.exists(os.path.join(LIBDIR, "d3.json")),
+      json.dumps(jd))
+check("v116 files delete: an undo handle comes back (2 h window)",
+      jd.get("undo", {}).get("opId") and jd.get("undo", {}).get("expiresAt", 0) > 0,
+      json.dumps(jd.get("undo")))
+check("v116 files delete: the history is NOT deleted (the process survives orphaned)",
+      jd.get("locationsDetached", 0) >= 1, json.dumps(jd))
+# traversal refuses the whole batch
+r = loop(FDEL(FakeRequest(json_body={"paths": ["workflows/../../user/settings_hub/"
+                                               "workflows/presets/x.json"]})))
+check("v116 files delete: traversal refuses with NOTHING deleted",
+      r.status == 400, json.dumps({"status": r.status}))
+# the undo restores the exact bytes; a taken path would be skipped
+r = loop(FUNDO(FakeRequest(json_body={"opId": jd["undo"]["opId"]})))
+check("v116 files undo: both files restored byte-exact",
+      r.json().get("ok") and r.json().get("restored") == 2 and
+      json.loads(lib_read("d1.json")).get("id") == "dddddddd-1111-1111-1111-111111111111",
+      json.dumps(r.json()))
+# a second undo is refused (the manifest died with the use)
+r = loop(FUNDO(FakeRequest(json_body={"opId": jd["undo"]["opId"]})))
+check("v116 files undo: the manifest dies after use (404)",
+      r.status == 404, json.dumps({"status": r.status}))
+# the conflict rule: a newer file at the path is NEVER overwritten
+r = loop(FDEL(FakeRequest(json_body={"paths": ["workflows/d1.json"]})))
+lib_write("d1.json", wf_v116("eeeeeeee-9999-9999-9999-999999999999", seed="newer"))
+r2 = loop(FUNDO(FakeRequest(json_body={"opId": r.json()["undo"]["opId"]})))
+check("v116 files undo: a TAKEN path is skipped, never overwritten",
+      r2.json().get("restored") == 0 and
+      json.loads(lib_read("d1.json")).get("id") == "eeeeeeee-9999-9999-9999-999999999999",
+      json.dumps(r2.json()))
+check("v116 files undo: the skip names the reason",
+      "taken by a newer file" in (r2.json().get("results")[0].get("error") or ""),
+      json.dumps(r2.json().get("results")))
+
+# ---- 4.6: the notes search route -------------------------------------------
+r = loop(HNOTES(FakeRequest(query={"q": "portrait"})))
+check("v116 notes route: answers without a crash (empty index is fine)",
+      r.json().get("ok") is True and "results" in r.json(), json.dumps(r.json()))
+r = loop(HNOTES(FakeRequest(query={"q": "", "rebuild": "1"})))
+check("v116 notes route: the rebuild pass is idempotent + safe",
+      r.json().get("ok") is True, json.dumps(r.json()))
+
+# ---- 5.4: the storage route + the compact action ---------------------------
+r = loop(HSTORAGE(FakeRequest()))
+check("v116 storage: the physical/logical split + the totals",
+      r.json().get("ok") and "totalPhysicalBytes" in r.json() and
+      "indexBytes" in r.json() and "txSnapshotBytes" in r.json(),
+      json.dumps(sorted(r.json().keys())))
+r = loop(HMAINT(FakeRequest(json_body={"action": "compact"})))
+check("v116 compact route: the verified rebuild answers measured bytes",
+      r.json().get("ok") is True and "before" in r.json() and "after" in r.json(),
+      json.dumps(r.json()))
+
+# ---- 5.1: the preset version payload migration -----------------------------
+PVER = H[("GET", "/settings_hub/workflows/preset/{pid}/versions")]
+PVGET = H[("GET", "/settings_hub/workflows/preset/{pid}/version/{rid}")]
+r = loop(PPOST(FakeRequest(json_body={"name": "Mig preset",
+                                      "items": [{"kind": "snapshot", "name": "snap",
+                                                 "graph": wf_v116("mmmmmmmm-0000-4000-8000-000000000001")}]})))
+mig = r.json()["preset"]
+# a legacy embedded version file (the v112 shape) in the SAME root
+vdir = os.path.join(os.path.dirname(os.path.dirname(
+    wf_store._find_preset_file(mig["id"]))), "preset_versions", mig["id"])
+os.makedirs(vdir, exist_ok=True)
+legacy_rid = "a" * 16
+with open(os.path.join(vdir, legacy_rid + ".json"), "w", encoding="utf-8") as fh:
+    json.dump({"revisionId": legacy_rid, "presetId": mig["id"],
+               "createdAt": int(time.time()), "seq": 1, "changedBy": "put",
+               "preset": mig}, fh)
+wf_store._pv_migrated = False
+wf_store._pv_migrate_once()
+rec = json.load(open(os.path.join(vdir, legacy_rid + ".json")))
+check("v116 migration: the legacy manifest got a storage reference",
+      rec.get("storage", {}).get("blob") and rec.get("rawHash") and
+      "preset" not in rec,
+      json.dumps(sorted(rec.keys())))
+r = loop(PVGET(FakeRequest(match_info={"pid": mig["id"], "rid": legacy_rid})))
+check("v116 migration: the version still reads (restorable through the store)",
+      r.json().get("ok") and r.json().get("preset", {}).get("id") == mig["id"],
+      json.dumps({k: r.json().get(k) for k in ("ok", "error")}))
+n0 = rec.get("migrated")
+wf_store._pv_migrated = False
+wf_store._pv_migrate_once()
+rec2 = json.load(open(os.path.join(vdir, legacy_rid + ".json")))
+check("v116 migration: the rerun is IDEMPOTENT",
+      rec2.get("storage", {}).get("blob") == rec.get("storage", {}).get("blob"),
+      json.dumps({"m0": n0, "m1": rec2.get("migrated")}))
+r = loop(PVER(FakeRequest(match_info={"pid": mig["id"]})))
+check("v116 migration: the listing stays metadata-only",
+      r.json().get("ok") and all("itemCount" in v for v in r.json().get("versions", [])),
+      json.dumps(r.json()))
+loop(PDEL(FakeRequest(match_info={"pid": mig["id"]})))
 
 reset_state()
 # ===========================================================================
