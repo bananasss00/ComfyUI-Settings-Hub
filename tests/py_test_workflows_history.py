@@ -333,6 +333,66 @@ check("stats: both size counters are present and positive",
 check("stats: the stable counter tracks", stats["stableRevisions"] >= 1)
 
 # ---------------------------------------------------------------------------
+# 15) v113: the catalog cache - a warm reconcile costs ZERO manifest writes
+# (the v112 code fsync-rewrote EVERY process manifest on every pass and
+# re-read every manifest per lookup: the Process History panel took forever
+# with a ~2000-process library), resolve is the O(1) path map, and
+# get_process never leaks the transient "revisions" key back into the
+# stored manifest.
+hist._reconcile_ts[0] = 0          # force the next reconcile to really run
+hist.reconcile_processes()
+_mtimes_before = {}
+for _fn in os.listdir(hist._hist_dir("catalog", "processes")):
+    _fp = os.path.join(hist._hist_dir("catalog", "processes"), _fn)
+    if _fn.endswith(".json"):
+        _mtimes_before[_fn] = os.path.getmtime(_fp)
+hist._reconcile_ts[0] = 0          # and again - the store is WARM now
+hist.reconcile_processes()
+_mtimes_after = {fn: os.path.getmtime(os.path.join(hist._hist_dir("catalog", "processes"), fn))
+                 for fn in _mtimes_before}
+check("v113 cache: a warm reconcile rewrites NO process manifest",
+      _mtimes_after == _mtimes_before,
+      json.dumps({k: (_mtimes_before[k], _mtimes_after.get(k))
+                  for k in _mtimes_before
+                  if _mtimes_before[k] != _mtimes_after.get(k)}))
+_rp = hist.resolve_path_process("workflows/p1.json")
+check("v113 cache: resolve_path_process binds through the path map",
+      _rp is not None and _rp.get("processId") == pid1,
+      json.dumps({"got": _rp.get("processId") if _rp else None, "want": pid1}))
+_gp = hist.get_process(pid1)
+check("v113 cache: get_process serves the revisions",
+      _gp is not None and isinstance(_gp.get("revisions"), list))
+_disk = hist._read_json(hist._process_file(pid1))
+check("v113 cache: the transient 'revisions' key never lands on disk",
+      _disk is not None and "revisions" not in _disk,
+      json.dumps(sorted(_disk.keys())) if _disk else "manifest missing")
+check("v113 cache: the cached manifest stays clean too",
+      "revisions" not in hist._proc_cache["by_pid"].get(pid1, {}))
+r3 = hist.record_checkpoint_for_path("workflows/p1.json",
+                                     wf_bytes("11111111-1111-1111-1111-111111111111",
+                                              seed="a", revision=9),
+                                     note="v113 sanity", source="checkpoint")
+check("v113 cache: a checkpoint after the cache warm-up still works",
+      r3.get("ok") and not r3.get("duplicate"),
+      json.dumps({k: r3.get(k) for k in ("ok", "duplicate", "error")}))
+check("v113 cache: resolve picks up the post-checkpoint state",
+      hist.resolve_path_process("workflows/p1.json").get("processId") == pid1)
+# a NEW uuid creates ONE process and the cache maps it instantly
+r4 = hist.record_checkpoint_for_path("workflows/p3.json",
+                                     wf_bytes("33333333-3333-3333-3333-333333333333",
+                                              seed="e"),
+                                     source="checkpoint")
+_p3 = hist.resolve_path_process("workflows/p3.json")
+check("v113 cache: a fresh process is resolvable immediately",
+      r4.get("ok") and _p3 is not None and
+      _p3.get("processId") == r4.get("processId"),
+      json.dumps({"ok": r4.get("ok"), "resolved": _p3.get("processId") if _p3 else None}))
+_u3 = hist._proc_cache["by_uuid"].get("33333333-3333-3333-3333-333333333333")
+check("v113 cache: the uuid map holds the fresh binding",
+      _u3 == r4.get("processId"),
+      json.dumps({"map": _u3, "want": r4.get("processId")}))
+
+# ---------------------------------------------------------------------------
 shutil.rmtree(TMP, ignore_errors=True)
 print()
 print("PASS: %d  FAIL: %d" % (PASS, FAIL))

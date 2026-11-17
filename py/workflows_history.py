@@ -333,15 +333,185 @@ def _new_id():
     return uuid.uuid4().hex[:16]
 
 
+# v113: in-memory catalog cache. The v112 flows re-read every process
+# manifest per lookup (O(N^2) inside reconcile: _ensure_process scanned ALL
+# manifests once PER index row) and re-wrote every manifest on each pass
+# (fsync per row) - with a 2000-process library that turned ONE open of the
+# history panel into thousands of file reads + thousands of atomic writes.
+# The cache is built lazily in ONE pass and is maintained by every mutation
+# in THIS module (the only writer of the catalog); an external file-set
+# change (a manifest added/removed by hand) is picked up through the
+# listdir-signature check on the reconcile TTL tick.
+_proc_cache = {"loaded": False, "by_pid": {}, "by_uuid": {}, "by_path": {},
+               "paths_of": {}, "sig": None}
+
+
+def _proc_sig():
+    try:
+        return sorted(os.listdir(_hist_dir("catalog", "processes")))
+    except OSError:
+        return []
+
+
+def _cache_load_locked(force=False):
+    """ONE pass over the process manifests -> pid/uuid/path maps. Sorted
+    order keeps the binding pick deterministic (v112 iterated listdir
+    order, which is arbitrary)."""
+    sig = _proc_sig()
+    if _proc_cache["loaded"] and not force and sig == _proc_cache["sig"]:
+        return
+    by_pid, by_uuid, by_path, paths_of = {}, {}, {}, {}
+    for pid in sorted(_list_ids(_hist_dir("catalog", "processes"))):
+        p = _read_json(_process_file(pid))
+        if not p or p.get("processId") != pid:
+            continue
+        by_pid[pid] = p
+        wid = p.get("workflowId")
+        if isinstance(wid, str) and wid and wid not in by_uuid:
+            by_uuid[wid] = pid
+        pths = set()
+        for loc in p.get("locations") or []:
+            lp = loc.get("path")
+            if isinstance(lp, str) and lp and lp not in by_path:
+                by_path[lp] = pid
+                pths.add(lp)
+        paths_of[pid] = pths
+    _proc_cache["by_pid"] = by_pid
+    _proc_cache["by_uuid"] = by_uuid
+    _proc_cache["by_path"] = by_path
+    _proc_cache["paths_of"] = paths_of
+    _proc_cache["sig"] = sig
+    _proc_cache["loaded"] = True
+
+
+def _cache_put_locked(p):
+    """Keep the maps in sync after THIS module writes a process manifest."""
+    pid = p.get("processId")
+    if not isinstance(pid, str):
+        return
+    _proc_cache["loaded"] = True
+    # keep the file-set signature incremental (a NEW process must not force
+    # a full cache rebuild on the next reconcile tick)
+    fname = pid + ".json"
+    sig = _proc_cache["sig"]
+    if not isinstance(sig, list):
+        sig = []
+    if fname not in sig:
+        sig = sorted(sig + [fname])
+    _proc_cache["sig"] = sig
+    old = _proc_cache["by_pid"].get(pid)
+    if old is not None and old is not p:
+        for lp in (_proc_cache["paths_of"].get(pid) or set()):
+            if _proc_cache["by_path"].get(lp) == pid:
+                _proc_cache["by_path"].pop(lp, None)
+    by_uuid = _proc_cache["by_uuid"]
+    wid = p.get("workflowId")
+    if isinstance(wid, str) and wid:
+        cur = by_uuid.get(wid)
+        if cur is None or cur == pid or _proc_cache["by_pid"].get(cur) is None:
+            by_uuid[wid] = pid
+    elif old is not None and old.get("workflowId"):
+        # the workflowId was cleared - drop the binding
+        if by_uuid.get(old["workflowId"]) == pid:
+            by_uuid.pop(old["workflowId"], None)
+    _proc_cache["by_pid"][pid] = p
+    pths = set()
+    for loc in p.get("locations") or []:
+        lp = loc.get("path")
+        if isinstance(lp, str) and lp:
+            pths.add(lp)
+            if _proc_cache["by_path"].get(lp) in (None, pid):
+                _proc_cache["by_path"][lp] = pid
+    _proc_cache["paths_of"][pid] = pths
+
+
+# v113: the same idea for revision manifests - list_revisions() walked the
+# parent chain (fine) but then scanned + re-read EVERY revision manifest in
+# the store to catch crash-orphaned branches; with thousands of revisions
+# that is a per-open file storm. One lazy pass + the same signature guard.
+_rev_cache = {"loaded": False, "by_rid": {}, "of_pid": {}, "sig": None}
+
+
+def _rev_sig():
+    try:
+        return sorted(os.listdir(_hist_dir("catalog", "revisions")))
+    except OSError:
+        return []
+
+
+def _rev_cache_load_locked(force=False):
+    sig = _rev_sig()
+    if _rev_cache["loaded"] and not force and sig == _rev_cache["sig"]:
+        return
+    by_rid, of_pid = {}, {}
+    for rid in sorted(_list_ids(_hist_dir("catalog", "revisions"))):
+        r = _read_json(_revision_file(rid))
+        if not r or r.get("revisionId") != rid:
+            continue
+        by_rid[rid] = r
+        pid = r.get("processId")
+        if isinstance(pid, str):
+            of_pid.setdefault(pid, []).append(r)
+    _rev_cache["by_rid"] = by_rid
+    _rev_cache["of_pid"] = of_pid
+    _rev_cache["sig"] = sig
+    _rev_cache["loaded"] = True
+
+
+def _rev_cache_put_locked(rec):
+    rid = rec.get("revisionId")
+    if not isinstance(rid, str):
+        return
+    _rev_cache["loaded"] = True
+    fname = rid + ".json"
+    sig = _rev_cache["sig"]
+    if not isinstance(sig, list):
+        sig = []
+    if fname not in sig:
+        sig = sorted(sig + [fname])
+    _rev_cache["sig"] = sig
+    pid = rec.get("processId")
+    _rev_cache["by_rid"][rid] = rec
+    if isinstance(pid, str):
+        lst = _rev_cache["of_pid"].setdefault(pid, [])
+        for i, r in enumerate(lst):
+            if r.get("revisionId") == rid:
+                lst[i] = rec
+                break
+        else:
+            lst.append(rec)
+
+
+def _rev_cache_drop_locked(rid):
+    _rev_cache["by_rid"].pop(rid, None)
+    for lst in _rev_cache["of_pid"].values():
+        lst[:] = [r for r in lst if r.get("revisionId") != rid]
+    sig = _rev_cache["sig"]
+    if isinstance(sig, list):
+        _rev_cache["sig"] = [n for n in sig if n != rid + ".json"]
+    else:
+        _rev_cache["sig"] = None  # the file set changed - reload on next use
+
+
 def _read_process(pid):
     if not isinstance(pid, str) or not _ID_RE.match(pid):
         return None
-    return _read_json(_process_file(pid))
+    with _lock:
+        _cache_load_locked()
+        p = _proc_cache["by_pid"].get(pid)
+        if p is not None:
+            return p
+    return _read_json(_process_file(pid))  # not cached yet - the direct read
 
 
 def _read_revision(rid):
     if not isinstance(rid, str) or not _ID_RE.match(rid):
         return None
+    with _lock:
+        _rev_cache_load_locked()
+        r = _rev_cache["by_rid"].get(rid)
+        if r is not None:
+            return r
     return _read_json(_revision_file(rid))
 
 
@@ -356,15 +526,15 @@ def _list_ids(folder):
 def list_processes():
     """All process manifests, newest-activity first. Reconciles the file
     bindings from the derived index first (the processes are DISCOVERED
-    from the ComfyUI UUIDs the index extracted - plan 5.1)."""
+    from the ComfyUI UUIDs the index extracted - plan 5.1). v113: served
+    from the in-memory catalog cache (one disk pass per session instead of
+    a full re-read per call - the route stays instant with 2000+ processes)."""
     with _lock:
         _resolve_backend()
         reconcile_processes()
-        out = []
-        for pid in _list_ids(_hist_dir("catalog", "processes")):
-            p = _read_json(_process_file(pid))
-            if p and p.get("processId") == pid:
-                out.append(p)
+        _cache_load_locked()
+        out = [p for p in _proc_cache["by_pid"].values()
+               if p and p.get("processId")]
         out.sort(key=lambda p: -(p.get("updatedAt") or 0))
         return out
 
@@ -376,8 +546,11 @@ def get_process(pid):
         p = _read_process(pid)
         if not p:
             return None
-        p["revisions"] = list_revisions(pid)
-        return p
+        # v113: COPY - the cached manifest must never gain the transient
+        # "revisions" key (the cache is written back to disk on mutations)
+        out = dict(p)
+        out["revisions"] = list_revisions(pid)
+        return out
 
 
 def _store_bytes(data):
@@ -473,9 +646,11 @@ def create_revision(pid, data, meta):
             rec["storage"]["commit"] = commit
         # 2) the durable manifest
         _atomic_write_json(_revision_file(rid), rec)
+        _rev_cache_put_locked(rec)
         proc["currentRevisionId"] = rid
         proc["updatedAt"] = _now()
         _atomic_write_json(_process_file(pid), proc)
+        _cache_put_locked(proc)
         return {"ok": True, "duplicate": False, "revisionId": rid, "revision": rec}
 
 
@@ -484,8 +659,9 @@ def list_revisions(pid):
     the true parent chain (walked backwards from the process's current
     revision) - a createdAt tie inside one second cannot reorder the
     history. Revisions outside the chain (an abandoned branch of a crashed
-    run) append after, newest first. The catalog manifests are the source;
-    the git history is the backup (rebuildable from the commits)."""
+    run) append after, newest first. v113: served from the in-memory
+    revision cache (one disk pass per session; the per-open full re-read
+    of EVERY revision manifest is gone)."""
     proc = _read_process(pid)
     chain = []
     seen = set()
@@ -498,11 +674,11 @@ def list_revisions(pid):
         seen.add(cur)
         cur = rec.get("parentRevisionId")
     rest = []
-    for rid in _list_ids(_hist_dir("catalog", "revisions")):
-        if rid in seen:
-            continue
-        r = _read_json(_revision_file(rid))
-        if r and r.get("processId") == pid:
+    with _lock:
+        _rev_cache_load_locked()
+        for r in _rev_cache["of_pid"].get(pid) or []:
+            if r.get("revisionId") in seen:
+                continue
             rest.append(r)
     rest.sort(key=lambda r: -(r.get("createdAt") or 0))
     return chain + rest
@@ -531,6 +707,7 @@ def mark_stable(rid, stable=True):
         rec["isStable"] = bool(stable)
         rec["stableAt"] = _now() if stable else None
         _atomic_write_json(_revision_file(rid), rec)
+        _rev_cache_put_locked(rec)
         pid = rec.get("processId")
         proc = _read_process(pid)
         if proc:
@@ -539,6 +716,7 @@ def mark_stable(rid, stable=True):
             elif proc.get("stableRevisionId") == rid:
                 proc.pop("stableRevisionId", None)
             _atomic_write_json(_process_file(pid), proc)
+            _cache_put_locked(proc)
         return {"ok": True, "revisionId": rid, "isStable": bool(stable)}
 
 
@@ -552,6 +730,7 @@ def set_revision_note(rid, note):
         rec["note"] = _sanitize_name(note, MAX_NOTE_CHARS)
         rec["noteEditedAt"] = _now()
         _atomic_write_json(_revision_file(rid), rec)
+        _rev_cache_put_locked(rec)
         return {"ok": True, "revisionId": rid}
 
 
@@ -569,6 +748,7 @@ def delete_revision(rid):
         if proc and proc.get("currentRevisionId") == rid:
             return {"ok": False, "error": "the current revision cannot be deleted"}
         os.unlink(_revision_file(rid))
+        _rev_cache_drop_locked(rid)
         return {"ok": True, "gone": rid}
 
 
@@ -578,34 +758,44 @@ def delete_revision(rid):
 
 def _ensure_process(workflow_id, display_name=None, note=None):
     """Find the process bound to a ComfyUI workflow UUID, or create it
-    (plan 2.1 rule 2: one valid UUID -> ONE processId)."""
-    if workflow_id:
-        for pid in _list_ids(_hist_dir("catalog", "processes")):
-            p = _read_json(_process_file(pid))
-            if p and p.get("workflowId") == workflow_id:
-                return p, False
-    pid = _new_id()
-    now = _now()
-    proc = {
-        "processId": pid,
-        "workflowId": workflow_id if isinstance(workflow_id, str) else None,
-        "displayName": _sanitize_name(display_name) or ("Process " + pid[:6]),
-        "note": _sanitize_name(note, MAX_NOTE_CHARS),
-        "locations": [],
-        "currentRevisionId": None,
-        "stableRevisionId": None,
-        "archived": False,
-        "createdAt": now,
-        "updatedAt": now,
-    }
-    _atomic_write_json(_process_file(pid), proc)
-    return proc, True
+    (plan 2.1 rule 2: one valid UUID -> ONE processId). v113: the lookup
+    is the in-memory uuid map (the v112 code re-read EVERY manifest per
+    call - O(N) per row made reconcile O(N^2) file reads with a large
+    library)."""
+    with _lock:
+        if workflow_id:
+            _cache_load_locked()
+            hit = _proc_cache["by_uuid"].get(workflow_id)
+            if hit:
+                p = _proc_cache["by_pid"].get(hit)
+                if p:
+                    return p, False
+        pid = _new_id()
+        now = _now()
+        proc = {
+            "processId": pid,
+            "workflowId": workflow_id if isinstance(workflow_id, str) else None,
+            "displayName": _sanitize_name(display_name) or ("Process " + pid[:6]),
+            "note": _sanitize_name(note, MAX_NOTE_CHARS),
+            "locations": [],
+            "currentRevisionId": None,
+            "stableRevisionId": None,
+            "archived": False,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        _atomic_write_json(_process_file(pid), proc)
+        _cache_put_locked(proc)
+        return proc, True
 
 
 def attach_location(pid, rel_path, last_seen_hash=None, mtime_ns=None,
                     primary=False):
     """Bind ONE physical file location to the process (plan 5.2: Save As
-    with the same UUID adds a location, never a revision)."""
+    with the same UUID adds a location, never a revision). v113: a
+    no-change binding (the typical reconcile row on a warm store) does NOT
+    rewrite the manifest - the v112 code fsync-wrote EVERY process manifest
+    on EVERY reconcile pass."""
     with _lock:
         proc = _read_process(pid)
         if not proc:
@@ -616,6 +806,16 @@ def attach_location(pid, rel_path, last_seen_hash=None, mtime_ns=None,
             if loc.get("path") == rel_path:
                 hit = loc
                 break
+        if hit is not None:
+            hash_same = (last_seen_hash is None or
+                         hit.get("lastSeenHash") == last_seen_hash)
+            mtime_same = (mtime_ns is None or
+                          hit.get("mtimeNs") == mtime_ns)
+            primary_ok = (not primary and
+                          any(l.get("isPrimary") for l in locs))
+            if hash_same and mtime_same and primary_ok:
+                return {"ok": True, "processId": pid, "locations": len(locs),
+                        "unchanged": True}
         if hit is None:
             hit = {"path": rel_path, "boundAt": _now()}
             locs.append(hit)
@@ -629,6 +829,7 @@ def attach_location(pid, rel_path, last_seen_hash=None, mtime_ns=None,
             hit["isPrimary"] = True
         proc["updatedAt"] = _now()
         _atomic_write_json(_process_file(pid), proc)
+        _cache_put_locked(proc)
         return {"ok": True, "processId": pid, "locations": len(locs)}
 
 
@@ -647,6 +848,7 @@ def set_process_meta(pid, display_name=None, note=None, archived=None):
             proc["archived"] = bool(archived)
         proc["updatedAt"] = _now()
         _atomic_write_json(_process_file(pid), proc)
+        _cache_put_locked(proc)
         return {"ok": True, "process": proc}
 
 
@@ -658,7 +860,10 @@ def reconcile_processes():
     ComfyUI UUID - every valid workflow_id becomes/updates ONE process with
     the file paths as locations. Files WITHOUT an id are never bound (rule
     8: no basename/similarity auto-merge). Cheap: a GROUP BY over the index;
-    throttled to once per 10s (every process listing re-checks)."""
+    throttled to once per 10s (every process listing re-checks). v113: a
+    row whose binding is already current (same process, same path, same
+    hash + mtime) costs ZERO reads and ZERO writes - the warm pass over a
+    2000-process library is one SELECT plus dict lookups."""
     if _wf_index is None:
         return 0
     if time.time() - _reconcile_ts[0] < 10:
@@ -678,10 +883,23 @@ def reconcile_processes():
         return 0
     n = 0
     with _lock:
+        _cache_load_locked()
         for workflow_id, rel_path, raw_hash, mtime_ns, name in rows[:5000]:
-            proc, created = _ensure_process(workflow_id, display_name=name)
-            r = attach_location(proc["processId"], rel_path,
-                                last_seen_hash=raw_hash, mtime_ns=mtime_ns)
+            pid = _proc_cache["by_path"].get(rel_path)
+            if pid:
+                p = _proc_cache["by_pid"].get(pid)
+                loc = None
+                for l in (p or {}).get("locations") or []:
+                    if l.get("path") == rel_path:
+                        loc = l
+                        break
+                if (p and p.get("workflowId") == workflow_id and loc and
+                        loc.get("lastSeenHash") == raw_hash and
+                        loc.get("mtimeNs") == mtime_ns):
+                    continue  # the binding is already current - touch nothing
+            proc, _created = _ensure_process(workflow_id, display_name=name)
+            attach_location(proc["processId"], rel_path,
+                            last_seen_hash=raw_hash, mtime_ns=mtime_ns)
             n += 1
     _reconcile_ts[0] = time.time()
     _reconcile_ts[1] = n
@@ -690,16 +908,15 @@ def reconcile_processes():
 
 def resolve_path_process(rel_path):
     """The binding of ONE file path (the UI asks: which process does this
-    file belong to, and does it differ from the last checkpoint?)."""
+    file belong to, and does it differ from the last checkpoint?). v113:
+    the O(1) path map instead of a full manifest re-read (the v112 code
+    scanned EVERY process manifest on EVERY open of the history panel)."""
     with _lock:
         reconcile_processes()
-        for pid in _list_ids(_hist_dir("catalog", "processes")):
-            p = _read_json(_process_file(pid))
-            if not p:
-                continue
-            for loc in p.get("locations") or []:
-                if loc.get("path") == rel_path:
-                    return p
+        _cache_load_locked()
+        pid = _proc_cache["by_path"].get(rel_path)
+        if pid:
+            return _proc_cache["by_pid"].get(pid)
         return None
 
 

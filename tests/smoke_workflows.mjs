@@ -1367,19 +1367,19 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v112", /"workflows":\s*"v112"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v113", /"workflows":\s*"v113"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v112", ENTRY_SRC.includes("web build: v112 - THE WORKFLOW MANAGER ROADMAP"));
-check("styles.css?v=112", ENTRY_SRC.includes("styles.css?v=112"));
-check("the module self-reports v112",
+check("the entry banner names v113", ENTRY_SRC.includes("web build: v113 - THE WORKFLOW MANAGER ROADMAP"));
+check("styles.css?v=113", ENTRY_SRC.includes("styles.css?v=113"));
+check("the module self-reports v113",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v112"'));
-check("the web stamp literal is v112",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v113"'));
+check("the web stamp literal is v113",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v112"'));
-check("py stamp bumps together (v112)",
+        .includes('const WF_WEB_VERSION = "v113"'));
+check("py stamp bumps together (v113)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v112"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v113"'));
 check("v107 routes registered (temp list/put/get/delete)",
     [".get(\"/settings_hub/workflows/temp\")", ".post(\"/settings_hub/workflows/temp\")",
      ".get(\"/settings_hub/workflows/temp/{tid}\")", ".delete(\"/settings_hub/workflows/temp/{tid}\")"]
@@ -1946,7 +1946,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v113"); // ahead of the pack (v112) - a stale web file
+    fakeApi.__setHealthVersion("v114"); // ahead of the pack (v113) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -3491,6 +3491,139 @@ phase("WY v112 stage 5 (plan 11) + stage 6: the Inspector + dependencies + libra
     check("WY: an old py keeps the inspector OUT of the rows",
         !bodyWy().querySelector('[data-act="fileinspect"]'), "");
     fakeApi.__setIdxMode("ok");
+    hooks.setTab("open");
+    await settle();
+}
+
+// ===========================================================================
+phase("WZ v113: the search keeps focus + the keys stay inside the panel; the big popovers anchor to their row");
+{
+    const pnlWz = () => hooks.panelEl();
+    const bodyWz = () => pnlWz().querySelector(".hub-wf-body");
+    fakeApi.__setIdxMode("ok");
+    fakeApi.__setIdxFiles([
+        { path: "workflows/wz_a.json", name: "wz_a.json", size: 10, mtime: 100,
+          workflowId: "wz-uuid-a" },
+        { path: "workflows/wz_b.json", name: "wz_b.json", size: 20, mtime: 200,
+          workflowId: "wz-uuid-b" },
+    ]);
+    hooks.setIdxReady(true);
+    hooks.setTab("files");
+    await settle();
+    await hooks.runServerList(true);
+    await settle();
+
+    // 1) the keystroke itself must NOT wipe + rebuild the list (v113: the
+    //    idx-mode search only re-renders when the server answer lands)
+    let sIn = bodyWz().querySelector('[data-wf="filesearch"]');
+    sIn.focus();
+    sIn.value = "wz_a";
+    sIn.setSelectionRange(4, 4);
+    sIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle(20);
+    check("WZ: typing does not flash the loading state (rows stay put)",
+        bodyWz().querySelectorAll('[data-act="openfile"]').length === 2,
+        String(bodyWz().querySelectorAll('[data-act="openfile"]').length));
+    // the debounced server answer lands -> ONE rebuild -> focus + caret back
+    await new Promise((r) => setTimeout(r, 400)); // past the 250ms debounce
+    await settle(20);
+    const fresh = bodyWz().querySelector('[data-wf="filesearch"]');
+    check("WZ: focus RETURNS to the fresh search input after the server answer",
+        fresh && dom.window.document.activeElement === fresh,
+        String(dom.window.document.activeElement?.dataset?.wf || "no-focus"));
+    check("WZ: the typed text + caret survive the re-render",
+        fresh && fresh.value === "wz_a" && fresh.selectionStart === 4 &&
+        fresh.selectionEnd === 4,
+        JSON.stringify({ v: fresh?.value, c: fresh?.selectionStart }));
+    const wzRows = bodyWz().querySelectorAll('[data-act="openfile"]').length;
+    check("WZ: the server search narrowed the list (wz_a only)",
+        wzRows === 1, String(wzRows));
+    // 2) the keystrokes never leak to ComfyUI's global keybinds
+    let leaked = 0;
+    const spy = () => { leaked++; };
+    dom.window.addEventListener("keydown", spy);
+    dom.window.addEventListener("keyup", spy);
+    fresh.dispatchEvent(new dom.window.KeyboardEvent("keydown",
+        { key: "q", bubbles: true, cancelable: true }));
+    fresh.dispatchEvent(new dom.window.KeyboardEvent("keyup",
+        { key: "q", bubbles: true, cancelable: true }));
+    check("WZ: keydown/keyup inside the search field do NOT reach the window",
+        leaked === 0, String(leaked));
+    const nonField = bodyWz().querySelector('[data-act="openfile"]');
+    nonField.dispatchEvent(new dom.window.KeyboardEvent("keydown",
+        { key: "q", bubbles: true, cancelable: true }));
+    check("WZ: keys OUTSIDE the text fields still propagate (the panel is not a vault)",
+        leaked === 1, String(leaked));
+    dom.window.removeEventListener("keydown", spy);
+    dom.window.removeEventListener("keyup", spy);
+    // clear the filter through the real Esc path (re-query the fresh node)
+    let sIn2 = bodyWz().querySelector('[data-wf="filesearch"]');
+    sIn2.dispatchEvent(new dom.window.KeyboardEvent("keydown",
+        { key: "Escape", bubbles: true, cancelable: true }));
+    await settle(20);
+    await new Promise((r) => setTimeout(r, 400));
+    await settle(20);
+    check("WZ: Esc clears the field + the full list returns",
+        bodyWz().querySelector('[data-wf="filesearch"]').value === "" &&
+        bodyWz().querySelectorAll('[data-act="openfile"]').length === 2,
+        String(bodyWz().querySelectorAll('[data-act="openfile"]').length));
+
+    // 3) the Process history pop anchors NEXT TO its row (a left-edge row
+    //    exercises the right-side fallback deterministically)
+    const histBtn = bodyWz().querySelector('[data-act="filehist"][data-path="workflows/wz_a.json"]');
+    check("WZ: the file rows carry the 🕘 history action", !!histBtn);
+    histBtn.getBoundingClientRect = () => ({
+        left: 50, top: 100, right: 90, bottom: 120, width: 40, height: 20,
+        x: 50, y: 100, toJSON() { return this; },
+    });
+    await histBtn.click();
+    await settle(20);
+    const hp = hooks.histPopEl();
+    check("WZ: the history pop opens ANCHORED (right of the row, not 16/16)",
+        hp && hp.style.left === "98px" && hp.style.top === "94px",
+        JSON.stringify({ left: hp?.style.left, top: hp?.style.top }));
+    check("WZ: the pop is viewport-clamped (maxWidth/maxHeight inline)",
+        hp && hp.style.maxWidth === "520px" && !!hp.style.maxHeight,
+        JSON.stringify({ mw: hp?.style.maxWidth, mh: hp?.style.maxHeight }));
+    // 4) the bottom actions: ✎ Process + ✕ Close in ONE row (the column fix)
+    const metaBtn = hp?.querySelector('[data-act="histmeta"]');
+    const closeBtn = hp?.querySelector('[data-act="histclose"]');
+    check("WZ: Process + Close sit in ONE actions row (no column)",
+        metaBtn && closeBtn && metaBtn.parentElement === closeBtn.parentElement &&
+        metaBtn.parentElement.classList.contains("hub-wf-planacts"),
+        JSON.stringify({
+            meta: !!metaBtn, close: !!closeBtn,
+            same: metaBtn && closeBtn && metaBtn.parentElement === closeBtn.parentElement,
+        }));
+    // 5) the pop carries its own key containment for the note input
+    let popLeak = 0;
+    const popSpy = () => { popLeak++; };
+    dom.window.addEventListener("keydown", popSpy);
+    const noteIn = hp.querySelector('[data-wf="histnote"]');
+    noteIn.dispatchEvent(new dom.window.KeyboardEvent("keydown",
+        { key: "n", bubbles: true, cancelable: true }));
+    check("WZ: the checkpoint note input does not leak keys either",
+        popLeak === 0, String(popLeak));
+    dom.window.removeEventListener("keydown", popSpy);
+    const closeAct = hp.querySelector('[data-act="histclose"]');
+    closeAct.click();
+    await settle(20);
+    check("WZ: the merged Close action closes the pop", !hooks.histPopEl());
+
+    // 6) the inspector anchors the same way (its own row button)
+    const inspBtn2 = bodyWz().querySelector('[data-act="fileinspect"][data-path="workflows/wz_a.json"]');
+    inspBtn2.getBoundingClientRect = () => ({
+        left: 50, top: 160, right: 90, bottom: 180, width: 40, height: 20,
+        x: 50, y: 160, toJSON() { return this; },
+    });
+    await inspBtn2.click();
+    await settle(20);
+    const ip = hooks.inspPopEl();
+    check("WZ: the inspector pop anchors next to its row too",
+        ip && ip.style.left === "98px" && ip.style.top === "154px",
+        JSON.stringify({ left: ip?.style.left, top: ip?.style.top }));
+    hooks.closeInspPop();
+    fakeApi.__setIdxFiles([]);
     hooks.setTab("open");
     await settle();
 }

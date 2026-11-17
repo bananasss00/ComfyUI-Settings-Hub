@@ -227,9 +227,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v112";
+const WF_WEB_VERSION = "v113";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v112";
+globalThis.__SettingsHubLoaded["workflows"] = "v113";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -1439,16 +1439,19 @@ function idxMode() { return idxReady === true; }
 function scheduleServerList(delay = 250) {
     if (!idxMode() || filesView !== "list") return;
     clearTimeout(idxQueryT);
-    idxQueryT = setTimeout(() => void runServerList(true), delay);
+    // v113: silent=true - typing must not flash the "Reading…" state and
+    // wipe the visible rows on every debounced keystroke; the answer
+    // replaces the list in one step
+    idxQueryT = setTimeout(() => void runServerList(true, true), delay);
 }
 
-async function runServerList(reset = true) {
+async function runServerList(reset = true, silent = false) {
     if (!idxMode()) return;
     const seq = ++idxSeq;
     if (reset) {
         serverList = { files: [], total: serverList.total, hasMore: false,
             nextCursor: null, loading: true, error: null };
-        if (uiTab === "files") renderAll(); // the loading state renders once
+        if (!silent && uiTab === "files") renderAll(); // the loading state renders once
     }
     const params = new URLSearchParams();
     if (filesSearch) params.set("q", filesSearch);
@@ -2828,6 +2831,11 @@ function buildDom() {
     panel.querySelector(".hub-wf-body").addEventListener("change", (e) => void onBodyChange(e));
     panel.querySelector(".hub-wf-body").addEventListener("input", (e) => void onBodyInput(e));
     panel.querySelector(".hub-wf-body").addEventListener("keydown", (e) => void onBodyKeydown(e));
+    // v113: ComfyUI binds keyup too (releasing a combo fires actions) - the
+    // text fields must contain BOTH halves of the keystroke
+    panel.querySelector(".hub-wf-body").addEventListener("keyup", (e) => {
+        if (isWfTextField(e.target)) e.stopPropagation();
+    });
 
     // v112 (plan 3.4): mount ON the Files tab starts the listing fetch
     // immediately - no detour through another tab is required anymore
@@ -2907,6 +2915,18 @@ function renderNote() {
 
 function renderAll() {
     if (!panel) return;
+    // v113: a re-render must not drop the text cursor. Every filter/search
+    // box (and every other [data-wf] control) keeps focus + exact caret
+    // position across the rebuild - the v112 code restored focus only in
+    // the keystroke path, so the DEBOUNCED server answer (and every other
+    // async renderAll) silently moved focus away from the search box and
+    // the next keystrokes hit ComfyUI's hotkeys instead of the field.
+    const ae = document.activeElement;
+    let focusWf = null, selA = -1, selB = -1;
+    if (ae && panel.contains(ae) && ae.matches?.("[data-wf]")) {
+        focusWf = ae.dataset.wf || null;
+        try { selA = ae.selectionStart; selB = ae.selectionEnd; } catch (_) {}
+    }
     renderHead();
     renderTabs();
     renderNote();
@@ -2924,6 +2944,16 @@ function renderAll() {
     if (keep) {
         const sc = body.querySelector(".hub-wf-scroll");
         if (sc) sc.scrollTop = keep;
+    }
+    if (focusWf) {
+        const el = body.querySelector('[data-wf="' + focusWf + '"]') ||
+            panel.querySelector('[data-wf="' + focusWf + '"]');
+        if (el) {
+            try { el.focus(); } catch (_) {}
+            if (selA >= 0 && typeof el.setSelectionRange === "function") {
+                try { el.setSelectionRange(selA, selB); } catch (_) {}
+            }
+        }
     }
 }
 
@@ -3502,7 +3532,7 @@ async function onBodyClick(e) {
         }
         // v112 stage 5 (plan 11): the workflow inspector
         case "fileinspect": {
-            if (btn.dataset.path) void openInspPop(btn.dataset.path);
+            if (btn.dataset.path) void openInspPop(btn.dataset.path, btn);
             return;
         }
         // v112 stage 3 (plan 6): the per-tab Save / Save As
@@ -3513,7 +3543,7 @@ async function onBodyClick(e) {
         }
         // v112 stage 2.5: the process-history panel of one file
         case "filehist": {
-            if (btn.dataset.path) void openHistPop(btn.dataset.path);
+            if (btn.dataset.path) void openHistPop(btn.dataset.path, btn);
             return;
         }
         // v112 stage 2 (plan 4.7): copy the ComfyUI UUID of a workflow file
@@ -3600,7 +3630,7 @@ async function onBodyClick(e) {
         // v112 stage 4 (plan 10): the preset version history
         case "pver": {
             const p = presets.find((x) => x.id === btn.dataset.pid);
-            if (p) void openPverPop(p.id);
+            if (p) void openPverPop(p.id, btn);
             return;
         }
         case "import": openImportPop(); return;
@@ -3786,15 +3816,16 @@ function onBodyInput(e) {
         filesSearch = el.value || "";
         fileRowsShown = ROW_LIST_CAP;
         if (idxMode() && filesView === "list") {
-            // v112 stage 2: the SERVER search (debounced ~250ms per plan 4.7)
+            // v112 stage 2: the SERVER search (debounced ~250ms per plan 4.7).
+            // v113: NO renderAll() per keystroke here - the focus/caret are
+            // preserved by renderAll itself now, but the v112 double rebuild
+            // (keystroke + the loading state + the answer) made typing in a
+            // 2000-file library feel like fighting the panel. The list
+            // region re-renders when the server answer lands.
             scheduleServerList(250);
+            return;
         }
         renderAll();
-        // restore the caret into the fresh input
-        const inp = panel?.querySelector('[data-wf="filesearch"]');
-        if (inp && inp !== document.activeElement) {
-            try { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } catch (_) {}
-        }
         return;
     }
     if (el.matches('[data-wf="histnote"]')) {
@@ -3804,12 +3835,11 @@ function onBodyInput(e) {
     if (el.matches('[data-wf="fuuid"]')) {
         // v112 stage 2 (plan 4.7): the UUID filter (exact/partial)
         filesUuid = el.value || "";
-        if (idxMode() && filesView === "list") scheduleServerList(250);
-        renderAll();
-        const inp2 = panel?.querySelector('[data-wf="fuuid"]');
-        if (inp2 && inp2 !== document.activeElement) {
-            try { inp2.focus(); inp2.setSelectionRange(inp2.value.length, inp2.value.length); } catch (_) {}
+        if (idxMode() && filesView === "list") {
+            scheduleServerList(250);   // v113: no per-keystroke rebuild (see above)
+            return;
         }
+        renderAll();
         return;
     }
     if (el.matches('[data-wf="opensearch"]')) {
@@ -3850,16 +3880,36 @@ function onBodyInput(e) {
     }
 }
 
+// v113: the text controls the panel owns. Keys typed into them must never
+// reach ComfyUI's global keybinds (a bare letter / Ctrl-combo in a search
+// box queued generations and triggered shortcuts - the search was unusable).
+const WF_TEXT_FIELDS = [
+    '[data-wf="presetsearch"]', '[data-wf="filesearch"]', '[data-wf="opensearch"]',
+    '[data-wf="fuuid"]', '[data-wf="sfname"]', '[data-wf="sfcat"]', '[data-wf="sftags"]',
+    '[data-wf="histnote"]', '[data-wf="root"]', '[data-wf="fdatefrom"]',
+    '[data-wf="fdateto"]', '[data-wf="fsizemin"]', '[data-wf="fsizemax"]',
+].join(", ");
+function isWfTextField(el) {
+    return !!(el && el.matches?.(WF_TEXT_FIELDS));
+}
+
 function onBodyKeydown(e) {
     const el = e.target;
     if (!el) return;
     if (el.matches('[data-wf="presetsearch"], [data-wf="filesearch"], [data-wf="opensearch"], [data-wf="fuuid"]') && e.key === "Escape") {
         // (the category/tags filter clears via the ✕ chip, Esc keeps the text)
+        e.preventDefault();
+        e.stopPropagation();
         el.value = "";
         if (el.matches('[data-wf="presetsearch"]')) presetsSearch = "";
         else if (el.matches('[data-wf="opensearch"]')) openSearch = "";
         else if (el.matches('[data-wf="fuuid"]')) { filesUuid = ""; if (idxMode() && filesView === "list") scheduleServerList(0); }
-        else filesSearch = "";
+        else {
+            // v113: clearing the Files search ALSO re-queries the server -
+            // the v112 Esc left the stale filtered rows visible
+            filesSearch = "";
+            if (idxMode() && filesView === "list") scheduleServerList(0);
+        }
         renderAll();
         return;
     }
@@ -3873,6 +3923,9 @@ function onBodyKeydown(e) {
             renderAll();
         }
     }
+    // v113: the containment itself - every other key stays inside the panel
+    // (Escape/Enter handled above are stopped too; this catches the rest)
+    if (isWfTextField(el)) e.stopPropagation();
 }
 
 // ---------------------------------------------------------------------------
@@ -4188,6 +4241,7 @@ function openNamePrompt(title, defName, onSubmit) {
     const inp = pop.querySelector("input");
     try { inp.focus(); inp.select(); } catch (_) {}
     window.addEventListener("keydown", onNamePopKey, true);
+    containPopTextKeys(pop);   // v113: the prompt field keeps its keys
     const commit = async () => {
         const nm = (inp.value || "").trim();
         if (!nm) { inp.focus(); return; }
@@ -4238,6 +4292,7 @@ function openImportPop() {
     const ta = pop.querySelector("textarea");
     try { ta.focus(); } catch (_) {}
     window.addEventListener("keydown", onImportPopKey, true);
+    containPopTextKeys(pop);   // v113: the pasted-JSON textarea keeps its keys
     pop.addEventListener("click", async (e) => {
         const b = e.target?.closest?.("[data-wf-btn]");
         if (!b) return;
@@ -4418,6 +4473,7 @@ function openWfSettingsPop() {
         `the mini panel (🗂) or ComfyUI Settings → SettingsHub → 'Mini panel'.</div>`;
     document.body.appendChild(pop);
     wfPop = pop;
+    containPopTextKeys(pop);   // v113: the storage-folder input keeps its keys
 
     const onSel = pop.querySelector('[data-wf="on"]');
     onSel.value = isWfOn() ? "1" : "0";
@@ -4723,22 +4779,82 @@ function histRevLabel(r) {
     return { d, src, title };
 }
 
-async function openHistPop(path) {
+// v113: shared placement for the big popovers (Process history, Workflow
+// inspector, Preset history). The v112 code hardcoded left/top = 16px - the
+// pop appeared in the far corner of the SCREEN, potentially on the other
+// side of the monitor from the Workflows panel. The pop now opens NEXT TO
+// the invoking row button (outside its left edge, right edge as the
+// fallback, viewport-clamped; a centered fallback when no anchor exists -
+// the jsdom tests drive the openers directly).
+function popAnchorRect(btn) {
+    try {
+        const r = btn?.getBoundingClientRect?.();
+        if (r && (r.width || r.height)) {
+            return { left: r.left, top: r.top, right: r.right,
+                bottom: r.bottom, width: r.width, height: r.height };
+        }
+    } catch (_) {}
+    return null;
+}
+
+function placeHubPop(pop, anchor, opts = {}) {
+    const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+    const maxW = Math.max(240, Math.min(opts.maxW || 520, vw - 20));
+    const maxH = Math.max(240, Math.min(opts.maxH || (vh - 24), vh - 20));
+    try {
+        pop.style.maxWidth = maxW + "px";
+        pop.style.maxHeight = maxH + "px";
+    } catch (_) {}
+    const pw = pop.offsetWidth || Math.min(maxW, 420);
+    const ph = pop.offsetHeight || 320;
+    const pad = 10;
+    let x = null, y = null;
+    if (anchor && (anchor.width || anchor.height)) {
+        x = anchor.left - pw - 8;               // outside the row's LEFT edge
+        if (x < pad) x = anchor.right + 8;      // no room - the right edge
+        y = anchor.top - 6;
+    }
+    if (x === null || !Number.isFinite(x)) x = (vw - pw) / 2;
+    if (y === null || !Number.isFinite(y)) y = (vh - ph) / 2;
+    x = Math.round(Math.min(Math.max(pad, x), Math.max(pad, vw - pw - pad)));
+    y = Math.round(Math.min(Math.max(pad, y), Math.max(pad, vh - ph - pad)));
+    try { pop.style.left = x + "px"; pop.style.top = y + "px"; } catch (_) {}
+}
+
+// v113: the popovers live on document.body (outside the panel's delegated
+// listeners) - any text input inside them needs its OWN key containment,
+// or ComfyUI's global keybinds fire while the user types the checkpoint
+// note ("What changed?").
+function isTextEntryEl(el) {
+    const t = el?.tagName;
+    if (t === "TEXTAREA") return true;
+    if (t === "INPUT") {
+        const NON_TEXT = new Set(["checkbox", "radio", "button", "submit",
+            "range", "file", "color", "image", "reset"]);
+        return !NON_TEXT.has((el.type || "text").toLowerCase());
+    }
+    return false;
+}
+function containPopTextKeys(pop) {
+    pop.addEventListener("keydown", (e) => {
+        if (isTextEntryEl(e.target)) e.stopPropagation();
+    });
+    pop.addEventListener("keyup", (e) => {
+        if (isTextEntryEl(e.target)) e.stopPropagation();
+    });
+}
+
+async function openHistPop(path, anchorBtn) {
     if (histPop) { closeHistPop(); return; }
     histState = { path, pid: null, proc: null, revs: [], loading: true,
-        error: null, cpBusy: false, armedRestore: null, compare: null };
+        error: null, cpBusy: false, armedRestore: null, compare: null,
+        anchor: popAnchorRect(anchorBtn) };
     histPop = document.createElement("div");
     histPop.className = "hub-menu hub-wf-histpop";
     histPop.innerHTML = `<div class="hub-menu-title">🕘 Process history</div>` +
         `<div class="hub-wf-emptylist">Reading the history…</div>`;
     document.body.appendChild(histPop);
-    try {
-        const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
-        histPop.style.maxHeight = Math.max(240, vh - 24) + "px";
-        histPop.style.maxWidth = "520px";
-        histPop.style.left = "16px";
-        histPop.style.top = "16px";
-    } catch (_) {}
+    placeHubPop(histPop, histState.anchor, { maxW: 520 });
     histPop.addEventListener("click", (e) => {
         const btn = e.target?.closest?.("[data-act]");
         if (!btn) return;
@@ -4772,6 +4888,7 @@ async function openHistPop(path) {
     });
     window.addEventListener("mousedown", onHistDown, true);
     window.addEventListener("keydown", onHistKey, true);
+    containPopTextKeys(histPop);   // v113: the note input never leaks keys
     await refreshHistState();
 }
 
@@ -4856,9 +4973,12 @@ function renderHistPop() {
         const compareBox = st.compare ? st.compare : "";
         body = head + cp + `<div class="hub-wf-sect">Checkpoints (newest first)</div>` +
             `<div class="hub-wf-list">${revs}</div>` +
-            `<div class="hub-wf-planacts">${cmpBtn}` +
-            `<button type="button" class="hub-wf-act" data-act="histmeta" title="Rename the process / edit the shared note">✎ Process</button></div>` +
-            compareBox;
+            compareBox +
+            // v113: ONE bottom actions row - ✎ Process and ✕ Close used to
+            // sit in two stacked planacts strips and read as a column
+            `<div class="hub-wf-planacts hub-wf-planacts-end">${cmpBtn}` +
+            `<button type="button" class="hub-wf-act" data-act="histmeta" title="Rename the process / edit the shared note">✎ Process</button>` +
+            `<button type="button" class="hub-wf-act" data-act="histclose" title="Close the history panel">✕ Close</button></div>`;
         // the restore confirm strip
         if (st.pendingRestore) {
             body += `<div class="hub-wf-planwarn">⚠ Overwrite <b>${esc(baseName(st.path))}</b> with the selected version? ` +
@@ -4867,8 +4987,9 @@ function renderHistPop() {
         }
     }
     histPop.innerHTML = `<div class="hub-menu-title">🕘 Process history</div>` +
-        `<div class="hub-wf-planhint">${esc(histState.path || "")}</div>` + body +
-        `<div class="hub-wf-planacts"><button type="button" class="hub-wf-act" data-act="histclose">✕ Close</button></div>`;
+        `<div class="hub-wf-planhint">${esc(histState.path || "")}</div>` + body;
+    // v113: the content size changed (loading -> data) - re-clamp + re-place
+    placeHubPop(histPop, histState.anchor, { maxW: 520 });
 }
 
 /** The COMPARE of two revisions: a compact, honest summary (node classes,
@@ -5094,21 +5215,16 @@ function onPverKey(e) {
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePverPop(); }
 }
 
-async function openPverPop(pid) {
+async function openPverPop(pid, anchorBtn) {
     if (pverPop) { closePverPop(); return; }
     pverState = { pid, versions: [], loading: true, error: null, armed: null,
-        cmpA: null, cmpB: null, compare: null };
+        cmpA: null, cmpB: null, compare: null, anchor: popAnchorRect(anchorBtn) };
     pverPop = document.createElement("div");
     pverPop.className = "hub-menu hub-wf-histpop";
     pverPop.innerHTML = `<div class="hub-menu-title">🕘 Preset history</div>` +
         `<div class="hub-wf-emptylist">Reading the versions…</div>`;
     document.body.appendChild(pverPop);
-    try {
-        pverPop.style.maxHeight = "520px";
-        pverPop.style.maxWidth = "520px";
-        pverPop.style.left = "16px";
-        pverPop.style.top = "16px";
-    } catch (_) {}
+    placeHubPop(pverPop, pverState.anchor, { maxW: 520 });
     pverPop.addEventListener("click", (e) => {
         const btn = e.target?.closest?.("[data-pact]");
         if (!btn) return;
@@ -5190,7 +5306,9 @@ function renderPverPop() {
     pverPop.innerHTML = `<div class="hub-menu-title">🕘 Preset history</div>` +
         `<div class="hub-wf-planhint">Every overwrite / merge / import archives the previous state automatically (up to ${st.maxVersions || 20}).</div>` +
         body +
-        `<div class="hub-wf-planacts"><button type="button" class="hub-wf-act" data-pact="pclose">✕ Close</button></div>`;
+        `<div class="hub-wf-planacts hub-wf-planacts-end"><button type="button" class="hub-wf-act" data-pact="pclose">✕ Close</button></div>`;
+    // v113: re-clamp + re-place (the content size changed)
+    placeHubPop(pverPop, pverState.anchor, { maxW: 520 });
 }
 
 async function pverClick(act, btn) {
@@ -5300,20 +5418,16 @@ function onInspKey(e) {
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeInspPop(); }
 }
 
-async function openInspPop(path) {
+async function openInspPop(path, anchorBtn) {
     if (inspPop) { closeInspPop(); return; }
-    inspState = { path, loading: true, error: null, data: null };
+    inspState = { path, loading: true, error: null, data: null,
+        anchor: popAnchorRect(anchorBtn) };
     inspPop = document.createElement("div");
     inspPop.className = "hub-menu hub-wf-histpop";
     inspPop.innerHTML = `<div class="hub-menu-title">🔍 Workflow inspector</div>` +
         `<div class="hub-wf-emptylist">Inspecting…</div>`;
     document.body.appendChild(inspPop);
-    try {
-        inspPop.style.maxHeight = "560px";
-        inspPop.style.maxWidth = "520px";
-        inspPop.style.left = "16px";
-        inspPop.style.top = "16px";
-    } catch (_) {}
+    placeHubPop(inspPop, inspState.anchor, { maxW: 520 });
     inspPop.addEventListener("click", (e) => {
         const btn = e.target?.closest?.("[data-iact]");
         if (!btn) return;
@@ -5327,11 +5441,14 @@ async function openInspPop(path) {
     });
     window.addEventListener("mousedown", onInspDown, true);
     window.addEventListener("keydown", onInspKey, true);
-    // the summary rides along once (the library overview - plan 12)
-    const sumRes = await jfetch("/settings_hub/workflows/index/summary");
+    // v113: the summary and the inspection run in PARALLEL (the v112
+    // sequential chain doubled the wait on every open)
+    const [sumRes, res] = await Promise.all([
+        jfetch("/settings_hub/workflows/index/summary"),
+        jfetch("/settings_hub/workflows/index/inspect?path=" +
+            encodeURIComponent(path)),
+    ]);
     inspState.summary = sumRes.json?.ok ? sumRes.json : null;
-    const res = await jfetch("/settings_hub/workflows/index/inspect?path=" +
-        encodeURIComponent(path));
     if (res.json?.ok) {
         inspState.data = res.json;
     } else if (res.status === 404) {
@@ -5413,7 +5530,10 @@ function renderInspPop() {
     }
     inspPop.innerHTML = `<div class="hub-menu-title">🔍 Workflow inspector</div>` +
         body +
-        `<div class="hub-wf-planacts"><button type="button" class="hub-wf-act" data-iact="iclose">✕ Close</button></div>`;
+        `<div class="hub-wf-planacts hub-wf-planacts-end"><button type="button" class="hub-wf-act" data-iact="iclose">✕ Close</button></div>`;
+    // v113: the content size changed (loading -> the full report) -
+    // re-clamp + re-place; the pop scrolls INSIDE its box (styles.css)
+    placeHubPop(inspPop, inspState.anchor, { maxW: 520 });
 }
 
 
