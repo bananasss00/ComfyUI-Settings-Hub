@@ -6237,6 +6237,25 @@ body.sh-modal-open .hub-sh-note {
     vertical-align: middle;
     pointer-events: none;
 }
+/* v115: the duplicate-ID counter on the ⧉ UUID chip - "×N" when several
+   files share one ComfyUI UUID (locations of ONE process); a cooler hue
+   keeps it apart from the orange version-count chip on the 🕘 button */
+.hub-wf-dupbadge {
+    display: inline-block;
+    min-width: 13px;
+    padding: 0 3px;
+    margin-left: 4px;
+    border-radius: 8px;
+    background: rgba(90, 160, 255, 0.20);
+    border: 1px solid rgba(110, 170, 255, 0.55);
+    color: #9ecbff;
+    font-size: calc(var(--sh-fs, 1) * 9px);
+    line-height: 13px;
+    font-weight: 700;
+    text-align: center;
+    vertical-align: middle;
+    pointer-events: none;
+}
 /* v103: the cap existed since v101 but WITHOUT overflow - 15 recent rows
    painted straight over the "All saved workflows" section below. The group
    is now its own little scroll area: capped at 30% of the panel, scrolling

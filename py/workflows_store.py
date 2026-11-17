@@ -1375,7 +1375,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v114"
+WORKFLOWS_SERVER_VERSION = "v115"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -2703,6 +2703,89 @@ async def workflows_history_revision_delete(request):
                                  status=400)
     r = _wf_hist.delete_revisions(rids)
     return web.json_response(r, status=200 if r.get("ok") else 400)
+
+
+@PromptServer.instance.routes.post("/settings_hub/workflows/history/process/{pid}/delete")
+async def workflows_history_process_delete(request):
+    """v115 (owner request): "кнопка удалять сами процессы со всеми
+    хвостами" - erase the WHOLE process: every revision, the process
+    manifest, every location binding and the CAS blobs no other revision
+    references. Body {deleteFiles: true} ALSO removes the physical workflow
+    files of every location - each file is safety-snapshotted (a tx copy
+    with the 6h TTL) BEFORE the unlink and every per-file result is
+    reported back so the UI can name exactly what happened. When the files
+    are gone their derived-index rows are dropped too - a stale row would
+    let the discovery reconcile resurrect the erased process from a ghost
+    location on the next throttled pass."""
+    if _wf_hist is None:
+        return web.json_response({"ok": False, "error": "history module unavailable"},
+                                 status=404)
+    pid = request.match_info.get("pid", "")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    delete_files = bool(body.get("deleteFiles")) if isinstance(body, dict) else False
+
+    def _remove_file(rel):
+        """The remover the store calls for every location: validate the
+        library-relative path against the REAL roots (never an arbitrary
+        filesystem path), snapshot the bytes, then unlink. A missing file
+        is a fine outcome (already gone); a failure is reported, never
+        raised - the process erasure itself must not wedge."""
+        res = {"path": rel, "removed": False, "snapshot": None}
+        if not isinstance(rel, str) or not rel.startswith("workflows/"):
+            res["error"] = "outside the workflows library"
+            return res
+        target = None
+        for wroot in _workflows_user_dirs(request):
+            cand = os.path.normpath(os.path.join(
+                wroot, rel[len("workflows/"):]))
+            if _is_inside(cand, wroot):
+                target = cand
+                break
+        if not target:
+            res["error"] = "the path escapes the library"
+            return res
+        if not os.path.isfile(target):
+            res["reason"] = "missing"   # already gone - not an error
+            return res
+        try:
+            with open(target, "rb") as fh:
+                old = fh.read()
+        except OSError as e:
+            res["error"] = "read failed: " + str(e)[:100]
+            return res
+        tx = _wf_hist.make_tx_snapshot(rel, old)
+        if not tx.get("ok"):
+            res["error"] = ("the safety snapshot failed: "
+                            + str(tx.get("error", "?"))[:100])
+            return res
+        res["snapshot"] = tx.get("txId")
+        try:
+            os.remove(target)
+            res["removed"] = True
+            res["bytes"] = len(old)
+        except OSError as e:
+            res["error"] = "remove failed: " + str(e)[:100]
+        return res
+
+    r = _wf_hist.delete_process(pid, delete_files=delete_files,
+                                file_remover=_remove_file if delete_files else None)
+    if not r.get("ok"):
+        return web.json_response(r, status=400)
+    dropped = 0
+    if delete_files and _wf_index is not None:
+        try:
+            gone = [f.get("path") for f in r.get("files") or [] if f.get("removed")]
+            if gone:
+                fr = _wf_index.forget_paths(
+                    user_scope=_request_user_scope(request), rel_paths=gone)
+                dropped = int(fr.get("removed") or 0)
+        except Exception:
+            dropped = 0   # the scan's own prune pass is the safety net
+    r["indexRowsDropped"] = dropped
+    return web.json_response(r, status=200)
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/history/badges")

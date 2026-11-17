@@ -491,6 +491,163 @@ check("v114 badges: the indicator reads 1 stable 0 after the cleanup",
       json.dumps(_b2.get("workflows/p4.json")))
 
 # ---------------------------------------------------------------------------
+# 17) v115 (owner request), two items:
+# (1) "надо и кнопка удалять сами процессы со всеми хвостами" - the
+#     PROCESS-level cleanup: delete_process() erases ONE process AND
+#     everything attached - every revision manifest (the whole chain,
+#     stable/current included: the armed two-click confirm in the UI is the
+#     consent), every location binding, the process manifest itself and the
+#     CAS blobs no OTHER revision references; an optional injected remover
+#     deletes the physical files and reports every per-file result;
+# (2) "индицировать количество процессов с одинаковым ид" - the badges
+#     answer also carries 'locations: N' (N > 1 ONLY - a normal one-file
+#     process adds no bytes): several FILES sharing one ComfyUI UUID are
+#     locations of ONE process and the user must SEE how many rows that ID
+#     covers; a revision-less duplicate still reports (count 0 + locations).
+_badges115 = hist.revision_badges()
+check("v115 badges: the duplicate-UUID paths carry the locations counter",
+      _badges115.get("workflows/p1.json", {}).get("locations") == 2 and
+      _badges115.get("workflows/p1_v2.json", {}).get("locations") == 2,
+      json.dumps({k: _badges115.get(k) for k in
+                  ("workflows/p1.json", "workflows/p1_v2.json")}))
+check("v115 badges: a single-location process carries NO locations key",
+      "locations" not in _badges115.get("workflows/p2.json", {}) and
+      "locations" not in _badges115.get("workflows/p4.json", {}),
+      json.dumps({k: _badges115.get(k) for k in
+                  ("workflows/p2.json", "workflows/p4.json")}))
+
+# a REVISION-LESS duplicate (two files, one UUID, zero checkpoints) still
+# shows up - duplicates matter before the first Checkpoint too
+_vless_pid = "5155aabbccdd1122"
+hist._atomic_write_json(hist._process_file(_vless_pid),
+                        {"processId": _vless_pid,
+                         "workflowId": "51555555-5555-5555-5555-555555555555",
+                         "displayName": "Versionless dup", "note": None,
+                         "locations": [], "currentRevisionId": None,
+                         "stableRevisionId": None, "archived": False,
+                         "createdAt": hist._now(), "updatedAt": hist._now()})
+hist.attach_location(_vless_pid, "workflows/dup1.json")
+hist.attach_location(_vless_pid, "workflows/dup2.json")
+_vb = hist.revision_badges()
+check("v115 badges: a revision-less duplicate reports locations with count 0",
+      _vb.get("workflows/dup1.json", {}).get("locations") == 2 and
+      _vb.get("workflows/dup1.json", {}).get("count") == 0 and
+      _vb.get("workflows/dup2.json", {}).get("locations") == 2,
+      json.dumps({k: _vb.get(k) for k in ("workflows/dup1.json", "workflows/dup2.json")}))
+
+# the deletion itself: contract checks first
+_d = hist.delete_process("NOT-A-PID")
+check("v115 delete: a malformed pid refuses with a clear error",
+      not _d.get("ok") and "bad processId" in _d.get("error", ""), json.dumps(_d))
+_d = hist.delete_process("f" * 16)
+check("v115 delete: an unknown pid reports no such process",
+      not _d.get("ok") and "no such process" in _d.get("error", ""), json.dumps(_d))
+_d = hist.delete_process(_pid4, delete_files=True, file_remover="not-callable")
+check("v115 delete: a non-callable remover refuses",
+      not _d.get("ok") and "callable" in _d.get("error", ""), json.dumps(_d))
+
+# HISTORY-ONLY delete: the whole chain dies (stable/current included - the
+# armed confirm is the consent), the manifests vanish, the caches clean up,
+# the git objects stay (the shared ref chain is immutable - honest report)
+_n4 = len(hist.list_revisions(_pid4))
+check("v115 setup: pid4 still carries revisions to erase", _n4 >= 1, str(_n4))
+_d = hist.delete_process(_pid4)
+check("v115 delete: the history-only deletion succeeds",
+      _d.get("ok") and _d.get("deletedRevisions") == _n4 and
+      _d.get("backend") == hist.backend_kind(), json.dumps(_d))
+check("v115 delete: the process manifest is gone",
+      hist._read_process(_pid4) is None and
+      not os.path.isfile(hist._process_file(_pid4)))
+check("v115 delete: every revision manifest is gone",
+      all(hist._read_revision(r["revisionId"]) is None
+          for r in hist.list_revisions(_pid4)) and
+      _pid4 not in hist._rev_cache["of_pid"])
+check("v115 delete: the caches are clean (pid/uuid/path maps)",
+      _pid4 not in hist._proc_cache["by_pid"] and
+      "44444444-4444-4444-4444-444444444444" not in hist._proc_cache["by_uuid"] and
+      "workflows/p4.json" not in hist._proc_cache["by_path"])
+check("v115 delete: the git backend reports zero reclaimed bytes honestly",
+      _d.get("freedBytes") == 0, json.dumps(_d.get("freedBytes")))
+_bb = hist.revision_badges()
+check("v115 delete: the badges stop listing the erased paths",
+      "workflows/p4.json" not in _bb, json.dumps(sorted(_bb)))
+check("v115 delete: resolve no longer binds the erased process",
+      hist.resolve_path_process("workflows/p4.json") is None)
+
+# FULL delete (files included): the injected remover handles every location;
+# a hostile remover must not wedge the store, a missing file is fine
+_fk = "6166aabbccdd1122"
+hist._atomic_write_json(hist._process_file(_fk),
+                        {"processId": _fk,
+                         "workflowId": "66666666-6666-6666-6666-666666666666",
+                         "displayName": "Full delete", "note": None,
+                         "locations": [], "currentRevisionId": None,
+                         "stableRevisionId": None, "archived": False,
+                         "createdAt": hist._now(), "updatedAt": hist._now()})
+hist.attach_location(_fk, "workflows/del1.json")
+hist.attach_location(_fk, "workflows/gone.json")
+hist.attach_location(_fk, "workflows/boom.json")
+_rk = hist.record_checkpoint_for_path("workflows/del1.json",
+                                      wf_bytes("66666666-6666-6666-6666-666666666666",
+                                               seed="fd"),
+                                      source="checkpoint")
+check("v115 setup: the full-delete process owns a revision",
+      _rk.get("ok") and _rk.get("processId") == _fk, json.dumps(_rk))
+_calls = []
+def _remover(rel):
+    _calls.append(rel)
+    if rel.endswith("gone.json"):
+        return {"path": rel, "removed": False, "reason": "missing"}
+    if rel.endswith("boom.json"):
+        raise RuntimeError("disk on fire")
+    return {"path": rel, "removed": True, "bytes": 123, "snapshot": "tx-1"}
+_d = hist.delete_process(_fk, delete_files=True, file_remover=_remover)
+_by_path = {f.get("path"): f for f in _d.get("files") or []}
+check("v115 full delete: every location was offered to the remover",
+      sorted(_calls) == ["workflows/boom.json", "workflows/del1.json",
+                         "workflows/gone.json"], json.dumps(_calls))
+check("v115 full delete: the file results are reported verbatim",
+      _by_path.get("workflows/del1.json", {}).get("removed") is True and
+      _by_path.get("workflows/gone.json", {}).get("reason") == "missing" and
+      "disk on fire" in (_by_path.get("workflows/boom.json", {}).get("error") or ""),
+      json.dumps(_d.get("files")))
+check("v115 full delete: the erasure still completes with a failing remover",
+      _d.get("ok") and _d.get("deletedRevisions") == 1 and
+      hist._read_process(_fk) is None and
+      _fk not in hist._proc_cache["by_pid"], json.dumps({k: _d.get(k) for k in ("ok", "deletedRevisions")}))
+
+# (2b) the CAS backend reclaims the REAL bytes: identical content across two
+# processes dedupes to ONE blob - it survives while any other revision
+# references it and is reclaimed with the last one
+cas2_tmp = tempfile.mkdtemp(prefix="shub-wf-cas2-")
+hist3 = load_mod("shub_hist_cas2", "py/workflows_history.py")
+hist3.set_base_dir(os.path.join(cas2_tmp, "settings_hub", "workflows_manager"))
+hist3._backend_cache["resolved"] = None
+hist3._git_available = lambda: False
+check("v115 cas: the fresh store resolves to cas", hist3.backend_kind() == "cas")
+_pa, _ = hist3._ensure_process("casduple-1-uuid")
+_pb, _ = hist3._ensure_process("casduple-2-uuid")
+_shared = b'{"identical": true, "nodes": []}'
+ra = hist3.create_revision(_pa["processId"], _shared, {"source": "checkpoint"})
+rb = hist3.create_revision(_pb["processId"], _shared, {"source": "checkpoint"})
+_oid = ra["revision"]["storage"]["blob"]
+check("v115 cas: identical content dedupes to ONE blob",
+      rb.get("ok") and rb["revision"]["storage"]["blob"] == _oid and
+      os.path.isfile(hist3._cas_blob_path(_oid)),
+      json.dumps({"a": ra.get("ok"), "b": rb.get("ok")}))
+da = hist3.delete_process(_pa["processId"])
+check("v115 cas: deleting process A keeps the blob (B still reads)",
+      da.get("ok") and da.get("freedBytes") == 0 and
+      hist3.read_revision_bytes(rb["revisionId"]) == _shared,
+      json.dumps({k: da.get(k) for k in ("ok", "freedBytes")}))
+db = hist3.delete_process(_pb["processId"])
+check("v115 cas: deleting process B reclaims the unreferenced blob",
+      db.get("ok") and db.get("freedBytes") > 0 and
+      not os.path.isfile(hist3._cas_blob_path(_oid)),
+      json.dumps({k: db.get(k) for k in ("ok", "freedBytes")}))
+shutil.rmtree(cas2_tmp, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
 shutil.rmtree(TMP, ignore_errors=True)
 print()
 print("PASS: %d  FAIL: %d" % (PASS, FAIL))

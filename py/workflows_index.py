@@ -658,6 +658,52 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
         _scan_lock.release()
 
 
+def forget_paths(db=None, user_scope="default", rel_paths=()):
+    """v115: drop the index rows of files the Process-delete route removed
+    from disk. The reconcile discovery groups the INDEX rows by UUID - a
+    stale row of a deleted file would resurrect the erased process with a
+    ghost location on the next throttled pass. The next full scan prunes
+    vanished rows anyway (reconciliation); this only closes the window
+    between the delete and that scan. The FTS mirror rows die with their
+    rows (the same contract the scan's prune branch follows). Returns
+    {ok, removed} - a busy scan just skips (the safety net above holds)."""
+    paths = {p for p in (rel_paths or ()) if isinstance(p, str) and p}
+    if not paths:
+        return {"ok": True, "removed": 0, "busy": False}
+    db = db or _db_path()
+    if not os.path.isfile(db):
+        return {"ok": True, "removed": 0, "busy": False}
+    if not _scan_lock.acquire(blocking=True, timeout=5):
+        return {"ok": True, "removed": 0, "busy": True}
+    removed = 0
+    try:
+        with _db_lock:
+            conn = _connect(db)
+            try:
+                fts = _fts_enabled(db)
+                for rp in sorted(paths):
+                    rows = conn.execute(
+                        "SELECT rowid FROM workflow_files "
+                        "WHERE user_scope=? AND rel_path=?",
+                        (user_scope, rp)).fetchall()
+                    for (rowid,) in rows:
+                        conn.execute("DELETE FROM workflow_files WHERE rowid=?",
+                                     (rowid,))
+                        if fts:
+                            conn.execute("DELETE FROM workflow_fts WHERE rowid=?",
+                                         (rowid,))
+                        removed += 1
+                conn.commit()
+            finally:
+                conn.close()
+    except sqlite3.DatabaseError:
+        return {"ok": False, "removed": 0, "busy": False,
+                "error": "index update failed"}
+    finally:
+        _scan_lock.release()
+    return {"ok": True, "removed": removed, "busy": False}
+
+
 def index_status(db=None, user_scope="default"):
     """The stats for the UI: how many files are indexed, the last scan, the
     profile, whether FTS is live. Cheap - never walks the filesystem."""

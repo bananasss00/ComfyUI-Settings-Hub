@@ -285,8 +285,8 @@ phase("PA build v95 + version manifest");
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat v98 + renderer v94",
         entrySrc.includes('"chat": "v111"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the current release (the v114 cleanup, the roadmap + unload kept in the prose)",
-        entrySrc.includes("web build: v114 - THE VERSION CLEANUP + INDICATOR") &&
+    check("PA the banner names the current release (the v115 cleanup, the roadmap + unload kept in the prose)",
+        entrySrc.includes("web build: v115 - THE PROCESS CLEANUP + DUPLICATE COUNTER") &&
         entrySrc.includes("THE WORKFLOW MANAGER ROADMAP") &&
         entrySrc.includes("THE SMART QUEUE-START UNLOAD"));
 }

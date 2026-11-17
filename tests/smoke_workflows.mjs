@@ -177,6 +177,8 @@ function makeFakeApi() {
     const txStore = new Map();
     // v114: the row-badge + batch-delete stub controls
     let badgesMode = "ok";           // "ok" | "stale" (an old py: the route 404s)
+    // v115: the whole-process delete stub control ("ok" | "stale")
+    let procDelMode = "ok";
     // v112 stage 4: the preset version archives (pid -> {versions, seq})
     const pverStore = new Map();
     const pverArchive = (pid, changedBy) => {
@@ -619,13 +621,18 @@ function makeFakeApi() {
             // chain is spliced)
             if (p === "/settings_hub/workflows/history/badges" && method === "GET") {
                 if (badgesMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                // v115: the answer also carries the duplicate-ID counter -
+                // 'locations: N' ONLY when the UUID covers MORE THAN ONE file;
+                // a revision-less duplicate still reports (count 0)
                 const out = {};
                 for (const pr of histStore.processes.values()) {
                     const revs = histRevList(pr.processId);
-                    if (!revs.length) continue;
+                    const locs = pr.locations || [];
+                    if (!revs.length && locs.length < 2) continue;
                     const info = { count: revs.length,
                         stable: revs.filter((r) => r.isStable).length };
-                    for (const l of pr.locations || []) out[l.path] = info;
+                    if (locs.length > 1) info.locations = locs.length;
+                    for (const l of locs) out[l.path] = info;
                 }
                 return jsonResp({ ok: true, badges: out });
             }
@@ -654,6 +661,39 @@ function makeFakeApi() {
                     deleted.push(rid);
                 }
                 return jsonResp({ ok: true, deleted, skipped });
+            }
+            // v115: the WHOLE-PROCESS delete ("удалить сами процессы со всеми
+            // хвостами") - the fake mirrors the real route: every revision
+            // dies, the process entry dies, deleteFiles removes every
+            // location's simulated file row (tx snapshot recorded first)
+            const mHistProcDel = p.match(/^\/settings_hub\/workflows\/history\/process\/([^/]+)\/delete$/);
+            if (mHistProcDel && method === "POST") {
+                if (procDelMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                const pid = decodeURIComponent(mHistProcDel[1]);
+                const proc = histStore.processes.get(pid);
+                if (!proc) return jsonResp({ ok: false, error: "no such process" }, 400);
+                let body2 = {};
+                try { body2 = JSON.parse(opts.body || "{}"); } catch (_) {}
+                const delFiles = !!(body2 && body2.deleteFiles);
+                const files = [];
+                if (delFiles) {
+                    for (const l of proc.locations || []) {
+                        const row = idxFiles.find((f) => f.path === l.path);
+                        if (!row) { files.push({ path: l.path, removed: false, reason: "missing" }); continue; }
+                        txStore.set("tx" + (++histStore.seq), { path: l.path, ts: Date.now() / 1000 | 0 });
+                        files.push({ path: l.path, removed: true,
+                            bytes: row.size || 10, snapshot: "tx" + histStore.seq });
+                    }
+                }
+                const n = histRevList(pid).length;
+                for (const r of histRevList(pid)) histStore.revisions.delete(r.revisionId);
+                histStore.processes.delete(pid);
+                const gone = files.filter((f) => f.removed).map((f) => f.path);
+                for (let i = idxFiles.length - 1; i >= 0; i--) {
+                    if (gone.includes(idxFiles[i].path)) idxFiles.splice(i, 1);
+                }
+                return jsonResp({ ok: true, processId: pid, deletedRevisions: n,
+                    freedBytes: 0, files, indexRowsDropped: gone.length });
             }
             if (p === "/settings_hub/workflows/history/storage" && method === "GET") {
                 return jsonResp({ ok: true, backend: "stub", processes: histStore.processes.size,
@@ -804,6 +844,8 @@ function makeFakeApi() {
         __pverStore: () => pverStore,
         // v114: the badges + batch-delete stub controls
         __setBadgesMode: (m) => { badgesMode = m; },
+        // v115: the whole-process delete stub control
+        __setProcDelMode: (m) => { procDelMode = m; },
         // v108: the Files listing + the favorites controls
         __setWfFiles: (v) => { wfFiles = v; },
         __wfFavs: () => wfFavs.slice(),
@@ -1413,21 +1455,25 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v114", /"workflows":\s*"v114"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v115", /"workflows":\s*"v115"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v114 (the cleanup release + the roadmap kept)",
-    ENTRY_SRC.includes("web build: v114 - THE VERSION CLEANUP + INDICATOR") &&
+check("the entry banner names v115 (the process cleanup + duplicate counter)",
+    ENTRY_SRC.includes("web build: v115 - THE PROCESS CLEANUP + DUPLICATE COUNTER") &&
     ENTRY_SRC.includes("THE WORKFLOW MANAGER ROADMAP"));
-check("styles.css?v=114", ENTRY_SRC.includes("styles.css?v=114"));
-check("the module self-reports v114",
+check("styles.css?v=115", ENTRY_SRC.includes("styles.css?v=115"));
+check("the module self-reports v115",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v114"'));
-check("the web stamp literal is v114",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v115"'));
+check("the web stamp literal is v115",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v114"'));
-check("py stamp bumps together (v114)",
+        .includes('const WF_WEB_VERSION = "v115"'));
+check("py stamp bumps together (v115)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v114"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v115"'));
+check("v115 routes registered (process delete + badges)",
+    ["/settings_hub/workflows/history/process/{pid}/delete",
+     "/settings_hub/workflows/history/badges"]
+        .every((s) => fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8").includes(s)));
 check("v107 routes registered (temp list/put/get/delete)",
     [".get(\"/settings_hub/workflows/temp\")", ".post(\"/settings_hub/workflows/temp\")",
      ".get(\"/settings_hub/workflows/temp/{tid}\")", ".delete(\"/settings_hub/workflows/temp/{tid}\")"]
@@ -1994,7 +2040,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v115"); // ahead of the pack (v114) - a stale web file
+    fakeApi.__setHealthVersion("v116"); // ahead of the pack (v115) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -3853,6 +3899,182 @@ phase("ZX v114: the version indicator on the rows + the manage/delete of SPECIFI
         bodyZx().querySelectorAll('[data-act="filehist"]').length === 2, "rows ok");
     hooks.closeHistPop();
     fakeApi.__setBadgesMode("ok");
+    fakeApi.__setIdxFiles([]);
+    hooks.setTab("open");
+    await settle();
+}
+
+phase("ZY v115: the duplicate-ID counter on the rows + the WHOLE-PROCESS delete (all tails)");
+{
+    const pnlZy = () => hooks.panelEl();
+    const bodyZy = () => pnlZy().querySelector(".hub-wf-body");
+    fakeApi.__setIdxMode("ok");
+    fakeApi.__setBadgesMode("ok");
+    fakeApi.__setProcDelMode("ok");
+    // two files share ONE UUID (duplicates of one process), one solo file
+    const zyRow = (path, hash) => ({ path, name: path.split("/")[1], size: 10,
+        mtime: 100, workflowId: null, rawHash: hash });
+    fakeApi.__setIdxFiles([
+        { ...zyRow("workflows/zya.json", "zy-h1"), workflowId: "zy-uuid-dup" },
+        { ...zyRow("workflows/zyb.json", "zy-h2"), workflowId: "zy-uuid-dup" },
+        { ...zyRow("workflows/zyc.json", "zy-h3"), workflowId: "zy-uuid-solo" },
+    ]);
+    // a deterministic phase: the fake history store starts empty
+    for (const k of [...fakeApi.__histStore().processes.keys()]) fakeApi.__histStore().processes.delete(k);
+    for (const k of [...fakeApi.__histStore().revisions.keys()]) fakeApi.__histStore().revisions.delete(k);
+    fakeApi.__histStore().seq = 0;
+    // a REVISION-LESS duplicate: two locations, zero checkpoints (the real
+    // reconcile builds exactly this shape before the first Checkpoint)
+    fakeApi.__histStore().processes.set("pzydup000000001", {
+        processId: "pzydup000000001", workflowId: "zy-uuid-dup",
+        displayName: "ZY dup", locations: [
+            { path: "workflows/zya.json", isPrimary: true },
+            { path: "workflows/zyb.json" }],
+        currentRevisionId: null, stableRevisionId: null });
+    hooks.setTab("files");
+    await settle();
+    await hooks.runServerList(true);
+    await settle();
+    hooks.refreshHistBadges(true);
+    await settle(30);
+
+    // 1) the duplicate-ID counter (the owner: "индицировать количество
+    //    процессов с одинаковым ид, тоже типа счетчика как для истории")
+    const chipA = bodyZy().querySelector('[data-act="copyuuid"][data-uuid="zy-uuid-dup"]');
+    check("ZY: the ⧉ UUID chip renders on the row", !!chipA,
+        chipA?.outerHTML?.slice(0, 120) || "no chip");
+    check("ZY: the DUPLICATE counter shows ×2 (a revision-less dup still reports)",
+        chipA && chipA.querySelector(".hub-wf-dupbadge")?.textContent === "×2",
+        chipA?.innerHTML || "no chip");
+    check("ZY: the chip tooltip names the shared count",
+        (chipA?.title || "").includes("2 files share this UUID"), chipA?.title || "");
+    const chipSolo = bodyZy().querySelector('[data-act="copyuuid"][data-uuid="zy-uuid-solo"]');
+    check("ZY: a single-file UUID carries NO counter",
+        !!chipSolo && !chipSolo.querySelector(".hub-wf-dupbadge"),
+        chipSolo?.title || "no chip");
+
+    // 2) the dup process gets TWO versions -> the 🕘 badge shows 2
+    const btnZy = bodyZy().querySelector('[data-act="filehist"][data-path="workflows/zya.json"]');
+    btnZy.getBoundingClientRect = () => ({
+        left: 50, top: 100, right: 90, bottom: 120, width: 40, height: 20,
+        x: 50, y: 100, toJSON() { return this; },
+    });
+    await btnZy.click();
+    await settle(20);
+    const hpZy = hooks.histPopEl();
+    check("ZY: the history pop opens", !!hpZy);
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(30);
+    fakeApi.__setIdxFiles([
+        { ...zyRow("workflows/zya.json", "zy-h1b"), workflowId: "zy-uuid-dup" },
+        { ...zyRow("workflows/zyb.json", "zy-h2"), workflowId: "zy-uuid-dup" },
+        { ...zyRow("workflows/zyc.json", "zy-h3"), workflowId: "zy-uuid-solo" },
+    ]);
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(30);
+    check("ZY: the dup process carries 2 versions across 2 locations",
+        hooks.histState().revs.length === 2 &&
+        (hooks.histState().proc.locations || []).length === 2,
+        JSON.stringify({ revs: hooks.histState().revs.length,
+            locs: (hooks.histState().proc.locations || []).length }));
+    const badgeZy = bodyZy().querySelector('[data-act="filehist"][data-path="workflows/zya.json"] .hub-wf-hbadge');
+    check("ZY: the version badge reads 2 next to the ×2 duplicate counter",
+        badgeZy && badgeZy.textContent === "2",
+        JSON.stringify({ badge: badgeZy?.textContent || null }));
+
+    // 3) the armed WHOLE-PROCESS delete: the strip names the exact counts,
+    //    Cancel disarms, the confirmed scope deletes files + versions
+    await hooks.histPopEl().querySelector('[data-act="histprocarm"]').click();
+    await settle(20);
+    const stripZy = hooks.histPopEl().querySelector(".hub-wf-planwarn");
+    check("ZY: the ARMED strip appears with the exact counts",
+        hooks.histPopEl().querySelector('[data-act="histprocyes"]') !== null &&
+        (stripZy?.textContent || "").includes("2 version(s)") &&
+        (stripZy?.textContent || "").includes("2 file location(s)"),
+        stripZy?.textContent || "no strip");
+    check("ZY: the entry button hides while armed",
+        !hooks.histPopEl().querySelector('[data-act="histprocarm"]'));
+    await hooks.histPopEl().querySelector('[data-act="histproccancel"]').click();
+    await settle(20);
+    check("ZY: Cancel disarms (no delete happened)",
+        !hooks.histPopEl().querySelector('[data-act="histprocyes"]') &&
+        fakeApi.__histStore().processes.has("pzydup000000001"));
+    await hooks.histPopEl().querySelector('[data-act="histprocarm"]').click();
+    await settle(20);
+    await hooks.histPopEl().querySelector('[data-act="histprocyes"]').click();
+    await settle(60);
+    check("ZY: the confirmed EVERYTHING-delete closes the panel",
+        !hooks.histPopEl());
+    check("ZY: the process + ALL its revisions died",
+        !fakeApi.__histStore().processes.has("pzydup000000001") &&
+        [...fakeApi.__histStore().revisions.values()]
+            .every((r) => r.processId !== "pzydup000000001"));
+    check("ZY: the tx snapshots were recorded BEFORE the unlink",
+        fakeApi.__txStore().size >= 2,
+        String(fakeApi.__txStore().size));
+    check("ZY: the toast names versions + files",
+        [...document.querySelectorAll(".hub-sh-note")]
+            .some((t) => (t.textContent || "").includes("Process deleted: 2 version(s) + 2 file(s)")),
+        JSON.stringify([...document.querySelectorAll(".hub-sh-note")]
+            .map((t) => t.textContent)));
+    check("ZY: BOTH duplicate rows left the Files list",
+        !bodyZy().querySelector('[data-fpath="workflows/zya.json"]') &&
+        !bodyZy().querySelector('[data-fpath="workflows/zyb.json"]'),
+        bodyZy().querySelectorAll("[data-fpath]").length + " rows left");
+    check("ZY: the untouched file stays",
+        !!bodyZy().querySelector('[data-fpath="workflows/zyc.json"]'));
+
+    // 4) the HISTORY-ONLY scope: the versions die, the file stays
+    const btnC = bodyZy().querySelector('[data-act="filehist"][data-path="workflows/zyc.json"]');
+    btnC.getBoundingClientRect = () => ({
+        left: 50, top: 140, right: 90, bottom: 160, width: 40, height: 20,
+        x: 50, y: 140, toJSON() { return this; },
+    });
+    await btnC.click();
+    await settle(20);
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(30);
+    fakeApi.__setIdxFiles([{ ...zyRow("workflows/zyc.json", "zy-h3b"), workflowId: "zy-uuid-solo" }]);
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(30);
+    check("ZY: the solo process carries 2 versions",
+        hooks.histState().revs.length === 2, String(hooks.histState().revs.length));
+    await hooks.histPopEl().querySelector('[data-act="histprocarm"]').click();
+    await settle(20);
+    await hooks.histPopEl().querySelector('[data-act="histprochist"]').click();
+    await settle(60);
+    check("ZY: history-only keeps the FILE row",
+        !!bodyZy().querySelector('[data-fpath="workflows/zyc.json"]'));
+    check("ZY: history-only emptied the history",
+        ![...fakeApi.__histStore().processes.values()]
+            .some((pr) => pr.workflowId === "zy-uuid-solo"));
+    check("ZY: the toast says the files stay",
+        [...document.querySelectorAll(".hub-sh-note")]
+            .some((t) => (t.textContent || "").includes("the file(s) stay")));
+
+    // 5) an old py without the route: the panel stays, the update is named
+    fakeApi.__setProcDelMode("stale");
+    const btnC2 = bodyZy().querySelector('[data-act="filehist"][data-path="workflows/zyc.json"]');
+    btnC2.getBoundingClientRect = () => ({
+        left: 50, top: 140, right: 90, bottom: 160, width: 40, height: 20,
+        x: 50, y: 140, toJSON() { return this; },
+    });
+    await btnC2.click();
+    await settle(20);
+    check("ZY: the delete-process entry hides for an UNBOUND file",
+        !hooks.histPopEl().querySelector('[data-act="histprocarm"]'));
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(30);
+    await hooks.histPopEl().querySelector('[data-act="histprocarm"]').click();
+    await settle(20);
+    await hooks.histPopEl().querySelector('[data-act="histprocyes"]').click();
+    await settle(40);
+    check("ZY: a stale pack keeps the panel and names the update",
+        !!hooks.histPopEl() &&
+        [...document.querySelectorAll(".hub-sh-note")]
+            .some((t) => (t.textContent || "").includes("update the FULL pack")));
+    fakeApi.__setProcDelMode("ok");
+    hooks.closeHistPop();
     fakeApi.__setIdxFiles([]);
     hooks.setTab("open");
     await settle();

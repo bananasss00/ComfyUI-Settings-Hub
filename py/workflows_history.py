@@ -484,8 +484,15 @@ def _rev_cache_put_locked(rec):
 
 def _rev_cache_drop_locked(rid):
     _rev_cache["by_rid"].pop(rid, None)
-    for lst in _rev_cache["of_pid"].values():
-        lst[:] = [r for r in lst if r.get("revisionId") != rid]
+    for pid, lst in list(_rev_cache["of_pid"].items()):
+        lst2 = [r for r in lst if r.get("revisionId") != rid]
+        if lst2:
+            _rev_cache["of_pid"][pid] = lst2
+        else:
+            # v115: the LAST revision of a process must not leave an empty
+            # shell under of_pid - the badges walk and delete_process treat
+            # "key present" as "process has revisions"
+            _rev_cache["of_pid"].pop(pid, None)
     sig = _rev_cache["sig"]
     if isinstance(sig, list):
         _rev_cache["sig"] = [n for n in sig if n != rid + ".json"]
@@ -819,20 +826,149 @@ def revision_badges():
     tab: {rel_path: {count, stable}} for every process that HAS revisions;
     a process without revisions (the bulk of a big library) contributes
     NOTHING - the payload stays small even with 2000+ processes. The keys
-    are the same 'workflows/<rel>' paths the Files listing serves."""
+    are the same 'workflows/<rel>' paths the Files listing serves.
+
+    v115 (owner request): the same answer also carries the DUPLICATE-ID
+    counter - "индицировать количество процессов с одинаковым ид": several
+    FILES sharing one ComfyUI UUID are locations of ONE process, and the
+    user must SEE how many rows that ID covers. A process reports
+    'locations: N' ONLY when N > 1 (a normal one-file process adds no
+    bytes), and a process with zero revisions but several locations still
+    shows up - duplicates matter even before the first Checkpoint."""
     with _lock:
         reconcile_processes()   # throttled (10s); keeps the bindings fresh
         _cache_load_locked()
         _rev_cache_load_locked()
         out = {}
         for pid, revs in _rev_cache["of_pid"].items():
-            if not revs:
-                continue
-            info = {"count": len(revs),
+            n = len(revs)
+            locs = _proc_cache["paths_of"].get(pid) or ()
+            if n == 0 and len(locs) < 2:
+                continue   # the bulk of a big library - zero bytes
+            info = {"count": n,
                     "stable": sum(1 for r in revs if r.get("isStable"))}
-            for lp in _proc_cache["paths_of"].get(pid) or ():
+            if len(locs) > 1:
+                info["locations"] = len(locs)
+            for lp in locs:
                 out[lp] = info
+        # v115: a process with NO revisions never entered the loop above
+        # (of_pid holds only processes that own a revision manifest) - walk
+        # the process cache for the revision-less duplicates
+        for pid, p in _proc_cache["by_pid"].items():
+            if pid in _rev_cache["of_pid"]:
+                continue
+            locs = _proc_cache["paths_of"].get(pid) or ()
+            if len(locs) < 2:
+                continue
+            info = {"count": 0, "stable": 0, "locations": len(locs)}
+            for lp in locs:
+                out.setdefault(lp, info)
         return out
+
+
+def _cas_blob_path(oid):
+    return _hist_dir("cas", oid[:2], oid + ".z")
+
+
+def delete_process(pid, delete_files=False, file_remover=None):
+    """v115 (owner request): "кнопка удалять сами процессы со всеми
+    хвостами" - erase ONE process AND everything attached to it: every
+    revision manifest, the stored blobs no other revision references (the
+    CAS backend reclaims the real bytes; the git backend keeps its
+    immutable commit chain - the manifests still die so the process
+    disappears), every location binding and the process manifest itself.
+    The version-level protections (stable/current) live at the REVISION
+    level - an explicit process erasure removes the whole object, the
+    armed two-click confirm in the UI is the consent.
+
+    delete_files: ALSO remove the physical workflow files of every
+    location. The remover callable is injected by the route layer (it owns
+    the library roots + the tx safety snapshots); every file result is
+    reported back verbatim so the UI can name exactly what happened.
+
+    The catalog writes stay atomic; the caches are dropped in one pass so
+    a subsequent reconcile sees a clean world (and with the files gone the
+    index rows are removed by the route too - a ghost row would resurrect
+    the process)."""
+    if not isinstance(pid, str) or not _ID_RE.match(pid):
+        return {"ok": False, "error": "bad processId"}
+    if file_remover is not None and not callable(file_remover):
+        return {"ok": False, "error": "file_remover must be callable"}
+    with _lock:
+        proc = _read_process(pid)
+        if not proc:
+            return {"ok": False, "error": "no such process"}
+        _rev_cache_load_locked()
+        _cache_load_locked()
+        revs = list(_rev_cache["of_pid"].get(pid) or [])
+        # 1) the physical files first (the remover owns roots + snapshots)
+        files = []
+        if delete_files and file_remover is not None:
+            for lp in sorted(_proc_cache["paths_of"].get(pid) or ()):
+                try:
+                    files.append(file_remover(lp) or {"path": lp})
+                except Exception as e:   # a hostile remover must not wed the store
+                    files.append({"path": lp, "removed": False,
+                                  "error": str(e)[:160]})
+        # 2) the CAS blobs this process uniquely owns (content dedupe means
+        #    a blob may be shared with ANOTHER process's revisions)
+        freed = 0
+        gone_oids = set()
+        for r in revs:
+            st = r.get("storage") or {}
+            if st.get("backend") == "cas" and isinstance(st.get("blob"), str):
+                gone_oids.add(st["blob"])
+        if gone_oids:
+            for other in _rev_cache["by_rid"].values():
+                if other.get("processId") == pid:
+                    continue
+                st = other.get("storage") or {}
+                if st.get("backend") == "cas":
+                    gone_oids.discard(st.get("blob"))
+            for oid in gone_oids:
+                bp = _cas_blob_path(oid)
+                try:
+                    freed += os.path.getsize(bp)
+                except OSError:
+                    freed += 0
+                try:
+                    os.unlink(bp)
+                except OSError:
+                    pass
+        # 3) the revision manifests (no splice needed - the whole chain dies)
+        for r in revs:
+            rid = r.get("revisionId")
+            if isinstance(rid, str):
+                try:
+                    os.unlink(_revision_file(rid))
+                except OSError:
+                    pass
+                _rev_cache_drop_locked(rid)
+        # 4) the process manifest + the caches
+        try:
+            os.unlink(_process_file(pid))
+        except OSError:
+            pass
+        _proc_cache["by_pid"].pop(pid, None)
+        wid = proc.get("workflowId")
+        if wid and _proc_cache["by_uuid"].get(wid) == pid:
+            _proc_cache["by_uuid"].pop(wid, None)
+        for lp in (_proc_cache["paths_of"].pop(pid, None) or ()):
+            if _proc_cache["by_path"].get(lp) == pid:
+                _proc_cache["by_path"].pop(lp, None)
+        # the file-set signature changes (a manifest vanished) - the next
+        # reconcile pass must not serve a stale cache
+        sig = _proc_cache["sig"]
+        if isinstance(sig, list):
+            _proc_cache["sig"] = [n for n in sig if n != pid + ".json"]
+        else:
+            _proc_cache["sig"] = None
+        _reconcile_ts[0] = 0   # the discovery must re-run immediately
+        return {"ok": True, "processId": pid,
+                "deletedRevisions": len(revs),
+                "freedBytes": freed,
+                "files": files,
+                "backend": _resolve_backend()}
 
 
 # ---------------------------------------------------------------------------

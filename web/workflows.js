@@ -227,9 +227,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v114";
+const WF_WEB_VERSION = "v115";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v114";
+globalThis.__SettingsHubLoaded["workflows"] = "v115";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -3379,9 +3379,12 @@ function savedFileRowHtml(f, depth = 0) {
     // a broken JSON stays LISTABLE with a ⚠ and a readable tooltip (plan 4.4)
     const uuid = f.workflowId ? String(f.workflowId) : null;
     const shortUuid = uuid ? (uuid.length > 8 ? uuid.slice(0, 8) + "…" : uuid) : null;
+    // v115: the duplicate-ID counter - several files sharing one UUID are
+    // locations of ONE process, the chip shows HOW MANY rows that ID covers
+    const dups = histBadgeDups(f.path);
     const uuidChip = shortUuid
         ? `<button type="button" class="hub-wf-act hub-wf-fchip" data-act="copyuuid" data-uuid="${esc(uuid)}" ` +
-          `title="ComfyUI workflow UUID: ${esc(uuid)} - click to copy; the files with the same UUID form ONE process">⧉ ${esc(shortUuid)}</button>`
+          `title="ComfyUI workflow UUID: ${esc(uuid)} - click to copy; the files with the same UUID form ONE process${dups > 1 ? " · " + dups + " files share this UUID" : ""}">⧉ ${esc(shortUuid)}${dups > 1 ? `<span class="hub-wf-dupbadge">×${dups}</span>` : ""}</button>`
         : "";
     const badMark = f.parseStatus === "error"
         ? `<span class="hub-wf-missing" title="This JSON failed to parse: ${esc(f.parseError || "")}">⚠</span>`
@@ -4884,6 +4887,16 @@ function histBadgeTitle(path) {
         (b.stable > 0 ? " (" + b.stable + " stable)" : "");
 }
 
+/** v115: the duplicate-ID counter - the badges answer carries 'locations'
+ *  ONLY for processes whose UUID covers MORE THAN ONE file (a normal
+ *  one-file process adds nothing); the chip renders when the count > 1. */
+function histBadgeDups(path) {
+    const m = histBadges.map;
+    if (!m) return 0;
+    const b = m[normWfPath(path)];
+    return b && b.locations > 1 ? b.locations : 0;
+}
+
 function applyHistBadges() {
     try {
         document.querySelectorAll('[data-act="filehist"][data-path]').forEach((btn) => {
@@ -4902,6 +4915,25 @@ function applyHistBadges() {
             // already baked the current suffix in)
             const base = (btn.title || "").replace(/ · \d+ saved version.*$/, "");
             btn.title = base + histBadgeTitle(btn.dataset.path);
+        });
+        // v115: the duplicate-ID counter rides the SAME in-place patch pass -
+        // the ⧉ UUID chip wears "×N" when several files share that UUID
+        document.querySelectorAll('[data-act="copyuuid"][data-uuid]').forEach((chip) => {
+            const row = chip.closest("[data-fpath]");
+            const n = row ? histBadgeDups(row.dataset.fpath) : 0;
+            const ex = chip.querySelector(".hub-wf-dupbadge");
+            if (n > 1) {
+                if (ex) ex.textContent = "×" + n;
+                else {
+                    const s = document.createElement("span");
+                    s.className = "hub-wf-dupbadge";
+                    s.textContent = "×" + n;
+                    chip.appendChild(s);
+                }
+            } else if (ex) ex.remove();
+            const cbase = (chip.title || "")
+                .replace(/ · \d+ files? share this UUID$/, "");
+            chip.title = cbase + (n > 1 ? " · " + n + " files share this UUID" : "");
         });
     } catch (_) {}
 }
@@ -4930,9 +4962,13 @@ async function openHistPop(path, anchorBtn) {
     // v114: manage - the version-cleanup mode (checkboxes + Select all /
     // Deselect all + an armed Delete selected); delSel holds the chosen
     // revisionIds; armedDel is the second-click confirm state.
+    // v115: armedProc - the WHOLE-PROCESS delete confirm (the owner's "кнопка
+    // удалять сами процессы со всеми хвостами"); procDelBusy locks the strip
+    // while the POST is in flight.
     histState = { path, pid: null, proc: null, revs: [], loading: true,
         error: null, cpBusy: false, armedRestore: null, compare: null,
         manage: false, delSel: new Set(), armedDel: false,
+        armedProc: false, procDelBusy: false,
         anchor: popAnchorRect(anchorBtn) };
     histPop = document.createElement("div");
     histPop.className = "hub-menu hub-wf-histpop";
@@ -5104,13 +5140,32 @@ function renderHistPop() {
               `${st.armedDel ? "⚠ Click AGAIN to delete " + nSel : "🗑 Delete selected" + (nSel ? " (" + nSel + ")" : "")}</button>` +
               `<button type="button" class="hub-wf-act" data-act="histdeldone" title="Leave the manage mode">✓ Done</button>`
             : `<button type="button" class="hub-wf-act" data-act="histdelmode" title="Manage the versions: select and delete the checkpoints you do not need">🗑 Manage versions</button>`;
+        // v115 (owner request): the WHOLE-PROCESS delete - an armed confirm
+        // strip with TWO scopes: EVERYTHING (all versions + every file of
+        // every location, each file safety-snapshotted server-side first) or
+        // the history only (the files stay). The strip names the exact
+        // counts so the destructive scope is never a surprise.
+        const nLocs = Array.isArray(st.proc?.locations) ? st.proc.locations.length : 0;
+        const procDelUi = st.armedProc && st.pid
+            ? `<div class="hub-wf-planwarn">⚠ Delete <b>${esc(procName)}</b> and ALL tails: ` +
+              `${st.revs.length} version(s) + ${nLocs} file location(s).` +
+              `<div class="hub-wf-planacts hub-wf-planacts-end" style="margin-top:4px">` +
+              `<button type="button" class="hub-wf-act hub-wf-armed" data-act="histprocyes" ` +
+              `title="Delete the process, ALL ${st.revs.length} saved version(s) AND the ${nLocs} workflow file(s) (a safety copy of each file is kept for 6 h)">${st.procDelBusy ? "…" : "⚠ Delete EVERYTHING: versions + files"}</button>` +
+              `<button type="button" class="hub-wf-act" data-act="histprochist" ` +
+              `title="Erase all ${st.revs.length} saved version(s) but KEEP the workflow file(s)">${st.procDelBusy ? "…" : "Versions only - keep the file(s)"}</button>` +
+              `<button type="button" class="hub-wf-act" data-act="histproccancel" title="Do not delete anything">✕ Cancel</button>` +
+              `</div></div>`
+            : "";
         const compareBox = st.compare ? st.compare : "";
         body = head + cp + sectHead +
             `<div class="hub-wf-list">${revs}</div>` +
             compareBox +
+            procDelUi +
             // v113: ONE bottom actions row - ✎ Process and ✕ Close used to
             // sit in two stacked planacts strips and read as a column
             `<div class="hub-wf-planacts hub-wf-planacts-end">${cmpBtn}${manageBtns}` +
+            (st.pid && !st.armedProc ? `<button type="button" class="hub-wf-act" data-act="histprocarm" title="Delete the WHOLE process with all tails: every saved version, every location, the process itself (a confirmed two-step action)">🗑 Delete process</button>` : "") +
             `<button type="button" class="hub-wf-act" data-act="histmeta" title="Rename the process / edit the shared note">✎ Process</button>` +
             `<button type="button" class="hub-wf-act" data-act="histclose" title="Close the history panel">✕ Close</button></div>`;
         // the restore confirm strip
@@ -5289,6 +5344,46 @@ async function histDeleteSelected() {
     }
 }
 
+/** v115 (owner request): the WHOLE-PROCESS deletion - "удалить сами процессы
+ *  со всеми хвостами". One call erases the process, ALL its versions and
+ *  (optionally) every workflow file of every location - each file is
+ *  safety-snapshotted server-side before the unlink. The panel closes, the
+ *  row badges and the file lists refresh (a files-delete makes the rows
+ *  disappear, a history-only delete just strips the count chips). */
+async function histDeleteProcess(deleteFiles) {
+    const st = histState;
+    if (!st?.pid || st.procDelBusy) return;
+    st.procDelBusy = true;
+    renderHistPop();
+    const res = await jfetch("/settings_hub/workflows/history/process/" +
+        encodeURIComponent(st.pid) + "/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deleteFiles: !!deleteFiles }),
+    });
+    st.procDelBusy = false;
+    if (res.json?.ok) {
+        const n = res.json.deletedRevisions || 0;
+        const files = Array.isArray(res.json.files) ? res.json.files : [];
+        const removed = files.filter((f) => f.removed).length;
+        const failed = files.filter((f) => f.error).length;
+        closeHistPop();
+        refreshHistBadges(true);   // the count + duplicate chips on the rows
+        await refreshSavedFiles();
+        if (idxMode()) await runServerList(true);
+        localToast("Process deleted: " + n + " version(s)" +
+            (deleteFiles ? " + " + removed + " file(s)" : " · the file(s) stay") +
+            (failed ? " · " + failed + " file(s) FAILED" : ""), 5000);
+    } else {
+        const why = (res.json && res.json.error) || ("HTTP " + res.status);
+        st.armedProc = false;
+        renderHistPop();
+        localToast((res.status === 404
+            ? "The delete route is missing (an old py) - update the FULL pack."
+            : "Delete failed: " + why), 4200);
+    }
+}
+
 function histPopClick(act, btn) {
     const st = histState;
     if (!st) return;
@@ -5361,6 +5456,27 @@ function histPopClick(act, btn) {
             st.manage = false;
             st.armedDel = false;
             st.delSel.clear();
+            renderHistPop();
+            return;
+        }
+        // v115: the WHOLE-PROCESS delete (armed strip: two scopes + cancel)
+        case "histprocarm": {
+            st.armedProc = true;
+            st.armedDel = false;
+            st.delSel.clear();
+            renderHistPop();
+            return;
+        }
+        case "histprocyes": {
+            if (!st.procDelBusy) void histDeleteProcess(true);
+            return;
+        }
+        case "histprochist": {
+            if (!st.procDelBusy) void histDeleteProcess(false);
+            return;
+        }
+        case "histproccancel": {
+            st.armedProc = false;
             renderHistPop();
             return;
         }
