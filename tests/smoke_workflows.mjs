@@ -1688,21 +1688,21 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v119", /"workflows":\s*"v119"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v120", /"workflows":\s*"v120"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v119 (the flexible similarity groups release)",
-    ENTRY_SRC.includes("web build: v119 - THE FLEXIBLE SIMILARITY GROUPS") &&
+check("the entry banner names v120 (the loose similarity match release)",
+    ENTRY_SRC.includes("web build: v120 - THE LOOSE SIMILARITY MATCH") &&
     ENTRY_SRC.includes("THE WORKFLOW MANAGER ROADMAP"));
-check("styles.css?v=119", ENTRY_SRC.includes("styles.css?v=119"));
-check("the module self-reports v119",
+check("styles.css?v=120", ENTRY_SRC.includes("styles.css?v=120"));
+check("the module self-reports v120",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v119"'));
-check("the web stamp literal is v119",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v120"'));
+check("the web stamp literal is v120",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v119"'));
-check("py stamp bumps together (v119)",
+        .includes('const WF_WEB_VERSION = "v120"'));
+check("py stamp bumps together (v120)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v119"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v120"'));
 check("v119 py: the flexible-candidate constants + the noise set exist",
     (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
         return src.includes('SIM_RARE_DF_MAX_CAP') && src.includes('SIM_PAIR_BUDGET')
@@ -2299,7 +2299,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v120"); // ahead of the pack (v119) - a stale web file
+    fakeApi.__setHealthVersion("v121"); // ahead of the pack (v120) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -4684,8 +4684,8 @@ phase("AAA v117: the delete preview + the confirm strip, the similarity groups U
     bodyA().querySelector('[data-act="groupfold"]').click();
     await settle();
     const thrSelA = bodyA().querySelector('[data-wf="groupthresh"]');
-    check("AAA groups: the threshold select carries 80-100 (step 5, default 90)",
-        !!thrSelA && thrSelA.options.length === 5 && thrSelA.value === "90",
+    check("AAA groups: the threshold select carries 50-100 (default 90)",
+        !!thrSelA && thrSelA.options.length === 8 && thrSelA.value === "90",
         String(thrSelA?.value));
     check("AAA groups: the kind chips are all present",
         !!bodyA().querySelector('[data-act="groupkind"][data-kind="same_uuid"]') &&

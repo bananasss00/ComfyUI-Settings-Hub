@@ -227,9 +227,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v119";
+const WF_WEB_VERSION = "v120";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v119";
+globalThis.__SettingsHubLoaded["workflows"] = "v120";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -249,7 +249,10 @@ const LS_RECENT_LIMIT = "settingshub.workflows.recentLimit";
 const RECENT_CHOICES = [5, 10, 15, 20, 30];
 // v117: the Files similarity grouping (the owner's plan section 4)
 const LS_GROUPS = "settingshub.workflows.groups"; // {on,threshold,kind}
-const GROUP_THRESHOLD_CHOICES = [80, 85, 90, 95, 100];
+// v120: the threshold goes DOWN to 50 (the owner's request: the heavily
+// modified copies only group at a loose estimate; the score formula got
+// the jaccard+overlap blend so additions cost far less than before)
+const GROUP_THRESHOLD_CHOICES = [50, 60, 70, 80, 85, 90, 95, 100];
 const Z_PANEL = "99900";               // same layer as the stack / chat panels
 const RECENT_MAX = 15;                 // the DEFAULT limit (the setting wins)
 // v108: the Files-tab quick-period bounds ("today" / "7d" / "30d" chips -
@@ -3482,6 +3485,27 @@ function filesTabHtml() {
                 } else {
                     const out = [];
                     const kindIcon = { same_uuid: "⧉", exact: "⧉", similar: "≈" };
+                    // v120 the ACCOUNTING: the kind filter hides the other
+                    // stages' groups while their members still leave the
+                    // ungrouped tail - without this note the owner's sums
+                    // "did not add up" (844 files in hidden Same-UUID/
+                    // Exact groups looked lost). kindCounts comes from the
+                    // server answer and covers every indexed file.
+                    const kindCounts = gd.kindCounts || {};
+                    const kindLabel = { same_uuid: "Same workflow ID",
+                                        exact: "Exact copies",
+                                        similar: "Similar" };
+                    let hiddenCount = 0;
+                    const hiddenLabels = [];
+                    for (const k of Object.keys(kindCounts)) {
+                        if (groupsState.kind !== "all" &&
+                            k !== groupsState.kind && kindCounts[k] > 0) {
+                            hiddenCount += kindCounts[k];
+                            hiddenLabels.push(kindLabel[k] || k);
+                        }
+                    }
+                    if (hiddenCount > 0)
+                        out.push(`<div class="hub-wf-emptylist">ℹ ${hiddenCount} file(s) live in ${esc(hiddenLabels.join(" / "))} groups - hidden by this filter (All groups shows them)</div>`);
                     for (const g of (gd.groups || [])) {
                         const collapsed = !!groupsState.collapsed[g.key];
                         const scoreTxt = g.kind === "similar" &&
@@ -3496,7 +3520,7 @@ function filesTabHtml() {
                                 out.push(savedFileRowHtml(f, 1));
                         }
                     }
-                    out.push(`<div class="hub-wf-sect">Outside the groups (${gd.ungroupedTotal || 0})</div>`);
+                    out.push(`<div class="hub-wf-sect">Outside the groups (${gd.ungroupedTotal || 0}${(gd.totalFiles || 0) > (gd.ungroupedTotal || 0) ? " of " + gd.totalFiles + " indexed" : ""})</div>`);
                     for (const f of (gd.ungrouped || []))
                         out.push(savedFileRowHtml(f, 0));
                     if ((gd.ungroupedTotal || 0) > (gd.ungrouped || []).length)
@@ -3607,7 +3631,7 @@ function filesTabHtml() {
         // chips' tooltips, the percentage is an estimate, never a proof
         (groupsState.on && idxMode()
             ? `<div class="hub-wf-fadv">` +
-              `<select class="hub-wf-fsel" data-wf="groupthresh" title="The similarity threshold: 80-100%, step 5. 95-100% = very similar, 85-94% = similar. v119 searches the MODIFIED copies too (a node group added/removed, reroutes, another seed - all still group). The % is a structural/content ESTIMATE, not an identity guarantee">` +
+              `<select class="hub-wf-fsel" data-wf="groupthresh" title="The similarity threshold: 50-100%. 95-100% = very similar, 80-94% = similar, 50-79% = loose (a heavily modified copy joins when it still resembles the group). v119 searches the MODIFIED copies too (a node group added/removed, reroutes, another seed - all still group); v120 scores additions/removals softer and joins copies of copies through a group member. The % is a structural/content ESTIMATE, not an identity guarantee">` +
               GROUP_THRESHOLD_CHOICES.map((t) =>
                   `<option value="${t}"${groupsState.threshold === t ? " selected" : ""}>≥ ${t}%</option>`).join("") +
               `</select>` +
@@ -4363,7 +4387,7 @@ function onBodyChange(e) {
     }
     // ---- v108 Files tab: the advanced filter inputs ------------------------
     if (el.matches('[data-wf="groupthresh"]')) {
-        // v117: the similarity threshold (80-100 step 5) - a server param,
+        // v120: the similarity threshold (50-100) - a server param,
         // the answer refetches immediately (the SQLite cache keeps it cheap)
         const t = parseInt(el.value, 10);
         if (GROUP_THRESHOLD_CHOICES.includes(t)) {

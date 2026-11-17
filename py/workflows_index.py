@@ -113,10 +113,22 @@ NORMALIZATION_PROFILE_VERSION = "nprof3"   # v119: the flexible candidates
 # change re-indexes every row once, honest per the profile contract)
 SCHEMA_VERSION = "2"                       # v117: +4 sig columns + the cache
 
+# v120 score contract: the SCORE FORMULA changed (the jaccard+overlap blend
+# below) while the EXTRACTED features stay byte-identical - the stored sig_*
+# columns are still valid, only the cached similarity answers are stale.
+# The cache key carries this version so a bump invalidates the answers
+# WITHOUT a full re-index (a profile bump would re-parse every file for
+# nothing - the honest-cheap invalidation).
+SIM_SCORE_VERSION = "s2"
+
 # v117 similarity-group bounds (the plan's performance contract: a 2000+
 # library must answer from SQLite, the detailed score runs for CANDIDATES
 # only; the cache table keeps repeat queries free)
-SIM_MAX_BUCKET = 60        # a candidate bucket bigger than this is skipped
+SIM_MAX_BUCKET = 60        # a candidate bucket up to this emits ALL pairs
+SIM_BIG_SUB = 200          # v120: an oversized-bucket model sub-bucket cap
+SIM_STAR_K = 8             # v120: the giant-sub-bucket per-file star partners
+SIM_STAR_MAX = 400         # v120: the star participants cap (deterministic,
+                           # the star compare is O(star^2) cheap counters)
 SIM_MAX_GROUPS = 200       # the groups answer cap
 SIM_UNGROUPED_CAP = 300    # the ungrouped rows carried in one answer
 SIM_CACHE_ROWS = 64        # the LRU cap of the similarity_cache table
@@ -127,6 +139,13 @@ SIM_CACHE_ROWS = 64        # the LRU cap of the similarity_cache table
 # is reported honestly as skippedPairs)
 SIM_RARE_DF_MAX_CAP = 60
 SIM_PAIR_BUDGET = 24000
+# v120 the JOIN pass (the modified copy of a modified copy): after the
+# anchor pass every still-ungrouped file gets a bounded second chance to
+# join an EXISTING group through one of its members (the anchor-only rule
+# left such chains ungrouped). Bounded by its own budget + member cap,
+# reported honestly (joinScored / joinSkipped).
+SIM_JOIN_BUDGET = 12000
+SIM_JOIN_MEMBERS = 40
 SIM_REROUTE_DEPTH = 32     # the reroute-chain walk cap (cycle defense)
 SIM_CAND_PAIRS = 150000    # the candidate-pair emission cap (pathological
 # libraries: the emission stops + candTruncated:true - honest, deterministic
@@ -1904,6 +1923,59 @@ def _counter_jaccard(ca, cb):
     return inter / union if union else 1.0
 
 
+def _counter_pair_parts(ca, cb):
+    """v120: (jaccard, overlap) over PRECOMPUTED counters in ONE pass.
+    overlap = sum(min) / min(total_a, total_b) - the containment form that
+    stays 1.0 when one graph is a strict SUPERSET of the other (the owner's
+    'a node group added' case: a jaccard punishes the added nodes, the
+    overlap does not). Both empty -> neutral (1.0, 1.0); exactly one empty
+    -> (0.0, 0.0)."""
+    if not ca and not cb:
+        return 1.0, 1.0
+    if len(cb) < len(ca):
+        ca, cb = cb, ca
+    inter = 0
+    union = 0
+    sa = 0
+    for k, n in ca.items():
+        m = cb.get(k, 0)
+        inter += n if n < m else m
+        union += n if n > m else m
+        sa += n
+    sb = 0
+    for k, n in cb.items():
+        if k not in ca:
+            union += n
+        sb += n
+    return (inter / union if union else 1.0,
+            inter / min(sa, sb) if min(sa, sb) else 0.0)
+
+
+def _counter_pair_score(ca, cb):
+    """v120: the blended types/edges sub-score over PRECOMPUTED counters:
+    (jaccard + overlap) / 2. The blend keeps the jaccard's rewire-punishing
+    (a switched link still costs) while the overlap half makes an ADDED or
+    REMOVED node group nearly free (inter/min does not shrink when only one
+    side grows). The zero-false-negative prefilter bound in
+    similarity_groups uses exactly this number."""
+    j, o = _counter_pair_parts(ca, cb)
+    return (j + o) / 2.0
+
+
+def _multiset_pair_score(a, b):
+    """v120: the blended (jaccard + overlap) / 2 over raw feature lists -
+    the score-form of _counter_pair_score (the counters are rebuilt here;
+    the hot candidate scan uses the counter forms directly)."""
+    if not a and not b:
+        return 1.0
+    ca, cb = {}, {}
+    for x in a:
+        ca[x] = ca.get(x, 0) + 1
+    for x in b:
+        cb[x] = cb.get(x, 0) + 1
+    return _counter_pair_score(ca, cb)
+
+
 def _widget_node_score(wa, wb):
     """One aligned node pair: the positional widget compare. Numeric
     mismatches are SOFTENED (SIM_NUMERIC_PENALTY) - two runs of one pipeline
@@ -1984,7 +2056,11 @@ def similarity_score(fa, fb):
     echoed in every answer so the UI can explain the number honestly.
     v119: the wiring/annotation noise (Reroute/Note/MarkdownNote) leaves
     the types and the widget features here too - the hand-built feature
-    dicts (the tests) and the scan-extracted ones behave identically."""
+    dicts (the tests) and the scan-extracted ones behave identically.
+    v120: the types/edges/models sub-scores are the (jaccard + overlap) / 2
+    BLEND - a modified copy that only ADDS or REMOVES a node group keeps a
+    high score (the overlap half stays 1.0 on a strict subset/superset)
+    while a switched link still costs through the jaccard half."""
     ta = [t for t in (fa.get("types") or [])
           if not _is_sim_noise_type(t)]
     tb = [t for t in (fb.get("types") or [])
@@ -1993,11 +2069,11 @@ def similarity_score(fa, fb):
           if not _is_sim_noise_type(r.get("t"))]
     wb = [r for r in (fb.get("widgets") or [])
           if not _is_sim_noise_type(r.get("t"))]
-    s = (SIM_WEIGHTS["types"] * _multiset_jaccard(ta, tb)
-         + SIM_WEIGHTS["edges"] * _multiset_jaccard(fa["edges"], fb["edges"])
+    s = (SIM_WEIGHTS["types"] * _multiset_pair_score(ta, tb)
+         + SIM_WEIGHTS["edges"] * _multiset_pair_score(fa["edges"], fb["edges"])
          + SIM_WEIGHTS["widgets"] * _widgets_similarity(wa, wb)
-         + SIM_WEIGHTS["models"] * _multiset_jaccard(fa["models"],
-                                                     fb["models"]))
+         + SIM_WEIGHTS["models"] * _multiset_pair_score(fa["models"],
+                                                        fb["models"]))
     return int(round(100.0 * s))
 
 
@@ -2054,15 +2130,18 @@ def _similarity_rows(conn, user_scope):
 
 
 def _similarity_cache_key(conn, user_scope, threshold):
-    """scope|threshold|profile|count|max(mtime_ns)|max(indexed_at) - ANY
-    re-indexed row bumps max(indexed_at), any deletion bumps the count, any
-    save bumps max(mtime_ns): the stale entries stop being read and the LRU
-    trim reclaims the space."""
+    """scope|scorever|profile|threshold|count|max(mtime_ns)|max(indexed_at) -
+    ANY re-indexed row bumps max(indexed_at), any deletion bumps the count,
+    any save bumps max(mtime_ns): the stale entries stop being read and the
+    LRU trim reclaims the space. v120: the score-version part invalidates
+    the cached answers when the FORMULA changes without touching the
+    extracted features (no pointless re-index)."""
     row = conn.execute(
         "SELECT count(*), max(mtime_ns), max(indexed_at) FROM workflow_files"
         " WHERE user_scope=?", (user_scope,)).fetchone()
-    return "%s|%d|%s|%s|%s|%s" % (
-        user_scope, threshold, NORMALIZATION_PROFILE_VERSION,
+    return "%s|%d|%s|%s|%s|%s|%s" % (
+        user_scope, threshold, SIM_SCORE_VERSION,
+        NORMALIZATION_PROFILE_VERSION,
         row[0] or 0, row[1] or 0, row[2] or 0), int(row[0] or 0)
 
 
@@ -2116,17 +2195,24 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
     Similar; every file lands in AT MOST ONE group (anchor-based, no
     chaining); the rest ships as `ungrouped`. The kind filter ('same_uuid' /
     'exact' / 'similar') only filters the ANSWER - the full computation is
-    cached so flipping the filter is free."""
+    cached so flipping the filter is free.
+
+    v120: the threshold accepts 50-100 (the owner asked for looser
+    matching); the sub-scores are the (jaccard + overlap) blend; the
+    oversized candidate buckets are no longer SKIPPED (sub-bucketed by the
+    model set + a bounded star); the answer carries kindCounts so the UI
+    can account for EVERY indexed file (the kind filter hides whole
+    stages' members - the owner's 'many files unaccounted' report)."""
     db = db or _db_path()
     try:
         threshold = int(threshold)
     except (TypeError, ValueError):
         threshold = 90
-    threshold = max(80, min(100, threshold))
+    threshold = max(50, min(100, threshold))
     out = {"ok": True, "profile": NORMALIZATION_PROFILE_VERSION,
            "threshold": threshold, "weights": SIM_WEIGHTS,
            "groups": [], "ungrouped": [], "ungroupedTotal": 0,
-           "totalFiles": 0, "skippedBroad": 0,
+           "totalFiles": 0, "kindCounts": {}, "skippedBroad": 0,
            "candidatePairs": 0, "pairsScored": 0, "skippedPairs": 0,
            "cached": False}
     try:
@@ -2210,23 +2296,27 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                         })
                         if len(groups) >= SIM_MAX_GROUPS:
                             break
-                # 3) SIMILAR - v119 FLEXIBLE CANDIDATES. The v117 exact
-                #    types-hash bucket refused to score ANY copy whose node
-                #    multiset differs (the owner's 'only ~10 groups' report:
-                #    one added/removed node changed the hash, the pair was
-                #    never scored). The candidate pool is now the UNION of
-                #    three cheap sources - the exact multiset-hash bucket
-                #    (the fast path), the UNIQUE-set bucket (the same
-                #    classes with different counts) and the RARE-TYPE pairs
-                #    (a node type seen in few files ties its carriers; the
-                #    generic types are never rare, so the pool stays small
-                #    on a 2000+ library). A cheap MATH prefilter runs first:
-                #    the size band (a jaccard can never exceed min/max) +
-                #    the types floor (a pair below it cannot reach the
-                #    threshold even with the perfect other features). The
-                #    full score runs for survivors ONLY against the ANCHOR
-                #    (no chaining), bounded by SIM_PAIR_BUDGET and reported
-                #    honestly (pairsScored / skippedPairs).
+                # 3) SIMILAR - v119 FLEXIBLE CANDIDATES + v120 LOOSE MATCH.
+                #    The candidate pool is the UNION of the exact
+                #    multiset-hash bucket (the fast path), the UNIQUE-set
+                #    bucket (the same classes with different counts) and
+                #    the RARE-TYPE pairs (a node type seen in few files
+                #    ties its carriers). v120: an OVERSIZED bucket (a
+                #    uniform library) is no longer skipped - it is
+                #    sub-bucketed by the MODEL-SET key (a modified copy
+                #    keeps its models) and the giant leftovers degrade to
+                #    a bounded per-file top-K star by the cheap types
+                #    blend (the old skip lost whole families silently).
+                #    A cheap MATH prefilter runs first: the types blend
+                #    floor (score <= w_types*T + (1-w_types), so a pair
+                #    below the floor can never reach the threshold - zero
+                #    false negatives). The full score runs for survivors
+                #    against the ANCHOR (bounded by SIM_PAIR_BUDGET), then
+                #    the v120 JOIN pass gives every still-ungrouped file a
+                #    bounded second chance to join an EXISTING group
+                #    through one of its members (the modified copy of a
+                #    modified copy: similar to a member, not to the
+                #    anchor). Everything is reported honestly.
                 if len(groups) < SIM_MAX_GROUPS:
                     open_paths = [rel for rel in feats
                                   if rel not in grouped
@@ -2239,10 +2329,51 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                         # the family itself is bounded, and the global cap
                         # guards a pathological library)
                         nonlocal cand_left
+                        if cand_left <= 0:
+                            return
                         for i in range(len(paths)):
                             a = paths[i]
                             for j in range(i + 1, len(paths)):
                                 b = paths[j]
+                                adj.setdefault(a, set()).add(b)
+                                adj.setdefault(b, set()).add(a)
+                                cand_left -= 1
+                                if cand_left <= 0:
+                                    return
+
+                    def _emit_bucket(paths):
+                        nonlocal cand_left
+                        if len(paths) < 2:
+                            return
+                        if len(paths) <= SIM_MAX_BUCKET:
+                            _emit(paths)
+                            return
+                        sub, star = {}, []
+                        for rel in paths:
+                            key = "\x00".join(
+                                sorted(set(feats[rel]["models"])))
+                            sub.setdefault(key, []).append(rel)
+                        for sp in sorted(sub.values(),
+                                         key=lambda ps: (-len(ps), ps[0])):
+                            if len(sp) <= SIM_BIG_SUB:
+                                _emit(sp)
+                            else:
+                                star.extend(sp)
+                        if not star:
+                            return
+                        star = sorted(star, key=lambda p: (
+                            -rows_by_path[p]["mtime"], p))[:SIM_STAR_MAX]
+                        out["broadStarFiles"] = (out.get("broadStarFiles", 0)
+                                                 + len(star))
+                        for a in star:
+                            if cand_left <= 0:
+                                return
+                            ta_ = feats[a]["tc"]
+                            scored = [(-_counter_pair_score(ta_,
+                                                            feats[b]["tc"]),
+                                       b) for b in star if b != a]
+                            scored.sort()
+                            for _neg, b in scored[:SIM_STAR_K]:
                                 adj.setdefault(a, set()).add(b)
                                 adj.setdefault(b, set()).add(a)
                                 cand_left -= 1
@@ -2258,12 +2389,8 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                     for buckets in (by_types, by_uset):
                         for paths in sorted(buckets.values(),
                                             key=lambda ps: (-len(ps), ps[0])):
-                            if len(paths) < 2:
-                                continue
-                            if len(paths) > SIM_MAX_BUCKET:
-                                out["skippedBroad"] += 1
-                                continue
-                            _emit(paths)
+                            if len(paths) >= 2:
+                                _emit_bucket(paths)
                     post = {}
                     for rel in open_paths:
                         for t in feats[rel]["tc"]:
@@ -2287,7 +2414,10 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                     anchors = sorted(open_paths,
                                      key=lambda p: (-rows_by_path[p]["mtime"],
                                                     p))
-                    budget = SIM_PAIR_BUDGET
+                    budget0 = SIM_PAIR_BUDGET
+                    budget = budget0
+                    scored_pairs = set()
+                    sim_meta = []
                     for anchor in anchors:
                         if anchor in grouped or len(groups) >= SIM_MAX_GROUPS:
                             continue
@@ -2304,18 +2434,23 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                             fb = feats[p]
                             nb = fb["n"]
                             # the cheap math prefilter (zero false
-                            # negatives): the size band + the types floor
+                            # negatives): the types blend floor - a pair
+                            # below it cannot reach the threshold even
+                            # with the perfect other features. (The v119
+                            # size band died with the blend: the overlap
+                            # half stays 1.0 on a subset/superset pair,
+                            # so a size ratio is NOT a valid bound.)
                             if na and nb:
-                                if (min(na, nb) / max(na, nb)) < floor:
+                                if _counter_pair_score(ta, fb["tc"]) < floor:
                                     continue
                             elif (na == 0) != (nb == 0):
-                                continue
-                            if _counter_jaccard(ta, fb["tc"]) < floor:
                                 continue
                             if budget <= 0:
                                 out["skippedPairs"] += 1
                                 continue
                             budget -= 1
+                            scored_pairs.add(
+                                (anchor, p) if anchor <= p else (p, anchor))
                             sc = similarity_score(fa, fb)
                             if sc >= threshold:
                                 hits.append(p)
@@ -2324,7 +2459,7 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                             continue
                         sel = [anchor] + hits
                         grouped.update(sel)
-                        groups.append({
+                        g = {
                             "kind": "similar",
                             "key": "sim:" + anchor,
                             "label": "Similar workflows",
@@ -2334,13 +2469,79 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                                                   / len(scores))),
                             "anchor": anchor,
                             "files": [rows_by_path[p] for p in sel],
-                        })
-                    out["pairsScored"] = SIM_PAIR_BUDGET - max(budget, 0)
+                        }
+                        groups.append(g)
+                        sim_meta.append({"paths": sel, "scores": scores,
+                                         "g": g})
+                    out["pairsScored"] = budget0 - max(budget, 0)
+                    # 3b) THE JOIN PASS (v120): a modified copy of a
+                    #     modified copy is often similar to a GROUP MEMBER
+                    #     but not to the anchor - the anchor-only rule
+                    #     left such chains ungrouped. Every still-ungrouped
+                    #     file scores against the members (anchor first,
+                    #     capped) of the existing groups in creation
+                    #     order; the first hit joins. The cheap floor runs
+                    #     per MEMBER (not per anchor - the member is the
+                    #     one the file resembles); already-scored pairs
+                    #     are skipped (the anchor pass answered them).
+                    join_budget = SIM_JOIN_BUDGET
+                    out["joinScored"] = 0
+                    out["joinSkipped"] = 0
+                    for f in anchors:
+                        if f in grouped or join_budget <= 0 \
+                                or len(groups) >= SIM_MAX_GROUPS:
+                            continue
+                        fa = feats[f]
+                        na, ta = fa["n"], fa["tc"]
+                        joined = False
+                        for meta in sim_meta:
+                            for m in meta["paths"]:
+                                if join_budget <= 0:
+                                    out["joinSkipped"] += 1
+                                    break
+                                key = (f, m) if f <= m else (m, f)
+                                if key in scored_pairs:
+                                    continue
+                                fb = feats[m]
+                                nb = fb["n"]
+                                if na and nb:
+                                    if _counter_pair_score(ta,
+                                                           fb["tc"]) < floor:
+                                        continue
+                                elif (na == 0) != (nb == 0):
+                                    continue
+                                join_budget -= 1
+                                out["joinScored"] += 1
+                                scored_pairs.add(key)
+                                sc = similarity_score(fa, fb)
+                                if sc >= threshold:
+                                    meta["paths"].append(f)
+                                    meta["scores"].append(sc)
+                                    grouped.add(f)
+                                    joined = True
+                                    break
+                            if joined:
+                                break
+                    for meta in sim_meta:
+                        g = meta["g"]
+                        g["count"] = len(meta["paths"])
+                        g["minScore"] = min(meta["scores"])
+                        g["avgScore"] = int(round(sum(meta["scores"])
+                                                  / len(meta["scores"])))
+                        g["files"] = [rows_by_path[p] for p in meta["paths"]]
                 ungrouped = [r for r in rows if r["path"] not in grouped]
                 out["ungroupedTotal"] = len(ungrouped)
                 out["ungrouped"] = ungrouped[:SIM_UNGROUPED_CAP]
                 out["groups"] = groups[:SIM_MAX_GROUPS]
                 out["totalFiles"] = len(rows)
+                # v120 the accounting contract: EVERY indexed file is
+                # either in a group (kindCounts names the kind) or in the
+                # ungrouped tail - the UI can prove nothing is lost
+                kind_counts = {}
+                for g in out["groups"]:
+                    kind_counts[g["kind"]] = (kind_counts.get(g["kind"], 0)
+                                              + g["count"])
+                out["kindCounts"] = kind_counts
                 cacheable = dict(out)
                 cacheable.pop("cached", None)
                 cacheable.pop("kind", None)

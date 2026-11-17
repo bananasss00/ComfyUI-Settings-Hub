@@ -746,6 +746,13 @@ check("v117 groups: every file sits in AT MOST ONE group",
       json.dumps({"groups": sum(g["count"] for g in _g.get("groups", [])),
                   "ungrouped": _g.get("ungroupedTotal"),
                   "total": _g.get("totalFiles")}))
+check("v120 groups: kindCounts accounts for EVERY indexed file (the owner's 'many unaccounted' fix)",
+      sum((_g.get("kindCounts") or {}).values()) +
+      _g.get("ungroupedTotal", 0) == _g.get("totalFiles", -1) and
+      (_g.get("kindCounts") or {}).get("same_uuid", 0) >= 2,
+      json.dumps({"kindCounts": _g.get("kindCounts"),
+                  "ungrouped": _g.get("ungroupedTotal"),
+                  "total": _g.get("totalFiles")}))
 _g2 = widx.similarity_groups(user_scope="default", threshold=90)
 check("v117 groups: the second call is served from the SQLite cache",
       _g2.get("cached") is True and
@@ -775,10 +782,13 @@ check("v117 groups: the strict threshold keeps the groups tight",
       all(g["count"] <= 3 for g in _g5.get("groups", [])
           if g["kind"] == "similar"),
       json.dumps([g.get("count") for g in _g5.get("groups", [])]))
-# the broad-bucket guard: a bucket bigger than SIM_MAX_BUCKET is skipped.
-# The probe files carry NO uuid (never grouped by id) and pairwise-DIFFERENT
-# edge sets (never an exact group) - their ONLY common feature is the node
-# type multiset, so they land in ONE types bucket together with d1.
+# v120 the OVERSIZED-bucket contract: a bucket over the cap is NO LONGER
+# skipped silently - it is sub-bucketed by the MODEL-SET key and the giant
+# leftovers degrade to a bounded per-file top-K star (broadStarFiles). The
+# probe files carry NO uuid (never grouped by id), pairwise-DIFFERENT edge
+# sets (never an exact group) and NO models (one giant sub-bucket) - their
+# ONLY common feature is the node type multiset, so they land in ONE types
+# bucket together with d1.
 _old_bucket = widx.SIM_MAX_BUCKET
 widx.SIM_MAX_BUCKET = 2
 try:
@@ -789,14 +799,39 @@ try:
         write_lib("v117_w%d.json" % i, _wf)
     scan(force=True)
     _gb = widx.similarity_groups(user_scope="default", threshold=80)
-    check("v117 groups: a bucket over the cap is SKIPPED (reported honestly)",
-          _gb.get("skippedBroad", 0) >= 1,
+    check("v120 groups: an oversized bucket is SUB-BUCKETED, never silently skipped (the pairs still get emitted)",
+          _gb.get("ok") and _gb.get("skippedBroad", 0) == 0 and
+          _gb.get("candidatePairs", 0) >= 1,
           json.dumps({"skipped": _gb.get("skippedBroad"),
+                      "cand": _gb.get("candidatePairs"),
                       "ok": _gb.get("ok"), "error": _gb.get("error"),
                       "groups": [(g.get("kind"), g.get("count"))
                                  for g in _gb.get("groups", [])],
                       "ungrouped": _gb.get("ungroupedTotal"),
                       "total": _gb.get("totalFiles")}))
+    # the STAR degradation: a sub-bucket itself over SIM_BIG_SUB feeds the
+    # bounded top-K star and the answer reports it (the cache is cleared -
+    # the cache key does not include SIM_BIG_SUB, a monkeypatched knob)
+    _old_sub = widx.SIM_BIG_SUB
+    widx.SIM_BIG_SUB = 1
+    try:
+        _cc = sqlite3.connect(DB, timeout=10)
+        try:
+            _cc.execute("DELETE FROM similarity_cache")
+            _cc.commit()
+        finally:
+            _cc.close()
+        _gs2 = widx.similarity_groups(user_scope="default", threshold=80)
+        check("v120 groups: a giant sub-bucket degrades to the bounded star (broadStarFiles reports it)",
+              _gs2.get("ok") and _gs2.get("broadStarFiles", 0) >= 4 and
+              _gs2.get("candidatePairs", 0) >= 1 and
+              _gs2.get("cached") is False,
+              json.dumps({"star": _gs2.get("broadStarFiles"),
+                          "cand": _gs2.get("candidatePairs"),
+                          "skipped": _gs2.get("skippedBroad"),
+                          "cached": _gs2.get("cached")}))
+    finally:
+        widx.SIM_BIG_SUB = _old_sub
 finally:
     widx.SIM_MAX_BUCKET = _old_bucket
 
@@ -1110,11 +1145,78 @@ check("v119 similar: a copy with a node GROUP added is GROUPED at 80 (the owner'
           for g in _ga.get("groups", [])),
       json.dumps([(g.get("kind"), g.get("count"), g.get("minScore"))
                   for g in _ga.get("groups", [])]))
+# v120: the 2-node pair measures 91 under the blend (the overlap half made
+# the addition cheaper) - the UNGROUPED-at-90 probe is now a HEAVY copy: a
+# 5-node tail of BRAND-NEW node types (TailA/TailB/TailC) that measures
+# ~85 vs BOTH a and b (measured, the score decides - never the prefilter).
+# The heavy file JOINS the library before the threshold probes so the
+# answers really see it. (The join pass may score it honestly - the score
+# is what keeps it out at 90.)
+_h119 = wf_v119_base("v119-h")
+_h119["nodes"].extend([
+    {"id": 13, "type": "TailA", "widgets_values": ["a1"]},
+    {"id": 14, "type": "TailB", "widgets_values": {"k": 1}},
+    {"id": 15, "type": "TailA", "widgets_values": ["a2"]},
+    {"id": 16, "type": "TailC", "widgets_values": {"k": 2}},
+    {"id": 17, "type": "TailB", "widgets_values": {"k": 3}},
+])
+_h119["links"].extend([[13, 9, 0, 13, 0, "IMAGE"],
+                       [14, 13, 0, 14, 0, "IMAGE"],
+                       [15, 14, 0, 15, 0, "IMAGE"],
+                       [16, 15, 0, 16, 0, "IMAGE"],
+                       [17, 16, 0, 17, 0, "IMAGE"]])
+_ha, _ = widx.analyze_workflow_bytes(json.dumps(_a119).encode())
+_hb, _ = widx.analyze_workflow_bytes(json.dumps(_h119).encode())
+
+
+def _feats_of_row(_r):
+    # node_types / model_refs are plain lists, sig_edges / sig_widgets are
+    # canon-JSON strings (the analyze record shape)
+    return {"types": list(_r["node_types"] or []),
+            "edges": json.loads(_r["sig_edges"]) if _r["sig_edges"] else [],
+            "widgets": json.loads(_r["sig_widgets"])
+            if _r["sig_widgets"] else [],
+            "models": list(_r["model_refs"] or [])}
+
+
+_hfeats_a = _feats_of_row(_ha)
+_hfeats_h = _feats_of_row(_hb)
+_b119_row, _ = widx.analyze_workflow_bytes(json.dumps(_b119).encode())
+_hsc_ah = widx.similarity_score(_hfeats_a, _hfeats_h)
+_hsc_bh = widx.similarity_score(_feats_of_row(_b119_row), _hfeats_h)
+_hsc_ab = widx.similarity_score(_hfeats_a, _feats_of_row(_b119_row))
+check("v120 score: the light pair >= 90, the heavy copy BELOW 90 vs both (the probes are honest)",
+      _hsc_ab >= 90 and _hsc_ah < 90 and _hsc_bh < 90,
+      "a-b %d, a-h %d, b-h %d" % (_hsc_ab, _hsc_ah, _hsc_bh))
+with open(os.path.join(_lib4, "v119_h.json"), "w") as _fh:
+    json.dump(_h119, _fh)
+widx.scan_index(workflows_user_dirs=[_lib4], hide_dirs_fn=lambda d: [],
+                force=True)
+_paths_of = lambda g: {f["path"] for f in g.get("files", [])}
 _ga90 = widx.similarity_groups(user_scope="default", threshold=90)
-check("v119 similar: the SAME pair stays UNGROUPED at 90 (the score decides, not the prefilter)",
-      all(g.get("kind") != "similar" for g in _ga90.get("groups", [])),
-      json.dumps([(g.get("kind"), g.get("count"))
+check("v119/v120 similar: the LIGHT pair groups at 90 now (the blend lifted the addition case 86 -> 91)",
+      any(g.get("kind") == "similar" and
+          {"workflows/v119_a.json", "workflows/v119_b.json"} <= _paths_of(g)
+          for g in _ga90.get("groups", [])),
+      json.dumps([(g.get("kind"), g.get("count"), g.get("minScore"))
                   for g in _ga90.get("groups", [])]))
+check("v119 similar: the HEAVY copy stays OUT of every 90 group (the score decides, not the prefilter)",
+      all("workflows/v119_h.json" not in _paths_of(g)
+          for g in _ga90.get("groups", [])
+          if g.get("kind") == "similar") and
+      "joinScored" in _ga90 and "joinSkipped" in _ga90,
+      json.dumps({"groups": [(g.get("kind"), g.get("count"), g.get("minScore"))
+                             for g in _ga90.get("groups", [])],
+                  "joinScored": _ga90.get("joinScored")}))
+_ga80h = widx.similarity_groups(user_scope="default", threshold=80)
+check("v120 similar: at 80 the heavy copy JOINS the family (one group of 3)",
+      any(g.get("kind") == "similar" and
+          {"workflows/v119_a.json", "workflows/v119_b.json",
+           "workflows/v119_h.json"} <= _paths_of(g)
+          for g in _ga80h.get("groups", [])),
+      json.dumps([(g.get("kind"), g.get("count"), g.get("minScore"),
+                   g.get("avgScore"))
+                  for g in _ga80h.get("groups", [])]))
 check("v119 similar: the honest counters are in the answer",
       _ga.get("candidatePairs", 0) >= 1 and _ga.get("pairsScored", 0) >= 1
       and "skippedPairs" in _ga,
@@ -1259,6 +1361,118 @@ try:
                                               "staleFiles", "totalFiles")}))
 finally:
     widx.set_db_path(DB)
+
+# ---------------------------------------------------------------------------
+# v120: the LOOSE match - the (jaccard + overlap) blend, the JOIN pass
+# (a modified copy of a modified copy joins through a MEMBER), the 50-100
+# threshold clamp, the score-version cache invalidation.
+# ---------------------------------------------------------------------------
+check("v120 blend: both-empty counters are neutral (1.0, 1.0)",
+      widx._counter_pair_parts({}, {}) == (1.0, 1.0),
+      str(widx._counter_pair_parts({}, {})))
+check("v120 blend: one-empty counters score 0 (never neutral-identical)",
+      widx._counter_pair_score({}, {"a": 2}) == 0.0,
+      str(widx._counter_pair_score({}, {"a": 2})))
+check("v120 blend: a strict SUPERSET keeps the overlap at 1.0 (jaccard 0.4 -> blend 0.7)",
+      widx._counter_pair_parts({"a": 2}, {"a": 2, "b": 3}) == (0.4, 1.0) and
+      widx._counter_pair_score({"a": 2}, {"a": 2, "b": 3}) == 0.7,
+      str(widx._counter_pair_parts({"a": 2}, {"a": 2, "b": 3})))
+check("v120 blend: the list form matches the counter form",
+      abs(widx._multiset_pair_score(["a", "a"], ["a", "a", "b"]) - 5.0 / 6.0)
+      < 1e-9,
+      str(widx._multiset_pair_score(["a", "a"], ["a", "a", "b"])))
+check("v120 blend: the blend NEVER drops below the jaccard on a superset pair",
+      widx._multiset_pair_score(["a", "a"], ["a", "a", "b"]) >
+      widx._multiset_jaccard(["a", "a"], ["a", "a", "b"]),
+      "%s vs %s" % (widx._multiset_pair_score(["a", "a"], ["a", "a", "b"]),
+                    widx._multiset_jaccard(["a", "a"], ["a", "a", "b"])))
+check("v120 blend: disjoint multisets score 0 on both halves",
+      widx._counter_pair_score({"a": 1}, {"b": 1}) == 0.0,
+      str(widx._counter_pair_score({"a": 1}, {"b": 1})))
+
+_jclamped = widx.similarity_groups(user_scope="default", threshold=30)
+check("v120 clamp: the threshold 30 clamps to 50",
+      _jclamped.get("ok") and _jclamped.get("threshold") == 50,
+      str(_jclamped.get("threshold")))
+_jclamped2 = widx.similarity_groups(user_scope="default", threshold=150)
+check("v120 clamp: the threshold 150 clamps to 100",
+      _jclamped2.get("ok") and _jclamped2.get("threshold") == 100,
+      str(_jclamped2.get("threshold")))
+
+# the JOIN pass end-to-end: j1 <- j2 <- j3 (a modified copy of a modified
+# copy). j1~j2 = 93, j2~j3 = 91, j1~j3 = 85 (measured): at 90 the anchor
+# pass groups {j2, j3} (the usets bucket ties them), j1 stays out (85 vs
+# the anchor j3) - the JOIN pass scores j1 against the MEMBER j2 and pulls
+# it in. The j-model file differs from the other libraries' m.safetensors
+# so the c1-c3 family cannot swallow j1 (the model axis kills those pairs).
+_lib7 = os.path.join(TMP, "userlib7", "workflows")
+os.makedirs(_lib7, exist_ok=True)
+
+
+def _wf_j(wid, extra_nodes, seed=5):
+    _w = wf_v119_base(wid, seed=seed)
+    _w["nodes"][0]["widgets_values"] = ["j-model.safetensors"]
+    _nid = 12
+    for _t, _wv in extra_nodes:
+        _nid += 1
+        _w["nodes"].append({"id": _nid, "type": _t, "widgets_values": [_wv]})
+    return _w
+
+
+_j1 = _wf_j("v120-j1", [])
+_j2 = _wf_j("v120-j2", [("UpscalerX", "2x-model"),
+                        ("ImageScaleBy", {"scale": 1.5})])
+_j2["links"].extend([[13, 9, 0, 13, 0, "IMAGE"],
+                     [14, 13, 0, 14, 0, "IMAGE"]])
+_j3 = _wf_j("v120-j3", [("UpscalerX", "2x-model"),
+                        ("ImageScaleBy", {"scale": 1.5}),
+                        ("UpscalerX", "4x-model"),
+                        ("ImageScaleBy", {"scale": 2.0}),
+                        ("UpscalerX", "8x-model")])
+_j3["links"].extend([[13, 9, 0, 13, 0, "IMAGE"],
+                     [14, 13, 0, 14, 0, "IMAGE"],
+                     [15, 14, 0, 15, 0, "IMAGE"],
+                     [16, 15, 0, 16, 0, "IMAGE"],
+                     [17, 16, 0, 17, 0, "IMAGE"]])
+for _name, _wf in (("v120_j1.json", _j1), ("v120_j2.json", _j2),
+                   ("v120_j3.json", _j3)):
+    with open(os.path.join(_lib7, _name), "w") as _fh:
+        json.dump(_wf, _fh)
+widx.scan_index(workflows_user_dirs=[_lib7], hide_dirs_fn=lambda d: [],
+                force=True)
+_jrow1, _ = widx.analyze_workflow_bytes(json.dumps(_j1).encode())
+_jrow2, _ = widx.analyze_workflow_bytes(json.dumps(_j2).encode())
+_jrow3, _ = widx.analyze_workflow_bytes(json.dumps(_j3).encode())
+_s12 = widx.similarity_score(_feats_of_row(_jrow1), _feats_of_row(_jrow2))
+_s23 = widx.similarity_score(_feats_of_row(_jrow2), _feats_of_row(_jrow3))
+_s13 = widx.similarity_score(_feats_of_row(_jrow1), _feats_of_row(_jrow3))
+check("v120 join: the chain measures 93/91/85 (j1~j3 below 90 - the anchor pass cannot see it)",
+      _s12 >= 90 and _s23 >= 90 and _s13 < 90,
+      "%d/%d/%d" % (_s12, _s23, _s13))
+_gj = widx.similarity_groups(user_scope="default", threshold=90)
+check("v120 join: the copy-of-copy JOINS through the member j2 (one group of 3, joinScored reported)",
+      any(g.get("kind") == "similar" and
+          {"workflows/v120_j1.json", "workflows/v120_j2.json",
+           "workflows/v120_j3.json"} <= _paths_of(g)
+          for g in _gj.get("groups", [])) and
+      _gj.get("joinScored", 0) >= 1 and "joinSkipped" in _gj,
+      json.dumps({"groups": [(g.get("kind"), g.get("count"))
+                             for g in _gj.get("groups", [])],
+                  "joinScored": _gj.get("joinScored"),
+                  "joinSkipped": _gj.get("joinSkipped")}))
+
+# the score-version cache invalidation: the FORMULA bump invalidates the
+# cached answers without a re-index (the features did not change)
+widx.similarity_groups(user_scope="default", threshold=90)  # warm the cache
+_old_sv = widx.SIM_SCORE_VERSION
+widx.SIM_SCORE_VERSION = "s2-test"
+try:
+    _gsv = widx.similarity_groups(user_scope="default", threshold=90)
+    check("v120 cache: a score-version bump invalidates the cached answer",
+          _gsv.get("cached") is False,
+          str(_gsv.get("cached")))
+finally:
+    widx.SIM_SCORE_VERSION = _old_sv
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------

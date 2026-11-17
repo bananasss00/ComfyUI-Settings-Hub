@@ -1615,7 +1615,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v119"
+WORKFLOWS_SERVER_VERSION = "v120"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -3083,8 +3083,8 @@ async def workflows_index_duplicates(request):
 async def workflows_index_groups(request):
     """v117 (the owner's Files-grouping plan): the SIMILARITY GROUPS over
     the WHOLE index - built SERVER-side (the flat list is server-paginated;
-    grouping one client page would lie). Query: threshold (80-100, default
-    90, step 5), kind (all | same_uuid | exact | similar). The features come
+    grouping one client page would lie). Query: threshold (50-100, default
+    90), kind (all | same_uuid | exact | similar). The features come
     from the nprof2 sig_* columns the scan maintains; the score runs for
     candidate pairs only and the result is cached in SQLite (invalidated by
     any re-index or profile change). The answer carries full page-shaped
