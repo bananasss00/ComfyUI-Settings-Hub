@@ -255,10 +255,10 @@ reset_state()
 r = loop(HEALTH(FakeRequest(method="GET")))
 j = r.json()
 check("health: ok", r.status == 200 and j.get("ok") is True)
-check("health: version matches the source constant",
+_HEALTH_VER = wf_store.WORKFLOWS_SERVER_VERSION
+check("health: version matches the source constant (%s)" % _HEALTH_VER,
       j.get("version") == wf_store.WORKFLOWS_SERVER_VERSION,
       "%s vs %s" % (j.get("version"), wf_store.WORKFLOWS_SERVER_VERSION))
-check("health: version is v111", j.get("version") == "v111", str(j.get("version")))
 check("health: default dir", j.get("dir") == os.path.join(_USER_DIR, "settings_hub", "workflows"), j.get("dir"))
 check("health: no custom root yet", j.get("custom") is None)
 check("health: writable", j.get("writable") is True)
@@ -551,14 +551,17 @@ r = loop(PPOST(FakeRequest(json_body={
     "id": "ffffffff", "name": "Ghost", "items": [], "mode": "overwrite"})))
 check("overwrite: unknown id -> 404", r.status == 404, str(r.status))
 
-# merge mode: dedupe by path, snapshots refresh by name
+# v112 stage 3 (plan 7.4): the snapshot dedupe moved to CONTENT - the same
+# graph re-merge REFRESHES; a same-name DIFFERENT graph COEXISTS (the plan's
+# acceptance criterion: two same-name/different-graph snapshots survive)
 r = loop(PPOST(FakeRequest(json_body={
     "id": PID1,
     "items": [
         {"kind": "path", "path": "workflows/NEW.json"},                     # appended
         {"kind": "path", "path": "workflows/upscale.json", "name": "Upscale stage"},  # dup -> dropped
-        {"kind": "snapshot", "name": "Temp nodes", "graph": {"v": 2}},      # snapshot REFRESHED
-        {"kind": "snapshot", "name": "Extra", "graph": {"v": 1}},           # appended
+        {"kind": "snapshot", "name": "Same graph new name", "graph": {"nodes": [], "links": []}},  # SAME content as the existing -> REFRESHED
+        {"kind": "snapshot", "name": "Temp nodes v2", "graph": {"v": 2}},   # different graph -> appended
+        {"kind": "snapshot", "name": "Extra", "graph": {"v": 3}},           # appended (distinct content)
     ],
     "mode": "merge"})))
 j = r.json()
@@ -568,10 +571,47 @@ paths = [it.get("path") for it in items if it.get("kind") == "path"]
 check("merge: dup path not stacked", paths.count("workflows/upscale.json") == 1, str(paths))
 check("merge: new path appended", "workflows/NEW.json" in paths)
 snaps = [it for it in items if it.get("kind") == "snapshot"]
-check("merge: snapshot refreshed not stacked",
-      len([s for s in snaps if s["name"] == "Temp nodes"]) == 1
-      and next(s for s in snaps if s["name"] == "Temp nodes")["graph"] == {"v": 2}, str(snaps))
-check("merge: new snapshot appended", any(s["name"] == "Extra" for s in snaps))
+check("merge: the SAME graph content refreshes (not stacked)",
+      len([s for s in snaps if s["graph"] == {"nodes": [], "links": []}]) == 1, str(snaps))
+check("merge: a same-name DIFFERENT graph COEXISTS (plan 7.4)",
+      any(s["graph"] == {"v": 2} for s in snaps),
+      json.dumps([s["graph"] for s in snaps]))
+check("merge: every item carries a stable itemId (plan 7.3)",
+      all(it.get("itemId") for it in items), json.dumps(items)[:120])
+
+# the activeItemId contract: a SNAPSHOT can be the preset's active item
+AID = snaps[0]["itemId"]
+r = loop(PPOST(FakeRequest(json_body={
+    "id": PID1, "items": snaps + [{"kind": "path", "path": "workflows/a.json"}],
+    "activeItemId": AID, "mode": "overwrite"})))
+check("activeItemId: a snapshot can be the active item",
+      r.json().get("ok") is True and r.json()["preset"].get("activeItemId") == AID,
+      json.dumps(r.json())[:160])
+r = loop(PPOST(FakeRequest(json_body={
+    "id": PID1, "items": snaps, "activeItemId": "does-not-exist-00", "mode": "overwrite"})))
+check("activeItemId: a dangling id is dropped",
+      r.json().get("ok") is True and "activeItemId" not in r.json()["preset"])
+
+# the snapshot origin metadata survives sanitization (plan 7.2)
+r = loop(PPOST(FakeRequest(json_body={
+    "name": "SnapMeta", "items": [{"kind": "snapshot", "name": "From disk",
+        "graph": {"nodes": []}, "sourcePath": "workflows/a.json",
+        "sourceName": "a.json", "workflowId": "abcd-1234", "capturedAt": 1700000000}],
+    "mode": "create"})))
+snap_meta = r.json()["preset"]["items"][0]
+loop(PDEL(FakeRequest(match_info={"pid": snap_meta.get("__pid") or r.json()["preset"]["id"]})))
+check("snapshot metadata: the origin fields survive (validated)",
+      snap_meta.get("sourcePath") == "workflows/a.json" and
+      snap_meta.get("sourceName") == "a.json" and
+      snap_meta.get("workflowId") == "abcd-1234" and
+      snap_meta.get("capturedAt") == 1700000000,
+      json.dumps(snap_meta))
+r = loop(PPOST(FakeRequest(json_body={
+    "name": "SnapMetaBad", "items": [{"kind": "snapshot", "name": "Evil",
+        "graph": {"nodes": []}, "sourcePath": "../../etc/passwd"}],
+    "mode": "create"})))
+check("snapshot metadata: a traversal sourcePath is REFUSED",
+      r.status == 400, str(r.status))
 
 # PUT: rename, fav off, items replaced. A 1.1s pause guarantees a strictly
 # newer `updated` (the sorting is updated-desc within the fav group - same-
@@ -1087,6 +1127,306 @@ check("files: an empty library answers ok:true with an EMPTY list",
       r.json().get("ok") is True and r.json().get("files") == [], json.dumps(r.json().get("files")))
 reset_state()
 
+# ===========================================================================
+# v112 (plan 3.1): the SERVER-SIDE UNDO SNAPSHOTS
+# ===========================================================================
+
+UPUT = H[("POST", "/settings_hub/workflows/undo")]
+UGET = H[("GET", "/settings_hub/workflows/undo/{uid}")]
+UDEL = H[("DELETE", "/settings_hub/workflows/undo/{uid}")]
+
+print("== v112: server-side undo snapshots (plan 3.1) ==")
+mgr_undo_dir = os.path.join(_USER_DIR, "settings_hub", wf_store.MGR_DIR_NAME, "undo")
+
+r = loop(UPUT(FakeRequest(json_body={"tabs": [
+    {"key": "t1", "path": "workflows/a.json", "name": "a.json", "active": True,
+     "modified": False, "temp": False, "graph": None},
+    {"key": "t2", "path": None, "name": "temp one", "active": False,
+     "modified": True, "temp": True, "graph": {"nodes": [{"id": 9}], "links": []}},
+], "activeKey": "t1"})))
+check("undo: a valid snapshot stores and returns an undoId",
+      r.json().get("ok") is True and isinstance(r.json().get("undoId"), str),
+      json.dumps(r.json()))
+undo_id = r.json().get("undoId")
+check("undo: the file lives under workflows_manager/undo/",
+      os.path.isfile(os.path.join(mgr_undo_dir, undo_id + ".json")))
+
+r = loop(UGET(FakeRequest(method="GET", match_info={"uid": undo_id})))
+tabs = r.json().get("tabs") or []
+check("undo: GET returns the tabs with the graphs",
+      r.json().get("ok") is True and len(tabs) == 2 and
+      tabs[1].get("graph", {}).get("nodes", [{}])[0].get("id") == 9,
+      json.dumps(r.json())[:160])
+check("undo: the graph-less clean tab keeps graph=None (reopens by path)",
+      tabs[0].get("graph") is None and tabs[0].get("path") == "workflows/a.json")
+check("undo: the activeKey survived",
+      r.json().get("activeKey") == "t1")
+
+r = loop(UPUT(FakeRequest(json_body={"no_tabs": True})))
+check("undo: a body without a tabs list refuses (400)",
+      r.status == 400 and r.json().get("ok") is False)
+
+r = loop(UPUT(FakeRequest(json_body={"tabs": [
+    {"path": "../../escape.json", "name": "bad", "graph": None},
+]})))
+check("undo: a traversal path in the snapshot is sanitized to null (kept temp-like)",
+      r.json().get("ok") is True and
+      (r.json().get("ts") is not None), json.dumps(r.json()))
+uid2 = r.json().get("undoId")
+rec2 = json.load(open(os.path.join(mgr_undo_dir, uid2 + ".json")))
+check("undo: the traversal path never reaches the stored record",
+      rec2["tabs"][0]["path"] is None, json.dumps(rec2["tabs"][0]))
+
+r = loop(UDEL(FakeRequest(method="DELETE", match_info={"uid": undo_id})))
+check("undo: DELETE removes the snapshot",
+      r.json().get("ok") is True and r.json().get("existed") is True and
+      not os.path.isfile(os.path.join(mgr_undo_dir, undo_id + ".json")))
+r = loop(UDEL(FakeRequest(method="DELETE", match_info={"uid": undo_id})))
+check("undo: a second DELETE is idempotent (existed:false)",
+      r.json().get("ok") is True and r.json().get("existed") is False)
+r = loop(UGET(FakeRequest(method="GET", match_info={"uid": "nope"})))
+check("undo: a malformed id answers 400 (strict charset)",
+      r.status == 400, str(r.status))
+r = loop(UGET(FakeRequest(method="GET", match_info={"uid": "0123456789abcdef"})))
+check("undo: a well-formed unknown id answers 404",
+      r.status == 404, str(r.status))
+
+# the TTL GC: a snapshot older than UNDO_MAX_AGE_S dies on the next store
+import time as _time
+old_rec = {"id": "oldoldoldoldoldold", "ts": int(_time.time()) - wf_store.UNDO_MAX_AGE_S - 10,
+           "activeKey": None, "tabs": []}
+json.dump(old_rec, open(os.path.join(mgr_undo_dir, "oldoldoldoldoldold.json"), "w"))
+r = loop(UPUT(FakeRequest(json_body={"tabs": []})))
+check("undo: the TTL GC removed the expired snapshot",
+      not os.path.isfile(os.path.join(mgr_undo_dir, "oldoldoldoldoldold.json")))
+for f in os.listdir(mgr_undo_dir):
+    os.unlink(os.path.join(mgr_undo_dir, f))
+
+# ===========================================================================
+# v112 (plan 3.6): the SERVER-SIDE RECENTLY-CLOSED MANIFESTS + reference GC
+# ===========================================================================
+
+RPUT = H[("POST", "/settings_hub/workflows/recent")]
+RGET = H[("GET", "/settings_hub/workflows/recent/{cid}")]
+RDEL = H[("DELETE", "/settings_hub/workflows/recent/{cid}")]
+TGC = H[("POST", "/settings_hub/workflows/temp/gc")]
+
+print("== v112: recently-closed manifests + server GC (plan 3.6) ==")
+mgr_recent_dir = os.path.join(_USER_DIR, "settings_hub", wf_store.MGR_DIR_NAME, "recent")
+
+# two browser sessions with their own rings, one SHARED snapshot
+r = loop(TPUT(FakeRequest(json_body={"name": "shared temp", "graph": {"nodes": []}})))
+shared_tid = r.json().get("id")
+r = loop(TPUT(FakeRequest(json_body={"name": "alpha temp", "graph": {"nodes": []}})))
+alpha_tid = r.json().get("id")
+
+r = loop(RPUT(FakeRequest(json_body={
+    "clientId": "browser_alpha01",
+    "entries": [{"path": None, "name": "shared", "ts": 1, "tempId": shared_tid},
+                {"path": None, "name": "alpha", "ts": 2, "tempId": alpha_tid}]})))
+check("recent: the manifest stores and returns the cross-browser refs",
+      r.json().get("ok") is True and
+      set(r.json().get("refs", [])) == {shared_tid, alpha_tid},
+      json.dumps(r.json()))
+r = loop(RPUT(FakeRequest(json_body={
+    "clientId": "browser_beta0001",
+    "entries": [{"path": None, "name": "shared", "ts": 3, "tempId": shared_tid}]})))
+check("recent: the SECOND browser registers its own manifest",
+      r.json().get("ok") is True and set(r.json().get("refs", [])) == {shared_tid, alpha_tid})
+
+r = loop(RGET(FakeRequest(method="GET", match_info={"cid": "browser_alpha01"})))
+check("recent: GET returns the session manifest",
+      r.json().get("ok") is True and len(r.json().get("entries") or []) == 2)
+r = loop(RGET(FakeRequest(method="GET", match_info={"cid": "browser_nope0001"})))
+check("recent: an unknown session answers 404 (fresh session migrates)",
+      r.status == 404)
+
+# the alpha browser EVICTS its rows (empty manifest): the shared snapshot
+# must SURVIVE (beta still references it), its own may go only by TTL
+r = loop(RPUT(FakeRequest(json_body={"clientId": "browser_alpha01", "entries": []})))
+check("recent: the manifest replace works (eviction)",
+      r.json().get("ok") is True and set(r.json().get("refs", [])) == {shared_tid})
+
+# the SERVER GC: a stale orphan (not referenced by anyone, > 1 day) dies;
+# the shared snapshot stays (beta references it) even though it is fresh
+old_tid = "0123456789ab0000"  # strict hex, like the server ids
+fake_temp_old = {"id": old_tid, "name": "stale orphan", "ts": int(_time.time()) - wf_store.TEMP_MAX_AGE_S - 10,
+                 "seq": 0, "graph": {"nodes": []}}
+os.makedirs(temp_dir(), exist_ok=True)
+json.dump(fake_temp_old, open(os.path.join(temp_dir(), old_tid + ".json"), "w"))
+r = loop(TGC(FakeRequest(method="POST")))
+removed = r.json().get("removed") or []
+check("temp/gc: the STALE unreferenced snapshot is removed",
+      old_tid in removed and not os.path.isfile(os.path.join(temp_dir(), old_tid + ".json")),
+      json.dumps(removed))
+check("temp/gc: the SHARED snapshot survives (beta still references it)",
+      shared_tid not in removed and os.path.isfile(os.path.join(temp_dir(), shared_tid + ".json")))
+check("temp/gc: the alpha temp (referenced by nobody, FRESH) survives the age rule",
+      alpha_tid in [t for t in (r.json().get("refs") or [])] or
+      os.path.isfile(os.path.join(temp_dir(), alpha_tid + ".json")))
+
+# beta forgets its manifest -> the next GC may reap the shared snapshot
+r = loop(RDEL(FakeRequest(method="DELETE", match_info={"cid": "browser_beta0001"})))
+check("recent: DELETE of a session manifest works",
+      r.json().get("ok") is True and not os.path.isfile(
+          os.path.join(mgr_recent_dir, "browser_beta0001.json")))
+# make the shared snapshot old, then GC again - now NOTHING references it
+tfile = os.path.join(temp_dir(), shared_tid + ".json")
+rec = json.load(open(tfile))
+rec["ts"] = int(_time.time()) - wf_store.TEMP_MAX_AGE_S - 10
+json.dump(rec, open(tfile, "w"))
+r = loop(TGC(FakeRequest(method="POST")))
+check("temp/gc: with NO manifest left, the aged snapshot is reaped (no orphans)",
+      shared_tid in (r.json().get("removed") or []),
+      json.dumps(r.json().get("removed")))
+
+r = loop(TGC(FakeRequest(method="POST")))
+check("temp/gc: an idempotent run removes nothing new",
+      r.json().get("ok") is True and (r.json().get("removed") or []) == [],
+      json.dumps(r.json().get("removed")))
+
+r = loop(RPUT(FakeRequest(json_body={"clientId": "../bad", "entries": []})))
+check("recent: a traversal clientId refuses (400)",
+      r.status == 400, str(r.status))
+r = loop(RGET(FakeRequest(method="GET", match_info={"cid": "../bad"})))
+check("recent: a traversal clientId in GET refuses (400)",
+      r.status == 400, str(r.status))
+
+# cleanup the manager folder for the later phases
+import shutil as _sh
+_sh.rmtree(os.path.join(_USER_DIR, "settings_hub", wf_store.MGR_DIR_NAME),
+           ignore_errors=True)
+reset_state()
+
+# ===========================================================================
+# v112 stage 4 (plan 9/10): the Preset CATEGORIES/TAGS + VERSION HISTORY
+# ===========================================================================
+
+VGET = H[("GET", "/settings_hub/workflows/preset/{pid}/versions")]
+VRGET = H[("GET", "/settings_hub/workflows/preset/{pid}/version/{rid}")]
+VREST = H[("POST", "/settings_hub/workflows/preset/{pid}/restore/{rid}")]
+
+print("== v112 stage 4: preset categories/tags + version history ==")
+reset_state()
+
+# --- the category/tags sanitization ---
+r = loop(PPOST(FakeRequest(json_body={
+    "name": "Catty", "category": "  Portrait  ",
+    "tags": ["Production", "production", "fast", "", "  hires  ", 42],
+    "items": [{"kind": "path", "path": "workflows/a.json"}]})))
+preset_c = r.json()["preset"]
+check("tags: the category trims and stores",
+      preset_c.get("category") == "Portrait", json.dumps(preset_c.get("category")))
+check("tags: duplicates collapse case-insensitively, non-strings drop, cap holds",
+      preset_c.get("tags") == ["Production", "fast", "hires"],
+      json.dumps(preset_c.get("tags")))
+r = loop(PPOST(FakeRequest(json_body={
+    "name": "BadTags", "tags": "not-a-list",
+    "items": [{"kind": "path", "path": "workflows/a.json"}]})))
+check("tags: a non-list tags payload refuses (400)",
+      r.status == 400, str(r.status))
+r = loop(PPOST(FakeRequest(json_body={
+    "name": "NoCat", "items": [{"kind": "path", "path": "workflows/a.json"}]})))
+check("tags: an old-style preset carries NO category/tags keys (back-compat)",
+      "category" not in r.json()["preset"] and "tags" not in r.json()["preset"])
+
+# --- the version lifecycle: create -> initial revision; overwrite -> archive ---
+PIDV = preset_c["id"]
+r = loop(VGET(FakeRequest(match_info={"pid": PIDV})))
+vers0 = r.json().get("versions") or []
+check("versions: a NEW preset gets its INITIAL revision",
+      r.json().get("ok") is True and len(vers0) == 1,
+      json.dumps(vers0))
+check("versions: the revision metadata carries name/items/changedBy",
+      vers0 and vers0[0].get("changedBy") == "create" and
+      vers0[0].get("itemCount") == 1 and vers0[0].get("name") == "Catty",
+      json.dumps(vers0[0]))
+
+# the version FILES live in the SAME root as the preset (plan 10)
+vdir = os.path.join(presets_dir(), "..", "preset_versions", PIDV)
+vdir = os.path.normpath(vdir)
+check("versions: the sidecar folder sits next to presets/ in the same root",
+      os.path.isdir(vdir) and len(os.listdir(vdir)) == 1,
+      json.dumps(os.listdir(vdir)) if os.path.isdir(vdir) else "missing")
+
+# an UNCHANGED overwrite -> NO new revision (plan 10: no revision when the
+# content is semantically the same)
+r = loop(PPOST(FakeRequest(json_body={
+    "id": PIDV, "name": "Catty", "category": "Portrait",
+    "tags": ["Production", "fast", "hires"],
+    "items": [{"kind": "path", "path": "workflows/a.json"}],
+    "mode": "overwrite"})))
+check("versions: the no-op overwrite creates NO revision",
+      len(loop(VGET(FakeRequest(match_info={"pid": PIDV}))).json()["versions"]) == 1)
+
+# a MEANINGFUL change -> the previous state archives
+r = loop(PPOST(FakeRequest(json_body={
+    "id": PIDV, "name": "Catty v2", "category": "Flux", "tags": ["fast"],
+    "items": [{"kind": "path", "path": "workflows/a.json"},
+              {"kind": "path", "path": "workflows/upscale.json"}],
+    "mode": "overwrite"})))
+vers1 = loop(VGET(FakeRequest(match_info={"pid": PIDV}))).json()["versions"]
+check("versions: the overwrite archives the previous state",
+      len(vers1) == 2 and vers1[0]["changedBy"] == "overwrite",
+      json.dumps([(v["changedBy"], v["name"]) for v in vers1]))
+check("versions: the archive carries the OLD name/tags (metadata)",
+      vers1[0]["name"] == "Catty" and vers1[0]["tags"] == ["Production", "fast", "hires"],
+      json.dumps(vers1[0]))
+
+# the version payload read
+r = loop(VRGET(FakeRequest(match_info={"pid": PIDV, "rid": vers1[0]["revisionId"]}))
+         ) if ("GET", "/settings_hub/workflows/preset/{pid}/version/{rid}") in H else None
+rec = r.json()
+check("versions: the payload returns the FULL previous preset",
+      rec.get("ok") is True and rec["preset"]["name"] == "Catty" and
+      len(rec["preset"]["items"]) == 1, json.dumps(rec)[:160])
+
+# --- the restore: the current archives FIRST, then the chosen returns ---
+r = loop(VREST(FakeRequest(match_info={"pid": PIDV, "rid": vers1[0]["revisionId"]},
+                           json_body={})))
+j = r.json()
+check("restore: ok, the current archived, the chosen returned",
+      j.get("ok") is True and j.get("restoredFrom") == vers1[0]["revisionId"] and
+      j.get("archivedAs"), json.dumps(j)[:200])
+check("restore: the preset went BACK (name/category/items)",
+      j["preset"]["name"] == "Catty" and j["preset"]["category"] == "Portrait" and
+      len(j["preset"]["items"]) == 1, json.dumps(j["preset"])[:160])
+vers2 = loop(VGET(FakeRequest(match_info={"pid": PIDV}))).json()["versions"]
+check("restore: the pre-restore archive exists (the rollback chain grows)",
+      len(vers2) == 3 and vers2[0]["changedBy"] == "restore",
+      json.dumps([(v["changedBy"]) for v in vers2]))
+
+# the retention cap: 25 changes -> at most MAX_PRESET_VERSIONS revisions
+for i in range(25):
+    loop(PPOST(FakeRequest(json_body={
+        "id": PIDV, "name": "Catty v%d" % i,
+        "items": [{"kind": "path", "path": "workflows/a.json"}],
+        "mode": "overwrite"})))
+vers3 = loop(VGET(FakeRequest(match_info={"pid": PIDV}))).json()["versions"]
+check("versions: the retention cap holds (%d max)" % wf_store.MAX_PRESET_VERSIONS,
+      len(vers3) <= wf_store.MAX_PRESET_VERSIONS, str(len(vers3)))
+
+# --- the DELETE takes the history along (no orphans) ---
+r = loop(PDEL(FakeRequest(match_info={"pid": PIDV})))
+check("versions: DELETE removes the preset",
+      r.json().get("ok") is True)
+check("versions: DELETE removes the version folder (no orphans)",
+      not os.path.isdir(vdir), str(os.path.isdir(vdir)))
+
+# --- the import carries the category/tags ---
+r = loop(PDEL(FakeRequest(match_info={"pid": preset_c["id"]})) if False
+         else FakeRequest()) if False else None
+r = loop(H[("POST", "/settings_hub/workflows/import")](FakeRequest(json_body={
+    "presets": [{"name": "Imported cat", "category": "Video",
+                 "tags": ["testing"],
+                 "items": [{"kind": "path", "path": "workflows/a.json"}]}]})))
+imp = r.json()["presets"][0]
+check("import: the category/tags transfer",
+      imp.get("category") == "Video" and imp.get("tags") == ["testing"],
+      json.dumps({k: imp.get(k) for k in ("category", "tags")}))
+loop(PDEL(FakeRequest(match_info={"pid": imp["id"]})))
+
+reset_state()
 # ===========================================================================
 
 print()

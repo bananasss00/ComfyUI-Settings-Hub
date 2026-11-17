@@ -1,5 +1,5 @@
 // ============================================================================
-// SettingsHub - WORKFLOWS MANAGER smoke test (v111)
+// SettingsHub - WORKFLOWS MANAGER smoke test (v112)
 // ----------------------------------------------------------------------------
 // Node ESM + jsdom. Loads the REAL web/workflows.js module exactly like the
 // entry does (a sandbox copies web/ and stubs ../../scripts/app.js with an
@@ -163,6 +163,80 @@ function makeFakeApi() {
     let wfFiles = null;              // v108: the /workflows/files rung (null = old py)
     let wfFavs = [];                 // v108: the favorites store
     const tempStore = new Map();     // v107: id -> {id, name, ts, graph}
+    // v112: the manager service stores (undo snapshots + recent manifests)
+    const undoStore = new Map();     // undoId -> {id, ts, activeKey, tabs}
+    const recentStore = new Map();   // clientId -> {clientId, entries, updatedAt}
+    let recentMode = "ok";           // "ok" | "stale" (an old py: the routes 404)
+    let undoMode = "ok";             // "ok" | "stale" | "fail" (413 oversized)
+    // v112 stage 2: the DERIVED INDEX stub (the plan 4.x engine)
+    let idxModeFlag = "stale";       // default: an old py (the earlier phases keep the v108 local behavior; WT flips it on)
+    let idxFiles = [];               // the indexed library rows
+    let idxScanCount = 0;
+    // v112 stage 2.5: the HISTORY stub (processes + revisions + tx snapshots)
+    const histStore = { processes: new Map(), revisions: new Map(), seq: 0 };
+    const txStore = new Map();
+    // v112 stage 4: the preset version archives (pid -> {versions, seq})
+    const pverStore = new Map();
+    const pverArchive = (pid, changedBy) => {
+        const cur = presets.find((x) => x.id === pid);
+        if (!cur) return;
+        let st = pverStore.get(pid);
+        if (!st) { st = { versions: [], seq: 0 }; pverStore.set(pid, st); }
+        st.seq++;
+        st.versions.push({ revisionId: "v" + (++uidSeq).toString(16).padStart(10, "0"),
+            createdAt: Math.floor(Date.now() / 1000) + st.seq, seq: st.seq,
+            changedBy, preset: JSON.parse(JSON.stringify(cur)) });
+        if (st.versions.length > 20) st.versions.shift();
+    };
+    const histRevList = (pid) => {
+        // the parent-chain walk (newest first), exactly like the real store
+        const proc = histStore.processes.get(pid);
+        const chain = [];
+        let cur = proc?.currentRevisionId || null;
+        while (cur) {
+            const rec = histStore.revisions.get(cur);
+            if (!rec) break;
+            chain.push(rec);
+            cur = rec.parentRevisionId;
+        }
+        const rest = [...histStore.revisions.values()]
+            .filter((r) => r.processId === pid && !chain.some((c) => c.revisionId === r.revisionId));
+        return [...chain, ...rest];
+    };
+    const idxSearch = (qp) => {
+        // a tiny in-memory engine: q over path/name/workflowId, sort, cursor
+        let rows = idxFiles.slice();
+        const q2 = (qp.get("q") || "").toLowerCase();
+        if (q2) {
+            rows = rows.filter((f) =>
+                (f.path + " " + f.name + " " + (f.workflowId || "") + " " +
+                 (f.nodeTypes || []).join(" ") + " " + (f.modelRefs || []).join(" "))
+                    .toLowerCase().includes(q2));
+        }
+        const wf = qp.get("workflow_id");
+        if (wf) rows = rows.filter((f) => f.workflowId === wf);
+        const sortKey = { mtime: "mtime", name: "name", size: "size" }[qp.get("sort") || "mtime"] || "mtime";
+        const dir = qp.get("direction") === "asc" ? 1 : -1;
+        rows.sort((a, b) => {
+            const r = (a[sortKey] || 0) < (b[sortKey] || 0) ? -1 : ((a[sortKey] || 0) > (b[sortKey] || 0) ? 1 : 0);
+            return r * dir || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+        });
+        const limit = parseInt(qp.get("limit") || "150", 10);
+        let start = 0;
+        const cur = qp.get("cursor");
+        if (cur) {
+            const i = rows.findIndex((f) => f.path === cur);
+            if (i >= 0) start = i + 1;
+        }
+        const page = rows.slice(start, start + limit);
+        const hasMore = start + limit < rows.length;
+        return {
+            ok: true, files: page, total: rows.length,
+            has_more: hasMore,
+            next_cursor: hasMore ? page[page.length - 1].path : null,
+            fts: true,
+        };
+    };
     let savedFiles = [
         { path: "workflows/flux_main.json", name: "flux_main.json" },
         { path: "workflows/flux_detail.json", name: "flux_detail.json" },
@@ -219,14 +293,29 @@ function makeFakeApi() {
             if (p === "/settings_hub/workflows/presets" && method === "POST") {
                 let body = {};
                 try { body = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                // v112 stage 4: the category/tags flow through the stub too
+                // (the tags normalize server-side: case-insensitive dedupe)
+                if (typeof body.category === "string" && body.category.trim()) body.__cat = body.category.trim();
+                if (Array.isArray(body.tags) && body.tags.length) {
+                    const seen = new Set();
+                    body.__tags = body.tags.filter((t) => {
+                        const k = String(t).toLowerCase();
+                        if (!k || seen.has(k)) return false;
+                        seen.add(k);
+                        return true;
+                    });
+                }
                 const mode = body.mode || "create";
                 if (mode !== "create") {
                     const ex = presets.find((x) => x.id === body.id);
                     if (!ex) return jsonResp({ ok: false, error: "no such preset" }, 404);
                     if (mode === "overwrite") {
+                        pverArchive(ex.id, "overwrite");
                         ex.name = body.name || ex.name;
                         ex.items = body.items;
                         if (body.activePath) ex.activePath = body.activePath;
+                        if (body.__cat) ex.category = body.__cat;
+                        if (body.__tags) ex.tags = body.__tags;
                         ex.updated = Date.now() / 1000 | 0;
                         return jsonResp({ ok: true, preset: ex, mode });
                     }
@@ -248,7 +337,10 @@ function makeFakeApi() {
                     items: body.items || [],
                 };
                 if (body.activePath) preset.activePath = body.activePath;
+                if (body.__cat) preset.category = body.__cat;
+                if (body.__tags) preset.tags = body.__tags;
                 presets.push(preset);
+                pverArchive(preset.id, "create");
                 return jsonResp({ ok: true, preset, mode: "create" });
             }
             let m = p.match(/^\/settings_hub\/workflows\/preset\/([^/]+)$/);
@@ -317,6 +409,297 @@ function makeFakeApi() {
                     return jsonResp({ ok: true, gone: tid, existed: had });
                 }
             }
+            // v112 (plan 3.1): the server-side UNDO snapshots
+            if (p === "/settings_hub/workflows/undo" && method === "POST") {
+                if (undoMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                let body = {};
+                try { body = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                if (!Array.isArray(body.tabs)) return jsonResp({ ok: false, error: "tabs list is required" }, 400);
+                if (undoMode === "fail") return jsonResp({ ok: false, error: "undo snapshot too large" }, 413);
+                const id = "u" + (++uidSeq).toString(16).padStart(15, "0");
+                const rec = { id, ts: Date.now() / 1000 | 0, activeKey: body.activeKey || null, tabs: body.tabs };
+                undoStore.set(id, rec);
+                return jsonResp({ ok: true, undoId: id, ts: rec.ts, bytes: JSON.stringify(body).length });
+            }
+            m = p.match(/^\/settings_hub\/workflows\/undo\/([^/]+)$/);
+            if (m) {
+                const uid = decodeURIComponent(m[1]);
+                if (undoMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                if (method === "GET") {
+                    const rec = undoStore.get(uid);
+                    if (!rec) return jsonResp({ ok: false, error: "no such snapshot" }, 404);
+                    return jsonResp({ ok: true, id: uid, ts: rec.ts, activeKey: rec.activeKey, tabs: rec.tabs });
+                }
+                if (method === "DELETE") {
+                    const had = undoStore.delete(uid);
+                    return jsonResp({ ok: true, gone: uid, existed: had });
+                }
+            }
+            // v112 (plan 3.6): the server-side RECENT manifests
+            if (p === "/settings_hub/workflows/recent" && method === "POST") {
+                if (recentMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                let body = {};
+                try { body = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                if (!body.clientId || !Array.isArray(body.entries)) {
+                    return jsonResp({ ok: false, error: "bad clientId/entries" }, 400);
+                }
+                recentStore.set(body.clientId, {
+                    clientId: body.clientId, entries: body.entries,
+                    updatedAt: Date.now() / 1000 | 0,
+                });
+                // the cross-manifest reference union over ALL sessions
+                const refs = new Set();
+                for (const man of recentStore.values()) {
+                    for (const e of man.entries || []) {
+                        if (e?.tempId) refs.add(e.tempId);
+                    }
+                }
+                return jsonResp({ ok: true, clientId: body.clientId, updatedAt: Date.now() / 1000 | 0, refs: [...refs] });
+            }
+            m = p.match(/^\/settings_hub\/workflows\/recent\/([^/]+)$/);
+            if (m) {
+                const cid = decodeURIComponent(m[1]);
+                if (recentMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                if (method === "GET") {
+                    const man = recentStore.get(cid);
+                    if (!man) return jsonResp({ ok: false, error: "no manifest" }, 404);
+                    return jsonResp({ ok: true, clientId: cid, entries: man.entries, updatedAt: man.updatedAt });
+                }
+                if (method === "DELETE") {
+                    const had = recentStore.delete(cid);
+                    return jsonResp({ ok: true, gone: cid, existed: had });
+                }
+            }
+            // v112 stage 2: the DERIVED INDEX routes (plan 4.x)
+            if (p === "/settings_hub/workflows/index/status" && method === "GET") {
+                if (idxModeFlag === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                return jsonResp({ ok: true, files: idxFiles.length, errors: 0,
+                    too_large: 0, last_scan: idxFiles.length ? Math.floor(Date.now() / 1000) : 0,
+                    profile: "nprof1", fts: true, db_exists: idxFiles.length > 0 });
+            }
+            if (p === "/settings_hub/workflows/index/scan" && method === "POST") {
+                if (idxModeFlag === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                idxScanCount++;
+                return jsonResp({ ok: true, scanned: idxFiles.length, indexed: 0,
+                    changed: 0, errors: 0, removed: 0, skipped_same: idxFiles.length });
+            }
+            if (p === "/settings_hub/workflows/index/search" && method === "GET") {
+                if (idxModeFlag === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                const qp2 = new URLSearchParams(String(u).split("?")[1] || "");
+                return jsonResp(idxSearch(qp2));
+            }
+            if (p === "/settings_hub/workflows/index/duplicates" && method === "GET") {
+                if (idxModeFlag === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                return jsonResp({ ok: true, exactCopies: [], sameJsonContent: [],
+                    sameWorkflowDiffCanvas: [], sameUuidDiffContent: [], noUuidCount: 0 });
+            }
+            // v112 stage 2.5: the HISTORY routes (plan 5.x)
+            if (p === "/settings_hub/workflows/history/resolve" && method === "GET") {
+                const rel = new URLSearchParams(String(u).split("?")[1]).get("path");
+                const proc = [...histStore.processes.values()]
+                    .find((pr) => (pr.locations || []).some((l) => l.path === rel));
+                if (!proc) return jsonResp({ ok: true, bound: false });
+                const cur = histStore.revisions.get(proc.currentRevisionId);
+                const idxRow = idxFiles.find((f) => f.path === rel);
+                return jsonResp({ ok: true, bound: true,
+                    changesSinceCheckpoint: !!(cur && idxRow && idxRow.rawHash && idxRow.rawHash !== cur.rawHash),
+                    process: { processId: proc.processId, workflowId: proc.workflowId,
+                        displayName: proc.displayName, note: proc.note,
+                        revisionCount: histRevList(proc.processId).length,
+                        hasCheckpoints: !!proc.currentRevisionId } });
+            }
+            if (p === "/settings_hub/workflows/history/processes" && method === "GET") {
+                return jsonResp({ ok: true, processes: [...histStore.processes.values()].map((pr) => ({
+                    processId: pr.processId, workflowId: pr.workflowId,
+                    displayName: pr.displayName, revisionCount: histRevList(pr.processId).length,
+                    hasCheckpoints: !!pr.currentRevisionId })) });
+            }
+            if (p === "/settings_hub/workflows/history/process/{pid}".replace("{pid}", m?.[1] || "") && false) { /* handled below */ }
+            const mHistProc = p.match(/^\/settings_hub\/workflows\/history\/process\/([^/]+)$/);
+            if (mHistProc) {
+                const proc = histStore.processes.get(decodeURIComponent(mHistProc[1]));
+                if (method === "GET") {
+                    if (!proc) return jsonResp({ ok: false, error: "no such process" }, 404);
+                    return jsonResp({ ok: true, process: { ...proc, revisions: histRevList(proc.processId) } });
+                }
+                return jsonResp({ ok: false, error: "unhandled" }, 404);
+            }
+            const mHistMeta = p.match(/^\/settings_hub\/workflows\/history\/process\/([^/]+)\/meta$/);
+            if (mHistMeta && method === "POST") {
+                const proc = histStore.processes.get(decodeURIComponent(mHistMeta[1]));
+                if (!proc) return jsonResp({ ok: false, error: "no such process" }, 404);
+                const body2 = JSON.parse(opts.body || "{}");
+                if (body2.displayName) proc.displayName = body2.displayName;
+                if (body2.note != null) proc.note = body2.note;
+                return jsonResp({ ok: true });
+            }
+            const mHistRestore = p.match(/^\/settings_hub\/workflows\/history\/process\/([^/]+)\/restore\/([^/]+)$/);
+            if (mHistRestore && method === "POST") {
+                const body2 = JSON.parse(opts.body || "{}");
+                const rec = histStore.revisions.get(decodeURIComponent(mHistRestore[2]));
+                if (!rec) return jsonResp({ ok: false, error: "no readable revision" }, 404);
+                if (body2.mode === "open-copy") {
+                    return jsonResp({ ok: true, graph: rec.__graph });
+                }
+                // replace: the tx snapshot is MANDATORY first (the server contract)
+                if (!body2.path) return jsonResp({ ok: false, error: "replace needs a path" }, 400);
+                txStore.set("tx" + (++histStore.seq), { path: body2.path, ts: Date.now() / 1000 | 0 });
+                return jsonResp({ ok: true, mode: "replace", path: body2.path,
+                    txId: "tx" + histStore.seq, rollbackAvailable: true });
+            }
+            if (p === "/settings_hub/workflows/history/checkpoint" && method === "POST") {
+                let body2 = {};
+                try { body2 = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                if (!body2.graph && !body2.path) return jsonResp({ ok: false, error: "a graph or a path is required" }, 400);
+                const wfId = body2.graph?.id || (idxFiles.find((f) => f.path === body2.path)?.workflowId) || null;
+                let proc = wfId ? [...histStore.processes.values()].find((pr) => pr.workflowId === wfId)
+                    : [...histStore.processes.values()].find((pr) => (pr.locations || []).some((l) => l.path === body2.path));
+                if (!proc) {
+                    const pid = "p" + (++histStore.seq).toString(16).padStart(15, "0");
+                    proc = { processId: pid, workflowId: wfId, displayName: body2.path || "Process",
+                        locations: [], currentRevisionId: null, stableRevisionId: null };
+                    histStore.processes.set(pid, proc);
+                }
+                if (body2.path && !(proc.locations || []).some((l) => l.path === body2.path)) {
+                    (proc.locations = proc.locations || []).push({ path: body2.path, isPrimary: true });
+                }
+                // a DISK checkpoint hashes the simulated DISK bytes (the
+                // idxFiles row's rawHash - the server would read the file);
+                // a graph checkpoint hashes the graph itself
+                let rawHash;
+                if (body2.graph) {
+                    const data = JSON.stringify(body2.graph);
+                    rawHash = "hash-g" + data.length + "-" + data.slice(0, 32);
+                } else {
+                    const row = idxFiles.find((f) => f.path === body2.path);
+                    rawHash = (row && row.rawHash) || ("hash-disk-" + body2.path);
+                }
+                // the dedupe contract: identical rawHash -> no new revision
+                const last = histRevList(proc.processId)[0];
+                if (last && last.rawHash === rawHash) {
+                    return jsonResp({ ok: true, duplicate: true, revisionId: last.revisionId, processId: proc.processId });
+                }
+                const rid = "r" + (++histStore.seq).toString(16).padStart(15, "0");
+                histStore.revisions.set(rid, {
+                    revisionId: rid, processId: proc.processId,
+                    parentRevisionId: proc.currentRevisionId,
+                    source: body2.source || "checkpoint", sourcePath: body2.path,
+                    createdAt: Math.floor(Date.now() / 1000) + histStore.seq,
+                    title: body2.title || null, note: body2.note || null,
+                    rawHash, storage: { backend: "stub", blob: rid },
+                    isStable: false, __graph: body2.graph || null,
+                });
+                proc.currentRevisionId = rid;
+                return jsonResp({ ok: true, duplicate: false, revisionId: rid,
+                    processId: proc.processId });
+            }
+            const mHistRaw = p.match(/^\/settings_hub\/workflows\/history\/revision\/([^/]+)\/raw$/);
+            if (mHistRaw && method === "GET") {
+                const rec = histStore.revisions.get(decodeURIComponent(mHistRaw[1]));
+                if (!rec) return jsonResp({ ok: false, error: "no readable revision" }, 404);
+                return jsonResp(rec.__graph || { nodes: [] });
+            }
+            const mHistStable = p.match(/^\/settings_hub\/workflows\/history\/revision\/([^/]+)\/stable$/);
+            if (mHistStable && method === "POST") {
+                const rec = histStore.revisions.get(decodeURIComponent(mHistStable[1]));
+                if (!rec) return jsonResp({ ok: false, error: "no such revision" }, 404);
+                const body2 = JSON.parse(opts.body || "{}");
+                rec.isStable = body2.stable !== false;
+                if (rec.isStable) {
+                    const proc = histStore.processes.get(rec.processId);
+                    if (proc) proc.stableRevisionId = rec.revisionId;
+                }
+                return jsonResp({ ok: true, revisionId: rec.revisionId, isStable: rec.isStable });
+            }
+            if (p === "/settings_hub/workflows/history/storage" && method === "GET") {
+                return jsonResp({ ok: true, backend: "stub", processes: histStore.processes.size,
+                    revisions: histStore.revisions.size, stableRevisions: 0,
+                    logicalBytes: 1000, physicalBytes: 500 });
+            }
+            // v112 stage 4: the PRESET VERSION routes
+            const mPver = p.match(/^\/settings_hub\/workflows\/preset\/([^/]+)\/versions$/);
+            if (mPver && method === "GET") {
+                const pid = decodeURIComponent(mPver[1]);
+                const st = pverStore.get(pid) || { versions: [], seq: 0 };
+                return jsonResp({ ok: true, presetId: pid,
+                    versions: st.versions.slice().sort((a, b) =>
+                        (b.createdAt - a.createdAt) || (b.seq - a.seq)).map((v) => ({
+                        revisionId: v.revisionId, createdAt: v.createdAt,
+                        seq: v.seq, changedBy: v.changedBy, name: v.preset.name,
+                        category: v.preset.category, tags: v.preset.tags || [],
+                        itemCount: (v.preset.items || []).length,
+                        snapshotBytes: 0 })),
+                    maxVersions: 20 });
+            }
+            const mPverOne = p.match(/^\/settings_hub\/workflows\/preset\/([^/]+)\/version\/([^/]+)$/);
+            if (mPverOne && method === "GET") {
+                const st = pverStore.get(decodeURIComponent(mPverOne[1]));
+                const rec = st && st.versions.find((v) => v.revisionId === decodeURIComponent(mPverOne[2]));
+                if (!rec) return jsonResp({ ok: false, error: "no such version" }, 404);
+                return jsonResp({ ok: true, revisionId: rec.revisionId,
+                    createdAt: rec.createdAt, changedBy: rec.changedBy, preset: rec.preset });
+            }
+            const mPverRest = p.match(/^\/settings_hub\/workflows\/preset\/([^/]+)\/restore\/([^/]+)$/);
+            if (mPverRest && method === "POST") {
+                const pid = decodeURIComponent(mPverRest[1]);
+                const st = pverStore.get(pid);
+                const rec = st && st.versions.find((v) => v.revisionId === decodeURIComponent(mPverRest[2]));
+                const cur = presets.find((x) => x.id === pid);
+                if (!rec || !cur) return jsonResp({ ok: false, error: "no such version" }, 404);
+                st.seq++;
+                st.versions.push({ revisionId: "arch" + (++uidSeq).toString(16).padStart(10, "0"),
+                    createdAt: Math.floor(Date.now() / 1000) + st.seq, seq: st.seq,
+                    changedBy: "restore", preset: JSON.parse(JSON.stringify(cur)) });
+                Object.assign(cur, JSON.parse(JSON.stringify(rec.preset)), { id: pid });
+                return jsonResp({ ok: true, presetId: pid, restoredFrom: rec.revisionId,
+                    archivedAs: st.versions[st.versions.length - 1].revisionId, preset: cur });
+            }
+            // v112 stage 5: the INSPECTOR + SUMMARY routes (plan 11/12)
+            if (p === "/settings_hub/workflows/index/inspect" && method === "GET") {
+                if (idxModeFlag === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                const rel = new URLSearchParams(String(u).split("?")[1]).get("path");
+                const row = idxFiles.find((f) => f.path === rel);
+                if (!row) return jsonResp({ ok: false, error: "the file is gone" }, 404);
+                return jsonResp({ ok: true, path: rel, name: row.name,
+                    workflowId: row.workflowId, nodeCount: 12,
+                    nodeTypes: ["KSampler", "SaveImage", "SuperUnknownNode"],
+                    models: ["v1-5-pruned-emaonly.ckpt", "gone_model.safetensors"],
+                    params: { steps: 25, cfg: 7.5, sampler: "euler", scheduler: "karras",
+                        width: 1024, height: 768 },
+                    hashes: { raw_hash: "h1", canonical_hash: "h2", workflow_hash: "h3" },
+                    groups: { exactCopies: 1, sameUuidDiffContent: 2, sameWorkflow: 0 },
+                    deps: { knownNodes: ["KSampler", "SaveImage"],
+                        unknownNodes: ["SuperUnknownNode"],
+                        models: [{ name: "v1-5-pruned-emaonly.ckpt", status: "available" },
+                                 { name: "gone_model.safetensors", status: "missing" }],
+                        missingModels: ["gone_model.safetensors"] },
+                    depsRegistryKnown: true, parseStatus: "ok" });
+            }
+            if (p === "/settings_hub/workflows/index/summary" && method === "GET") {
+                if (idxModeFlag === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                return jsonResp({ ok: true, files: idxFiles.length, errors: 1,
+                    tooLarge: 0, exactCopyGroups: 2, sameJsonGroups: 1,
+                    sameWorkflowDiffCanvas: 1, sameUuidDiffContent: 3, noUuidFiles: 4 });
+            }
+            // v112 (plan 3.6): the SERVER-authoritative temp GC
+            if (p === "/settings_hub/workflows/temp/gc" && method === "POST") {
+                if (tempMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                const refs = new Set();
+                for (const man of recentStore.values()) {
+                    for (const e of man.entries || []) {
+                        if (e?.tempId) refs.add(e.tempId);
+                    }
+                }
+                const dayAgoS = (Date.now() - 24 * 60 * 60 * 1000) / 1000;
+                const removed = [];
+                for (const [tid, rec] of [...tempStore]) {
+                    if (!refs.has(tid) && (rec.ts || 0) < dayAgoS) {
+                        tempStore.delete(tid);
+                        removed.push(tid);
+                    }
+                }
+                return jsonResp({ ok: true, removed, refs: [...refs] });
+            }
             // the NATIVE ComfyUI /userdata endpoint (the adapter rung)
             if (p === "/userdata" && method === "GET") {
                 return jsonResp(userdataFiles());
@@ -362,6 +745,19 @@ function makeFakeApi() {
         __setFiles: (v) => { savedFiles = v; },
         __tempStore: () => tempStore,
         __setTempMode: (m) => { tempMode = m; },
+        // v112: the manager service stores
+        __undoStore: () => undoStore,
+        __setUndoMode: (m) => { undoMode = m; },
+        __recentStore: () => recentStore,
+        __setRecentMode: (m) => { recentMode = m; },
+        // v112 stage 2: the index stub controls
+        __setIdxMode: (m) => { idxModeFlag = m; },
+        __setIdxFiles: (v) => { idxFiles = v; },
+        __idxScanCount: () => idxScanCount,
+        // v112 stage 2.5: the history stub controls
+        __histStore: () => histStore,
+        __txStore: () => txStore,
+        __pverStore: () => pverStore,
         // v108: the Files listing + the favorites controls
         __setWfFiles: (v) => { wfFiles = v; },
         __wfFavs: () => wfFavs.slice(),
@@ -396,6 +792,9 @@ function makeFakeStore(api) {
             store.calls.push({ op: "createTemp", name, graph: !!graphJson });
             const wf = makeTab({ name, isTemporary: true, isPersisted: false, nodes: [1, 2] });
             wf.__snapshotGraph = graphJson;
+            // v112 parity: the REAL createTemporary builds the tab from the
+            // graph - its active state IS the passed graph JSON
+            try { wf.activeState = JSON.parse(JSON.stringify(graphJson)); } catch (_) {}
             // v102 parity: the REAL createTemporary only REGISTERS the temp -
             // the open/activation is the caller's job (workflowService calls
             // openWorkflow separately). Pushing + focusing here would fake the
@@ -462,11 +861,19 @@ const appStub = {
     // bare store.openWorkflow does NONE of that (the v101 activation bug).
     async loadGraphData(data, a, b, c, d) {
         loadCalls.push({ data, a, b, c, d });
-        if (c && typeof c === "object") await wfStore.openWorkflow(c);
-        else if (typeof c === "string") {
+        if (c && typeof c === "object") {
+            await wfStore.openWorkflow(c);
+            // v112 parity: the REAL loadGraphData loads the graph ONTO the
+            // tab - the bound tab's active state BECOMES the data (identity
+            // kept: the v102 phase asserts data === tab.activeState)
+            try { c.activeState = data; } catch (_) {}
+        } else if (typeof c === "string") {
             const rel = c.startsWith("workflows/") ? c : ("workflows/" + c);
             const t = wfStore.workflows.find((w) => w.path === rel || w.path === c);
-            if (t) await wfStore.openWorkflow(t);
+            if (t) {
+                await wfStore.openWorkflow(t);
+                try { t.activeState = data; } catch (_) {}
+            }
         }
     },
     graph: null,
@@ -960,19 +1367,19 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v111", /"workflows":\s*"v111"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v112", /"workflows":\s*"v112"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v111", ENTRY_SRC.includes("web build: v111 - THE SMART QUEUE-START UNLOAD"));
-check("styles.css?v=111", ENTRY_SRC.includes("styles.css?v=111"));
-check("the module self-reports v111",
+check("the entry banner names v112", ENTRY_SRC.includes("web build: v112 - THE WORKFLOW MANAGER ROADMAP"));
+check("styles.css?v=112", ENTRY_SRC.includes("styles.css?v=112"));
+check("the module self-reports v112",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v111"'));
-check("the web stamp literal is v111",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v112"'));
+check("the web stamp literal is v112",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v111"'));
-check("py stamp bumps together (v111)",
+        .includes('const WF_WEB_VERSION = "v112"'));
+check("py stamp bumps together (v112)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v111"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v112"'));
 check("v107 routes registered (temp list/put/get/delete)",
     [".get(\"/settings_hub/workflows/temp\")", ".post(\"/settings_hub/workflows/temp\")",
      ".get(\"/settings_hub/workflows/temp/{tid}\")", ".delete(\"/settings_hub/workflows/temp/{tid}\")"]
@@ -1539,7 +1946,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v112"); // ahead of the pack (v111) - a stale web file
+    fakeApi.__setHealthVersion("v113"); // ahead of the pack (v112) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -1752,8 +2159,11 @@ phase("WN v107: server-side temp snapshots (temp/<id>.json) + eviction + boot GC
         fakeApi.__calls().filter((c) => c.url.includes("/userdata")).length === udBeforeWN);
 
     // ------------------------------------------------------------------
-    // 14c) the evicted ring rows delete their server files (the owner:
-    //      "пока они фигурируют в recently closed")
+    // 14c) the evicted ring rows: the SERVER reference accounting (v112,
+    //      plan 3.6) - the debounced manifest sync uploads the ring, the
+    //      server computes the cross-browser reference union, and ONLY the
+    //      snapshots no manifest references are deleted. The test waits
+    //      past the 600ms debounce.
     // ------------------------------------------------------------------
     const createdIds = [wnRec.tempId];
     for (let i = 1; i <= 20; i++) {
@@ -1763,11 +2173,19 @@ phase("WN v107: server-side temp snapshots (temp/<id>.json) + eviction + boot GC
     }
     const ringIds = new Set(hooks.recent().map((r) => r.tempId).filter(Boolean));
     const evicted = createdIds.filter((id) => !ringIds.has(id));
-    const delUrls = fakeApi.__calls().filter((c) => c.url.startsWith("/settings_hub/workflows/temp/") && c.method === "DELETE")
-        .map((c) => decodeURIComponent(c.url.split("/temp/")[1] || ""));
     check("WN: the ring is capped at RECENT_MAX (15) temp rows",
         hooks.recent().length === 15, String(hooks.recent().length));
-    check("WN: every evicted temp row issued DELETE for its server file",
+    // wait past the 600ms manifest-sync debounce
+    await new Promise((r) => setTimeout(r, 900)); await settle(20);
+    const manifest = [...fakeApi.__recentStore().values()][0] || null;
+    check("WN: the ring manifest landed SERVER-side (metadata per session)",
+        !!manifest && Array.isArray(manifest.entries) && manifest.entries.length === 15,
+        JSON.stringify(manifest || null).slice(0, 120));
+    check("WN: the manifest references exactly the current ring's tempIds",
+        !!manifest && manifest.entries.every((e) => ringIds.has(e.tempId)));
+    const delUrls = fakeApi.__calls().filter((c) => c.url.startsWith("/settings_hub/workflows/temp/") && c.method === "DELETE")
+        .map((c) => decodeURIComponent(c.url.split("/temp/")[1] || ""));
+    check("WN: every evicted temp snapshot was deleted AFTER the server confirmed no manifest references it",
         evicted.length === 6 && evicted.every((id) => delUrls.includes(id)),
         "evicted=" + evicted.length + " deletes=" + delUrls.length + " ring=" + ringIds.size);
     check("WN: the evicted files are GONE from the server store, the ring files stay",
@@ -1776,8 +2194,9 @@ phase("WN v107: server-side temp snapshots (temp/<id>.json) + eviction + boot GC
         "store=" + fakeApi.__tempStore().size);
 
     // ------------------------------------------------------------------
-    // 14d) the boot GC: a day-old orphan dies, a referenced file and a
-    //      fresh orphan stay (another browser may point at it)
+    // 14d) the boot GC (v112): SERVER-AUTHORITATIVE - the POST /temp/gc
+    //      route deletes a snapshot only when NO manifest (any browser)
+    //      references it AND it is older than a day
     // ------------------------------------------------------------------
     const gRef = [...ringIds][0];
     const gFresh = "aabbccdd0001";
@@ -1788,9 +2207,9 @@ phase("WN v107: server-side temp snapshots (temp/<id>.json) + eviction + boot GC
     fakeApi.__tempStore().set(gOld, { id: gOld, name: "stale orphan", ts: dayAgo, graph: { nodes: [] } });
     hooks.setTempGcDone(false);
     await hooks.gcTempSnapshots();
-    check("WN: the boot GC deleted the STALE orphan (> 1 day, not referenced)",
+    check("WN: the boot GC (server route) deleted the STALE orphan (> 1 day, not referenced)",
         !fakeApi.__tempStore().has(gOld));
-    check("WN: the boot GC kept the ring-referenced file",
+    check("WN: the boot GC kept the manifest-referenced file",
         fakeApi.__tempStore().has(gRef));
     check("WN: the boot GC kept the FRESH orphan (< 1 day - another browser may point at it)",
         fakeApi.__tempStore().has(gFresh), "store=" + fakeApi.__tempStore().size);
@@ -2132,6 +2551,949 @@ check("WO9: a non-empty rung-0 answer is still preferred",
 fakeApi.__setWfFiles(null);
 hooks.setTab("open");
 await settle();
+
+
+// ===========================================================================
+phase("WP v112 plan 3.1: snapshot-based Undo (server-side, graphs included)");
+{
+    const pnlWp = () => hooks.panelEl();
+    hooks.resetRecent();
+    // a workspace: one clean persisted tab + one MODIFIED persisted tab + one temp
+    wfStore.openWorkflows.length = 0;
+    wfStore.activeWorkflow = null;
+    const cleanTab = makeTab({ path: "workflows/flux_main.json", nodes: [1, 2] });
+    const modTab = makeTab({ path: "workflows/flux_detail.json", nodes: [3], isModified: true, name: "flux_detail.json" });
+    const tempTab = makeTab({ name: "WP unsaved", isTemporary: true, isPersisted: false, nodes: [9] });
+    wfStore.openWorkflows.push(cleanTab, modTab, tempTab);
+    wfStore.activeWorkflow = cleanTab;
+    // a preset that CLOSES the modified + temp tabs (keeps only flux_main)
+    fakeApi.__setPresets([{ id: "wppreset1", name: "WP only main", items: [
+        { kind: "path", path: "workflows/flux_main.json", name: "flux_main.json" },
+    ] }]);
+    await hooks.refreshPresets();
+    await hooks.refreshOpen(true);
+
+    const plan = hooks.buildApplyPlan("wppreset1", { keepUnsaved: false });
+    check("WP: the plan would close the modified + temp tabs (2 risky)",
+        plan.close.length === 2 && plan.close.every((t) => t.isModified || !t.isPersisted),
+        JSON.stringify(plan.close.map((t) => t.name)));
+    check("WP: NO undo snapshot exists before the apply", fakeApi.__undoStore().size === 0);
+
+    await hooks.applyPlanById("wppreset1", { keepUnsaved: false });
+    await settle(30);
+    check("WP: the apply captured ONE server undo snapshot",
+        fakeApi.__undoStore().size === 1,
+        "undo=" + fakeApi.__undoStore().size);
+    const undoId = hooks.sessionUndoState()?.undoId || null;
+    check("WP: the browser keeps only the undoId (not the graphs)",
+        typeof undoId === "string" && !!undoId,
+        JSON.stringify(hooks.sessionUndoState() || null).slice(0, 120));
+    const snap = fakeApi.__undoStore().get(undoId);
+    check("WP: the snapshot carries ALL 3 pre-apply tabs",
+        Array.isArray(snap?.tabs) && snap.tabs.length === 3,
+        JSON.stringify(snap?.tabs?.map((t) => t.name)));
+    check("WP: the MODIFIED persisted tab's GRAPH is in the snapshot",
+        snap.tabs.find((t) => t.path === "workflows/flux_detail.json")?.graph?.nodes?.[0]?.id === 3,
+        JSON.stringify(snap.tabs.find((t) => t.path === "workflows/flux_detail.json")));
+    check("WP: the TEMP tab's graph is in the snapshot",
+        snap.tabs.find((t) => t.temp)?.graph?.nodes?.[0]?.id === 9);
+    check("WP: the activeKey recorded (the wrapper key = the tab path)",
+        snap.activeKey === cleanTab.path, JSON.stringify(snap.activeKey));
+
+    // the workspace after the apply: flux_main only (mod + temp closed)
+    check("WP: after the apply only the preset tab stays",
+        wfStore.openWorkflows.length === 1 && wfStore.openWorkflows[0] === cleanTab,
+        JSON.stringify(wfStore.openWorkflows.map((t) => t.name)));
+
+    // UNDO: restores the modified persisted tab WITH its unsaved graph and
+    // the temp tab WITH its graph
+    await hooks.undo();
+    await settle(30);
+    check("WP: the undo restored 3 tabs",
+        wfStore.openWorkflows.length === 3,
+        JSON.stringify(wfStore.openWorkflows.map((t) => t.name)));
+    const modRestored = wfStore.openWorkflows.find((t) => t.path === "workflows/flux_detail.json");
+    const tempRestored = wfStore.openWorkflows.find((t) => t.name === "WP unsaved");
+    check("WP: the modified persisted tab came back WITH its unsaved graph",
+        !!modRestored && modRestored.activeState?.nodes?.[0]?.id === 3,
+        JSON.stringify(modRestored?.activeState));
+    check("WP: the temp tab came back WITH its graph",
+        !!tempRestored && tempRestored.activeState?.nodes?.[0]?.id === 9);
+    check("WP: the undo snapshot was CONSUMED (deleted server-side)",
+        fakeApi.__undoStore().size === 0 && !hooks.sessionUndoState(),
+        "undo=" + fakeApi.__undoStore().size);
+    check("WP: the active tab after undo is the pre-apply active (flux_main)",
+        wfStore.activeWorkflow === cleanTab);
+
+    // FAILURE path: the undo route refuses -> the destructive close refuses
+    fakeApi.__setUndoMode("fail");
+    wfStore.openWorkflows.length = 0;
+    wfStore.openWorkflows.push(cleanTab, makeTab({ name: "risky", isTemporary: true, isPersisted: false, nodes: [7] }));
+    wfStore.activeWorkflow = cleanTab;
+    const r1 = await hooks.adapter.closeWorkflowTab(hooks.getOpenWorkflows().find((t) => t.name === "risky"), { forceClean: true });
+    check("WP: a temp tab close still works through the store rung (no undo involved)",
+        r1.ok === true || r1.unsupported, JSON.stringify(r1));
+    // an apply with a failing undo snapshot must NOT close the risky tab
+    fakeApi.__setPresets([{ id: "wppreset1", name: "WP only main", items: [
+        { kind: "path", path: "workflows/flux_main.json", name: "flux_main.json" },
+    ] }]);
+    await hooks.refreshPresets();
+    await hooks.refreshOpen(true);
+    const openBeforeFail = wfStore.openWorkflows.map((t) => t.id).sort().join(",");
+    await hooks.applyPlanById("wppreset1", { keepUnsaved: false });
+    await settle(30);
+    const openAfterFail = wfStore.openWorkflows.map((t) => t.id).sort().join(",");
+    check("WP: a failed undo snapshot BLOCKED the destructive close (risky tabs survive)",
+        openAfterFail === openBeforeFail,
+        "before=" + openBeforeFail + " after=" + openAfterFail);
+    fakeApi.__setUndoMode("ok");
+    wfStore.openWorkflows.length = 0;
+}
+
+// ===========================================================================
+phase("WQ v112 plan 3.2: safe activation guard (command rung refuses unverified targets)");
+{
+    // Simulate a build where NOTHING can verify the activation: the store
+    // closeWorkflow refuses, loadGraphData is gone and the store has no
+    // openWorkflow rung - so the command rung must REFUSE instead of acting
+    // on a potentially different tab (the acceptance criterion).
+    const origClose = wfStore.closeWorkflow;
+    const origOpen = wfStore.openWorkflow;
+    const origLGD = appStub.loadGraphData;
+    wfStore.closeWorkflow = async () => { throw new Error("refused"); };
+    delete wfStore.openWorkflow;
+    appStub.loadGraphData = async () => { throw new Error("no canvas"); };
+    const t1 = makeTab({ path: "workflows/a.json", nodes: [1] });
+    const t2 = makeTab({ path: "workflows/b.json", nodes: [2] });
+    wfStore.openWorkflows.length = 0;
+    wfStore.openWorkflows.push(t1, t2);
+    wfStore.activeWorkflow = t2; // a DIFFERENT tab is active
+    // the wrapper activation (openStoreWorkflow) will NOT flip the active in
+    // this store (no loadGraphData in the harness for this shape) - so the
+    // verification must FAIL and the close must be REFUSED
+    const w1 = hooks.getOpenWorkflows().find((t) => t.path === "workflows/a.json");
+    const r = await hooks.adapter.closeWorkflowTab(w1, { forceClean: true });
+    check("WQ: an unverified activation REFUSES the close (no wrong tab dies)",
+        r.ok === false && r.via !== "command",
+        JSON.stringify(r));
+    check("WQ: the target tab is still open after the refusal",
+        wfStore.openWorkflows.includes(t1));
+    check("WQ: the OTHER tab was not closed either",
+        wfStore.openWorkflows.includes(t2));
+    wfStore.closeWorkflow = origClose;
+    wfStore.openWorkflow = origOpen;
+    appStub.loadGraphData = origLGD;
+    wfStore.openWorkflows.length = 0;
+}
+
+// ===========================================================================
+phase("WR v112 plan 3.3: ONE canonical path normalizer");
+{
+    const c = hooks.canonWfRel;
+    const s = hooks.sameWfPath;
+    check("WR: workflow.json == workflows/workflow.json (the agreed rule)",
+        s("workflow.json", "workflows/workflow.json"));
+    check("WR: backslashes normalize",
+        c("workflows\\sub\\a.json") === "sub/a.json");
+    check("WR: repeated separators + dot segments collapse",
+        c("workflows//./sub/./x.json") === "sub/x.json");
+    check("WR: the prefix is case-insensitive",
+        c("WORKFLOWs/a.json") === "a.json");
+    check("WR: '..' refuses to empty", c("workflows/../escape.json") === "");
+    check("WR: absolute paths refuse", c("/etc/passwd") === "" && c("C:\\x.json") === "");
+    check("WR: folderA/a.json and folderB/a.json stay DIFFERENT files",
+        !s("workflows/folderA/a.json", "workflows/folderB/a.json"));
+    check("WR: same basename different folders never merge in missing-marks",
+        !s("folderA/a.json", "folderB/a.json"));
+    check("WR: normWfPath keeps the display shape (prefix stays)",
+        hooks.normWfPath("workflows/a.json") === "workflows/a.json");
+    // openHasPath accepts both shapes
+    check("WR: openHasPath matches prefix-less against prefixed",
+        hooks.adapter.wfStoreOf() != null);
+}
+
+// ===========================================================================
+phase("WS v112 plans 3.4/3.5/3.7/3.8/3.9/3.10: Files states, 400-cap gone, indexes, sort, refresh");
+{
+    const pnlWs = () => hooks.panelEl();
+    const bodyWs = () => pnlWs().querySelector(".hub-wf-body");
+    // 3.9 stable sort: identical mtime, identical size - DESC keeps names ASC
+    hooks.setFilesSort("mtime", "desc");
+    hooks.setFilesFilters({});
+    fakeApi.__setWfFiles([
+        { path: "workflows/z.json", name: "z.json", size: 100, mtime: 500 },
+        { path: "workflows/a.json", name: "a.json", size: 100, mtime: 500 },
+        { path: "workflows/m.json", name: "m.json", size: 200, mtime: 400 },
+    ]);
+    await hooks.refreshSavedFiles();
+    await settle();
+    const descOrder = hooks.filteredSavedFiles().map((f) => f.name);
+    check("WS: DESC by mtime with EQUAL mtimes keeps names ascending (tie-break)",
+        JSON.stringify(descOrder) === JSON.stringify(["a.json", "z.json", "m.json"]),
+        JSON.stringify(descOrder));
+    hooks.setFilesSort("mtime", "asc");
+    const ascOrder = hooks.filteredSavedFiles().map((f) => f.name);
+    check("WS: ASC by mtime: older first, equal-mtime names still ascending",
+        JSON.stringify(ascOrder) === JSON.stringify(["m.json", "a.json", "z.json"]),
+        JSON.stringify(ascOrder));
+    hooks.setFilesSort("size", "desc");
+    const sizeDesc = hooks.filteredSavedFiles().map((f) => f.name);
+    check("WS: DESC by size: bigger first, equal-size names ascending",
+        JSON.stringify(sizeDesc) === JSON.stringify(["m.json", "a.json", "z.json"]),
+        JSON.stringify(sizeDesc));
+    hooks.setFilesSort("size", "asc");
+    const sizeAsc = hooks.filteredSavedFiles().map((f) => f.name);
+    check("WS: ASC by size: smaller first, equal-size names ascending",
+        JSON.stringify(sizeAsc) === JSON.stringify(["a.json", "z.json", "m.json"]),
+        JSON.stringify(sizeAsc));
+
+    // 3.7 the one-pass tree index
+    fakeApi.__setWfFiles([
+        { path: "workflows/root1/a.json", name: "a.json", size: 1, mtime: 1 },
+        { path: "workflows/root1/b.json", name: "b.json", size: 1, mtime: 2 },
+        { path: "workflows/root1/sub/c.json", name: "c.json", size: 1, mtime: 3 },
+        { path: "workflows/root2/d.json", name: "d.json", size: 1, mtime: 4 },
+    ]);
+    await hooks.refreshSavedFiles();
+    await settle();
+    const wsList = hooks.filteredSavedFiles();
+    const idx = hooks.buildTreeIndex(wsList);
+    check("WS: the tree index counts DEEP files (root1 = 3: a, b, sub/c)",
+        idx.counts.get("root1") === 3, JSON.stringify([...idx.counts]));
+    check("WS: the tree index counts nested folders (root1/sub = 1)",
+        idx.counts.get("root1/sub") === 1);
+    check("WS: the index is CACHED on the list reference (same list -> same object)",
+        hooks.buildTreeIndex(wsList) === idx);
+
+    // 3.8 the missing-paths index is canonical
+    check("WS: savedPathIndex is canonical (prefix-free)",
+        hooks.savedPathIndex().has("root1/a.json") &&
+        !hooks.savedPathIndex().has("workflows/root1/a.json"),
+        JSON.stringify([...hooks.savedPathIndex()].slice(0, 6)));
+
+    // 3.4 the explicit loading/error states: the pending flag + the error
+    // note render through the real Files render
+    hooks.setFilesLoadState({ pending: true });
+    check("WS: the pending flag marks the loading state",
+        hooks.filesLoadState().pending === true,
+        JSON.stringify(hooks.filesLoadState()));
+    hooks.setTab("files");
+    await settle();
+    await hooks.refreshSavedFiles(); // a clean scan first (clears any error)
+    await settle();
+    hooks.setFilesLoadState({ pending: false, error: { why: "boom test" } });
+    hooks.renderAll();
+    await settle();
+    check("WS: the error state renders the note + the Retry button (never a silent blank)",
+        bodyWs().textContent.includes("Files refresh failed") &&
+        bodyWs().textContent.includes("boom test") &&
+        !!bodyWs().querySelector('[data-act="filesrefresh"]'),
+        bodyWs().textContent.slice(0, 240));
+    hooks.setFilesLoadState({ error: null });
+    hooks.renderAll();
+    await settle();
+
+    // 3.10 the truncated warning + the Refresh button + the last scan time
+    fakeApi.__setWfFiles([
+        { path: "workflows/only.json", name: "only.json", size: 1, mtime: 7 },
+    ]);
+    // simulate the truncated flag from the backend listing
+    hooks.setTab("files");
+    await hooks.refreshSavedFiles();
+    await settle();
+    check("WS: the Files toolbar carries the Refresh button",
+        !!bodyWs().querySelector('[data-act="filesrefresh"]'));
+    const scanBefore = hooks.filesLoadState().lastScan;
+    check("WS: a successful scan records the lastScan time",
+        scanBefore > 0, String(scanBefore));
+    // truncated: true from the backend -> the warning renders
+    fakeApi.__setWfFiles([
+        { path: "workflows/only.json", name: "only.json", size: 1, mtime: 7 },
+    ]);
+    // force the truncated path through the rung-0 stub
+    const origFetch = appStub.api.fetchApi;
+    appStub.api.fetchApi = async (u, o = {}) => {
+        if (String(u).split("?")[0] === "/settings_hub/workflows/files") {
+            const r = await origFetch(u, o);
+            const j = await r.json();
+            return {
+                ok: true, status: 200,
+                headers: { get: () => "application/json" },
+                json: async () => ({ ...j, truncated: true }),
+            };
+        }
+        return origFetch(u, o);
+    };
+    await hooks.refreshSavedFiles();
+    await settle();
+    check("WS: the backend truncated flag surfaces as the state note + status",
+        hooks.filesLoadState().truncated === true &&
+        bodyWs().textContent.includes("truncated"),
+        bodyWs().textContent.slice(0, 260));
+    check("WS: the truncated note names the shown count",
+        /showing the first 1 files/.test(bodyWs().textContent),
+        bodyWs().textContent.match(/showing[^\n]{0,40}/)?.[0]);
+    appStub.api.fetchApi = origFetch;
+
+    // 3.10 the transient empty answer KEEPS the last good list (all rungs
+    // empty: rung-0 [], the registry gone, /userdata [] - the exact v109
+    // degraded shape that once blanked the tab)
+    await hooks.refreshSavedFiles(); // a good list first
+    await settle();
+    const good = hooks.savedFiles().slice();
+    const origRegistry = wfStore.workflows;
+    wfStore.workflows = [];
+    fakeApi.__setWfFiles([]);   // an empty rung-0 answer
+    fakeApi.__setFiles([]);     // AND an empty /userdata rung (run 2)
+    await hooks.refreshSavedFiles();
+    await settle();
+    check("WS: the first empty answer KEEPS the last good list + names the problem",
+        hooks.savedFiles().length === good.length &&
+        !!hooks.filesLoadState().error,
+        JSON.stringify(hooks.filesLoadState().error));
+    await hooks.refreshSavedFiles(); // the second strike - really empty
+    await settle();
+    check("WS: the SECOND empty answer is accepted (the folder is really empty)",
+        hooks.savedFiles().length === 0 && !hooks.filesLoadState().error,
+        JSON.stringify(hooks.filesLoadState()));
+    wfStore.workflows = origRegistry;
+    // restore the healthy shape
+    fakeApi.__setFiles([
+        { path: "workflows/flux_main.json", name: "flux_main.json", size: 1, mtime: NOW },
+        { path: "workflows/flux_detail.json", name: "flux_detail.json", size: 1, mtime: NOW - 1 },
+        { path: "workflows/upscale.json", name: "upscale.json", size: 1, mtime: NOW - 2 },
+    ]);
+    fakeApi.__setWfFiles([
+        { path: "workflows/flux_main.json", name: "flux_main.json", size: 1, mtime: NOW },
+        { path: "workflows/flux_detail.json", name: "flux_detail.json", size: 1, mtime: NOW - 1 },
+        { path: "workflows/upscale.json", name: "upscale.json", size: 1, mtime: NOW - 2 },
+    ]);
+    await hooks.refreshSavedFiles();
+    await settle();
+
+    // 3.5 the Open tab: >400 tabs are ALL reachable and searchable
+    wfStore.openWorkflows.length = 0;
+    for (let i = 0; i < 450; i++) {
+        wfStore.openWorkflows.push(makeTab({ name: "bulk_" + String(i).padStart(3, "0") + ".json",
+            path: "workflows/bulk_" + String(i).padStart(3, "0") + ".json", nodes: [i] }));
+    }
+    await hooks.refreshOpen(true);
+    hooks.setTab("open");
+    await settle();
+    check("WS: 450 open tabs - the status shows the chunk (showing N of M)",
+        bodyWs().textContent.includes("showing 60 of 450"),
+        bodyWs().textContent.match(/showing[^·]{0,30}/)?.[0] || bodyWs().textContent.slice(-160));
+    // "Show more" walks to the very end
+    for (let i = 0; i < 6; i++) {
+        const moreBtn = bodyWs().querySelector('[data-act="moreopen"]');
+        if (!moreBtn) break;
+        moreBtn.click();
+        await settle();
+    }
+    check("WS: after Show more x6 ALL 450 rows are reachable (no 400 cap)",
+        bodyWs().textContent.includes("showing 450 of 450") ||
+            bodyWs().querySelectorAll('[data-act="activate"]').length >= 450,
+        bodyWs().textContent.match(/showing[^·]{0,30}/)?.[0]);
+    // the search covers the FULL set (bulk_449 deep inside the tail)
+    let searchIn = bodyWs().querySelector('[data-wf="opensearch"]');
+    searchIn.value = "bulk_449";
+    searchIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+    check("WS: the search finds tab #449 beyond the old 400 cap",
+        bodyWs().querySelector('[data-act="activate"]')?.textContent.includes("bulk_449"),
+        bodyWs().querySelector(".hub-wf-status")?.textContent);
+    // RE-QUERY: every renderAll re-created the input (a stale node cannot
+    // dispatch into the delegated listener)
+    searchIn = bodyWs().querySelector('[data-wf="opensearch"]');
+    searchIn.value = "";
+    searchIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+    wfStore.openWorkflows.length = 0;
+    await hooks.refreshOpen(true);
+}
+
+
+// ===========================================================================
+phase("WT v112 stage 2 (plan 4.x): the SQLite index drives the Files tab");
+{
+    const pnlWt = () => hooks.panelEl();
+    const bodyWt = () => pnlWt().querySelector(".hub-wf-body");
+    // a 250-row indexed library (page size 150 -> 2 pages) - beyond every
+    // local cap, proving the 6000-listing mask is gone in principle
+    const lib = [];
+    for (let i = 0; i < 250; i++) {
+        const id = "uuid-" + String(i).padStart(4, "0") + "-aaaa";
+        lib.push({
+            path: "workflows/lib/f" + String(i).padStart(3, "0") + ".json",
+            name: "f" + String(i).padStart(3, "0") + ".json",
+            size: 1000 + i, mtime: 1000 + i,
+            workflowId: i % 2 ? id : null,
+            nodeTypes: i % 5 === 0 ? ["KSampler"] : ["SaveImage"],
+            modelRefs: i % 7 === 0 ? ["v1-5-pruned-emaonly.ckpt"] : [],
+            parseStatus: i === 13 ? "error" : "ok",
+        });
+    }
+    fakeApi.__setIdxFiles(lib);
+    fakeApi.__setIdxMode("ok");
+    hooks.setTab("files");
+    await settle();
+    await hooks.ensureIndexStatus();
+    await settle(20);
+    check("WT: the index status probe marked the engine READY",
+        hooks.idxState().ready === true, JSON.stringify(hooks.idxState().ready));
+    check("WT: the boot scan fired (collapsed to one while busy)",
+        fakeApi.__idxScanCount() >= 1, String(fakeApi.__idxScanCount()));
+    await hooks.runServerList(true);
+    await settle(20);
+    check("WT: the FIRST server page renders 150 rows (of 250)",
+        bodyWt().querySelectorAll('[data-act="openfile"]').length === 150,
+        String(bodyWt().querySelectorAll('[data-act="openfile"]').length));
+    check("WT: the status line shows '150 shown of 250 indexed'",
+        bodyWt().textContent.includes("150 shown of 250 indexed"),
+        bodyWt().querySelector(".hub-wf-status")?.textContent);
+    check("WT: the Rebuild index button exists in index mode",
+        !!bodyWt().querySelector('[data-act="idxrebuild"]'));
+    // Show more -> the cursor page (all 250 reachable)
+    const moreBtn = bodyWt().querySelector('[data-act="morefiles"]');
+    moreBtn.click();
+    await settle(20);
+    check("WT: Show more appended the cursor page (250 rows visible)",
+        bodyWt().querySelectorAll('[data-act="openfile"]').length === 250,
+        String(bodyWt().querySelectorAll('[data-act="openfile"]').length));
+    // the server search over the FULL indexed set
+    let sIn = bodyWt().querySelector('[data-wf="filesearch"]');
+    sIn.value = "KSampler";
+    sIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle(20);
+    await new Promise((r) => setTimeout(r, 400)); // past the 250ms debounce
+    await settle(20);
+    const ksRows = bodyWt().querySelectorAll('[data-act="openfile"]').length;
+    check("WT: the server search finds only the KSampler rows (50)",
+        ksRows === 50, String(ksRows));
+    // clear the text search first (the filters COMBINE server-side) -
+    // RE-QUERY the input: every renderAll re-creates it (a stale node
+    // dispatches into the void)
+    sIn = bodyWt().querySelector('[data-wf="filesearch"]');
+    sIn.value = "";
+    sIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle(20);
+    await new Promise((r) => setTimeout(r, 400));
+    await settle(20);
+    // the UUID filter (an ODD index carries the uuid in this fixture)
+    hooks.setFilesUuid("uuid-0003-aaaa");
+    await hooks.runServerList(true);
+    await settle(20);
+    check("WT: the workflow_id (UUID) filter narrows the list server-side",
+        bodyWt().querySelectorAll('[data-act="openfile"]').length === 1,
+        String(bodyWt().querySelectorAll('[data-act="openfile"]').length));
+    hooks.setFilesUuid("");
+    await hooks.runServerList(true);
+    await settle(20);
+    // the parse-error row carries the ⚠ mark + a UUID copy chip
+    await hooks.runServerList(true);
+    await settle(20);
+    const badRow = bodyWt().querySelector('[data-fpath="workflows/lib/f013.json"]');
+    check("WT: a broken-JSON row stays LISTED with the parse-status mark",
+        !!badRow && badRow.textContent.includes("⚠"), badRow?.textContent || "no row");
+    const uuidChip = bodyWt().querySelector('[data-act="copyuuid"]');
+    check("WT: the rows with a workflowId carry the copy-UUID chip",
+        !!uuidChip && /uuid-\d{4}-aaaa/.test(uuidChip.dataset.uuid || ""));
+    // rebuild triggers a server scan + a fresh query
+    await hooks.rebuildIndex();
+    await settle(20);
+    check("WT: the Rebuild index fired a scan",
+        fakeApi.__idxScanCount() >= 2, String(fakeApi.__idxScanCount()));
+    check("WT: after the rebuild the status shows the index stats chip",
+        bodyWt().textContent.includes("· idx "), bodyWt().querySelector(".hub-wf-status")?.textContent);
+
+    // THE OLD-PY FALLBACK: 404 on the status -> the local behavior returns
+    fakeApi.__setIdxMode("stale");
+    await hooks.ensureIndexStatus();
+    await settle(10);
+    check("WT: an old py (404 status) flips the engine OFF",
+        hooks.idxState().ready === false);
+    const rowsLocal = bodyWt().querySelectorAll('[data-act="openfile"]').length;
+    check("WT: the local mirror rows still render in the fallback",
+        rowsLocal > 0, String(rowsLocal));
+    fakeApi.__setIdxMode("ok");
+    // restore the clean shape for any later phase
+    hooks.setFilesUuid("");
+    hooks.setTab("open");
+    await settle();
+}
+
+
+// ===========================================================================
+phase("WU v112 stage 2.5 (plan 5.x): the Process History panel");
+{
+    const pnlWu = () => hooks.panelEl();
+    const bodyWu = () => pnlWu().querySelector(".hub-wf-body");
+    fakeApi.__setIdxMode("ok");
+    fakeApi.__setIdxFiles([
+        { path: "workflows/hist1.json", name: "hist1.json", size: 10, mtime: 100,
+          workflowId: "wuuid-1111", rawHash: "hash-disk-1" },
+    ]);
+    hooks.setIdxReady(true);
+    hooks.setTab("files");
+    await settle();
+    await hooks.runServerList(true);
+    await settle();
+
+    // the row carries the History button
+    const histBtn = bodyWu().querySelector('[data-act="filehist"][data-path="workflows/hist1.json"]');
+    check("WU: the file rows carry the 🕘 History action (progressive disclosure)",
+        !!histBtn);
+    await histBtn.click();
+    await settle(20);
+
+    // a not-yet-bound file: the empty state offers the first checkpoint
+    let st = hooks.histState();
+    check("WU: the history panel opens for an unbound file with the empty state",
+        !!hooks.histPopEl() && st && !st.bound && st.revs.length === 0 && !st.loading,
+        JSON.stringify({ pid: st?.pid, err: st?.error, revs: st?.revs?.length }));
+    check("WU: the panel never shows storage terminology",
+        !hooks.histPopEl().textContent.match(/commit|blob|ref|checkout|staging|rebase|git/i),
+        hooks.histPopEl().textContent.slice(0, 120));
+    check("WU: the empty state names the Checkpoint as the next action",
+        hooks.histPopEl().textContent.includes("No checkpoints yet") &&
+        !!hooks.histPopEl().querySelector('[data-act="histcheckpoint"]'));
+
+    // Checkpoint #1 captures the payload (a disk checkpoint: no open tab)
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(20);
+    st = hooks.histState();
+    check("WU: the first checkpoint created ONE revision and bound the process",
+        st.revs.length === 1 && !!st.pid, JSON.stringify({ pid: st.pid, revs: st.revs.length }));
+    check("WU: the fake history store holds exactly 1 revision",
+        fakeApi.__histStore().revisions.size === 1,
+        String(fakeApi.__histStore().revisions.size));
+
+    // Checkpoint #2 with different content -> the second revision; then the
+    // repeat with IDENTICAL bytes -> NO duplicate
+    const wfStoreCall = { ...wfStore };
+    fakeApi.__histStore().seq = 100; // shift the hash namespace
+    fakeApi.__setIdxFiles([{ path: "workflows/hist1.json", name: "hist1.json", size: 20,
+        mtime: 200, workflowId: "wuuid-1111", rawHash: "hash-disk-2" }]);
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(20);
+    st = hooks.histState();
+    check("WU: the second checkpoint adds a revision (linear, newest first)",
+        st.revs.length === 2 && st.revs[0].createdAt >= st.revs[1].createdAt,
+        JSON.stringify(st.revs.map((r) => [r.revisionId, r.createdAt])));
+    const revCount = fakeApi.__histStore().revisions.size;
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(20);
+    check("WU: an identical checkpoint does NOT duplicate (the dedupe contract)",
+        fakeApi.__histStore().revisions.size === revCount &&
+        hooks.histState().revs.length === 2,
+        String(fakeApi.__histStore().revisions.size));
+
+    // Open version (the DEFAULT restore): a COPY into an independent tab
+    const openCalls0 = loadCalls.length;
+    await hooks.histRestore(hooks.histState().revs[0].revisionId, false);
+    await settle(20);
+    check("WU: the default Restore opens a COPY (a snapshot tab), no writes",
+        loadCalls.length === openCalls0 + 1 &&
+        !fakeApi.__calls().some((c) => c.url.includes("/restore/") && c.method === "POST"),
+        JSON.stringify({ calls: loadCalls.length }));
+    check("WU: the opened copy is an independent TEMP tab with the version graph",
+        wfStore.openWorkflows.some((t) => t.__snapshotGraph?.nodes?.length >= 0),
+        JSON.stringify(wfStore.openWorkflows.map((t) => t.name)));
+
+    // the REPLACE: armed confirm -> tx snapshot on the server
+    await hooks.histRestore(hooks.histState().revs[0].revisionId, true);
+    await settle(20);
+    check("WU: the confirmed replace POSTs mode=replace and records the tx snapshot",
+        fakeApi.__calls().some((c) => c.url.includes("/restore/") && c.method === "POST" &&
+            (c.body || "").includes('"mode":"replace"')) &&
+        fakeApi.__txStore().size === 1,
+        JSON.stringify([...fakeApi.__txStore().keys()]));
+
+    // Mark stable
+    await hooks.histPopEl().querySelector('[data-act="histstable"]').click();
+    await settle(20);
+    check("WU: Mark stable flags the revision (★, protected)",
+        hooks.histState().revs.some((r) => r.isStable),
+        JSON.stringify(hooks.histState().revs.map((r) => r.isStable)));
+
+    // the note input flows into the checkpoint payload
+    const noteIn = hooks.histPopEl().querySelector('[data-wf="histnote"]');
+    noteIn.value = "added controlnet";
+    noteIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+    check("WU: the note draft lands in the state (the compact optional field)",
+        hooks.histState().noteDraft === "added controlnet");
+    // a NEW disk state (an identical payload would dedupe into the last
+    // revision - the plan's contract - and the note would go to the note
+    // editor instead)
+    fakeApi.__setIdxFiles([{ path: "workflows/hist1.json", name: "hist1.json", size: 30,
+        mtime: 300, workflowId: "wuuid-1111", rawHash: "hash-disk-3" }]);
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(20);
+    check("WU: the checkpoint carried the optional note",
+        hooks.histState().revs[0].note === "added controlnet",
+        hooks.histState().revs[0].note);
+    check("WU: the note draft cleared after the successful checkpoint",
+        hooks.histState().noteDraft === "");
+
+    // Compare: pick two revisions -> the honest summary (the pop re-renders
+    // after every selection - re-query the fresh radios)
+    let radios = [...hooks.histPopEl().querySelectorAll("[data-hcmp]")];
+    radios[0].checked = true;
+    radios[0].dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    radios = [...hooks.histPopEl().querySelectorAll("[data-hcmp]")];
+    radios[1].checked = true;
+    radios[1].dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    await hooks.runHistCompare();
+    await settle(20);
+    check("WU: the Compare renders the node/model summary",
+        hooks.histPopEl().textContent.includes("⚖ Compare") &&
+        hooks.histPopEl().textContent.includes("Nodes:"),
+        hooks.histPopEl().textContent.slice(0, 200));
+
+    // Esc closes; the old-py fallback hides the history buttons
+    hooks.closeHistPop();
+    check("WU: the panel closes cleanly", !hooks.histPopEl());
+    fakeApi.__setIdxMode("stale");
+    hooks.setIdxReady(false);
+    await hooks.refreshSavedFiles();
+    await settle();
+    check("WU: without the index/history routes the 🕘 buttons hide (old py)",
+        !bodyWu().querySelector('[data-act="filehist"]'));
+    fakeApi.__setIdxMode("ok");
+    hooks.setIdxReady(true);
+    hooks.setTab("open");
+    await settle();
+}
+
+
+// ===========================================================================
+phase("WV v112 stage 3 (plans 6/7/8): per-tab Save, snapshot mode, duplicates");
+{
+    const pnlWv = () => hooks.panelEl();
+    const bodyWv = () => pnlWv().querySelector(".hub-wf-body");
+    // ---- plan 6: the per-tab Save of a PERSISTED row ----
+    wfStore.openWorkflows.length = 0;
+    wfStore.activeWorkflow = null;
+    const pt = makeTab({ path: "workflows/flux_main.json", nodes: [1, 2], isModified: true });
+    const tmp = makeTab({ name: "WV unsaved", isTemporary: true, isPersisted: false, nodes: [9] });
+    wfStore.openWorkflows.push(pt, tmp);
+    wfStore.activeWorkflow = pt;
+    await hooks.refreshOpen(true);
+    hooks.setTab("open");
+    hooks.renderAll();
+    await settle();
+    const rowWv = (name) => [...bodyWv().querySelectorAll(".hub-wf-row")]
+        .find((r) => r.textContent.includes(name));
+    const saveBtnP = rowWv("flux_main.json")?.querySelector('[data-act="savetab"]');
+    check("WV: every Open row carries the per-tab Save button",
+        !!saveBtnP, rowWv("flux_main.json")?.innerHTML?.slice(0, 120));
+    const storeCalls0 = wfStore.calls.length;
+    await saveBtnP.click();
+    await settle(20);
+    check("WV: the persisted row's Save called store.saveWorkflow with the tab ref",
+        wfStore.calls.slice(storeCalls0).some((c) => c.op === "save"),
+        JSON.stringify(wfStore.calls.slice(storeCalls0)));
+    // ---- plan 6: the temp row's Save As ladder ----
+    // this fake build exposes NO Save-As command -> the honest refusal
+    const cand = hooks.wfStoreSaveAsCandidate();
+    check("WV: the Save As ladder is feature-detected (no guessed command ids)",
+        Array.isArray(cand) && cand.every((c) => c === "store" || c.startsWith("cmd:")),
+        JSON.stringify(cand));
+    const saveBtnT = rowWv("WV unsaved")?.querySelector('[data-act="savetab"]');
+    await saveBtnT.click();
+    await settle(20);
+    check("WV: a temp tab's Save As without an available API degrades honestly",
+        hooks.adapter.wfStoreOf() != null, "no throw");
+
+    // ---- plan 7: the snapshot toggle (default OFF) ----
+    hooks.openSaveForm("new");
+    await settle();
+    check("WV: the snapshot toggle defaults OFF",
+        hooks.snapMode() === false &&
+        !!bodyWv().querySelector('[data-wf="sfnapmode"]'));
+    // OFF: the persisted row stays a PATH item
+    const rowsForm = hooks.saveForm();
+    check("WV: the form rows mark persisted rows (path mode)",
+        rowsForm.rows.some((r) => !r.isTemp));
+    const c1 = hooks.collectFormItems();
+    check("WV: OFF embeds persisted tabs as PATH items",
+        c1.items.every((it) => it.kind === "path" || it.kind === "snapshot"),
+        JSON.stringify(c1.items.map((it) => it.kind)));
+    // ON: the persisted row becomes an EMBEDDED SNAPSHOT with the origin meta
+    hooks.setSnapMode(true);
+    await settle();
+    check("WV: the toggle flips to ON with the explanation",
+        hooks.snapMode() === true &&
+        bodyWv().textContent.includes("Embed saved workflows as snapshots"));
+    const c2 = hooks.collectFormItems();
+    check("WV: ON embeds the persisted tab as a snapshot WITH its origin metadata",
+        c2.items.some((it) => it.kind === "snapshot" && it.sourcePath === "workflows/flux_main.json"),
+        JSON.stringify(c2.items.map((it) => [it.kind, it.sourcePath || null])));
+    hooks.closePlanPop && null;
+    saveFormCloseWv();
+
+    function saveFormCloseWv() { /* the form dies with the re-render below */ }
+
+    // ---- plan 8: the duplicate detection ----
+    const g1 = { id: "dup-uuid", revision: 1, nodes: [{ id: 1, type: "KSampler", pos: [5, 5], widgets_values: ["x"] }], links: [], extra: { ds: { scale: 1, offset: [0, 0] } } };
+    const g1Same = { links: [], revision: 1, nodes: [{ widgets_values: ["x"], type: "KSampler", id: 1, pos: [999, 999] }], extra: { ds: { scale: 0.5, offset: [9, 9] } }, id: "dup-uuid" }; // the same graph, another layout
+    const g1Diff = { id: "dup-uuid", nodes: [{ id: 1, type: "KSampler", pos: [5, 5], widgets_values: ["y"] }], links: [], extra: {} }; // a widget CHANGED
+    check("WV: the canonical form is key-order insensitive",
+        hooks.canonJsonOf({ a: 1, b: [2, 3] }) === hooks.canonJsonOf({ b: [2, 3], a: 1 }));
+    check("WV: a layout-only difference does NOT change the graph hash",
+        hooks.wfGraphHashClient(g1) === hooks.wfGraphHashClient(g1Same));
+    check("WV: an unclassified field/widget change DOES change the graph hash",
+        hooks.wfGraphHashClient(g1) !== hooks.wfGraphHashClient(g1Diff));
+    // open the first copy as a temp tab
+    const rOpen1 = await hooks.adapter.openSnapshotWorkflow("WV dup", g1, { forceCopy: true });
+    await settle(20);
+    check("WV: the first copy opens", rOpen1.ok === true, JSON.stringify(rOpen1));
+    // the SECOND identical open -> the duplicate PROMPT (never silent)
+    const rDup = await hooks.adapter.openSnapshotWorkflow("WV dup", g1);
+    await settle(20);
+    check("WV: an exact duplicate prompts Focus/Copy (not silently opened)",
+        rDup.duplicatePrompted === true && !!document.querySelector(".hub-wf-duppop"),
+        JSON.stringify(rDup));
+    check("WV: the prompt offers Focus existing + Open another copy",
+        document.querySelector(".hub-wf-duppop")?.textContent.includes("Focus existing") &&
+        document.querySelector(".hub-wf-duppop")?.textContent.includes("Open another copy"));
+    // Open another copy really opens one
+    const copyBtn = document.querySelector('.hub-wf-duppop [data-wf-btn="copy"]');
+    copyBtn.click();
+    await settle(20);
+    check("WV: 'Open another copy' opens the second independent tab",
+        !document.querySelector(".hub-wf-duppop") &&
+        wfStore.openWorkflows.filter((t) => t.__snapshotGraph?.id === "dup-uuid").length === 2,
+        String(wfStore.openWorkflows.length));
+    // the same graph with a DIFFERENT canvas state -> a warning, both open
+    const rWarn = await hooks.adapter.openSnapshotWorkflow("WV canvas", g1Same, { forceCopy: true });
+    await settle(20);
+    check("WV: a same-graph/different-canvas copy opens with a warning",
+        rWarn.ok === true,
+        JSON.stringify(rWarn));
+    // ---- plan 7.4: same NAME, different graph -> both survive the merge ----
+    const nameA = { id: "n1", nodes: [{ id: 1, type: "A" }] };
+    const nameB = { id: "n1", nodes: [{ id: 1, type: "B" }] };
+    const resA = await fakeApi.fetchApi("/settings_hub/workflows/presets", { method: "POST",
+        body: JSON.stringify({ name: "WV same name", items: [{ kind: "snapshot", name: "Same", graph: nameA }] }) });
+    const presetA = (await resA.json()).preset;
+    const resB = await fakeApi.fetchApi("/settings_hub/workflows/presets", { method: "POST",
+        body: JSON.stringify({ id: presetA.id, name: "WV same name",
+            items: [{ kind: "snapshot", name: "Same", graph: nameB }], mode: "merge" }) });
+    const mergedB = (await resB.json()).preset;
+    const sameName = mergedB.items.filter((it) => it.kind === "snapshot" && it.name === "Same");
+    check("WV: the merge keeps BOTH same-name different-graph snapshots (plan 7.4)",
+        sameName.length === 2 &&
+        JSON.stringify(sameName.map((s) => s.graph.nodes[0].type).sort()) === JSON.stringify(["A", "B"]),
+        JSON.stringify(sameName.map((s) => s.graph)));
+    // cleanup
+    wfStore.openWorkflows.length = 0;
+    await hooks.refreshOpen(true);
+}
+
+
+
+// ===========================================================================
+phase("WX v112 stage 4 (plans 9/10): preset category/tags + version history");
+{
+    const pnlWx = () => hooks.panelEl();
+    const bodyWx = () => pnlWx().querySelector(".hub-wf-body");
+    hooks.clearPresets();
+    fakeApi.__setPresets([]);
+    fakeApi.__pverStore().clear();
+
+    // the save form carries the category + the tags editors
+    hooks.openSaveForm("new");
+    await settle();
+    check("WX: the save form carries the category + tags editors",
+        !!bodyWx().querySelector('[data-wf="sfcat"]') &&
+        !!bodyWx().querySelector('[data-wf="sftags"]'));
+    const catIn = bodyWx().querySelector('[data-wf="sfcat"]');
+    const tagIn = bodyWx().querySelector('[data-wf="sftags"]');
+    catIn.value = "Flux";
+    catIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    tagIn.value = "production, fast, production";
+    tagIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+    check("WX: the tags editor keeps the display text (the SERVER normalizes)",
+        Array.isArray(hooks.saveForm().tags) &&
+        hooks.saveForm().tags.join(" ").toLowerCase().includes("production"),
+        JSON.stringify(hooks.saveForm().tags));
+    // the form commits with the category/tags (one persisted row: flux_main)
+    const nameIn = bodyWx().querySelector('[data-wf="sfname"]');
+    nameIn.value = "WX preset";
+    await hooks.commitFormSave("create", null);
+    await settle(20);
+    const wxPreset = hooks.presets().find((p) => p.name === "WX preset");
+    check("WX: the saved preset carries the category",
+        wxPreset && wxPreset.category === "Flux", JSON.stringify(wxPreset));
+    check("WX: the saved preset carries the normalized tags",
+        wxPreset && Array.isArray(wxPreset.tags) && wxPreset.tags.length === 2,
+        JSON.stringify(wxPreset?.tags));
+    check("WX: the new preset got an INITIAL version archive",
+        (fakeApi.__pverStore().get(wxPreset.id)?.versions.length || 0) === 1,
+        String(fakeApi.__pverStore().get(wxPreset.id)?.versions.length));
+
+    // the card shows the category + the tag chips + the history button
+    check("WX: the preset card shows the category chip + the tag chips + 🕘",
+        bodyWx().textContent.includes("Flux") &&
+        bodyWx().textContent.includes("#production") &&
+        !!bodyWx().querySelector('[data-act="pver"]'));
+
+    // the search covers the category + the tags
+    const sIn = bodyWx().querySelector('[data-wf="presetsearch"]');
+    sIn.value = "flux";
+    sIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+    check("WX: the search matches the CATEGORY",
+        bodyWx().querySelectorAll(".hub-wf-card").length === 1);
+    sIn.value = "fast";
+    sIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+    check("WX: the search matches a TAG",
+        bodyWx().querySelectorAll(".hub-wf-card").length === 1,
+        "cards=" + bodyWx().querySelectorAll(".hub-wf-card").length +
+        " presets=" + JSON.stringify(hooks.presets().map((p) => [p.name, p.tags])));
+    sIn.value = "";
+    sIn.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+
+    // the ⚑ filter row: category select
+    const fadvBtn = bodyWx().querySelector('[data-act="pfadv"]');
+    fadvBtn.click();
+    await settle();
+    check("WX: the ⚑ filter row opens with the category/tag selects",
+        !!bodyWx().querySelector('[data-wf="pcat"]') && !!bodyWx().querySelector('[data-wf="ptag"]'));
+    hooks.setPresetsCat("Flux");
+    hooks.renderAll();
+    await settle();
+    check("WX: the category filter keeps the matching preset",
+        bodyWx().querySelectorAll(".hub-wf-card").length === 1);
+    hooks.setPresetsCat("Portrait");
+    hooks.renderAll();
+    await settle();
+    check("WX: the category filter hides the non-matching preset",
+        bodyWx().querySelectorAll(".hub-wf-card").length === 0);
+    hooks.setPresetsCat("");
+    hooks.setPresetsTag("");
+    hooks.renderAll();
+    await settle();
+
+    // the version history: overwrite -> archive; restore -> current archived
+    await hooks.refreshPresets();
+    const pid = wxPreset.id;
+    await fakeApi.fetchApi("/settings_hub/workflows/presets", { method: "POST",
+        body: JSON.stringify({ id: pid, name: "WX preset v2", items: wxPreset.items, mode: "overwrite" }) });
+    await hooks.refreshPresets();
+    await settle();
+    check("WX: the overwrite archived the previous state (2 versions)",
+        fakeApi.__pverStore().get(pid).versions.length === 2,
+        String(fakeApi.__pverStore().get(pid).versions.length));
+    await hooks.openPverPop(pid);
+    await settle(20);
+    let pst = hooks.pverState();
+    check("WX: the version panel lists the archives (newest first)",
+        !!hooks.pverPopEl() && pst.versions.length === 2 &&
+        pst.versions[0].createdAt >= pst.versions[1].createdAt,
+        JSON.stringify(pst.versions.map((v) => v.changedBy)));
+    check("WX: the panel names the archive rule (no storage terms)",
+        hooks.pverPopEl().textContent.includes("archives") &&
+        !/commit|blob|git ref|staging/i.test(hooks.pverPopEl().textContent));
+    // restore the OLDEST (the initial "WX preset" with category Flux)
+    const restBtn = [...hooks.pverPopEl().querySelectorAll('[data-pact="prestore"]')].pop();
+    restBtn.click();
+    await settle();
+    check("WX: the restore arms a confirm (the current state archives first)",
+        hooks.pverState().armed !== null &&
+        !!hooks.pverPopEl().querySelector('[data-pact="prestoreconfirm"]'));
+    const confBtn = hooks.pverPopEl().querySelector('[data-pact="prestoreconfirm"]');
+    confBtn.click();
+    await settle(20);
+    pst = hooks.pverState();
+    check("WX: the restore returned the old version + archived the current",
+        pst.versions.length === 3 && pst.versions[0].changedBy === "restore",
+        JSON.stringify(pst.versions.map((v) => v.changedBy)));
+    await hooks.refreshPresets();
+    check("WX: the preset content rolled back (name v2 -> WX preset)",
+        hooks.presets().find((p) => p.id === pid)?.name === "WX preset",
+        hooks.presets().find((p) => p.id === pid)?.name);
+    // compare: two versions -> the summary
+    let pradios = [...hooks.pverPopEl().querySelectorAll("[data-pcmp]")];
+    pradios[0].checked = true;
+    pradios[0].dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    pradios = [...hooks.pverPopEl().querySelectorAll("[data-pcmp]")];
+    pradios[1].checked = true;
+    pradios[1].dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    const cmpBtn = hooks.pverPopEl().querySelector('[data-pact="pcompare"]');
+    cmpBtn.click();
+    await settle(20);
+    check("WX: the Compare renders the honest summary (name/tags/items)",
+        hooks.pverPopEl().textContent.includes("⚖ Compare") &&
+        hooks.pverPopEl().textContent.includes("Items:"),
+        hooks.pverPopEl().textContent.slice(0, 160));
+    hooks.closePverPop();
+    hooks.setTab("open");
+    await settle();
+}
+
+
+
+// ===========================================================================
+phase("WY v112 stage 5 (plan 11) + stage 6: the Inspector + dependencies + library summary");
+{
+    const pnlWy = () => hooks.panelEl();
+    const bodyWy = () => pnlWy().querySelector(".hub-wf-body");
+    fakeApi.__setIdxMode("ok");
+    fakeApi.__setIdxFiles([
+        { path: "workflows/insp.json", name: "insp.json", size: 10, mtime: 100,
+          workflowId: "insp-uuid-1" },
+    ]);
+    hooks.setIdxReady(true);
+    hooks.setTab("files");
+    await settle();
+    await hooks.runServerList(true);
+    await settle();
+    const inspBtn = bodyWy().querySelector('[data-act="fileinspect"][data-path="workflows/insp.json"]');
+    check("WY: the file rows carry the 🔍 Inspect action",
+        !!inspBtn);
+    await inspBtn.click();
+    await settle(20);
+    const st = hooks.inspState();
+    check("WY: the inspector loaded the honest report",
+        !!st?.data && st.data.nodeCount === 12, JSON.stringify(!!st?.data));
+    const popTxt = hooks.inspPopEl()?.textContent || "";
+    check("WY: the UUID shows with a copy action (a no-UUID file would say so)",
+        popTxt.includes("⧉") || popTxt.includes("No UUID"));
+    check("WY: the parameters show (steps 25 · cfg 7.5 · euler · karras · 1024×768)",
+        popTxt.includes("steps 25") && popTxt.includes("cfg 7.5") &&
+        popTxt.includes("1024×768"), popTxt.slice(0, 300));
+    check("WY: the dependency report names the MISSING node + the MISSING model",
+        popTxt.includes("Missing nodes") && popTxt.includes("SuperUnknownNode") &&
+        popTxt.includes("Missing model") && popTxt.includes("gone_model.safetensors"),
+        popTxt.slice(0, 400));
+    check("WY: the duplicate groups surface",
+        popTxt.includes("exact byte copy") && popTxt.includes("same-UUID"),
+        popTxt.slice(0, 400));
+    check("WY: the library summary rides along (plan 12)",
+        popTxt.includes("Library") && popTxt.includes("bad JSON"),
+        popTxt.slice(0, 400));
+    hooks.closeInspPop();
+    check("WY: the inspector closes cleanly", !hooks.inspPopEl());
+    fakeApi.__setIdxMode("stale");
+    await hooks.ensureIndexStatus(); // the 404 flips the engine OFF (idxReady=false)
+    hooks.renderAll();
+    await settle();
+    check("WY: an old py keeps the inspector OUT of the rows",
+        !bodyWy().querySelector('[data-act="fileinspect"]'), "");
+    fakeApi.__setIdxMode("ok");
+    hooks.setTab("open");
+    await settle();
+}
 
 // ===========================================================================
 

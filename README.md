@@ -1,6 +1,6 @@
 # Settings Hub для ComfyUI
 
-[![build](https://img.shields.io/badge/web%20build-v111-3d5a80)](#как-это-работает)
+[![build](https://img.shields.io/badge/web%20build-v112-3d5a80)](#как-это-работает)
 [![tests](https://img.shields.io/badge/tests-1863%20passing-2b6b3f)](#разработка-и-тесты)
 [![python](https://img.shields.io/badge/python-stub-lightgrey)](#как-это-работает)
 [![frontend](https://img.shields.io/badge/ComfyUI-frontend%20extension-3d5a80)](#установка)
@@ -721,6 +721,57 @@ Diff прямо в подсказке говорит, что B масштаби�
   выгрузкой/загрузкой модели и освобождением памяти ComfyUI.
 
 ### Workflows Manager
+
+**v112 — план Workflow Manager реализован целиком** (P0 → P3, см. worklog.md
+и docs/history_design.md):
+
+- **P0 стабильность:** серверный snapshot-Undo перед каждым ▶ Switch (графы
+  temp и изменённых сохранённых вкладок уходят на сервер, браузер хранит
+  только undoId; сбой снимка БЛОКИРУЕТ деструктивное закрытие с точной
+  причиной); safe-activation гвард перед Close/Save в fallback-путях
+  (проверка активной вкладки по каноническому пути — одноимённые файлы в
+  разных папках не путаются); ЕДИНАЯ каноническая нормализация путей;
+  Files грузится сразу при монтировании на этой вкладке с явными
+  состояниями loading/empty/error/truncated + кнопкой ⟳ Refresh; лимит
+  400 строк Open снят (чанки + Show more доходят до конца, поиск по
+  ПОЛНОМУ набору вкладок); 🕘 Recently closed получил серверные
+  манифесты с cross-browser reference accounting (один браузер не может
+  осиротить снимок другого) и серверный temp/gc; индексы папок и
+  missing-путей за один проход; стабильный tie-break сортировки.
+- **SQLite-индекс библиотеки** (`py/workflows_index.py`): производный кэш
+  `workflows_manager/index/` с layered fingerprints (raw/canonical/
+  workflow/presentation/extension/structural + версия профиля
+  нормализации), FTS5-поиском по имени/пути/UUID/типам нод/моделям/
+  содержимому (LIKE-фолбэк протестирован), keyset-пагинацией (кап 6000
+  больше не скрывает библиотеку), карантином повреждённой БД (пересборка
+  без касания файлов), multi-user изоляцией. В индексном режиме список
+  Files рендерит СЕРВЕР (поиск+фильтры+сортировка+пагинация), UUID-фильтр
+  и ⧉-копирование UUID на строках, ⟲ Rebuild index.
+- **Process History** (`py/workflows_history.py`): линейные
+  Process → Revision истории в ОДНОМ общем Git bare repository на user
+  scope (один ref для всех процессов и пресетов; CAS-фолбэк с тем же UX);
+  📌 Checkpoint захватывает СОСТОЯНИЕ ОТКРЫТОЙ ВКЛАДКИ ИЗ ПАМЯТИ (включая
+  несохранённые правки; дедуп по байтам), Mark stable, ⚖ Compare, ↺
+  Restore (по умолчанию — копия; замена файла идёт через проверенный
+  transaction safety snapshot + атомарную запись + откат при сбое); связи
+  процессов по ComfyUI UUID (Save As с тем же UUID добавляет location,
+  Duplicate создаёт отдельный процесс); обычный Save ComfyUI не создаёт
+  ни ревизий, ни коммитов. UI — без какой-либо storage-терминологии.
+- **Per-tab 💾 Save** на каждой строке Open (temp-вкладки — Save As через
+  feature-detection ladder с честным отказом), **snapshot mode** (тоггл
+  «Embed saved workflows as snapshots», default OFF, с origin-метаданными),
+  dedupe снапшотов по СОДЕРЖИМОМУ графа + стабильный itemId +
+  activeItemId, duplicate detection с промптом «Focus existing / Open
+  another copy» и предупреждением «same workflow; canvas state differs».
+- **Категории/теги Presets** (серверная валидация, поиск и ⚑-фильтр) +
+  **история версий Preset** (архив перед каждым значимым изменением,
+  Restore с архивированием текущего состояния — всегда обратимо, ретеншн
+  20 ревизий без касания текущей версии).
+- **Inspector + Dependency Checker** (🔍 на строках файлов): UUID, ноды,
+  модели, параметры (только когда извлекаются однозначно), duplicate-
+  группы, отсутствующие ноды против установленного реестра и файлы
+  моделей против папок — диагностика, открытие не блокирует; сводка
+  библиотеки.
 
 Самостоятельная утилита над **всеми открытыми воркфлоу** (v101, плавающее
 окно с вкладками `Open / Presets / Files`, четвёртая кнопка минипанели — не

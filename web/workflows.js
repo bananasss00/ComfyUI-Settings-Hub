@@ -227,9 +227,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v111";
+const WF_WEB_VERSION = "v112";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v111";
+globalThis.__SettingsHubLoaded["workflows"] = "v112";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -239,6 +239,7 @@ const LS_ON = "settingshub.workflows.on";      // "1"/"0" - panel enabled
 const LS_UI = "settingshub.workflows.ui";      // {x,y,w,h,min,chipX,chipY,tab}
 const LS_PREF = "settingshub.workflows.pref";  // {keepUnsaved,closeEmptyTemp,warnOnQueue}
 const LS_RECENT = "settingshub.workflows.recent"; // ring buffer of closed tabs
+const LS_CLIENT = "settingshub.workflows.client"; // v112: the browser-session id (server recent manifests)
 const Z_PANEL = "99900";               // same layer as the stack / chat panels
 const RECENT_MAX = 15;
 // v108: the Files-tab quick-period bounds ("today" / "7d" / "30d" chips -
@@ -262,7 +263,9 @@ const TAB_SEQ = 30;                    // ms between tab operations (ChangeTrack
 const ITEM_LIST_CAP = 12;              // preset card: items shown before "+N more"
 const ROW_LIST_CAP = 60;               // open/files lists: rows per render chunk
 const SHOW_MORE_STEP = 150;
-const MAX_OPEN_ROWS = 400;             // hard cap of rendered rows (huge sessions)
+// v112 (plan 3.5): the hard 400-row cap is GONE - it permanently hid open
+// tabs beyond 400. The list renders in chunks (ROW_LIST_CAP + "Show more")
+// and the search always runs over the FULL open set.
 const DEF_W = 320;
 const DEF_H = 430;
 
@@ -362,13 +365,46 @@ function setWorkflowsOn(v) {
     }
 }
 
-/** Normalize a workflow file path for comparisons (POSIX, no leading ./ or /). */
+/** v112 (plan 3.3): THE ONE canonical workflow-path normalizer - every
+ *  path-based comparison in the panel goes through THIS function (the
+ *  plan: "создать одну каноническую функцию нормализации относительных
+ *  workflow path"). Rules:
+ *    - backslashes -> slashes, surrounding whitespace trimmed;
+ *    - the "workflows/" userdata prefix is stripped ("workflow.json" and
+ *      "workflows/workflow.json" compare EQUAL - the agreed rule);
+ *    - "." and empty segments collapse, repeated separators collapse;
+ *    - "..", absolute paths (leading "/", drive letters) REFUSE to "" -
+ *      a path that escapes the userdata root never matches anything.
+ *  The server-side validation is separate (py _clean_item_path) - this
+ *  function is a comparison helper, not a security boundary.
+ *  normWfPath stays as the RAW normalized form (prefix kept) for the
+ *  favorites set + display paths. */
+function canonWfRel(p) {
+    if (typeof p !== "string") return "";
+    let s = p.replace(/\\/g, "/").trim();
+    if (/^[A-Za-z]:/.test(s) || s.startsWith("/")) return ""; // absolute -> refuse
+    s = s.replace(/^(?:\.\/)+/, "");
+    s = s.replace(/^workflows\//i, "");
+    const parts = s.split("/").filter((seg) => seg && seg !== ".");
+    if (parts.some((seg) => seg === "..")) return "";
+    return parts.join("/");
+}
+
+/** Normalize a workflow file path for display/storage (POSIX, no leading
+ *  ./ or /; the workflows/ prefix is KEPT - the listing shape). */
 function normWfPath(p) {
     if (typeof p !== "string") return "";
     let s = p.replace(/\\/g, "/").trim();
     while (s.startsWith("./")) s = s.slice(2);
     while (s.startsWith("/")) s = s.slice(1);
     return s;
+}
+
+/** Canonical compare: TRUE when both paths point at the SAME workflow file
+ *  under the agreed rule (prefix-insensitive, never basename-only). */
+function sameWfPath(a, b) {
+    const ca = canonWfRel(a), cb = canonWfRel(b);
+    return !!ca && !!cb && ca === cb;
 }
 
 function baseName(p) {
@@ -589,6 +625,8 @@ async function getSavedWorkflows() {
     try {
         const res = await jfetch("/settings_hub/workflows/files");
         if (res.json?.ok && Array.isArray(res.json.files) && res.json.files.length) {
+            // v112 (plan 3.10): the backend cap surfaces as a truncation note
+            lastFilesTruncated = !!res.json.truncated;
             return res.json.files.map((f) => ({
                 path: normWfPath(f.path),
                 name: f.name || baseName(f.path),
@@ -597,6 +635,7 @@ async function getSavedWorkflows() {
             })).filter((f) => f.path && !f.path.toLowerCase().includes("settings_hub/"));
         }
     } catch (_) { /* old py - the legacy rungs take over */ }
+    lastFilesTruncated = false;
     const store = wfStoreOf();
     let list = null;
     try { list = store?.workflows ?? store?.persistedWorkflows ?? null; } catch (_) { list = null; }
@@ -669,8 +708,9 @@ async function openWorkflowByPath(path) {
     // the store keys carry the workflows/ prefix, the presets may keep either
     // shape - compare against both
     const withPrefix = n2.startsWith("workflows/") ? n2 : ("workflows/" + n2);
-    const already = getOpenWorkflows().find((t) => t.path &&
-        (normWfPath(t.path) === n2 || normWfPath(t.path) === withPrefix));
+    // v112 (plan 3.3): the canonical comparison - prefix/slash/dot-shape
+    // differences must never fork the already-open check
+    const already = getOpenWorkflows().find((t) => t.path && sameWfPath(t.path, path));
     if (already) {
         const r = await activateWorkflow(already);
         return { ...r, alreadyOpen: true };
@@ -712,9 +752,23 @@ async function openWorkflowByPath(path) {
     }
 }
 
-/** Open a SNAPSHOT (an embedded graph JSON of a temporary tab). */
-async function openSnapshotWorkflow(name, graphJson) {
+/** Open a SNAPSHOT (an embedded graph JSON of a temporary tab).
+ *  v112 stage 3 (plan 8): an exact duplicate of an open temp tab prompts
+ *  Focus existing / Open another copy (opts.forceCopy skips the prompt);
+ *  the same working graph with a different canvas state only WARNS. */
+async function openSnapshotWorkflow(name, graphJson, opts = {}) {
     if (!graphJson || typeof graphJson !== "object") return { ok: false, error: "no graph" };
+    if (!opts.forceCopy) {
+        const dup = findSnapshotDuplicates(graphJson);
+        if (dup.exact) {
+            askSnapshotDuplicate(dup.exact, name, graphJson,
+                () => void openSnapshotWorkflow(name, graphJson, { forceCopy: true }));
+            return { ok: false, duplicatePrompted: true };
+        }
+        if (dup.sameGraph) {
+            localToast("Same workflow; the canvas state differs - both tabs stay open", 3600);
+        }
+    }
     const store = wfStoreOf();
     // rung 1: the store's own temporary-tab factory + the CANVAS-swap open
     // (v102: the bare store.openWorkflow left the new tab with the previous
@@ -771,6 +825,33 @@ async function ensureSomeTab() {
     } catch (_) {}
 }
 
+/** v112 (plan 3.2): after a fallback activation, VERIFY that the target tab
+ *  is really the active one before a targeted/destructive command (Close/
+ *  Save run over "the ACTIVE tab" in some ComfyUI builds). Verification
+ *  ladder: the store's isActive(ref) -> the re-queried wrapper list's
+ *  isActive flag -> a canonical-PATH match (NEVER a name-only check: equal
+ *  basenames in different folders are different files, the plan's own
+ *  acceptance criterion). A tab that cannot be verified is refused - an
+ *  operation on a POTENTIALLY DIFFERENT tab is never attempted. */
+async function verifyActiveTab(w) {
+    const store = wfStoreOf();
+    try {
+        if (w?.ref && typeof store?.isActive === "function") {
+            if (store.isActive(w.ref)) return true;
+        }
+    } catch (_) {}
+    await sleep(TAB_SEQ);
+    await nextFrame();
+    const live = getOpenWorkflows();
+    const cur = live.find((t) => t.key === w.key) || null;
+    if (cur) return !!cur.isActive;
+    if (w?.path) {
+        const byPath = live.find((t) => t.path && sameWfPath(t.path, w.path));
+        return !!(byPath && byPath.isActive);
+    }
+    return false; // a temp tab without a verifiable identity -> refuse
+}
+
 /** Close ONE tab. forceClean (default) skips the frontend's own unsaved
  *  warning - the PANEL owns the confirmation UX (armed ✕ / the apply plan). */
 async function closeWorkflowTab(w, opts = {}) {
@@ -789,11 +870,18 @@ async function closeWorkflowTab(w, opts = {}) {
             return { ok: true, via: "store" };
         } catch (_) {}
     }
-    // rung 2: the command API (some builds expose close as a command)
+    // rung 2: the command API (some builds expose close as a command).
+    // v112 (plan 3.2): the command targets the ACTIVE tab - the activation
+    // must be VERIFIED first, otherwise the close is refused (a same-name
+    // tab in a different folder must never die instead of the target).
     try {
         const cmd = app.extensionManager?.command;
         if (cmd && typeof cmd.execute === "function") {
             await activateWorkflow(w);
+            if (!(await verifyActiveTab(w))) {
+                return { ok: false, unsupported: true,
+                    error: "the target tab could not be verified as active - close refused" };
+            }
             await cmd.execute("Workspace.CloseWorkflow");
             await recordRecent(w, snap); // v107: awaited (see above)
             return { ok: true, via: "command" };
@@ -802,7 +890,10 @@ async function closeWorkflowTab(w, opts = {}) {
     return { ok: false, unsupported: true };
 }
 
-/** Save ONE modified persisted tab ("Save all modified"). */
+/** Save ONE modified persisted tab ("Save all modified").
+ *  v112 (plan 3.2): the command fallback VERIFIES the activation first -
+ *  Comfy.SaveWorkflow acts on the ACTIVE tab, so an unverified activation
+ *  refuses instead of writing a potentially DIFFERENT file. */
 async function saveWorkflowTab(w) {
     if (!w) return { ok: false, error: "no tab" };
     if (!w.isPersisted || !w.isModified) return { ok: false, skipped: true };
@@ -812,11 +903,225 @@ async function saveWorkflowTab(w) {
     }
     try {
         await activateWorkflow(w);
+        if (!(await verifyActiveTab(w))) {
+            return { ok: false,
+                error: "the target tab could not be verified as active - save refused" };
+        }
         await app.extensionManager?.command?.execute?.("Comfy.SaveWorkflow");
         return { ok: true, via: "command" };
     } catch (e) {
         return { ok: false, error: String((e && e.message) || e) };
     }
+}
+
+// v112 stage 3 (plan 6): the PER-TAB save of the Open tab.
+const saveState = new Map(); // key -> "saving" | "saved" (a transient marker)
+
+/** The Save As candidate ladder for TEMP tabs (plan 6: feature detection
+ *  ONLY - a guessed command id is never executed). The store's own
+ *  saveWorkflow(ref, {saveAs})-style API first, then a command whose id the
+ *  installed build actually exposes, then an honest refusal (the native
+ *  ComfyUI UI stays the way back). */
+function wfStoreSaveAsCandidate() {
+    const store = wfStoreOf();
+    const cands = [];
+    if (store && typeof store.saveWorkflow === "function") cands.push("store");
+    try {
+        const cmd = app?.extensionManager?.command;
+        const ids = new Set();
+        try {
+            const list = typeof cmd?.getCommands === "function" ? cmd.getCommands() : null;
+            if (Array.isArray(list)) for (const c of list) ids.add(String(c?.id || c));
+        } catch (_) {}
+        try {
+            const reg = cmd?.registry || cmd?.commands;
+            if (reg instanceof Map) for (const k of reg.keys()) ids.add(String(k));
+            else if (reg && typeof reg === "object") for (const k of Object.keys(reg)) ids.add(String(k));
+        } catch (_) {}
+        for (const want of ["Comfy.SaveWorkflowAs", "Workflow.SaveAs",
+            "Comfy.SaveAsWorkflow", "Workspace.SaveWorkflowAs"]) {
+            if (ids.has(want)) cands.push("cmd:" + want);
+        }
+    } catch (_) {}
+    return cands;
+}
+
+async function saveWorkflowTabAs(w) {
+    if (!w) return { ok: false, error: "no tab" };
+    const store = wfStoreOf();
+    // rung 1: the store's own save-with-name API (feature-detected shapes)
+    if (store && typeof store.saveWorkflow === "function" && w.ref) {
+        for (const shape of [{ saveAs: true }, { as: true }, { saveAsName: true }]) {
+            try {
+                const r = await store.saveWorkflow(w.ref, shape);
+                if (r !== false) return { ok: true, via: "store", shape };
+            } catch (_) { /* the next shape */ }
+        }
+    }
+    // rung 2: a command the installed build ACTUALLY exposes
+    try {
+        await activateWorkflow(w);
+        if (!(await verifyActiveTab(w))) {
+            return { ok: false, error: "the target tab could not be verified as active - Save As refused" };
+        }
+        const cands = wfStoreSaveAsCandidate();
+        const cmdId = cands.find((c) => c.startsWith("cmd:"));
+        if (cmdId) {
+            await app.extensionManager.command.execute(cmdId.slice(4));
+            return { ok: true, via: "command" };
+        }
+        return { ok: false, unsupported: true,
+            error: "this ComfyUI build exposes no Save-As API to extensions - use the native ComfyUI UI (File > Save As)" };
+    } catch (e) {
+        return { ok: false, error: String((e && e.message) || e) };
+    }
+}
+
+/** The per-row 💾 action (plan 6): a persisted tab saves IN PLACE; a temp
+ *  tab runs the Save As ladder; a clean persisted tab still saves explicitly
+ *  (the unified UX: always enabled). The row shows saving/saved/error. */
+async function saveTabRow(t) {
+    if (!t || saveState.get(t.key) === "saving") return;
+    saveState.set(t.key, "saving");
+    renderAll();
+    let r;
+    if (t.isPersisted) {
+        r = await saveWorkflowTab(t);
+    } else {
+        r = await saveWorkflowTabAs(t);
+    }
+    if (r?.ok) {
+        saveState.set(t.key, "saved");
+        if (t.isPersisted && t.ref) { try { t.ref.isModified = false; } catch (_) {} }
+        await refreshOpen(true);
+        await refreshSavedFiles();
+        if (idxMode()) await runServerList(true);
+    } else {
+        saveState.delete(t.key);
+    }
+    renderAll();
+    if (r?.ok) {
+        localToast(t.isPersisted ? "Saved \"" + (t.name || "") + "\"" : "Save As handed to ComfyUI");
+    } else if (r?.skipped) {
+        localToast("No changes to save");
+    } else if (r?.unsupported) {
+        localToast(r.error || "Save As is not available in this build", 4200);
+    } else {
+        localToast("Save failed: " + ((r && r.error) || "?"), 4200);
+    }
+    setTimeout(() => { if (saveState.get(t.key) === "saved") { saveState.delete(t.key); renderAll(); } }, 2000);
+}
+
+// ---------------------------------------------------------------------------
+// v112 stage 3 (plan 8): the DUPLICATE DETECTION of temporary tabs and
+// snapshot opens. The client mirrors the layered-hash IDEA with a light
+// canonical form: byte-exact = raw string equality; same JSON content =
+// canonical (sorted keys) equality; the same working graph with a different
+// canvas state = a WARNING, never a silent merge (plan 2.2: unknown fields
+// stay in the graph hash, only the confirmed presentation fields strip out).
+// ---------------------------------------------------------------------------
+
+function canonJsonOf(v) {
+    if (v === null || typeof v !== "object") return JSON.stringify(v);
+    if (Array.isArray(v)) return "[" + v.map(canonJsonOf).join(",") + "]";
+    const keys = Object.keys(v).sort();
+    return "{" + keys.map((k) => JSON.stringify(k) + ":" + canonJsonOf(v[k])).join(",") + "}";
+}
+
+/** The graph WITHOUT the confirmed presentation/environment fields - the
+ *  client-side mirror of the server's workflowHash normalization (plan 2.2:
+ *  extra.ds.scale/offset + frontendVersion + nodes[].pos/size + visual
+ *  node fields; EVERY unknown field stays). */
+function stripPresentationOf(wf) {
+    if (!wf || typeof wf !== "object") return wf;
+    const PRESENT_NODE = new Set(["pos", "size", "bgcolor", "color", "collapsed", "shape", "loc"]);
+    const g = { ...wf };
+    if (g.extra && typeof g.extra === "object") {
+        const e = { ...g.extra };
+        delete e.ds;
+        delete e.frontendVersion;
+        g.extra = e;
+    }
+    if (Array.isArray(g.nodes)) {
+        g.nodes = g.nodes.map((n) => {
+            if (!n || typeof n !== "object") return n;
+            const n2 = { ...n };
+            for (const k of PRESENT_NODE) delete n2[k];
+            return n2;
+        });
+    }
+    return g;
+}
+
+function wfGraphHashClient(graph) {
+    try {
+        return canonJsonOf(stripPresentationOf(graph));
+    } catch (_) { return null; }
+}
+
+/** The duplicate scan of ONE snapshot graph against the OPEN TEMP tabs.
+ *  Returns {exact: tab|null, sameGraph: tab|null} - exact = the same JSON
+ *  content; sameGraph = the same working graph, a different canvas state. */
+function findSnapshotDuplicates(graphJson) {
+    const out = { exact: null, sameGraph: null };
+    if (!graphJson || typeof graphJson !== "object") return out;
+    let canon = null, ghash = null;
+    try { canon = canonJsonOf(graphJson); } catch (_) { return out; }
+    ghash = wfGraphHashClient(graphJson);
+    const temps = getOpenWorkflows().filter((t) => !t.path || t.isTemporary);
+    for (const t of temps) {
+        const g = graphJsonOfOpenTab(t);
+        if (!g) continue;
+        if (!out.exact) {
+            try {
+                if (canonJsonOf(g) === canon) { out.exact = t; continue; }
+            } catch (_) {}
+        }
+        if (!out.sameGraph && ghash) {
+            const gh2 = wfGraphHashClient(g);
+            if (gh2 && gh2 === ghash) out.sameGraph = t;
+        }
+    }
+    return out;
+}
+
+/** The snapshot-open duplicate prompt (plan 8): Focus existing / Open
+ *  another copy - a duplicate is NEVER created silently. */
+function askSnapshotDuplicate(hit, name, graphJson, onOpenCopy) {
+    closeDupPop();
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-wf-duppop";
+    pop.innerHTML =
+        `<div class="hub-menu-title">Duplicate workflow</div>` +
+        `<div class="hub-wf-planhint">The same workflow content is already open as '${esc(hit.name || "a temp tab")}'.</div>` +
+        `<div class="hub-wf-planacts">` +
+        `<button type="button" class="hub-wf-act" data-wf-btn="focus">🎯 Focus existing</button>` +
+        `<button type="button" class="hub-wf-act" data-wf-btn="copy">＋ Open another copy</button>` +
+        `</div>`;
+    document.body.appendChild(pop);
+    dupPop = pop;
+    try {
+        const vw = window.innerWidth || 1600;
+        pop.style.left = Math.max(8, (vw - (pop.offsetWidth || 300)) / 2) + "px";
+        pop.style.top = "80px";
+    } catch (_) {}
+    pop.addEventListener("click", async (e) => {
+        const b = e.target?.closest?.("[data-wf-btn]");
+        if (!b) return;
+        closeDupPop();
+        if (b.dataset.wfBtn === "focus") {
+            const r = await activateWorkflow(hit);
+            if (!r.ok) localToast("Could not focus the existing tab - see F12", 3600);
+            return;
+        }
+        void onOpenCopy();
+    });
+}
+
+let dupPop = null;
+function closeDupPop() {
+    try { dupPop?.remove(); } catch (_) {}
+    dupPop = null;
 }
 
 /** The serialized graph JSON of an open tab (the SNAPSHOT payload). */
@@ -1061,24 +1366,16 @@ async function deleteTempSnapshot(id) {
 
 let tempGcDone = false; // one silent boot GC pass per page load
 
-/** v107 boot GC: the reserved temp folder must not outlive the ring forever.
- *  Deletes server snapshots that are NOT referenced by this browser's ring
- *  AND older than a day (the conservative age keeps a snapshot another
- *  browser may still point at alive; with a 15-row ring a day-old orphan is
- *  a leftover in practice). Best-effort, silent, once per page load. */
+/** v112 boot GC (plan 3.6): SERVER-AUTHORITATIVE - POST /workflows/temp/gc
+ *  deletes a snapshot only when NO manifest (any browser) references it AND
+ *  it is older than a day. The v107 client-side per-id deletion could orphan
+ *  another browser's reopen - the server computes the reference union now.
+ *  An old py (no gc route) answers 404: the boot GC silently skips (the
+ *  folder still bounds itself via MAX_TEMP_FILES eviction). */
 async function gcTempSnapshots() {
     if (!serverState) return;
     try {
-        const res = await jfetch("/settings_hub/workflows/temp");
-        const items = res.json?.ok && Array.isArray(res.json.items) ? res.json.items : null;
-        if (!items) return; // old py without the route - the embed fallback rules
-        const keep = new Set(recent.map((r) => r.tempId).filter(Boolean));
-        const cutoff = Date.now() - TEMP_MAX_AGE_MS;
-        for (const it of items) {
-            if (!it || typeof it.id !== "string" || keep.has(it.id)) continue;
-            if (Number(it.ts || 0) * 1000 > cutoff) continue;
-            await deleteTempSnapshot(it.id);
-        }
+        await jfetch("/settings_hub/workflows/temp/gc", { method: "POST" });
     } catch (_) {}
 }
 
@@ -1104,6 +1401,169 @@ let fileSizeMax = "";
 let filesAdvOpen = false;       // the ⚗ advanced-filters row visibility
 let filesTreeFolder = "";       // tree-mode navigation ("" = the root)
 let treeExpanded = new Set();   // the expanded folder paths in tree mode
+// v112 (plan 3.4/3.10): the EXPLICIT Files-list states + the request guard.
+// filesLoadSeq kills stale responses; filesLoadError keeps the last good
+// list visible; filesTruncated mirrors the backend listing cap; filesLast-
+// Scan feeds the Refresh tooltip + the status line.
+let filesLoadSeq = 0;
+let filesLoadPending = false;
+let filesLoadError = null;      // {why} | null
+let filesTruncated = false;
+let filesLastScan = 0;          // ms epoch of the last SUCCESSFUL scan
+let filesEmptyStrikes = 0;      // two consecutive empty answers = really empty
+let lastFilesTruncated = false; // the truncated flag of the last listing fetch
+
+// ---------------------------------------------------------------------------
+// v112 stage 2 (plan 4.x): the DERIVED SQLITE INDEX as the Files-tab engine.
+// When the index routes answer (a v112 py), the LIST mode is SERVER-PAGINATED
+// (keyset cursor - no 6000 cap masks the library) and the search runs on the
+// SERVER over names/paths/UUIDs/node types/model refs/contents. The tree
+// view and the preset missing-marks keep the local mirror listing. The index
+// is a derived cache - an old py (404 status) degrades to the v108 local
+// behavior with zero UI contract change.
+// ---------------------------------------------------------------------------
+let idxReady = null;            // null unknown / true / false (index routes alive)
+let idxStats = null;            // the /index/status answer
+let idxSeq = 0;                 // the stale-response guard of the queries
+let idxQueryT = null;           // the search debounce (~250ms)
+let idxScanBusy = false;        // one scan trigger per session (client-side)
+let serverList = { files: [], total: 0, hasMore: false, nextCursor: null,
+    loading: false, error: null };
+let filesUuid = "";             // the advanced filter: exact/partial ComfyUI UUID
+
+function idxMode() { return idxReady === true; }
+
+/** The Files-tab list query the server answers: search + filters + sort +
+ *  pagination in ONE request. Debounced for typing, immediate for the
+ *  sort/filter clicks (the callers pass delay). */
+function scheduleServerList(delay = 250) {
+    if (!idxMode() || filesView !== "list") return;
+    clearTimeout(idxQueryT);
+    idxQueryT = setTimeout(() => void runServerList(true), delay);
+}
+
+async function runServerList(reset = true) {
+    if (!idxMode()) return;
+    const seq = ++idxSeq;
+    if (reset) {
+        serverList = { files: [], total: serverList.total, hasMore: false,
+            nextCursor: null, loading: true, error: null };
+        if (uiTab === "files") renderAll(); // the loading state renders once
+    }
+    const params = new URLSearchParams();
+    if (filesSearch) params.set("q", filesSearch);
+    if (filesUuid) params.set("workflow_id", filesUuid.trim());
+    if (filesFolder && filesView === "list") params.set("folder", filesFolder);
+    if (filesFavOnly) params.set("fav", "1");
+    params.set("sort", filesSort.key === "mtime" ? "mtime" : filesSort.key);
+    params.set("direction", filesSort.dir);
+    params.set("limit", String(SHOW_MORE_STEP));
+    if (!reset && serverList.nextCursor) params.set("cursor", serverList.nextCursor);
+    if (filesDateFrom) {
+        const t = Date.parse(filesDateFrom + "T00:00:00");
+        if (Number.isFinite(t)) params.set("mtime_from", String(Math.floor(t / 1000)));
+    }
+    if (filesDateTo) {
+        const t = Date.parse(filesDateTo + "T23:59:59");
+        if (Number.isFinite(t)) params.set("mtime_to", String(Math.floor(t / 1000)));
+    }
+    if (fileSizeMin !== "" && Number.isFinite(parseFloat(fileSizeMin))) {
+        params.set("size_min", String(Math.round(parseFloat(fileSizeMin) * 1024)));
+    }
+    if (fileSizeMax !== "" && Number.isFinite(parseFloat(fileSizeMax))) {
+        params.set("size_max", String(Math.round(parseFloat(fileSizeMax) * 1024)));
+    }
+    const res = await jfetch("/settings_hub/workflows/index/search?" + params.toString());
+    if (seq !== idxSeq) return; // a newer query superseded this one
+    if (res.json?.ok && Array.isArray(res.json.files)) {
+        const rows = res.json.files.map((f) => ({
+            path: f.path, name: f.name || baseName(f.path),
+            size: Number(f.size) || 0, mtime: Number(f.mtime) || 0,
+            workflowId: f.workflowId || null,
+            parseStatus: f.parseStatus || null,
+            nodeCount: Number(f.nodeCount) || 0,
+        }));
+        serverList = {
+            files: reset ? rows : serverList.files.concat(rows),
+            total: Number(res.json.total) || rows.length,
+            hasMore: !!res.json.has_more,
+            nextCursor: res.json.next_cursor || null,
+            loading: false, error: null,
+        };
+        idxReady = true;
+    } else if (res.status === 404) {
+        idxReady = false; // an old py - the local rung takes over for good
+        serverList.loading = false;
+    } else {
+        serverList.loading = false;
+        serverList.error = (res.json && res.json.error) || ("HTTP " + (res.status || "?"));
+    }
+    if (uiTab === "files") renderAll();
+}
+
+/** The index status probe + the boot scan trigger (once per session). The
+ *  scan walks the library in a SERVER worker thread - the panel only shows
+ *  the Indexing state and re-queries when it lands. */
+async function ensureIndexStatus() {
+    if (!serverState) return;
+    try {
+        const res = await jfetch("/settings_hub/workflows/index/status");
+        if (res.json?.ok) {
+            idxStats = res.json;
+            idxReady = true;
+            if (!idxScanBusy) {
+                idxScanBusy = true;
+                void (async () => {
+                    try {
+                        await jfetch("/settings_hub/workflows/index/scan", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ force: false }),
+                        });
+                    } catch (_) {}
+                    const st2 = await jfetch("/settings_hub/workflows/index/status");
+                    if (st2.json?.ok) idxStats = st2.json;
+                    idxScanBusy = false;
+                    if (uiTab === "files") {
+                        await runServerList(true);
+                        renderAll();
+                    }
+                })();
+            }
+        } else if (res.status === 404) {
+            idxReady = false;
+        }
+    } catch (_) { /* an old py - local mode stays */ }
+}
+
+/** v112 stage 2 (plan 4.4): the manual Rebuild index - a FULL rescan
+ *  (force:true re-analyzes every file), then the status + the list refresh. */
+async function rebuildIndex() {
+    if (!idxMode()) { localToast("The index routes are not available (an old py)"); return; }
+    idxScanBusy = true;
+    renderAll();
+    try {
+        await jfetch("/settings_hub/workflows/index/scan", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ force: true }),
+        });
+    } catch (_) {}
+    const st = await jfetch("/settings_hub/workflows/index/status");
+    if (st.json?.ok) idxStats = st.json;
+    idxScanBusy = false;
+    await runServerList(true);
+    if (uiTab === "files") renderAll();
+    localToast("Index rebuilt: " + (idxStats?.files || 0) + " file(s)"
+        + (idxStats?.errors ? " · " + idxStats.errors + " bad json" : ""));
+}
+
+function filesListRows() {
+    // the rows the LIST mode displays: the server page when the index is
+    // live, the local mirror otherwise (the old v108 behavior)
+    if (idxMode()) return serverList.files;
+    return filteredSavedFiles().slice(0, fileRowsShown);
+}
 
 function loadFilesViewState() {
     // the persisted bits of LS_UI (sort + view mode) - read once at mount
@@ -1159,6 +1619,7 @@ function filesActiveFilterCount() {
     if (filesFolder) n++;
     if (filesQuick || filesDateFrom || filesDateTo) n++;
     if (fileSizeMin !== "" || fileSizeMax !== "") n++;
+    if (filesUuid) n++; // v112 stage 2: the UUID filter
     return n;
 }
 
@@ -1203,15 +1664,19 @@ function filteredSavedFiles() {
     });
     const mul = filesSort.dir === "asc" ? 1 : -1;
     const byName = (a, b) => String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
+    const byNamePathAsc = (a, b) => byName(a, b) ||
+        String(relWfPath(a.path)).localeCompare(String(relWfPath(b.path)), undefined, { sensitivity: "base" });
     list.sort((a, b) => {
-        let r = 0;
-        if (filesSort.key === "name") r = byName(a, b);
-        else if (filesSort.key === "size") r = (a.size || 0) - (b.size || 0);
-        else r = (a.mtime || 0) - (b.mtime || 0);
-        // the tie-break is ALWAYS name-ascending (a descending pass must not
-        // reverse the alphabet inside one mtime/size group)
-        if (!r) r = byName(a, b);
-        return r * mul;
+        let r;
+        if (filesSort.key === "name") r = byName(a, b) * mul;
+        else if (filesSort.key === "size") r = ((a.size || 0) - (b.size || 0)) * mul;
+        else r = ((a.mtime || 0) - (b.mtime || 0)) * mul;
+        // v112 (plan 3.9): the tie-break is ALWAYS name-ascending (path as
+        // the second tie) - a DESC pass must not reverse the alphabet inside
+        // one mtime/size group (the old `r * mul` multiplied the tie-break
+        // by the direction too)
+        if (!r) r = byNamePathAsc(a, b);
+        return r;
     });
     return list;
 }
@@ -1295,7 +1760,9 @@ async function toggleFileFav(path) {
 // --- v108: the folder tree (tree view mode) --------------------------------
 
 /** parentDir -> Set(subDirName) over every saved file path. Leaf folders
- *  (files only, no subfolder) get an empty set so they stay addressable. */
+ *  (files only, no subfolder) get an empty set so they stay addressable.
+ *  v112: prefer buildTreeIndex() for rendering - THIS helper stays for the
+ *  tests/back-compat. */
 function buildFolderMap() {
     const map = new Map();
     for (const f of savedFiles) {
@@ -1311,7 +1778,36 @@ function buildFolderMap() {
     return map;
 }
 
-/** How many files a folder holds at ANY depth (the folder row's counter). */
+/** v112 (plan 3.7): the folder tree index in ONE pass over the list - the
+ *  folder map AND the deep file count of every folder in one walk (the old
+ *  code ran a full filter() over the whole list PER FOLDER ROW). Cached on
+ *  the list reference: a new filtered array rebuilds it, a re-render of
+ *  the same list reuses it. */
+let _treeIdx = null;
+let _treeIdxList = null;
+function buildTreeIndex(list) {
+    if (_treeIdx && _treeIdxList === list) return _treeIdx;
+    const map = new Map();
+    const counts = new Map();
+    for (const f of list) {
+        const segs = fileFolderOf(f.path).split("/").filter(Boolean);
+        let acc = "";
+        for (const s of segs) {
+            if (!map.has(acc)) map.set(acc, new Set());
+            map.get(acc).add(s);
+            acc = acc ? acc + "/" + s : s;
+            counts.set(acc, (counts.get(acc) || 0) + 1); // the deep count
+        }
+        if (!map.has(acc)) map.set(acc, new Set());
+    }
+    _treeIdx = { map, counts };
+    _treeIdxList = list;
+    return _treeIdx;
+}
+
+/** How many files a folder holds at ANY depth (the folder row's counter).
+ *  v112: reads the one-pass index (O(files) total, not O(files) per row).
+ *  Kept for the tests/back-compat. */
 function deepCountIn(dir) {
     if (!dir) return savedFiles.length;
     const pre = dir + "/";
@@ -1330,17 +1826,42 @@ function folderRowHtml(full, label, depth, open, count) {
 
 // ---------------------------------------------------------------------------
 // Recently-closed ring buffer (🕘 Files & Recent)
+// v112 (plan 3.6): the SERVER is the source of truth for the ring METADATA.
+// Each browser session owns a manifest record (workflows_manager/recent/<cid>
+// .json server-side) and every temp snapshot is referenced by the UNION of
+// the manifests - one browser can never delete a snapshot another browser
+// still points at. The localStorage ring stays as the offline mirror + the
+// degraded fallback (an old py without the recent routes = v107 behavior,
+// surfaced in the UI as "recent available only locally"). The temp payload
+// files themselves live server-side as temp/<id>.json exactly as in v107.
 // ---------------------------------------------------------------------------
 
 let recent = lsJson(LS_RECENT, []);
 if (!Array.isArray(recent)) recent = [];
 sanitizeRecent(); // v106: drop the legacy ".null" garbage + unrestorable rows
-/** v107: prune the reopen buffer to what can actually be reopened - a path
- *  entry needs a real file path (the ".null" suffix is the garbage ComfyUI
- *  builds for unsaved tabs, it can never exist in userdata), a temp entry
- *  needs its server temp id (v107) or its embedded snapshot (the v106
- *  fallback). Runs on boot over the loaded localStorage and is exported for
- *  the tests. */
+
+/** v112: the stable browser-session id (one manifest record per session).
+ *  Generated once, kept in localStorage; a cleared localStorage simply
+ *  re-registers as a new session (its old manifest expires by TTL). */
+function clientSessionId() {
+    try {
+        let cid = localStorage.getItem(LS_CLIENT);
+        if (typeof cid === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(cid)) return cid;
+        cid = "c" + (crypto?.randomUUID ? crypto.randomUUID().replace(/-/g, "").slice(0, 24)
+            : Date.now().toString(36) + Math.random().toString(36).slice(2, 12));
+        localStorage.setItem(LS_CLIENT, cid);
+        return cid;
+    } catch (_) { return "c" + Date.now().toString(36); }
+}
+
+let recentServer = null;   // true = the server manifests are live (v112)
+let recentSyncT = null;    // the debounce of the manifest sync
+// v112: the tempIds this browser EVICTED from its ring since the last
+// successful sync (the debounce collapses bursts of closes, so the eviction
+// candidates accumulate here - the plan's reference accounting needs them
+// to survive the whole burst)
+let _pendingEvicted = [];
+
 function sanitizeRecent() {
     const ok = (r) => r && typeof r === "object" &&
         (typeof r.tempId === "string" && r.tempId ||
@@ -1369,6 +1890,79 @@ function persistRecent() {
     saveJson(LS_RECENT, list);
 }
 
+/** v112: upload the ring manifest to the server (debounced ~600ms - bursts
+ *  of closes must not stampede the POST route). On success the server-side
+ *  reference union comes back; the evicted temps of THIS ring are deleted
+ *  ONLY when NO manifest references them anymore (cross-browser safe).
+ *  Never throws; a failure just leaves the v107 semantics for this close. */
+function syncRecentManifest() {
+    if (!serverState) return;
+    clearTimeout(recentSyncT);
+    recentSyncT = setTimeout(async () => {
+        const evicted = _pendingEvicted;
+        _pendingEvicted = [];
+        try {
+            const res = await jfetch("/settings_hub/workflows/recent", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    clientId: clientSessionId(),
+                    entries: recent.slice(0, RECENT_MAX).map((r) => ({
+                        path: r.path || null, name: r.name || "Unsaved",
+                        ts: r.ts || 0, tempId: r.tempId || null, snap: null,
+                    })),
+                }),
+            });
+            if (res.json?.ok) {
+                recentServer = true;
+                // cross-browser reference accounting: delete an evicted
+                // snapshot only when NO manifest references it anymore (the
+                // server computed the union over every browser session)
+                const refs = new Set(res.json.refs || []);
+                const keep = new Set(recent.map((r) => r.tempId).filter(Boolean));
+                for (const tid of evicted) {
+                    if (tid && !keep.has(tid) && !refs.has(tid)) {
+                        void deleteTempSnapshot(tid);
+                    }
+                }
+            } else {
+                // the sync failed - the candidates stay pending for the retry
+                _pendingEvicted.push(...evicted);
+            }
+        } catch (_) {
+            _pendingEvicted.push(...evicted); // the local ring stays the fallback
+        }
+    }, 600);
+}
+
+/** v112 boot: adopt the SERVER manifest for this session (the plan: the
+ *  localStorage ring must not be the only source). A 404 (fresh session)
+ *  MIGRATES the existing localStorage ring up without losing references;
+ *  a 404 on the POST too (an old py) keeps the v107 local-only behavior. */
+async function loadRecentFromServer() {
+    if (!serverState) return false;
+    const cid = clientSessionId();
+    try {
+        const res = await jfetch("/settings_hub/workflows/recent/" + encodeURIComponent(cid));
+        if (res.json?.ok && Array.isArray(res.json.entries)) {
+            recent = res.json.entries.filter((r) => r && typeof r === "object")
+                .slice(0, RECENT_MAX);
+            sanitizeRecent();
+            persistRecent();
+            recentServer = true;
+            return true;
+        }
+        // no manifest yet (fresh session / cleared storage): upload the
+        // migrated localStorage ring - the entries keep their tempIds, so
+        // the referenced snapshots stay alive
+        if (res.status === 404) {
+            syncRecentManifest();
+            return true;
+        }
+    } catch (_) {}
+    return false;
+}
+
 /** The recently-closed ring. v107: a TEMP tab (no real file behind it - the
  *  autosave-ish "Unsaved Workflow (N).json" names never materialize in
  *  userdata, and the duplicate suffix builds "... (2).null") is recorded
@@ -1393,7 +1987,7 @@ function recordRecent(w, snap = null) {
     const name = w.name || (path ? baseName(path) : "Unsaved");
     if (!path && (!snap || w.isEmpty)) return Promise.resolve({ ok: false }); // nothing reopenable - skip
     const prev = recent;
-    const same = (r) => path ? r.path === path : (!r.path && r.name === name);
+    const same = (r) => path ? sameWfPath(r.path, path) : (!r.path && r.name === name);
     return (async () => {
         let tempId = null, embed = null;
         if (snap) {
@@ -1409,17 +2003,25 @@ function recordRecent(w, snap = null) {
         recent = [{ path, name, ts: Date.now(),
                 ...(tempId ? { tempId } : {}), ...(embed ? { snap: embed } : {}) },
             ...prev.filter((r) => !same(r))].slice(0, RECENT_MAX);
-        dropEvictedTemps(prev);
+        // v112: collect the tempIds that just LEFT the ring - the debounced
+        // manifest sync owns their deletion (server reference union first;
+        // the old direct dropEvictedTemps could orphan ANOTHER browser's
+        // snapshot - plan 3.6)
+        const keepIds = new Set(recent.map((r) => r.tempId).filter(Boolean));
+        for (const r of prev) {
+            if (r && typeof r.tempId === "string" && r.tempId && !keepIds.has(r.tempId)) {
+                _pendingEvicted.push(r.tempId);
+            }
+        }
         persistRecent();
+        syncRecentManifest();
         return { ok: true, tempId };
     })();
 }
 
-/** v107: fire-and-forget deletion of the temp snapshots that just LEFT the
- *  ring (the 15-row slice + the same-name dedupe). The ring carries no
- *  graph payloads anymore, so a stranded id would keep its server file
- *  forever - "the folder holds the temp processes WHILE they figure in
- *  recently closed" (the owner's contract). */
+/** v112: kept for the tests/diagnostics - the DELETION decision moved into
+ *  syncRecentManifest (server reference union). Deleting a temp snapshot
+ *  directly here would break the plan 3.6 ownership contract. */
 function dropEvictedTemps(prev) {
     const keep = new Set(recent.map((r) => r.tempId).filter(Boolean));
     const seen = new Set();
@@ -1455,6 +2057,11 @@ let fileRowsShown = ROW_LIST_CAP;
 let fileSel = new Set();            // the Files-tab selection (normalized paths)
 let chipMoved = false;              // the chip drag-vs-click discriminator
 let presetsSearch = "";
+// v112 stage 4 (plan 9): the category/tag filter state (compact - hidden
+// behind the ⚑ chip per the progressive-disclosure contract)
+let presetsFadvOpen = false;
+let presetsCat = "";   // "" = all
+let presetsTag = "";   // "" = all
 let filesSearch = "";
 let openSearch = "";       // v103: the multi-word filter of the Open tab
 let pollT = null;
@@ -1465,20 +2072,35 @@ let lastLoadSig = "";      // v105: the retry render guard's last seen value
 let renderedTab = null;    // v106: the scroll-keep guard's last rendered tab
 
 function openHasPath(p) {
-    const norm = normWfPath(p);
-    return openTabs.some((t) => t.path && normWfPath(t.path) === norm);
+    // v112 (plan 3.3): ONE canonical comparison for every open-tab check
+    return openTabs.some((t) => t.path && sameWfPath(t.path, p));
+}
+
+/** v112 (plan 3.8): the saved-file path index - ONE canonical Set built per
+ *  refresh/render pass (the old missingPathsOf rebuilt Sets per preset-card
+ *  ROW, O(presets x items x files) in the template). Invalidated on every
+ *  refreshSavedFiles() (the only writer of savedFiles). */
+let _savedPathIdx = null;
+function savedPathIndex() {
+    if (!_savedPathIdx) {
+        const s = new Set();
+        for (const f of savedFiles) {
+            const c = canonWfRel(f.path);
+            if (c) s.add(c);
+        }
+        _savedPathIdx = s;
+    }
+    return _savedPathIdx;
 }
 
 function missingPathsOf(preset) {
     if (!savedFilesLoaded) return [];
-    const known = new Set(savedFiles.map((f) => normWfPath(f.path)));
-    // some builds keep the workflows/ prefix in one list but not the other
-    const alt = new Set(savedFiles.map((f) => normWfPath(f.path).replace(/^workflows\//, "")));
+    const known = savedPathIndex();
     return (preset.items || [])
         .filter((it) => it.kind === "path")
         .filter((it) => {
-            const n = normWfPath(it.path);
-            return !known.has(n) && !alt.has(n.replace(/^workflows\//, ""));
+            const c = canonWfRel(it.path);
+            return !c || !known.has(c); // unknown/unsafe path = missing
         })
         .map((it) => it.path);
 }
@@ -1491,13 +2113,15 @@ function missingPathsOf(preset) {
 function buildApplyPlan(preset, opts = {}) {
     const pref = getPref();
     const keepUnsaved = opts.keepUnsaved != null ? !!opts.keepUnsaved : pref.keepUnsaved;
-    const itemPaths = (preset.items || [])
+    // v112 (plan 3.3): ALL path set-membership goes through canonWfRel
+    const itemPaths = new Set((preset.items || [])
         .filter((it) => it.kind === "path")
-        .map((it) => normWfPath(it.path));
+        .map((it) => canonWfRel(it.path))
+        .filter(Boolean));
     const open = getOpenWorkflows();
     const keep = [], close = [];
     for (const t of open) {
-        const inPreset = !!(t.path && itemPaths.includes(normWfPath(t.path)));
+        const inPreset = !!(t.path && itemPaths.has(canonWfRel(t.path)));
         const locked = lockedKeys.has(t.key);
         const unsaved = t.isModified || !t.isPersisted;
         const emptyTemp = t.isEmpty && t.isTemporary && !t.isModified;
@@ -1509,34 +2133,160 @@ function buildApplyPlan(preset, opts = {}) {
         }
         (keepIt ? keep : close).push(t);
     }
-    const keptPaths = new Set(keep.filter((t) => t.path).map((t) => normWfPath(t.path)));
-    const openPaths = new Set(open.filter((t) => t.path).map((t) => normWfPath(t.path)));
+    const keptPaths = new Set(keep.filter((t) => t.path).map((t) => canonWfRel(t.path)));
+    const openPaths = new Set(open.filter((t) => t.path).map((t) => canonWfRel(t.path)));
     const toOpenPaths = (preset.items || [])
-        .filter((it) => it.kind === "path" && !keptPaths.has(normWfPath(it.path)));
-    const toOpenSnaps = (preset.items || []).filter((it) => it.kind === "snapshot");
+        .filter((it) => it.kind === "path" && !keptPaths.has(canonWfRel(it.path)));
+    let toOpenSnaps = (preset.items || []).filter((it) => it.kind === "snapshot");
+    // v112 stage 3 (plan 8): the batch duplicate accounting - the exact
+    // copies of ALREADY-OPEN temp tabs are counted and can be SKIPPED by an
+    // explicit user choice (the default opens all copies - nothing is
+    // dropped silently)
+    const dupCount = (opts.skipDupSnaps ? toOpenSnaps : []).filter((it) => {
+        const dup = findSnapshotDuplicates(it.graph);
+        return !!dup.exact;
+    }).length;
+    if (opts.skipDupSnaps) {
+        toOpenSnaps = toOpenSnaps.filter((it) => !findSnapshotDuplicates(it.graph).exact);
+    }
     return {
         preset, keep, close, toOpenPaths, toOpenSnaps,
-        reopenClosed: toOpenPaths.filter((it) => openPaths.has(normWfPath(it.path))),
+        reopenClosed: toOpenPaths.filter((it) => openPaths.has(canonWfRel(it.path))),
         missing: missingPathsOf(preset),
         keepUnsaved,
+        dupCount,
     };
 }
 
-function captureUndo() {
+/** v112 (plan 3.1): SNAPSHOT-BASED UNDO. Before a destructive apply the
+ *  FULL workspace state is captured SERVER-side (POST /workflows/undo):
+ *  every open tab's path/flags AND the actual graph JSON of any tab that
+ *  may be closed/overwritten (temp tabs, modified persisted tabs - the
+ *  plan: "включая temp и modified persisted tabs"). The browser keeps only
+ *  the undoId. A failed/oversized capture resolves {ok:false, reason} and
+ *  the apply plan then REFUSES the destructive close for the unsnapshotable
+ *  tabs (never silently drops unsaved work). The old paths-only
+ *  sessionUndo is gone: undo restores the actual graphs, not just paths. */
+async function captureUndo() {
     const open = getOpenWorkflows();
     const act = open.find((t) => t.isActive) || null;
-    sessionUndo = {
+    const plan = {
         paths: open.filter((t) => t.path).map((t) => t.path),
         activePath: act?.path || null,
-        openedKeys: [],   // filled by applyPlan after the opens complete
+        openedKeys: [],
+        undoId: null,
         ts: Date.now(),
     };
+    const tabs = [];
+    let failed = [];
+    for (const t of open) {
+        let graph = null;
+        // capture the JSON of every tab whose content may be lost: temp tabs
+        // and modified persisted tabs (clean persisted tabs reopen by path)
+        if (t.isTemporary || t.isModified || !t.isPersisted) {
+            graph = graphJsonOfOpenTab(t);
+            if (!graph) {
+                failed.push(t.name || t.path || "tab");
+                graph = null;
+            }
+        }
+        tabs.push({
+            key: t.key, path: t.path || null, name: t.name || null,
+            active: !!t.isActive, modified: !!t.isModified,
+            temp: !!t.isTemporary || !t.isPersisted, graph,
+        });
+    }
+    if (failed.length) {
+        // plan 3.1: "При неудачном snapshot не выполнять destructive close
+        // соответствующей вкладки. Показать точную причину."
+        return { ...plan, ok: false,
+            reason: "could not serialize " + failed.join(", ") };
+    }
+    if (!serverState) {
+        return { ...plan, ok: false,
+            reason: "the server is offline - the undo snapshot cannot be stored" };
+    }
+    try {
+        const res = await jfetch("/settings_hub/workflows/undo", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tabs, activeKey: act?.key || null }),
+        });
+        if (res.json?.ok && typeof res.json.undoId === "string") {
+            return { ...plan, ok: true, undoId: res.json.undoId };
+        }
+        return { ...plan, ok: false,
+            reason: (res.json && res.json.error) || ("HTTP " + (res.status || "?")) };
+    } catch (e) {
+        return { ...plan, ok: false, reason: String((e && e.message) || e) };
+    }
+}
+
+/** v112: restore ONE pre-apply tab from the server undo snapshot. A tab
+ *  with a captured graph gets its content back (a modified persisted tab
+ *  is reopened by path FIRST so the file binding survives, then the
+ *  in-memory graph is swapped onto the canvas; a temp tab reopens as a
+ *  snapshot). A graph-less tab reopens by path. */
+async function restoreUndoTab(tab) {
+    if (!tab || typeof tab !== "object") return false;
+    const path = tab.path ? normWfPath(tab.path) : null;
+    if (tab.graph && typeof tab.graph === "object") {
+        if (path && !tab.temp) {
+            // modified persisted tab: bind the file first, then swap the
+            // graph (loadGraphData carries the path -> the SAME tab is
+            // reopened with its unsaved state)
+            const opened = await openWorkflowByPath(path);
+            if (opened.ok) {
+                try {
+                    const bindName = path.replace(/^workflows\//, "");
+                    await app.loadGraphData(tab.graph, true, true, bindName, {
+                        showMissingModelsDialog: false,
+                        showMissingNodesDialog: false,
+                        checkForRerouteMigration: false,
+                    });
+                    return true;
+                } catch (_) { /* the saved-file version stays - not a silent loss:
+                               the snapshot graph is below */ }
+            }
+        }
+        const r = await openSnapshotWorkflow(tab.name || (path ? baseName(path) : "Unsaved"), tab.graph);
+        return !!r.ok;
+    }
+    if (path) {
+        const r = await openWorkflowByPath(path);
+        return !!r.ok;
+    }
+    return false;
 }
 
 async function applyPlan(plan) {
     const p = plan.preset;
     const preKeys = getOpenWorkflows().map((t) => t.key);
-    captureUndo();
+    // v112 (plan 3.1): the snapshot is REQUIRED before any destructive close.
+    // A failed capture blocks the close of the tabs it could not protect -
+    // the plan degrades to "open-only" with the exact reason, never to a
+    // silent loss.
+    const undoCap = await captureUndo();
+    if (!undoCap.ok && plan.close.length) {
+        const risky = plan.close.filter((t) => t.isModified || !t.isPersisted);
+        if (risky.length) {
+            await refreshOpen(true);
+            renderAll();
+            actionToast("Switch blocked: the undo snapshot failed (" +
+                (undoCap.reason || "?") + ") - " + risky.length +
+                " unsaved tab(s) would be lost. Opened what was safe.",
+                "↩ Retry", () => { void (async () => {
+                    const cap2 = await captureUndo();
+                    if (cap2.ok) await applyPlan(plan);
+                    else localToast("Undo snapshot still failing: " + cap2.reason, 4200);
+                })(); }, 7000);
+            return;
+        }
+    }
+    // v112: sessionUndo ALWAYS exists after a successful capture (undoId +
+    // server snapshot); a failed capture still allows a paths-only undo
+    // (only safe when no risky tabs were closed - checked above)
+    sessionUndo = undoCap;
     let opened = 0, closed = 0, failed = [];
     // 1) open the missing targets FIRST (ComfyUI always keeps one live tab -
     //    opening before closing never leaves the workspace empty)
@@ -1561,11 +2311,19 @@ async function applyPlan(plan) {
         await sleep(TAB_SEQ);
         await nextFrame();
     }
-    // 3) activate the preset's active tab
+    // 3) activate the preset's active tab - v112 stage 3 (plan 7.3): the
+    // active item may be a SNAPSHOT (activeItemId); the snapshot's temp tab
+    // opened above is the LAST matching snapshot - activate by name
     if (p.activePath) {
-        const norm = normWfPath(p.activePath);
-        const t = getOpenWorkflows().find((x) => x.path && normWfPath(x.path) === norm);
+        const t = getOpenWorkflows().find((x) => x.path && sameWfPath(x.path, p.activePath));
         if (t) await activateWorkflow(t);
+    } else if (p.activeItemId) {
+        const it = (p.items || []).find((x) => x.itemId === p.activeItemId);
+        if (it?.kind === "snapshot") {
+            const t = [...getOpenWorkflows()].reverse()
+                .find((x) => !x.path && x.name === (it.name || it.sourceName));
+            if (t) await activateWorkflow(t);
+        }
     }
     // remember which keys the apply ADDED - the undo retires exactly these
     // (still untouched) and brings the pre-apply set back
@@ -1586,14 +2344,28 @@ async function undoApply() {
     const u = sessionUndo;
     if (!u) { localToast("Nothing to undo"); return; }
     sessionUndo = null;
-    const keep = new Set(u.paths.map(normWfPath));
+    // v112 (plan 3.1): fetch the SERVER snapshot - the actual pre-apply
+    // graphs, including temp tabs and the unsaved states of persisted tabs.
+    let snapTabs = null, snapActiveKey = null;
+    if (u.undoId) {
+        try {
+            const res = await jfetch("/settings_hub/workflows/undo/" + encodeURIComponent(u.undoId));
+            if (res.json?.ok && Array.isArray(res.json.tabs)) {
+                snapTabs = res.json.tabs;
+                snapActiveKey = res.json.activeKey || null;
+            }
+        } catch (_) {}
+        // consumed: the snapshot is one-shot (bounded server storage)
+        void jfetch("/settings_hub/workflows/undo/" + encodeURIComponent(u.undoId), { method: "DELETE" });
+    }
+    const keep = new Set((u.paths || []).map(canonWfRel));
     const openedByApply = new Set(u.openedKeys || []);
     // retire what the apply brought in (still untouched) - the tabs the user
     // had BEFORE the apply survive unless they were retired by it
     for (const t of getOpenWorkflows()) {
         if (lockedKeys.has(t.key)) continue;
         if (t.isModified) continue;   // never close touched work on undo
-        if (t.path && keep.has(normWfPath(t.path))) continue;
+        if (t.path && keep.has(canonWfRel(t.path))) continue;
         if (!openedByApply.has(t.key) && (t.isModified || (!t.isPersisted && !t.isEmpty))) {
             // a PRE-EXISTING unsaved/temp tab the plan kept - hands off
             continue;
@@ -1602,22 +2374,70 @@ async function undoApply() {
         await sleep(TAB_SEQ);
         await nextFrame();
     }
-    // bring back the pre-apply set
-    for (const path of u.paths) {
-        if (!openHasPath(path)) {
-            await openWorkflowByPath(path);
+    // bring the pre-apply set back - WITH the captured graphs when the
+    // snapshot is available (temp tabs + modified persisted tabs restore
+    // their actual content, not just the file paths)
+    if (snapTabs) {
+        const knownKeys = new Set(snapTabs.map((t) => t.key || ""));
+        for (const tab of snapTabs) {
+            const path = tab.path ? normWfPath(tab.path) : null;
+            if (path && openHasPath(path)) {
+                // already open: restore the pre-apply MODIFIED content only
+                // when the current copy is clean (post-apply work survives)
+                const cur = getOpenWorkflows().find((t) => t.path && sameWfPath(t.path, path));
+                if (cur && (cur.isModified || (tab.graph && tab.modified))) {
+                    if (!cur.isModified && tab.graph && tab.modified) {
+                        await restoreUndoTab(tab);
+                        await sleep(TAB_SEQ);
+                        await nextFrame();
+                    }
+                }
+                continue;
+            }
+            if (!path && tab.key && openTabs.some((t) => t.key === tab.key)) {
+                continue; // that temp tab is still open - nothing to restore
+            }
+            const ok = await restoreUndoTab(tab);
+            if (!ok && path) {
+                await openWorkflowByPath(path); // the file at least
+            }
             await sleep(TAB_SEQ);
             await nextFrame();
         }
-    }
-    if (u.activePath) {
-        const norm = normWfPath(u.activePath);
-        const t = getOpenWorkflows().find((x) => x.path && normWfPath(x.path) === norm);
-        if (t) await activateWorkflow(t);
+        // a paths-only safety net: every pre-apply PATH must be open again
+        for (const path of (u.paths || [])) {
+            if (!openHasPath(path)) {
+                await openWorkflowByPath(path);
+                await sleep(TAB_SEQ);
+                await nextFrame();
+            }
+        }
+        // activate what was active pre-apply (by the snapshot key, then path)
+        let act = snapActiveKey ? getOpenWorkflows().find((t) => knownKeys.has(t.key) && t.key === snapActiveKey) : null;
+        if (!act && u.activePath) {
+            act = getOpenWorkflows().find((x) => x.path && sameWfPath(x.path, u.activePath)) || null;
+        }
+        if (act) await activateWorkflow(act);
+    } else {
+        // degraded (no snapshot): paths-only restore - reached only when no
+        // risky tab was closed (the apply refuses destructive closes then)
+        for (const path of (u.paths || [])) {
+            if (!openHasPath(path)) {
+                await openWorkflowByPath(path);
+                await sleep(TAB_SEQ);
+                await nextFrame();
+            }
+        }
+        if (u.activePath) {
+            const t = getOpenWorkflows().find((x) => x.path && sameWfPath(x.path, u.activePath));
+            if (t) await activateWorkflow(t);
+        }
     }
     await refreshOpen(true);
     renderAll();
-    localToast("Restored the previous set of open workflows");
+    localToast(snapTabs
+        ? "Restored the previous workspace (including unsaved states)"
+        : "Restored the previous set of open workflows");
 }
 
 // ---------------------------------------------------------------------------
@@ -2008,6 +2828,10 @@ function buildDom() {
     panel.querySelector(".hub-wf-body").addEventListener("change", (e) => void onBodyChange(e));
     panel.querySelector(".hub-wf-body").addEventListener("input", (e) => void onBodyInput(e));
     panel.querySelector(".hub-wf-body").addEventListener("keydown", (e) => void onBodyKeydown(e));
+
+    // v112 (plan 3.4): mount ON the Files tab starts the listing fetch
+    // immediately - no detour through another tab is required anymore
+    if (uiTab === "files") void refreshSavedFiles();
 }
 
 function setUiTab(tab) {
@@ -2016,6 +2840,17 @@ function setUiTab(tab) {
     uiTab = tab;
     saveUi({ tab });
     if (tab === "files" || tab === "presets") void refreshSavedFiles();
+    // v112 stage 2: the Files tab drives the index engine
+    if (tab === "files") {
+        void ensureIndexStatus();
+        if (idxReady === true) void runServerList(true);
+        else if (idxReady === null) {
+            void (async () => {
+                await ensureIndexStatus();
+                if (idxReady === true) void runServerList(true);
+            })();
+        }
+    }
     renderAll();
     // v105: the presets list is loaded ONCE per session - a transient boot
     // failure used to leave the tab empty until a save happened. Opening the
@@ -2103,7 +2938,7 @@ function openTabHtml() {
         const hay = [t.name || "", t.path || "", t.isTemporary ? "temp" : ""].join(" ").toLowerCase();
         return toks.every((tok) => hay.includes(tok));
     });
-    const rows = list.slice(0, MAX_OPEN_ROWS).map((t, i) => {
+    const rows = list.slice(0, openRowsShown).map((t, i) => {
         if (i >= openRowsShown) return "";
         const locked = lockedKeys.has(t.key);
         const marks = [
@@ -2112,9 +2947,15 @@ function openTabHtml() {
             t.isTemporary ? `<span class="hub-wf-temp" title="Not saved to disk yet">temp</span>` : "",
             t.isEmpty ? `<span class="hub-wf-empty" title="0 nodes">(empty)</span>` : "",
         ].join("");
+        // v112 stage 3 (plan 6): the PER-TAB save - persisted = save in
+        // place, temp = Save As ladder, clean = an explicit save (unified UX)
+        const saveMark = saveState.get(t.key);
+        const saveBtn = `<button type="button" class="hub-wf-lockbtn${saveMark === "saved" ? " hub-wf-locked" : ""}" data-act="savetab" data-key="${esc(t.key)}" ` +
+            `title="${t.isPersisted ? (t.isModified ? "Save this tab to its file" : "Save this tab (no changes yet)") : "Save As... (hands the tab to ComfyUI's own Save-As flow)"}">${saveMark === "saving" ? "…" : (saveMark === "saved" ? "✓" : "💾")}</button>`;
         return `<div class="hub-wf-row${t.isActive ? " hub-wf-row-active" : ""}${locked ? " hub-wf-row-locked" : ""}" data-key="${esc(t.key)}">` +
             `<button type="button" class="hub-wf-name" data-act="activate" data-key="${esc(t.key)}" title="${esc(t.path || "temporary tab")}">${esc(t.name)}${t.isModified ? " *" : ""}</button>` +
             `<span class="hub-wf-marks">${marks}</span>` +
+            saveBtn +
             `<button type="button" class="hub-wf-lockbtn${locked ? " hub-wf-locked" : ""}" data-act="lock" data-key="${esc(t.key)}" title="${locked ? "Unlock - allow mass close" : "Lock - protect from mass close (📌)"}">📌</button>` +
             `<button type="button" class="hub-wf-closebtn${armedClose?.key === t.key ? " hub-wf-armed" : ""}" data-act="close" data-key="${esc(t.key)}" title="${(t.isModified || t.isTemporary) ? (armedClose?.key === t.key ? "Click AGAIN to confirm closing the UNSAVED tab" : "Close (unsaved - click twice)") : "Close this tab"}">✕</button>` +
             `</div>`;
@@ -2139,11 +2980,22 @@ function openTabHtml() {
         // pinned on top and the status bar stays pinned at the bottom (v101
         // scrolled the whole body, so the status slid under the list)
         `<div class="hub-wf-scroll">${rows || `<div class="hub-wf-emptylist">${toks.length ? "Nothing matches the filter" : "Nothing is open (or this ComfyUI build does not expose its tab list to extensions)"}</div>`}${more}</div>` +
-        `<div class="hub-wf-status">${toks.length ? list.length + " of " : ""}${openTabs.length} open${unsaved ? " · unsaved work present" : ""}${queueRunning ? " · ⚠ generation running" : ""}</div>`;
+        // v112 (plan 3.5): the status shows the chunk position when the list
+        // is longer than the rendered chunk ("showing N of M"), the search
+        // still covers the FULL open set
+        `<div class="hub-wf-status">${toks.length ? list.length + " of " : ""}${openTabs.length} open${openTabs.length > openRowsShown ? " · showing " + Math.min(openRowsShown, list.length) + " of " + list.length : ""}${unsaved ? " · unsaved work present" : ""}${queueRunning ? " · ⚠ generation running" : ""}</div>`;
 }
 
 function presetCardHtml(p) {
     const items = p.items || [];
+    // v112 stage 4 (plan 9): the category + the tag chips (a long list
+    // collapses; the full set stays on hover)
+    const cat = p.category || "Uncategorized";
+    const tags = Array.isArray(p.tags) ? p.tags : [];
+    const shownTags = tags.slice(0, 4);
+    const tagChips = shownTags.map((t) =>
+        `<span class="hub-wf-snap" title="Tag: ${esc(t)}">#${esc(t)}</span>`).join("") +
+        (tags.length > shownTags.length ? `<span class="hub-wf-snap" title="${esc(tags.slice(4).join(", "))}">+${tags.length - 4}</span>` : "");
     const shown = items.slice(0, ITEM_LIST_CAP);
     const rows = shown.map((it) => {
         if (it.kind === "snapshot") {
@@ -2161,7 +3013,10 @@ function presetCardHtml(p) {
         `<div class="hub-wf-card-head">` +
         `<button type="button" class="hub-wf-fav${p.fav ? " hub-wf-fav-on" : ""}" data-act="fav" data-pid="${esc(p.id)}" title="${p.fav ? "Unfavorite" : "Favorite - stays on top"}">${p.fav ? "★" : "☆"}</button>` +
         `<span class="hub-wf-card-name" title="${esc(p.name)}">${esc(p.name)}</span>` +
+        `<span class="hub-wf-snap" title="Category: ${esc(cat)}" data-cat="${esc(cat)}">${esc(cat)}</span>` +
+        tagChips +
         `<span class="hub-wf-card-badge">${items.length} wf</span>` +
+        `<button type="button" class="hub-wf-cbtn" data-act="pver" data-pid="${esc(p.id)}" title="Version history: the automatic archives before every change (restore any point)">🕘</button>` +
         `<span class="hub-wf-card-date">${esc(fmtDate(p.updated))}</span>` +
         `<span class="hub-wf-hspace"></span>` +
         `<button type="button" class="hub-wf-cbtn" data-act="rename" data-pid="${esc(p.id)}" title="Rename (Enter applies, Esc cancels)">✎</button>` +
@@ -2182,10 +3037,12 @@ function saveFormHtml() {
     const rows = f.rows.map((r, i) => {
         const mark = r.isTemp
             ? `<span class="hub-wf-sf-snap">temp → snapshot</span>`
-            : (r.isModified ? `<span class="hub-wf-sf-mod" title="The tab has unsaved changes">* (references disk file)</span>` : "");
+            : (f.snapMode
+                ? `<span class="hub-wf-sf-snap">→ embedded snapshot</span>`
+                : (r.isModified ? `<span class="hub-wf-sf-mod" title="The tab has unsaved changes">* (references disk file)</span>` : ""));
         return `<label class="hub-wf-sf-row">` +
             `<input type="checkbox" data-wf-check="${i}"${r.checked ? " checked" : ""}>` +
-            `<input type="radio" name="hub-wf-activeradio" data-wf-radio="${i}"${f.activeKey === r.key ? " checked" : ""}${r.isTemp ? " disabled title=\"A snapshot has no file path\"" : ""} title="Which file counts as the preset's active tab">` +
+            `<input type="radio" name="hub-wf-activeradio" data-wf-radio="${i}"${(f.activeKey === r.key || (f.snapMode && f.activeKey === r.key)) ? " checked" : ""} title="Which item counts as the preset's active tab">` +
             `<span class="hub-wf-sf-name" title="${esc(r.path || "temporary tab")}">${esc(r.name)}${r.isModified && !r.isTemp ? " *" : ""}</span>${mark}` +
             `</label>`;
     }).join("");
@@ -2196,6 +3053,16 @@ function saveFormHtml() {
     return `<div class="hub-wf-saveform">` +
         `<div class="hub-wf-sf-title">${f.mode === "update" ? "Update '" + esc(target) + "'" : "Save current tabs as a preset"}</div>` +
         `<input type="text" class="hub-wf-sf-namein" data-wf="sfname" placeholder="Workspace ${presets.length + 1}" value="${esc(f.name || "")}" spellcheck="false">` +
+        // v112 stage 4 (plan 9): the category + the tag editor (comma-separated)
+        `<div class="hub-wf-sf-tools">` +
+        `<input type="text" class="hub-cs-in" data-wf="sfcat" placeholder="Category (e.g. Portrait, Flux, Upscale)" value="${esc(f.category || "")}" spellcheck="false" style="flex:1 1 auto">` +
+        `<input type="text" class="hub-cs-in" data-wf="sftags" placeholder="Tags, comma-separated (production, fast…)" value="${esc((f.tags || []).join(", "))}" spellcheck="false" style="flex:1 1 auto">` +
+        `</div>` +
+        // v112 stage 3 (plan 7.1): the SNAPSHOT toggle - default OFF; ON embeds
+        // the checked PERSISTED tabs as independent snapshots (with their
+        // origin metadata); temp tabs are always snapshots anyway
+        `<label class="hub-wf-plankeep" title="OFF: the checked saved tabs are referenced by their file path (the preset follows the file). ON: they are embedded as independent snapshot copies - changing the file later never changes the preset.">` +
+        `<input type="checkbox" data-wf="sfnapmode"${f.snapMode ? " checked" : ""}> Embed saved workflows as snapshots</label>` +
         (f.rows.length
             ? `<div class="hub-wf-sf-tools"><button type="button" class="hub-wf-act" data-wf-btn="sftoggle" title="${allChecked ? "Uncheck every tab" : "Check every tab (temp tabs become snapshots)"}">${allChecked ? "Deselect all" : "Select all"}</button></div>`
             : "") +
@@ -2213,18 +3080,48 @@ function saveFormHtml() {
 }
 
 function presetsTabHtml() {
+    // v112 stage 4 (plan 9): the search covers name + items + CATEGORY + TAGS;
+    // the compact ⚑ filter row (category + tag selects) opens on demand
     const toks = presetsSearch.toLowerCase().split(/\s+/).filter(Boolean);
-    const list = !toks.length ? presets : presets.filter((p) => {
-        const hay = [p.name || "", ...(p.items || []).map((it) => it.path || it.name || "")]
+    const list = presets.filter((p) => {
+        const hay = [p.name || "", p.category || "", ...(p.tags || []),
+            ...(p.items || []).map((it) => it.path || it.name || "")]
             .join(" ").toLowerCase();
-        return toks.every((t) => hay.includes(t));
+        if (toks.length && !toks.every((t) => hay.includes(t))) return false;
+        if (presetsCat && (p.category || "Uncategorized") !== presetsCat) return false;
+        if (presetsTag && !(p.tags || []).some((t) =>
+            String(t).toLowerCase() === presetsTag.toLowerCase())) return false;
+        return true;
     });
+    const cats = [...new Set(presets.map((p) => p.category || "Uncategorized"))].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    const tagSet = new Map();
+    for (const p of presets) {
+        for (const t of (p.tags || [])) {
+            const k = String(t).toLowerCase();
+            if (!tagSet.has(k)) tagSet.set(k, t);
+        }
+    }
+    const fRow = !presetsFadvOpen ? "" :
+        `<div class="hub-wf-fadv">` +
+        `<select class="hub-wf-fsel" data-wf="pcat" title="Category filter">` +
+        `<option value=""${!presetsCat ? " selected" : ""}>category: all</option>` +
+        cats.map((c) => `<option value="${esc(c)}"${presetsCat === c ? " selected" : ""}>${esc(c)}</option>`).join("") +
+        `</select>` +
+        `<select class="hub-wf-fsel" data-wf="ptag" title="Tag filter">` +
+        `<option value=""${!presetsTag ? " selected" : ""}>tag: all</option>` +
+        [...tagSet.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([k, t]) =>
+            `<option value="${esc(k)}"${presetsTag === k ? " selected" : ""}>#${esc(t)}</option>`).join("") +
+        `</select>` +
+        `<button type="button" class="hub-wf-act" data-act="pfclear" title="Clear the category/tag filters">✕</button>` +
+        `</div>`;
+    const fCount = (presetsCat ? 1 : 0) + (presetsTag ? 1 : 0);
     return `<div class="hub-wf-toolbar">` +
-        `<input type="text" class="hub-wf-search" data-wf="presetsearch" placeholder="filter: multi-word…" value="${esc(presetsSearch)}" spellcheck="false">` +
+        `<input type="text" class="hub-wf-search" data-wf="presetsearch" placeholder="filter: name, category, tag…" value="${esc(presetsSearch)}" spellcheck="false">` +
+        `<button type="button" class="hub-wf-act hub-wf-fchip${presetsFadvOpen ? " hub-wf-advbtn-on" : ""}" data-act="pfadv" title="Category/tag filters">⚑${fCount ? " " + fCount : ""}</button>` +
         `<button type="button" class="hub-wf-act" data-act="savepreset" title="Save the current open tabs as a new preset">＋ Save current</button>` +
         `<button type="button" class="hub-wf-act" data-act="import" title="Import presets from JSON (paste)">⤒ Import</button>` +
         `<button type="button" class="hub-wf-act" data-act="exportall" title="Export ALL presets as JSON (to the clipboard)">⤓ Export all</button>` +
-        `</div>` +
+        `</div>` + fRow +
         (saveForm ? saveFormHtml() : "") +
         // v102: the cards scroll INSIDE .hub-wf-scroll - the search toolbar
         // and the save form stay pinned on top, the status bar at the bottom
@@ -2253,7 +3150,12 @@ function filesTabHtml() {
         `title="${(r.tempId || r.snap) ? "Snapshot - restores the tab as it was when closed" : esc(r.path || "")}">🕘 ${esc(r.name)}${(r.tempId || r.snap) && !r.path ? " <span class=\"hub-wf-snap\">(snapshot)</span>" : ""}</button>` +
         `<span class="hub-wf-marks"><span class="hub-wf-snap">${esc(fmtDate(Math.floor((r.ts || 0) / 1000)))}</span></span>` +
         `</div>`).join("") : "";
+    // v112 stage 2: in index mode the LIST branch renders the SERVER page
+    // (search + filters + sort + pagination on the backend, keyset cursor -
+    // the 6000-listing cap no longer masks the library); the tree branch and
+    // the counts stay on the local mirror (full paths needed).
     const list = filteredSavedFiles();
+    const idxList = idxMode() && filesView === "list" ? serverList.files : null;
     const viewBtn = (v, label, title) =>
         `<button type="button" class="hub-wf-act hub-wf-viewbtn${filesView === v ? " hub-wf-viewbtn-on" : ""}" data-act="filesview" data-view="${v}" title="${title}">${label}</button>`;
     const sortBtn = (k, label, title) => {
@@ -2282,6 +3184,7 @@ function filesTabHtml() {
                   return `<option value="${esc(d)}"${filesFolder === d ? " selected" : ""}>${esc(label)}</option>`;
               }).join("") + `</select>`
             : `<span class="hub-wf-flabel" title="In tree mode the navigation below filters the folders">folder: tree nav</span>`) +
+        `<input type="text" class="hub-wf-fdate" data-wf="fuuid" placeholder="UUID" value="${esc(filesUuid)}" title="ComfyUI workflow UUID filter (exact or prefix) - the index groups files by this id" spellcheck="false">` +
         `<input type="date" class="hub-wf-fdate" data-wf="fdatefrom" value="${esc(filesDateFrom)}" title="Modified from (inclusive)" aria-label="Modified from">` +
         `<input type="date" class="hub-wf-fdate" data-wf="fdateto" value="${esc(filesDateTo)}" title="Modified until (inclusive)" aria-label="Modified until">` +
         `<span class="hub-wf-fnum-wrap"><input type="number" class="hub-wf-fnum" data-wf="fsizemin" min="0" step="any" placeholder="min" value="${esc(fileSizeMin)}" title="Size min, KB">` +
@@ -2295,32 +3198,15 @@ function filesTabHtml() {
     // fileRowsShown cap.
     let rows, more = "";
     if (filesView === "tree") {
-        const map = buildFolderMap();
-        // v110: an active search OR any filter prunes the DEAD branches - a
-        // folder whose subtree holds no matching file disappears from the
-        // tree (the owner's ask: no empty folders during the search), and
-        // the counters read the FILTERED list so a folder row never shows a
-        // count the rows below cannot back up. Without filters the tree is
-        // untouched (every real folder stays addressable).
-        const filtering = !!(filesSearch || filesQuick || filesDateFrom || filesDateTo ||
-            (fileSizeMin !== "" && Number.isFinite(parseFloat(fileSizeMin))) ||
-            (fileSizeMax !== "" && Number.isFinite(parseFloat(fileSizeMax))) || filesFavOnly);
-        const aliveDirs = new Set();
-        if (filtering) {
-            for (const f of list) {
-                const segs = fileFolderOf(f.path).split("/").filter(Boolean);
-                let acc = "";
-                for (const s of segs) {
-                    acc = acc ? acc + "/" + s : s;
-                    aliveDirs.add(acc);
-                }
-            }
-        }
-        const deepCount = (dir) => {
-            if (!dir) return list.length;
-            const pre = dir + "/";
-            return list.reduce((n, f) => n + (relWfPath(f.path).startsWith(pre) ? 1 : 0), 0);
-        };
+        // v112 (plan 3.7): the one-pass tree index over the FILTERED list -
+        // the map AND the deep counts in one walk (the per-folder-row
+        // filter() is gone). The map now comes from the filtered list, so a
+        // dead branch (no matching files under the active filters) is simply
+        // absent from the map - the v110 pruning contract holds, without the
+        // extra aliveDirs walk.
+        const idx = buildTreeIndex(list);
+        const map = idx.map;
+        const deepCount = (dir) => dir ? (idx.counts.get(dir) || 0) : list.length;
         const out = [];
         let shown = 0, capHit = false;
         const renderDir = (dir, depth) => {
@@ -2328,7 +3214,6 @@ function filesTabHtml() {
             const kids = [...(map.get(dir) || [])].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
             for (const k of kids) {
                 const full = dir ? dir + "/" + k : k;
-                if (filtering && !aliveDirs.has(full)) continue; // dead branch - pruned
                 const open = treeExpanded.has(full);
                 out.push(folderRowHtml(full, k, depth, open, deepCount(full)));
                 if (open) renderDir(full, depth + 1);
@@ -2343,17 +3228,58 @@ function filesTabHtml() {
         rows = out.join("");
         if (capHit) more = `<button type="button" class="hub-wf-more" data-act="morefiles">Show more</button>`;
     } else {
-        rows = list.slice(0, fileRowsShown).map((f) => savedFileRowHtml(f, 0)).join("");
-        more = list.length > fileRowsShown
-            ? `<button type="button" class="hub-wf-more" data-act="morefiles">Show more (${list.length - fileRowsShown} hidden)</button>` : "";
+        if (idxList) {
+            // the SERVER page (index mode): the rows are already filtered/
+            // sorted/paginated backend-side - render as-is
+            rows = idxList.map((f) => savedFileRowHtml(f, 0)).join("");
+            more = serverList.hasMore
+                ? `<button type="button" class="hub-wf-more" data-act="morefiles">Show more (${serverList.total - idxList.length} hidden of ${serverList.total})</button>`
+                : (serverList.loading ? `<div class="hub-wf-emptylist">Loading the library…</div>` : "");
+            if (!rows && serverList.loading) {
+                rows = "";
+                more = `<div class="hub-wf-emptylist">Reading the indexed library…</div>`;
+            }
+        } else {
+            rows = list.slice(0, fileRowsShown).map((f) => savedFileRowHtml(f, 0)).join("");
+            more = list.length > fileRowsShown
+                ? `<button type="button" class="hub-wf-more" data-act="morefiles">Show more (${list.length - fileRowsShown} hidden)</button>` : "";
+        }
     }
     const crumbs = filesView === "tree" ? crumbsHtml() : "";
+    // v112 (plan 3.10): the Refresh button + the last successful scan time
+    const refreshBtn = `<button type="button" class="hub-wf-act" data-act="filesrefresh" ` +
+        `title="Re-read the workflow files from the server${filesLastScan ? " (last scan " + esc(fmtDateTime(Math.floor(filesLastScan / 1000))) + ")" : ""}">⟳ Refresh</button>`;
+    // v112 (plan 3.4): EXPLICIT list states - loading / loaded empty / error /
+    // partial (truncated). An error NEVER blanks the last good list and the
+    // "Reading…" placeholder cannot outlive a failed request (the note names
+    // the problem and offers the next action - Refresh).
+    let stateNote = "";
+    if (idxMode() && filesView === "list" && serverList.error) {
+        stateNote = `<div class="hub-wf-planwarn" title="${esc(serverList.error)}">⚠ The index query failed: ${esc(serverList.error)} - the local mirror still works.</div>`;
+    } else if (idxMode() && filesView === "list" && idxScanBusy) {
+        stateNote = `<div class="hub-wf-planwarn" title="The server walks the library in a background thread">⏳ Indexing the library… the search results refresh when it lands.</div>`;
+    } else if (filesLoadError) {
+        stateNote = `<div class="hub-wf-planwarn" title="${esc(filesLoadError.why)}">⚠ Files refresh failed: ${esc(filesLoadError.why)} - the last list is kept. ${""}` +
+            `<button type="button" class="hub-wf-act" data-act="filesrefresh">⟳ Retry</button></div>`;
+    } else if (filesTruncated && savedFilesLoaded) {
+        stateNote = `<div class="hub-wf-planwarn" title="The backend caps one listing - the SQLite index stage removes the cap">⚠ The library is larger than one listing - showing the first ${savedFiles.length} files (truncated).</div>`;
+    }
+    const emptyMsg = !savedFilesLoaded
+        ? (filesLoadPending ? "Reading the workflow files…" : "No saved workflow files found")
+        : (filesView === "tree" && filesTreeFolder
+            ? "This folder is empty (or the filters hide everything)"
+            : (idxMode() && filesView === "list"
+                ? (serverList.error ? "The index query failed: " + serverList.error
+                    : (savedFiles.length || serverList.total ? "Nothing matches the filters" : "No saved workflow files found"))
+                : (savedFiles.length ? "Nothing matches the filters" : "No saved workflow files found")));
     return `<div class="hub-wf-toolbar">` +
         // v102: the search + actions are PINNED above the scroll container -
         // the field stays visible while the file list scrolls
-        `<input type="text" class="hub-wf-search" data-wf="filesearch" placeholder="filter: name or nested folder…" value="${esc(filesSearch)}" spellcheck="false">` +
+        `<input type="text" class="hub-wf-search" data-wf="filesearch" placeholder="${idxMode() && filesView === "list" ? "search: name, path, UUID, node, model, content…" : "filter: name or nested folder…"}" value="${esc(filesSearch)}" spellcheck="false">` +
         `<button type="button" class="hub-wf-act" data-act="openselected" title="Open every checked file">▶ Open selected</button>` +
         `<button type="button" class="hub-wf-act" data-act="saveselection" title="Save the checked files as a preset WITHOUT opening them">💾 Save selected as preset</button>` +
+        refreshBtn +
+        (idxMode() ? `<button type="button" class="hub-wf-act" data-act="idxrebuild" title="Rebuild the SQLite library index from scratch (a background server scan)">⟲ ${idxScanBusy ? "Indexing…" : "Rebuild index"}</button>` : "") +
         `</div>` +
         // v108: the file-manager row - sort (date/name/size, asc/desc on the
         // active one), the list/tree view toggle, the ★-only chip, the ⚗
@@ -2370,23 +3296,25 @@ function filesTabHtml() {
         quickChip("7d", "7d") +
         quickChip("30d", "30d") +
         `</div>` +
-        adv +
+        adv + stateNote +
         `<div class="hub-wf-scroll">` +
         (filesView === "list"
-            ? `<div class="hub-wf-sect">🕘 Recently closed</div>` +
+            ? `<div class="hub-wf-sect">🕘 Recently closed${recentServer === false ? " <span class=\"hub-wf-snap\" title=\"An old py without the recent routes - the ring lives in this browser only\">(local only)</span>" : ""}</div>` +
               `<div class="hub-wf-list hub-wf-list-recent">${rec || `<div class="hub-wf-emptylist">Nothing closed yet</div>`}</div>` +
               `<div class="hub-wf-sect">All saved workflows</div>`
             : `<div class="hub-wf-sect">${filesTreeFolder ? "📁 " + esc(filesTreeFolder) : "📁 Folder tree"}</div>` + crumbs) +
-        `<div class="hub-wf-list">${rows || `<div class="hub-wf-emptylist">${savedFilesLoaded
-            ? (filesView === "tree" && filesTreeFolder
-                ? "This folder is empty (or the filters hide everything)"
-                : (savedFiles.length ? "Nothing matches the filters" : "No saved workflow files found"))
-            : "Reading the workflow files…"}</div>`}${more}</div>` +
+        `<div class="hub-wf-list">${rows || `<div class="hub-wf-emptylist">${emptyMsg}</div>`}${more}</div>` +
         `</div>` +
-        `<div class="hub-wf-status">${savedFilesLoaded ? (filesView === "tree"
-            ? list.length + " match(es)"
-            : list.length + " of " + savedFiles.length + " file(s)") : "reading…"}` +
+        `<div class="hub-wf-status">${idxMode() && filesView === "list"
+            ? (serverList.loading && !serverList.files.length ? "reading the index…"
+                : serverList.files.length + " shown of " + serverList.total + " indexed")
+            : (savedFilesLoaded ? (filesView === "tree"
+                ? list.length + " match(es)"
+                : list.length + " of " + savedFiles.length + " file(s)") : (filesLoadPending ? "reading…" : "no files loaded"))}` +
+        `${idxMode() && idxStats ? " · idx " + (idxStats.files || 0) + (idxStats.errors ? " (" + idxStats.errors + " bad json)" : "") : ""}` +
+        `${filesTruncated ? " · ⚠ truncated" : ""}` +
         ` · ★ ${filesFav.size} · ${fileSel.size} selected` +
+        `${filesLastScan ? " · scanned " + esc(fmtDateTime(Math.floor(filesLastScan / 1000))) : ""}` +
         `${filesView === "tree" && filesTreeFolder ? " · in " + esc(filesTreeFolder) : ""}</div>`;
 }
 
@@ -2413,13 +3341,30 @@ function savedFileRowHtml(f, depth = 0) {
     const openNow = openHasPath(f.path);
     const fav = filesFav.has(norm);
     const ind = depth ? ` style="padding-left:${depth * 10 + 5}px"` : "";
+    // v112 stage 2: the UUID chip (copy on click) + the parse-status mark -
+    // a broken JSON stays LISTABLE with a ⚠ and a readable tooltip (plan 4.4)
+    const uuid = f.workflowId ? String(f.workflowId) : null;
+    const shortUuid = uuid ? (uuid.length > 8 ? uuid.slice(0, 8) + "…" : uuid) : null;
+    const uuidChip = shortUuid
+        ? `<button type="button" class="hub-wf-act hub-wf-fchip" data-act="copyuuid" data-uuid="${esc(uuid)}" ` +
+          `title="ComfyUI workflow UUID: ${esc(uuid)} - click to copy; the files with the same UUID form ONE process">⧉ ${esc(shortUuid)}</button>`
+        : "";
+    const badMark = f.parseStatus === "error"
+        ? `<span class="hub-wf-missing" title="This JSON failed to parse: ${esc(f.parseError || "")}">⚠</span>`
+        : (f.parseStatus === "too_large_to_index"
+            ? `<span class="hub-wf-snap" title="The file is too large for the index analysis - it still opens normally">…MB</span>` : "");
     const meta = [f.mtime ? fmtDateTime(f.mtime) : "", fmtSize(f.size)].filter(Boolean).join(" · ");
     return `<div class="hub-wf-row${openNow ? " hub-wf-row-active" : ""}" data-fpath="${esc(f.path)}"${ind}>` +
         `<input type="checkbox" class="hub-wf-fcheck" data-fcheck="${esc(f.path)}"${fileSel.has(norm) ? " checked" : ""} title="Select for Open selected / Save selected as preset">` +
         `<span class="hub-wf-filecol">` +
-        `<button type="button" class="hub-wf-name" data-act="openfile" data-path="${esc(f.path)}" title="${esc(rel)}">${esc(f.name)}${openNow ? " ●" : ""}</button>` +
+        `<button type="button" class="hub-wf-name" data-act="openfile" data-path="${esc(f.path)}" title="${esc(rel)}${uuid ? " · UUID " + uuid : ""}">${esc(f.name)}${openNow ? " ●" : ""}${badMark}</button>` +
         `<span class="hub-wf-filesub" title="${esc(rel)}">${esc(shortPath(rel))}${meta ? " · " + esc(meta) : ""}</span>` +
         `</span>` +
+        uuidChip +
+        (idxReady === false ? "" : `<button type="button" class="hub-wf-cbtn" data-act="fileinspect" data-path="${esc(f.path)}" ` +
+        `title="Inspect: the identity, the nodes, the models, the parameters, the dependencies of this workflow">🔍</button>`) +
+        (idxReady === false ? "" : `<button type="button" class="hub-wf-cbtn" data-act="filehist" data-path="${esc(f.path)}" ` +
+        `title="Process history: the Checkpoints, Compare, Restore of this workflow${uuid ? " (UUID " + uuid + ")" : ""}">🕘</button>`) +
         `<button type="button" class="hub-wf-favbtn${fav ? " hub-wf-favbtn-on" : ""}" data-act="filefav" data-path="${esc(f.path)}" ` +
         `title="${fav ? "Remove from favorites" : "Add to favorites (★)"}">${fav ? "★" : "☆"}</button>` +
         `</div>`;
@@ -2490,13 +3435,24 @@ async function onBodyClick(e) {
             return;
         }
         case "moreopen": openRowsShown += SHOW_MORE_STEP; renderAll(); return;
-        case "morefiles": fileRowsShown += SHOW_MORE_STEP; renderAll(); return;
+        // v112 stage 2: in index mode the Show more fetches the NEXT server
+        // page (keyset cursor); the local chunk cap stays for the tree + the
+        // old-py fallback
+        case "morefiles":
+            if (idxMode() && filesView === "list") { void runServerList(false); }
+            else { fileRowsShown += SHOW_MORE_STEP; renderAll(); }
+            return;
+        // v112 (plan 3.10): the explicit Files Refresh button
+        case "filesrefresh": void refreshSavedFiles(); return;
+        // v112 stage 2 (plan 4.4): the manual full re-index
+        case "idxrebuild": void rebuildIndex(); return;
         // ---- v108 Files tab: the file-manager controls --------------------
         case "filesort": {
             const k = btn.dataset.key;
             if (filesSort.key === k) filesSort.dir = filesSort.dir === "asc" ? "desc" : "asc";
             else filesSort = { key: k, dir: k === "name" ? "asc" : "desc" };
             saveUi({ filesSort });
+            if (idxMode() && filesView === "list") scheduleServerList(0);
             renderAll();
             return;
         }
@@ -2513,6 +3469,7 @@ async function onBodyClick(e) {
         case "favonly": {
             filesFavOnly = !filesFavOnly;
             fileRowsShown = ROW_LIST_CAP;
+            if (idxMode() && filesView === "list") scheduleServerList(0);
             renderAll();
             return;
         }
@@ -2523,7 +3480,9 @@ async function onBodyClick(e) {
             filesDateTo = "";
             fileSizeMin = "";
             fileSizeMax = "";
+            filesUuid = "";
             fileRowsShown = ROW_LIST_CAP;
+            if (idxMode() && filesView === "list") scheduleServerList(0);
             renderAll();
             return;
         }
@@ -2533,11 +3492,36 @@ async function onBodyClick(e) {
             filesDateFrom = "";
             filesDateTo = "";
             fileRowsShown = ROW_LIST_CAP;
+            if (idxMode() && filesView === "list") scheduleServerList(0);
             renderAll();
             return;
         }
         case "filefav": {
             if (btn.dataset.path) void toggleFileFav(btn.dataset.path);
+            return;
+        }
+        // v112 stage 5 (plan 11): the workflow inspector
+        case "fileinspect": {
+            if (btn.dataset.path) void openInspPop(btn.dataset.path);
+            return;
+        }
+        // v112 stage 3 (plan 6): the per-tab Save / Save As
+        case "savetab": {
+            const t = byKey(btn.dataset.key);
+            if (t) void saveTabRow(t);
+            return;
+        }
+        // v112 stage 2.5: the process-history panel of one file
+        case "filehist": {
+            if (btn.dataset.path) void openHistPop(btn.dataset.path);
+            return;
+        }
+        // v112 stage 2 (plan 4.7): copy the ComfyUI UUID of a workflow file
+        case "copyuuid": {
+            if (btn.dataset.uuid) {
+                const ok = await copyText(String(btn.dataset.uuid));
+                localToast(ok ? "UUID copied: " + btn.dataset.uuid : "Could not copy - see F12");
+            }
             return;
         }
         case "treefold": {
@@ -2608,6 +3592,15 @@ async function onBodyClick(e) {
             if (r.ok) { await refreshPresets(); localToast("Preset deleted"); }
             else localToast("Could not delete: " + (r.error || "?"));
             renderAll();
+            return;
+        }
+        // v112 stage 4: the preset category/tag filter row
+        case "pfadv": { presetsFadvOpen = !presetsFadvOpen; renderAll(); return; }
+        case "pfclear": { presetsCat = ""; presetsTag = ""; renderAll(); return; }
+        // v112 stage 4 (plan 10): the preset version history
+        case "pver": {
+            const p = presets.find((x) => x.id === btn.dataset.pid);
+            if (p) void openPverPop(p.id);
             return;
         }
         case "import": openImportPop(); return;
@@ -2691,9 +3684,31 @@ function onBodyChange(e) {
         if (saveForm && saveForm.rows[i]) saveForm.rows[i].checked = el.checked;
         return;
     }
+    if (el.matches('[data-wf="sfnapmode"]')) {
+        // v112 stage 3 (plan 7.1): flip the whole form's embedding mode
+        if (saveForm) saveForm.snapMode = !!el.checked;
+        renderAll();
+        return;
+    }
     if (el.matches("[data-wf-radio]")) {
         const i = parseInt(el.dataset.wfRadio, 10);
         if (saveForm && saveForm.rows[i]) saveForm.activeKey = saveForm.rows[i].key;
+        return;
+    }
+    if (el.matches("[data-hcmp]")) {
+        // the Compare selection: two radios (A then B)
+        if (histState) {
+            if (!histState.cmpA || histState.cmpA === el.dataset.hcmp) {
+                histState.cmpA = el.dataset.hcmp;
+                histState.cmpB = null;
+            } else if (!histState.cmpB) {
+                histState.cmpB = el.dataset.hcmp;
+            } else {
+                histState.cmpA = histState.cmpB;
+                histState.cmpB = el.dataset.hcmp;
+            }
+            renderHistPop();
+        }
         return;
     }
     if (el.matches("[data-fcheck]")) {
@@ -2714,24 +3729,28 @@ function onBodyChange(e) {
         filesDateFrom = el.value || "";
         filesQuick = ""; // the explicit date wins over the quick chip
         fileRowsShown = ROW_LIST_CAP;
+        if (idxMode() && filesView === "list") scheduleServerList(0);
         renderAll();
         return;
     }
     if (el.matches('[data-wf="fdateto"]')) {
         filesDateTo = el.value || "";
         fileRowsShown = ROW_LIST_CAP;
+        if (idxMode() && filesView === "list") scheduleServerList(0);
         renderAll();
         return;
     }
     if (el.matches('[data-wf="fsizemin"]')) {
         fileSizeMin = el.value === "" ? "" : el.value;
         fileRowsShown = ROW_LIST_CAP;
+        if (idxMode() && filesView === "list") scheduleServerList(0);
         renderAll();
         return;
     }
     if (el.matches('[data-wf="fsizemax"]')) {
         fileSizeMax = el.value === "" ? "" : el.value;
         fileRowsShown = ROW_LIST_CAP;
+        if (idxMode() && filesView === "list") scheduleServerList(0);
         renderAll();
         return;
     }
@@ -2742,14 +3761,21 @@ function onBodyInput(e) {
     if (!el) return;
     if (el.matches('[data-wf="presetsearch"]')) {
         presetsSearch = el.value || "";
-        // live filter without rebuilding the input itself (keeps the caret)
+        // live filter without rebuilding the input itself (keeps the caret);
+        // v112 stage 4: the SAME extended hay as presetsTabHtml (category +
+        // tags) - the two code paths must never diverge
         const list = panel?.querySelector(".hub-wf-list");
         if (list) {
             const toks = presetsSearch.toLowerCase().split(/\s+/).filter(Boolean);
-            const filtered = !toks.length ? presets : presets.filter((p) => {
-                const hay = [p.name || "", ...(p.items || []).map((it) => it.path || it.name || "")]
+            const filtered = presets.filter((p) => {
+                const hay = [p.name || "", p.category || "", ...(p.tags || []),
+                    ...(p.items || []).map((it) => it.path || it.name || "")]
                     .join(" ").toLowerCase();
-                return toks.every((t) => hay.includes(t));
+                if (toks.length && !toks.every((t) => hay.includes(t))) return false;
+                if (presetsCat && (p.category || "Uncategorized") !== presetsCat) return false;
+                if (presetsTag && !(p.tags || []).some((t) =>
+                    String(t).toLowerCase() === presetsTag.toLowerCase())) return false;
+                return true;
             });
             list.innerHTML = filtered.map(presetCardHtml).join("") ||
                 `<div class="hub-wf-emptylist">${presets.length ? "Nothing matches the filter" : "No presets yet"}</div>`;
@@ -2759,11 +3785,30 @@ function onBodyInput(e) {
     if (el.matches('[data-wf="filesearch"]')) {
         filesSearch = el.value || "";
         fileRowsShown = ROW_LIST_CAP;
+        if (idxMode() && filesView === "list") {
+            // v112 stage 2: the SERVER search (debounced ~250ms per plan 4.7)
+            scheduleServerList(250);
+        }
         renderAll();
         // restore the caret into the fresh input
         const inp = panel?.querySelector('[data-wf="filesearch"]');
         if (inp && inp !== document.activeElement) {
             try { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } catch (_) {}
+        }
+        return;
+    }
+    if (el.matches('[data-wf="histnote"]')) {
+        if (histState) histState.noteDraft = el.value || "";
+        return;
+    }
+    if (el.matches('[data-wf="fuuid"]')) {
+        // v112 stage 2 (plan 4.7): the UUID filter (exact/partial)
+        filesUuid = el.value || "";
+        if (idxMode() && filesView === "list") scheduleServerList(250);
+        renderAll();
+        const inp2 = panel?.querySelector('[data-wf="fuuid"]');
+        if (inp2 && inp2 !== document.activeElement) {
+            try { inp2.focus(); inp2.setSelectionRange(inp2.value.length, inp2.value.length); } catch (_) {}
         }
         return;
     }
@@ -2783,15 +3828,37 @@ function onBodyInput(e) {
         if (saveForm) saveForm.name = el.value || "";
         return;
     }
+    // v112 stage 4 (plan 9): the category/tags editors
+    if (el.matches('[data-wf="sfcat"]')) {
+        if (saveForm) saveForm.category = el.value || "";
+        return;
+    }
+    if (el.matches('[data-wf="sftags"]')) {
+        if (saveForm) saveForm.tags = (el.value || "").split(",").map((s) => s.trim()).filter(Boolean);
+        return;
+    }
+    // v112 stage 4: the preset category/tag filters
+    if (el.matches('[data-wf="pcat"]')) {
+        presetsCat = el.value || "";
+        renderAll();
+        return;
+    }
+    if (el.matches('[data-wf="ptag"]')) {
+        presetsTag = el.value || "";
+        renderAll();
+        return;
+    }
 }
 
 function onBodyKeydown(e) {
     const el = e.target;
     if (!el) return;
-    if (el.matches('[data-wf="presetsearch"], [data-wf="filesearch"], [data-wf="opensearch"]') && e.key === "Escape") {
+    if (el.matches('[data-wf="presetsearch"], [data-wf="filesearch"], [data-wf="opensearch"], [data-wf="fuuid"]') && e.key === "Escape") {
+        // (the category/tags filter clears via the ✕ chip, Esc keeps the text)
         el.value = "";
         if (el.matches('[data-wf="presetsearch"]')) presetsSearch = "";
         else if (el.matches('[data-wf="opensearch"]')) openSearch = "";
+        else if (el.matches('[data-wf="fuuid"]')) { filesUuid = ""; if (idxMode() && filesView === "list") scheduleServerList(0); }
         else filesSearch = "";
         renderAll();
         return;
@@ -2826,9 +3893,15 @@ function openSaveForm(mode = "new", targetPid = null) {
         return;
     }
     const act = open.find((t) => t.isActive);
+    const target = mode === "update" ? presets.find((p) => p.id === targetPid) : null;
     saveForm = {
         mode,
         targetPid,
+        // v112 stage 4 (plan 9): the category/tags flow with the form
+        category: target?.category || "",
+        tags: Array.isArray(target?.tags) ? target.tags.slice() : [],
+        snapMode: false,   // v112 stage 3 (plan 7.1): default OFF - persisted
+                           // tabs stay path items unless the toggle flips
         name: mode === "update" ? (presets.find((p) => p.id === targetPid)?.name || "") : nextWorkspaceName(),
         rows: open.map((t) => ({
             key: t.key, name: t.name, path: t.path, tab: t,
@@ -2849,18 +3922,32 @@ function collectFormItems() {
     if (!saveForm) return { error: "no form" };
     const items = [];
     let activePath = null;
+    let activeItemId = null;
     for (const r of saveForm.rows) {
         if (!r.checked) continue;
-        if (r.isTemp) {
+        const snap = r.isTemp || saveForm.snapMode;
+        if (snap) {
             const g = graphJsonOfOpenTab(r.tab);
-            if (!g) return { error: "Could not serialize the temp tab '" + r.name + "'" };
-            items.push({ kind: "snapshot", name: r.name, graph: g });
+            if (!g) return { error: "Could not serialize the tab '" + r.name + "'" };
+            // v112 stage 3 (plan 7.2): the snapshot ORIGIN metadata - the
+            // snapshot stays an independent copy, the metadata only explains
+            // where it came from
+            const it = { kind: "snapshot", name: r.name, graph: g };
+            if (r.path) {
+                it.sourcePath = r.path;
+                it.sourceName = r.name;
+            }
+            if (g && typeof g.id === "string" && g.id) it.workflowId = g.id;
+            it.capturedAt = Math.floor(Date.now() / 1000);
+            const idx = items.push(it) - 1;
+            if (saveForm.activeKey === r.key) activeItemId = it; // resolved post-save
         } else {
             items.push({ kind: "path", path: r.path });
             if (saveForm.activeKey === r.key && !activePath) activePath = r.path;
         }
     }
-    return { items, activePath };
+    return { items, activePath,
+        activeItemName: activeItemId ? activeItemId.name : null };
 }
 
 /** "💾 Save modified first" inside the save form: saves every CHECKED
@@ -2901,9 +3988,20 @@ async function commitFormSave(mode, targetPid) {
             id: targetPid || undefined,
             name, items: c.items,
             activePath: c.activePath || undefined,
+            category: saveForm.category || undefined,
+            tags: saveForm.tags?.length ? saveForm.tags : undefined,
             mode: mode || "create",
         });
         if (res.ok) {
+            // v112 stage 3 (plan 7.3): the ACTIVE snapshot - the server
+            // assigned itemIds; bind the activeItemId by the item's name
+            const saved = res.preset;
+            if (c.activeItemName && Array.isArray(saved?.items)) {
+                const hit = saved.items.find((it) => it.kind === "snapshot" && it.name === c.activeItemName);
+                if (hit?.itemId) {
+                    await patchPreset(saved.id, { activeItemId: hit.itemId });
+                }
+            }
             saveForm = null;
             await refreshPresets();
             renderAll();
@@ -3017,6 +4115,7 @@ function openPlanPop(preset, anchorEl) {
         (plan.missing.length ? ` <span class="hub-wf-missing">⚠ ${plan.missing.length} missing</span>` : "") +
         `</span></div>` +
         `<label class="hub-wf-plankeep"><input type="checkbox" data-wf="plankeep"${plan.keepUnsaved ? " checked" : ""}> Keep unsaved open</label>` +
+        (plan.toOpenSnaps.length ? `<label class="hub-wf-plankeep"><input type="checkbox" data-wf="planskipsnaps"> Skip exact copies of already-open tabs${plan.dupCount ? " (" + plan.dupCount + " exact copy)" : ""}</label>` : "") +
         `<div class="hub-wf-planacts">` +
         `<button type="button" class="hub-wf-act hub-wf-plan-apply" data-wf-btn="planapply">Apply</button>` +
         `<button type="button" class="hub-wf-act" data-wf-btn="plancancel">Cancel</button>` +
@@ -3048,8 +4147,9 @@ function openPlanPop(preset, anchorEl) {
         if (b.dataset.wfBtn === "plancancel") { closePlanPop(); return; }
         if (b.dataset.wfBtn === "planapply") {
             const keep = !!pop.querySelector('[data-wf="plankeep"]')?.checked;
+            const skipSnaps = !!pop.querySelector('[data-wf="planskipsnaps"]')?.checked;
             setPref({ keepUnsaved: keep });
-            const fresh = buildApplyPlan(preset, { keepUnsaved: keep });
+            const fresh = buildApplyPlan(preset, { keepUnsaved: keep, skipDupSnaps: skipSnaps });
             closePlanPop();
             await applyPlan(fresh);
         }
@@ -3416,14 +4516,56 @@ async function refreshOpen(force = false) {
 }
 
 async function refreshSavedFiles() {
-    savedFiles = await getSavedWorkflows();
-    savedFilesLoaded = true;
+    // v112 (plan 3.4): ONE request sequence - a newer refresh invalidates an
+    // older in-flight one; the completed answer lands in the DOM only when
+    // it is still the newest and the tab is one of the data tabs.
+    const seq = ++filesLoadSeq;
+    if (!savedFilesLoaded) {
+        filesLoadPending = true;
+        renderAll(); // show the explicit "Reading…" state once
+    }
+    let list = [];
+    let ok = false;
+    try {
+        list = await getSavedWorkflows();
+        ok = true;
+    } catch (e) {
+        list = null;
+    }
+    if (seq !== filesLoadSeq) return; // superseded
+    filesLoadPending = false;
+    if (!ok || list === null) {
+        filesLoadError = { why: "the request failed - see F12" };
+    } else if (!list.length && savedFiles.length && savedFilesLoaded) {
+        // v112 (plan 3.10): a TRANSIENT empty answer must not blank the last
+        // good list. TWO consecutive empty answers are accepted as real (the
+        // user may genuinely have emptied the folder).
+        filesEmptyStrikes++;
+        if (filesEmptyStrikes < 2) {
+            filesLoadError = { why: "the refresh returned no files - the previous list is kept (transient server hiccup)" };
+        } else {
+            savedFiles = list;
+            savedFilesLoaded = true;
+            _savedPathIdx = null;
+            filesLoadError = null;
+            filesLastScan = Date.now();
+        }
+    } else {
+        filesEmptyStrikes = 0;
+        savedFiles = list;
+        savedFilesLoaded = true;
+        _savedPathIdx = null; // plan 3.8: the missing-paths index invalidates
+        filesLoadError = null;
+        filesTruncated = !!lastFilesTruncated;
+        filesLastScan = Date.now();
+    }
     if (!filesFavsLoaded) {
         // v108: the ★ marks load once per session; a stale answer must not
         // sit in the DOM when the Files tab is the visible one
         await fetchFileFavs();
+        if (seq !== filesLoadSeq) return;
     }
-    fileSel = new Set([...fileSel].filter((p) => savedFiles.some((f) => normWfPath(f.path) === p)));
+    fileSel = new Set([...fileSel].filter((p) => savedFiles.some((f) => sameWfPath(f.path, p))));
     // the tab may have rendered its "Reading the workflow files…" placeholder
     // while this was in flight - the completed list must land in the DOM
     if (uiTab === "files" || uiTab === "presets") renderAll();
@@ -3501,6 +4643,13 @@ export function initWorkflows() {
     void (async () => {
         await loadServerState();
         if (seq !== initSeq) return;
+        // v112 (plan 3.6): adopt the server-side recent manifest (or migrate
+        // the localStorage ring up) right after the first healthy probe
+        await loadRecentFromServer();
+        // v112 stage 2: the library index probe + the boot scan (server-side
+        // worker thread; the panel stays responsive either way)
+        void ensureIndexStatus();
+        if (seq !== initSeq) return;
         // v105: a refreshOpen throw must not skip the one render that shows
         // the freshly-read presets (a stale body used to outlive the read)
         try { await refreshOpen(true); } catch (_) {}
@@ -3519,6 +4668,10 @@ function teardown() {
     clearTimeout(pollT);
     clearInterval(pollT);
     pollT = null;
+    closeDupPop();
+    closeHistPop();
+    closePverPop();
+    closeInspPop();
     closeWfPop();
     closePlanPop();
     closeImportPop();
@@ -3536,6 +4689,733 @@ function teardown() {
     sessionUndo = null;
     presetsLoaded = false; // v105: the next mount re-reads from scratch
 }
+
+
+// ---------------------------------------------------------------------------
+// v112 stage 2.5 (plan 5.x): the PROCESS HISTORY panel - a linear list of
+// Checkpoints with Compare / Restore / Mark stable. The user sees Process,
+// History, Checkpoint, Restore - NEVER storage terminology. It opens from a
+// file row (🕘) and stays OUT of the main screen (progressive disclosure).
+// ---------------------------------------------------------------------------
+
+let histPop = null;
+let histState = null;      // {path, pid, proc, revs, loading, error, sel, cpBusy, armedRestore, compare}
+
+function closeHistPop() {
+    try { histPop?.remove(); } catch (_) {}
+    histPop = null;
+    histState = null;
+    try { window.removeEventListener("mousedown", onHistDown, true); } catch (_) {}
+    try { window.removeEventListener("keydown", onHistKey, true); } catch (_) {}
+}
+function onHistDown(e) {
+    if (!histPop || histPop.contains(e.target)) return;
+    closeHistPop();
+}
+function onHistKey(e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeHistPop(); }
+}
+
+function histRevLabel(r) {
+    const d = r.createdAt ? fmtDateTime(r.createdAt) : "";
+    const src = r.source === "disk" ? "Disk file" : (r.source || "Checkpoint");
+    const title = r.title || r.note || "";
+    return { d, src, title };
+}
+
+async function openHistPop(path) {
+    if (histPop) { closeHistPop(); return; }
+    histState = { path, pid: null, proc: null, revs: [], loading: true,
+        error: null, cpBusy: false, armedRestore: null, compare: null };
+    histPop = document.createElement("div");
+    histPop.className = "hub-menu hub-wf-histpop";
+    histPop.innerHTML = `<div class="hub-menu-title">🕘 Process history</div>` +
+        `<div class="hub-wf-emptylist">Reading the history…</div>`;
+    document.body.appendChild(histPop);
+    try {
+        const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+        histPop.style.maxHeight = Math.max(240, vh - 24) + "px";
+        histPop.style.maxWidth = "520px";
+        histPop.style.left = "16px";
+        histPop.style.top = "16px";
+    } catch (_) {}
+    histPop.addEventListener("click", (e) => {
+        const btn = e.target?.closest?.("[data-act]");
+        if (!btn) return;
+        const act = btn.dataset.act;
+        if (act && act.startsWith("hist")) { e.preventDefault(); e.stopPropagation(); histPopClick(act, btn); }
+    });
+    // the pop lives on document.body - OUTSIDE the panel's delegated
+    // listeners, so it carries its OWN input/change wiring
+    histPop.addEventListener("input", (e) => {
+        const el = e.target;
+        if (!el) return;
+        if (el.matches('[data-wf="histnote"]') && histState) {
+            histState.noteDraft = el.value || "";
+        }
+    });
+    histPop.addEventListener("change", (e) => {
+        const el = e.target;
+        if (!el) return;
+        if (el.matches("[data-hcmp]") && histState) {
+            if (!histState.cmpA || histState.cmpA === el.dataset.hcmp) {
+                histState.cmpA = el.dataset.hcmp;
+                histState.cmpB = null;
+            } else if (!histState.cmpB) {
+                histState.cmpB = el.dataset.hcmp;
+            } else {
+                histState.cmpA = histState.cmpB;
+                histState.cmpB = el.dataset.hcmp;
+            }
+            renderHistPop();
+        }
+    });
+    window.addEventListener("mousedown", onHistDown, true);
+    window.addEventListener("keydown", onHistKey, true);
+    await refreshHistState();
+}
+
+async function refreshHistState() {
+    if (!histState) return;
+    histState.loading = true;
+    histState.error = null;
+    renderHistPop();
+    const res = await jfetch("/settings_hub/workflows/history/resolve?path=" +
+        encodeURIComponent(histState.path));
+    if (res.json?.ok && res.json.bound && res.json.process) {
+        histState.pid = res.json.process.processId;
+        const pr = await jfetch("/settings_hub/workflows/history/process/" +
+            encodeURIComponent(res.json.process.processId));
+        if (pr.json?.ok && pr.json.process) {
+            histState.proc = pr.json.process;
+            histState.revs = Array.isArray(pr.json.process.revisions)
+                ? pr.json.process.revisions : [];
+        } else {
+            histState.error = (pr.json && pr.json.error) || ("HTTP " + pr.status);
+        }
+        histState.changesSince = !!res.json.changesSinceCheckpoint;
+    } else if (res.status === 404) {
+        histState.error = "The history routes are missing (an old py) - update the FULL pack.";
+    } else if (res.json?.ok && !res.json.bound) {
+        histState.pid = null;
+        histState.proc = null;
+        histState.revs = [];
+    } else {
+        histState.error = (res.json && res.json.error) || ("HTTP " + res.status);
+    }
+    histState.loading = false;
+    renderHistPop();
+}
+
+function histRevRowHtml(r, i) {
+    const lbl = histRevLabel(r);
+    const stable = !!r.isStable;
+    const sel = histState.sel === r.revisionId;
+    return `<div class="hub-wf-item${sel ? " hub-wf-item-open" : ""}" data-hrev="${esc(r.revisionId)}">` +
+        `<input type="radio" name="hub-wf-histcmp" data-hcmp="${esc(r.revisionId)}"${histState.cmpA === r.revisionId ? " checked" : ""} ` +
+        `title="Select two versions for Compare">` +
+        `<button type="button" class="hub-wf-name" data-act="histopen" data-rid="${esc(r.revisionId)}" ` +
+        `title="Open this version as an independent COPY (the source file is never touched)">` +
+        `${esc(lbl.title || ("Checkpoint " + (histState.revs.length - i)))}</button>` +
+        `${stable ? `<span class="hub-wf-dot" title="Marked stable - never cleaned up">★</span>` : ""}` +
+        `<span class="hub-wf-filesub">${esc(lbl.d)} · ${esc(lbl.src)}${r.note && r.title ? " · " + esc(r.note) : ""}</span>` +
+        `<button type="button" class="hub-wf-cbtn" data-act="histstable" data-rid="${esc(r.revisionId)}" ` +
+        `title="${stable ? "Unmark stable" : "Mark stable - protects this version from cleanup"}">★</button>` +
+        `<button type="button" class="hub-wf-cbtn" data-act="histrestore" data-rid="${esc(r.revisionId)}" ` +
+        `title="Restore: opens a COPY first; overwriting the file needs a second confirm">↺</button>` +
+        `</div>`;
+}
+
+function renderHistPop() {
+    if (!histPop || !histState) return;
+    const st = histState;
+    let body = "";
+    if (st.loading) {
+        body = `<div class="hub-wf-emptylist">Reading the history…</div>`;
+    } else if (st.error) {
+        body = `<div class="hub-wf-planwarn">⚠ ${esc(st.error)}</div>`;
+    } else {
+        const procName = st.proc?.displayName || baseName(st.path);
+        const uuid = st.proc?.workflowId ? ` · <span class="hub-wf-snap" title="${esc(st.proc.workflowId)}">⧉ ${esc(String(st.proc.workflowId).slice(0, 8))}…</span>` : "";
+        const head = `<div class="hub-wf-planrow"><span class="hub-wf-plan-cap">Process</span>` +
+            `<span class="hub-wf-plan-names">${esc(procName)}${uuid}</span></div>` +
+            (st.changesSince
+                ? `<div class="hub-wf-planwarn" title="The current disk file (or the open tab) differs from the last Checkpoint">⇅ Changes since the last checkpoint - a Checkpoint saves the current state.</div>`
+                : "");
+        const cp = `<div class="hub-wf-planacts">` +
+            `<input type="text" class="hub-cs-in" data-wf="histnote" placeholder="What changed? (optional)" value="${esc(st.noteDraft || "")}" spellcheck="false">` +
+            `<button type="button" class="hub-wf-act" data-act="histcheckpoint" title="Capture the CURRENT state into the history${st.openTab ? " (the in-memory tab incl. unsaved edits)" : " (the disk file)"}">📌 Checkpoint</button>` +
+            `<button type="button" class="hub-wf-act" data-act="histimport" title="Add the CURRENT DISK file into the history as an imported version">⤓ Import disk file</button>` +
+            `</div>` +
+            (st.openTab ? `<div class="hub-wf-planhint">The tab is open - the Checkpoint captures the in-memory graph, including unsaved edits.</div>` : "");
+        const revs = st.revs.length
+            ? st.revs.map(histRevRowHtml).join("")
+            : `<div class="hub-wf-emptylist">No checkpoints yet - the ordinary ComfyUI Save does not create history; press 📌 Checkpoint to fix the current state.</div>`;
+        const cmpBtn = st.cmpA && st.cmpB
+            ? `<button type="button" class="hub-wf-act" data-act="histcompare">⚖ Compare the selected versions</button>` : "";
+        const compareBox = st.compare ? st.compare : "";
+        body = head + cp + `<div class="hub-wf-sect">Checkpoints (newest first)</div>` +
+            `<div class="hub-wf-list">${revs}</div>` +
+            `<div class="hub-wf-planacts">${cmpBtn}` +
+            `<button type="button" class="hub-wf-act" data-act="histmeta" title="Rename the process / edit the shared note">✎ Process</button></div>` +
+            compareBox;
+        // the restore confirm strip
+        if (st.pendingRestore) {
+            body += `<div class="hub-wf-planwarn">⚠ Overwrite <b>${esc(baseName(st.path))}</b> with the selected version? ` +
+                `<button type="button" class="hub-wf-act hub-wf-armed" data-act="histrestoreconfirm">Click AGAIN to replace the file</button> ` +
+                `<span class="hub-wf-snap">(a safety snapshot is taken first; undoable)</span></div>`;
+        }
+    }
+    histPop.innerHTML = `<div class="hub-menu-title">🕘 Process history</div>` +
+        `<div class="hub-wf-planhint">${esc(histState.path || "")}</div>` + body +
+        `<div class="hub-wf-planacts"><button type="button" class="hub-wf-act" data-act="histclose">✕ Close</button></div>`;
+}
+
+/** The COMPARE of two revisions: a compact, honest summary (node classes,
+ * model refs, sizes) - never a fake equivalence. */
+async function runHistCompare() {
+    const st = histState;
+    if (!st?.cmpA || !st.cmpB) return;
+    const [ra, rb] = [st.revs.find((r) => r.revisionId === st.cmpA),
+        st.revs.find((r) => r.revisionId === st.cmpB)];
+    if (!ra || !rb) return;
+    const load = async (rid) => {
+        const res = await jfetch("/settings_hub/workflows/history/revision/" +
+            encodeURIComponent(rid) + "/raw");
+        if (res.json && typeof res.json === "object") return res.json;
+        try { return JSON.parse(await res.text()); } catch (_) { return null; }
+    };
+    const ga = await load(ra.revisionId);
+    const gb = await load(rb.revisionId);
+    if (!ga || !gb) {
+        st.compare = `<div class="hub-wf-planwarn">⚠ Could not read the versions for compare.</div>`;
+        renderHistPop();
+        return;
+    }
+    const summary = (g) => {
+        const nodes = Array.isArray(g.nodes) ? g.nodes : [];
+        const types = {};
+        const models = [];
+        for (const n of nodes) {
+            if (!n || typeof n !== "object") continue;
+            const t = typeof n.type === "string" ? n.type : "?";
+            types[t] = (types[t] || 0) + 1;
+            const wv = n.widgets_values;
+            if (Array.isArray(wv)) {
+                for (const v of wv) {
+                    if (typeof v === "string" && /\.(safetensors|ckpt|pt|pth|sft)$/i.test(v) &&
+                        !models.includes(v)) models.push(v);
+                }
+            }
+        }
+        return { count: nodes.length, types, models };
+    };
+    const A = summary(ga), B = summary(gb);
+    const typeKeys = [...new Set([...Object.keys(A.types), ...Object.keys(B.types)])].sort();
+    const diffTypes = typeKeys.filter((t) => (A.types[t] || 0) !== (B.types[t] || 0));
+    const modelDiff = [...new Set([...A.models, ...B.models])]
+        .filter((m) => (A.models.includes(m) ? 1 : 0) !== (B.models.includes(m) ? 1 : 0));
+    const rows = [
+        `Nodes: ${A.count} → ${B.count}`,
+        ...(diffTypes.length ? diffTypes.map((t) =>
+            `${esc(t)}: ${A.types[t] || 0} → ${B.types[t] || 0}`) : ["Node classes: unchanged"]),
+        ...(modelDiff.length ? modelDiff.map((m) =>
+            `Model ${esc(m)}: ${A.models.includes(m) ? "present" : "absent"} → ${B.models.includes(m) ? "present" : "absent"}`)
+            : ["Models: unchanged"]),
+    ];
+    st.compare = `<div class="hub-wf-sect">⚖ Compare</div>` +
+        `<div class="hub-wf-planhint">${rows.map((r) => "· " + r).join("<br>")}</div>`;
+    renderHistPop();
+}
+
+/** The Checkpoint action: the OPEN tab's in-memory graph wins over the disk
+ * (plan 5.7.2) - a disk checkpoint only when the workflow is not open. */
+async function histCreateCheckpoint(source) {
+    const st = histState;
+    if (!st || st.cpBusy) return;
+    st.cpBusy = true;
+    renderHistPop();
+    try {
+        const payload = { path: st.path, source: source || "checkpoint",
+            note: st.noteDraft || undefined, title: undefined };
+        if (!source || source === "checkpoint") {
+            const tab = getOpenWorkflows().find((t) => t.path && sameWfPath(t.path, st.path));
+            const graph = tab ? graphJsonOfOpenTab(tab) : null;
+            if (graph) payload.graph = graph;
+            else payload.source = "disk";
+        }
+        const res = await jfetch("/settings_hub/workflows/history/checkpoint", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (res.json?.ok) {
+            st.noteDraft = "";
+            await refreshHistState();
+            if (res.json.duplicate) {
+                localToast("Identical to the last checkpoint - nothing duplicated");
+            } else {
+                localToast("Checkpoint saved" + (payload.graph ? " (the in-memory state)" : " (the disk file)"));
+            }
+        } else {
+            localToast("Checkpoint failed: " + ((res.json && res.json.error) || ("HTTP " + res.status)), 4200);
+            st.cpBusy = false;
+            renderHistPop();
+            return;
+        }
+    } catch (e) {
+        localToast("Checkpoint failed: " + String((e && e.message) || e), 4200);
+    }
+    st.cpBusy = false;
+}
+
+async function histRestore(rid, confirmReplace) {
+    const st = histState;
+    if (!st) return;
+    if (!confirmReplace) {
+        // the DEFAULT restore: open as an independent COPY (no writes)
+        const res = await jfetch("/settings_hub/workflows/history/revision/" +
+            encodeURIComponent(rid) + "/raw");
+        let graph = null;
+        if (res.json && typeof res.json === "object") graph = res.json;
+        else { try { graph = JSON.parse(await res.text()); } catch (_) {} }
+        if (!graph) { localToast("Could not read the version - see F12", 3600); return; }
+        const r = await openSnapshotWorkflow(baseName(st.path), graph);
+        if (r.ok) localToast("Opened the version as a copy (the file is untouched)");
+        else localToast("Could not open the version - see F12", 3600);
+        return;
+    }
+    // the CONFIRMED replace: the server snapshots + atomically overwrites
+    const res = await jfetch("/settings_hub/workflows/history/process/" +
+        encodeURIComponent(st.pid) + "/restore/" + encodeURIComponent(rid), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "replace", path: st.path }),
+    });
+    if (res.json?.ok) {
+        st.pendingRestore = null;
+        st.armedRestore = null;
+        localToast("The file was replaced (a safety snapshot is kept)");
+        await refreshSavedFiles();
+        if (idxMode()) await runServerList(true);
+        await refreshHistState();
+    } else {
+        localToast("Replace failed: " + ((res.json && res.json.error) || "?"), 5000);
+    }
+}
+
+function histPopClick(act, btn) {
+    const st = histState;
+    if (!st) return;
+    const rid = btn.dataset.rid || null;
+    switch (act) {
+        case "histclose": closeHistPop(); return;
+        case "histcheckpoint": void histCreateCheckpoint("checkpoint"); return;
+        case "histimport": void histCreateCheckpoint("import"); return;
+        case "histopen": void histRestore(rid, false); return;
+        case "histstable": {
+            const rev = st.revs.find((r) => r.revisionId === rid);
+            void (async () => {
+                const res = await jfetch("/settings_hub/workflows/history/revision/" +
+                    encodeURIComponent(rid) + "/stable", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ stable: !(rev && rev.isStable) }),
+                });
+                if (res.json?.ok) await refreshHistState();
+                else localToast("Could not update: " + ((res.json && res.json.error) || "?"), 3600);
+            })();
+            return;
+        }
+        case "histrestore": {
+            // the plan contract: Restore DEFAULTS to opening a COPY; the
+            // file-replace is a SEPARATE confirmed action (the second click)
+            if (st.armedRestore === rid) {
+                st.pendingRestore = rid;
+                renderHistPop();
+                void histRestore(rid, true);
+            } else {
+                st.armedRestore = rid;
+                void histRestore(rid, false); // the non-destructive copy open
+                localToast("Opened as a copy. Click ↺ AGAIN to overwrite the file (confirmed + safety snapshot).", 5000);
+            }
+            return;
+        }
+        case "histrestoreconfirm": {
+            if (st.armedRestore) void histRestore(st.armedRestore, true);
+            return;
+        }
+        case "histcompare": void runHistCompare(); return;
+        case "histmeta": {
+            const nm = prompt("Process name:", st.proc?.displayName || "");
+            if (nm === null) return;
+            const note = prompt("Process note (what is this workflow for?):", st.proc?.note || "");
+            if (note === null) return;
+            void (async () => {
+                const res = await jfetch("/settings_hub/workflows/history/process/" +
+                    encodeURIComponent(st.pid) + "/meta", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ displayName: nm, note }),
+                });
+                if (res.json?.ok) { await refreshHistState(); }
+                else localToast("Could not update: " + ((res.json && res.json.error) || "?"), 3600);
+            })();
+            return;
+        }
+        default: return;
+    }
+}
+
+
+
+// ---------------------------------------------------------------------------
+// v112 stage 4 (plan 10): the PRESET VERSION HISTORY panel - the automatic
+// archives of every meaningful change; Restore with a confirm preview; the
+// Compare of two versions (name/tags/items summary). The payloads load for
+// restore/compare only - the list carries metadata.
+// ---------------------------------------------------------------------------
+
+let pverPop = null;
+let pverState = null;   // {pid, versions, loading, error, armed, cmpA, cmpB, compare}
+
+function closePverPop() {
+    try { pverPop?.remove(); } catch (_) {}
+    pverPop = null;
+    pverState = null;
+    try { window.removeEventListener("mousedown", onPverDown, true); } catch (_) {}
+    try { window.removeEventListener("keydown", onPverKey, true); } catch (_) {}
+}
+function onPverDown(e) {
+    if (!pverPop || pverPop.contains(e.target)) return;
+    closePverPop();
+}
+function onPverKey(e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePverPop(); }
+}
+
+async function openPverPop(pid) {
+    if (pverPop) { closePverPop(); return; }
+    pverState = { pid, versions: [], loading: true, error: null, armed: null,
+        cmpA: null, cmpB: null, compare: null };
+    pverPop = document.createElement("div");
+    pverPop.className = "hub-menu hub-wf-histpop";
+    pverPop.innerHTML = `<div class="hub-menu-title">🕘 Preset history</div>` +
+        `<div class="hub-wf-emptylist">Reading the versions…</div>`;
+    document.body.appendChild(pverPop);
+    try {
+        pverPop.style.maxHeight = "520px";
+        pverPop.style.maxWidth = "520px";
+        pverPop.style.left = "16px";
+        pverPop.style.top = "16px";
+    } catch (_) {}
+    pverPop.addEventListener("click", (e) => {
+        const btn = e.target?.closest?.("[data-pact]");
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        pverClick(btn.dataset.pact, btn);
+    });
+    pverPop.addEventListener("change", (e) => {
+        const el = e.target;
+        if (!el?.matches("[data-pcmp]") || !pverState) return;
+        if (!pverState.cmpA || pverState.cmpA === el.dataset.pcmp) {
+            pverState.cmpA = el.dataset.pcmp;
+            pverState.cmpB = null;
+        } else if (!pverState.cmpB) {
+            pverState.cmpB = el.dataset.pcmp;
+        } else {
+            pverState.cmpA = pverState.cmpB;
+            pverState.cmpB = el.dataset.pcmp;
+        }
+        renderPverPop();
+    });
+    window.addEventListener("mousedown", onPverDown, true);
+    window.addEventListener("keydown", onPverKey, true);
+    await refreshPverState();
+}
+
+async function refreshPverState() {
+    if (!pverState) return;
+    pverState.loading = true;
+    pverState.error = null;
+    renderPverPop();
+    const res = await jfetch("/settings_hub/workflows/preset/" +
+        encodeURIComponent(pverState.pid) + "/versions");
+    if (res.json?.ok) {
+        pverState.versions = Array.isArray(res.json.versions) ? res.json.versions : [];
+        pverState.maxVersions = res.json.maxVersions || 20;
+    } else if (res.status === 404) {
+        pverState.error = "The version routes are missing (an old py) - update the FULL pack.";
+    } else {
+        pverState.error = (res.json && res.json.error) || ("HTTP " + res.status);
+    }
+    pverState.loading = false;
+    renderPverPop();
+}
+
+function pverRowHtml(v, i) {
+    const armed = pverState.armed === v.revisionId;
+    return `<div class="hub-wf-item" data-prev="${esc(v.revisionId)}">` +
+        `<input type="radio" name="hub-wf-pvercmp" data-pcmp="${esc(v.revisionId)}" title="Select two versions for Compare">` +
+        `<span class="hub-wf-name" title="${esc(v.name || "")}">#${pverState.versions.length - i} · ${esc(v.name || "preset")}` +
+        `${v.changedBy ? ` <span class="hub-wf-snap">${esc(v.changedBy)}</span>` : ""}</span>` +
+        `<span class="hub-wf-filesub">${esc(fmtDateTime(v.createdAt))} · ${v.itemCount} item(s)` +
+        `${v.snapshotBytes > 0 ? " · " + fmtSize(v.snapshotBytes) : ""}` +
+        `${v.category ? " · " + esc(v.category) : ""}${(v.tags || []).length ? " · " + esc(v.tags.join(", ")) : ""}</span>` +
+        `<button type="button" class="hub-wf-cbtn${armed ? " hub-wf-armed" : ""}" data-pact="prestore" data-rid="${esc(v.revisionId)}" ` +
+        `title="${armed ? "Click AGAIN: the CURRENT state is archived first, then this version returns" : "Restore this version (the current state archives first - always reversible)"}">↺</button>` +
+        `</div>`;
+}
+
+function renderPverPop() {
+    if (!pverPop || !pverState) return;
+    const st = pverState;
+    let body = "";
+    if (st.loading) body = `<div class="hub-wf-emptylist">Reading the versions…</div>`;
+    else if (st.error) body = `<div class="hub-wf-planwarn">⚠ ${esc(st.error)}</div>`;
+    else {
+        body = st.versions.length
+            ? `<div class="hub-wf-list">${st.versions.map(pverRowHtml).join("")}</div>`
+            : `<div class="hub-wf-emptylist">No archived versions yet - every meaningful change archives the previous state automatically.</div>`;
+        if (st.cmpA && st.cmpB) {
+            body += `<button type="button" class="hub-wf-act" data-pact="pcompare">⚖ Compare the selected versions</button>`;
+        }
+        if (st.compare) body += st.compare;
+        if (st.pendingRestore) {
+            body += `<div class="hub-wf-planwarn">⚠ Restore version #${st.pendingRestore.n}? The current state archives FIRST (nothing is lost). ` +
+                `<button type="button" class="hub-wf-act hub-wf-armed" data-pact="prestoreconfirm">Click AGAIN to restore</button></div>`;
+        }
+    }
+    pverPop.innerHTML = `<div class="hub-menu-title">🕘 Preset history</div>` +
+        `<div class="hub-wf-planhint">Every overwrite / merge / import archives the previous state automatically (up to ${st.maxVersions || 20}).</div>` +
+        body +
+        `<div class="hub-wf-planacts"><button type="button" class="hub-wf-act" data-pact="pclose">✕ Close</button></div>`;
+}
+
+async function pverClick(act, btn) {
+    const st = pverState;
+    if (!st) return;
+    const rid = btn.dataset.rid || null;
+    switch (act) {
+        case "pclose": closePverPop(); return;
+        case "prestore": {
+            if (st.armed === rid) {
+                await pverRestore(rid);
+            } else {
+                st.armed = rid;
+                const idx = st.versions.findIndex((v) => v.revisionId === rid);
+                st.pendingRestore = { rid, n: st.versions.length - idx };
+                renderPverPop();
+            }
+            return;
+        }
+        case "prestoreconfirm": {
+            if (st.armed) await pverRestore(st.armed);
+            return;
+        }
+        case "pcompare": await pverCompare(); return;
+        default: return;
+    }
+}
+
+async function pverRestore(rid) {
+    const st = pverState;
+    const res = await jfetch("/settings_hub/workflows/preset/" +
+        encodeURIComponent(st.pid) + "/restore/" + encodeURIComponent(rid), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+    });
+    if (res.json?.ok) {
+        st.armed = null;
+        st.pendingRestore = null;
+        await refreshPresets();
+        renderAll();
+        localToast("Restored version (the previous state was archived - reversible)");
+        await refreshPverState();
+    } else {
+        localToast("Restore failed: " + ((res.json && res.json.error) || "?"), 4200);
+    }
+}
+
+async function pverCompare() {
+    const st = pverState;
+    const ra = st.versions.find((v) => v.revisionId === st.cmpA);
+    const rb = st.versions.find((v) => v.revisionId === st.cmpB);
+    if (!ra || !rb) return;
+    const load = async (rid) => {
+        const res = await jfetch("/settings_hub/workflows/preset/" +
+            encodeURIComponent(st.pid) + "/version/" + encodeURIComponent(rid));
+        return res.json?.ok ? res.json.preset : null;
+    };
+    const [pa, pb] = [await load(ra.revisionId), await load(rb.revisionId)];
+    if (!pa || !pb) {
+        st.compare = `<div class="hub-wf-planwarn">⚠ Could not read the versions.</div>`;
+        renderPverPop();
+        return;
+    }
+    const itemsSig = (p) => (p.items || []).map((it) =>
+        it.kind === "path" ? ("path:" + (it.path || "")) : ("snap:" + (it.snapHash || it.name || "")));
+    const sa = new Set(itemsSig(pa)), sb = new Set(itemsSig(pb));
+    const added = itemsSig(pb).filter((s) => !sa.has(s));
+    const removed = itemsSig(pa).filter((s) => !sb.has(s));
+    const rows = [
+        `Name: ${pa.name || "?"} → ${pb.name || "?"}`,
+        `Category: ${pa.category || "Uncategorized"} → ${pb.category || "Uncategorized"}`,
+        `Tags: ${(pa.tags || []).join(", ") || "—"} → ${(pb.tags || []).join(", ") || "—"}`,
+        `Items: ${(pa.items || []).length} → ${(pb.items || []).length}`,
+        ...(added.length ? ["Added: " + added.length + " item(s)"] : []),
+        ...(removed.length ? ["Removed: " + removed.length + " item(s)"] : []),
+    ];
+    st.compare = `<div class="hub-wf-sect">⚖ Compare</div>` +
+        `<div class="hub-wf-planhint">${rows.map((r) => "· " + esc(r)).join("<br>")}</div>`;
+    renderPverPop();
+}
+
+
+
+// ---------------------------------------------------------------------------
+// v112 stage 5 (plan 11) + stage 6 (plan 12): the WORKFLOW INSPECTOR + the
+// DEPENDENCY CHECK + the library summary. Honest diagnostics only - every
+// non-extractable value shows "Not detected"; the report never blocks an
+// open.
+// ---------------------------------------------------------------------------
+
+let inspPop = null;
+let inspState = null;   // {path, loading, error, data}
+
+function closeInspPop() {
+    try { inspPop?.remove(); } catch (_) {}
+    inspPop = null;
+    inspState = null;
+    try { window.removeEventListener("mousedown", onInspDown, true); } catch (_) {}
+    try { window.removeEventListener("keydown", onInspKey, true); } catch (_) {}
+}
+function onInspDown(e) {
+    if (!inspPop || inspPop.contains(e.target)) return;
+    closeInspPop();
+}
+function onInspKey(e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeInspPop(); }
+}
+
+async function openInspPop(path) {
+    if (inspPop) { closeInspPop(); return; }
+    inspState = { path, loading: true, error: null, data: null };
+    inspPop = document.createElement("div");
+    inspPop.className = "hub-menu hub-wf-histpop";
+    inspPop.innerHTML = `<div class="hub-menu-title">🔍 Workflow inspector</div>` +
+        `<div class="hub-wf-emptylist">Inspecting…</div>`;
+    document.body.appendChild(inspPop);
+    try {
+        inspPop.style.maxHeight = "560px";
+        inspPop.style.maxWidth = "520px";
+        inspPop.style.left = "16px";
+        inspPop.style.top = "16px";
+    } catch (_) {}
+    inspPop.addEventListener("click", (e) => {
+        const btn = e.target?.closest?.("[data-iact]");
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (btn.dataset.iact === "iclose") closeInspPop();
+        if (btn.dataset.iact === "icopyuuid" && btn.dataset.uuid) {
+            void copyText(btn.dataset.uuid).then((ok) =>
+                localToast(ok ? "UUID copied" : "Could not copy - see F12"));
+        }
+    });
+    window.addEventListener("mousedown", onInspDown, true);
+    window.addEventListener("keydown", onInspKey, true);
+    // the summary rides along once (the library overview - plan 12)
+    const sumRes = await jfetch("/settings_hub/workflows/index/summary");
+    inspState.summary = sumRes.json?.ok ? sumRes.json : null;
+    const res = await jfetch("/settings_hub/workflows/index/inspect?path=" +
+        encodeURIComponent(path));
+    if (res.json?.ok) {
+        inspState.data = res.json;
+    } else if (res.status === 404) {
+        inspState.error = "The inspector routes are missing (an old py) - update the FULL pack.";
+    } else {
+        inspState.error = (res.json && res.json.error) || ("HTTP " + res.status);
+    }
+    inspState.loading = false;
+    renderInspPop();
+}
+
+function inspRow(cap, val, title) {
+    return `<div class="hub-wf-planrow"><span class="hub-wf-plan-cap" title="${esc(title || cap)}">${esc(cap)}</span>` +
+        `<span class="hub-wf-plan-names">${val}</span></div>`;
+}
+
+function renderInspPop() {
+    if (!inspPop || !inspState) return;
+    const st = inspState;
+    let body = "";
+    if (st.loading) {
+        body = `<div class="hub-wf-emptylist">Inspecting…</div>`;
+    } else if (st.error) {
+        body = `<div class="hub-wf-planwarn">⚠ ${esc(st.error)}</div>`;
+    } else {
+        const d = st.data;
+        const uuid = d.workflowId
+            ? `<button type="button" class="hub-wf-act" data-iact="icopyuuid" data-uuid="${esc(d.workflowId)}" title="Copy the ComfyUI workflow UUID">⧉ ${esc(String(d.workflowId).slice(0, 10))}…</button>`
+            : `<span class="hub-wf-snap" title="No valid ComfyUI UUID in this JSON">No UUID</span>`;
+        const params = d.params || {};
+        const paramStr = [
+            params.steps != null ? "steps " + params.steps : null,
+            params.cfg != null ? "cfg " + params.cfg : null,
+            params.sampler || null,
+            params.scheduler || null,
+            (params.width != null && params.height != null) ? params.width + "×" + params.height : null,
+        ].filter(Boolean).join(" · ") || `<span class="hub-wf-snap">Not detected</span>`;
+        const types = (d.nodeTypes || []).slice(0, 40).map((t) => esc(t)).join(", ") +
+            ((d.nodeTypes || []).length > 40 ? " …+" + (d.nodeTypes.length - 40) : "");
+        const models = (d.models || []).length
+            ? (d.models || []).slice(0, 10).map((m) => esc(m)).join("<br>") +
+              ((d.models || []).length > 10 ? "<br>…+" + (d.models.length - 10) : "")
+            : `<span class="hub-wf-snap">Not detected</span>`;
+        const deps = d.deps || {};
+        const depRows = [];
+        if (deps.unknownNodes?.length) {
+            depRows.push(`<div class="hub-wf-planwarn" title="These node classes are not in the installed registry">⚠ Missing nodes: ${deps.unknownNodes.map(esc).join(", ")}</div>`);
+        }
+        for (const m of (deps.models || [])) {
+            if (m.status === "missing") {
+                depRows.push(`<div class="hub-wf-planwarn">⚠ Missing model: ${esc(m.name)}</div>`);
+            }
+        }
+        if (!deps.unknownNodes?.length && !(deps.models || []).some((m) => m.status === "missing")) {
+            depRows.push(`<div class="hub-wf-planhint" title="Every node class and every model file this workflow references checks out">✓ No missing dependencies detected${d.depsRegistryKnown ? "" : " (the node registry is not exposed by this runtime - the check is partial)"}</div>`);
+        }
+        const groups = d.groups || {};
+        const grpStr = [];
+        if (groups.exactCopies) grpStr.push(groups.exactCopies + " exact byte copy(ies)");
+        if (groups.sameJson) grpStr.push(groups.sameJson + " same-JSON copy(ies)");
+        if (groups.sameUuidDiffContent) grpStr.push(groups.sameUuidDiffContent + " same-UUID different-content");
+        if (groups.sameWorkflow) grpStr.push(groups.sameWorkflow + " same-workflow file(s)");
+        const summary = st.summary;
+        const sumStr = summary
+            ? inspRow("Library", `${summary.files} file(s) · ${summary.errors} bad JSON · ${summary.exactCopyGroups} exact-copy group(s) · ${summary.sameUuidDiffContent} same-UUID/diff group(s) · ${summary.noUuidFiles} without UUID`,
+                "The library summary (plan 12)")
+            : "";
+        body = inspRow("UUID", uuid, "The ComfyUI workflow UUID - files sharing it form ONE process") +
+            inspRow("Path", esc(d.name || "") + ` <span class="hub-wf-snap">${esc(d.path || "")}</span>`) +
+            inspRow("Nodes", String(d.nodeCount ?? "?")) +
+            inspRow("Params", paramStr, "Sampler/CFG/steps/resolution - only when they extract unambiguously") +
+            inspRow("Node classes", types || `<span class="hub-wf-snap">Not detected</span>`) +
+            inspRow("Models", models) +
+            (grpStr.length ? inspRow("Duplicates", grpStr.join(" · ") || "none", "The duplicate/similarity groups this file belongs to") : "") +
+            sumStr +
+            `<div class="hub-wf-sect">Dependencies</div>` + depRows.join("") +
+            (d.parseStatus && d.parseStatus !== "ok"
+                ? `<div class="hub-wf-planwarn">⚠ This JSON ${d.parseStatus === "error" ? "failed to parse: " + esc(d.parseError || "") : "is too large for the analysis"}</div>` : "");
+    }
+    inspPop.innerHTML = `<div class="hub-menu-title">🔍 Workflow inspector</div>` +
+        body +
+        `<div class="hub-wf-planacts"><button type="button" class="hub-wf-act" data-iact="iclose">✕ Close</button></div>`;
+}
+
 
 // ---------------------------------------------------------------------------
 // v101 test hooks (the smoke suite drives the panel through its real UI)
@@ -3667,6 +5547,72 @@ export function __workflowsTestHooks() {
             graphJsonOfOpenTab,
             getSavedWorkflows,
         },
+        // v112 (plan 3.x): the P0 helpers the new phases drive directly
+        canonWfRel,
+        sameWfPath,
+        normWfPath,
+        captureUndo,
+        verifyActiveTab,
+        sessionUndoState: () => sessionUndo,
+        setSessionUndo: (v) => { sessionUndo = v; },
+        filesLoadState: () => ({ seq: filesLoadSeq, pending: filesLoadPending,
+            error: filesLoadError, truncated: filesTruncated,
+            lastScan: filesLastScan, emptyStrikes: filesEmptyStrikes }),
+        setFilesLoadState: (patch = {}) => {
+            if ("pending" in patch) filesLoadPending = !!patch.pending;
+            if ("error" in patch) filesLoadError = patch.error;
+            if ("truncated" in patch) filesTruncated = !!patch.truncated;
+            if ("lastScan" in patch) filesLastScan = patch.lastScan || 0;
+        },
+        buildTreeIndex,
+        savedPathIndex,
+        // v112 stage 2: the index engine hooks
+        idxState: () => ({ ready: idxReady, stats: idxStats,
+            scanBusy: idxScanBusy, serverList: JSON.parse(JSON.stringify(serverList)),
+            uuid: filesUuid }),
+        // v112 stage 5: the inspector hooks
+        openInspPop: (p) => openInspPop(p),
+        closeInspPop,
+        inspState: () => inspState ? JSON.parse(JSON.stringify(inspState)) : null,
+        inspPopEl: () => inspPop,
+        // v112 stage 4: the preset versions panel hooks
+        openPverPop: (pid) => openPverPop(pid),
+        closePverPop,
+        pverState: () => pverState ? JSON.parse(JSON.stringify(pverState)) : null,
+        pverPopEl: () => pverPop,
+        setPresetsCat: (v) => { presetsCat = v || ""; },
+        setPresetsTag: (v) => { presetsTag = v || ""; },
+        presetsFilters: () => ({ cat: presetsCat, tag: presetsTag, open: presetsFadvOpen }),
+        // v112 stage 3: the duplicate detection + the snapshot toggle hooks
+        canonJsonOf,
+        stripPresentationOf,
+        wfGraphHashClient,
+        findSnapshotDuplicates,
+        setSnapMode: (v) => { if (saveForm) saveForm.snapMode = !!v; },
+        snapMode: () => !!saveForm?.snapMode,
+        saveTabRow: (t) => saveTabRow(t),
+        saveWorkflowTabAs: (t) => saveWorkflowTabAs(t),
+        wfStoreSaveAsCandidate,
+        setSaveFormRows: (rows) => { if (saveForm) saveForm.rows = rows; },
+        // v112 stage 2.5: the history panel hooks
+        openHistPop: (p) => openHistPop(p),
+        closeHistPop,
+        histState: () => histState ? JSON.parse(JSON.stringify(histState)) : null,
+        histPopEl: () => histPop,
+        histCreateCheckpoint: (src) => histCreateCheckpoint(src),
+        histRestore: (rid, confirmReplace) => histRestore(rid, confirmReplace),
+        runHistCompare: () => runHistCompare(),
+        refreshHistState: () => refreshHistState(),
+        setIdxReady: (v) => { idxReady = v; },
+        runServerList: (reset) => runServerList(reset),
+        ensureIndexStatus: () => ensureIndexStatus(),
+        rebuildIndex: () => rebuildIndex(),
+        setFilesUuid: (v) => { filesUuid = v || ""; },
+        recentServer: () => recentServer,
+        loadRecentFromServer: () => loadRecentFromServer(),
+        clientSessionId,
+        serverState: () => serverState,
+        undoRoute: "/settings_hub/workflows/undo",
         isOn: isWfOn,
         setOn: setWorkflowsOn,
         mount: initWorkflows,

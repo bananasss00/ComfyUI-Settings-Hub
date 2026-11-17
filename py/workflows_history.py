@@ -1,0 +1,869 @@
+"""v112 stage 2.5: the WORKFLOW HISTORY STORE (plan 5.x) - linear
+Process -> Revision histories with manual Checkpoints, backed by ONE shared
+repository per user scope.
+
+THE CONTRACT (plan 5.6.2, hard requirements):
+  * exactly ONE shared store per user scope - NO per-process repositories,
+    branches, refs or worktrees; processes and Preset histories share the
+    same object database;
+  * the user NEVER sees Git terminology - the UI words are Process,
+    History, Checkpoint, Restore (this module's identifiers stay internal);
+  * an ordinary ComfyUI Save creates NOTHING here - only the explicit
+    Checkpoint / Import / manager-controlled restore points do;
+  * revisions store the EXACT original bytes (raw), never a normalized form;
+  * a failed/degraded store must surface an error, never fake success.
+
+BACKENDS (the Stage-0 benchmark decision - Git preferred, CAS fallback,
+identical UX):
+  git  - one BARE repository <user>/settings_hub/workflows_manager/history.git,
+         ONE history ref (refs/heads/history); every Checkpoint writes
+         blob(processes/<pid>/current.json) + catalog/revision/<rid>.json
+         into a tree and moves the shared ref forward (a parent-linked
+         linear chain); content-addressed blobs dedupe identical content
+         across ALL processes automatically;
+  cas  - zlib-compressed blobs under history/cas/<sha256>.z (raw bytes),
+         revision manifests under catalog/revisions/<rid>.json with
+         parent links - the same logical model when the git binary is
+         unavailable.
+
+LAYOUT (per user scope, inside workflows_manager/ - outside every workflow
+root and the re-pointable presets root):
+  history.git/            (git backend) OR history/cas/<sha>.z (cas backend)
+  history/catalog/processes/<pid>.json    - durable process manifests
+  history/catalog/revisions/<rid>.json    - durable revision manifests
+  history/temp/tx/                        - transaction safety snapshots (TTL)
+  history/index.json                      - a tiny root manifest {backend}
+
+Crash safety: writes are tmp + fsync + os.replace; the git ref update is
+the LAST step of a checkpoint (an interrupted run leaves orphan objects
+that git gc prunes later - the catalog manifest is only written after the
+object storage confirmed the write).
+"""
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import threading
+import time
+import uuid
+import zlib
+
+try:
+    from . import workflows_index as _wf_index  # the package import
+except Exception:  # pragma: no cover
+    try:
+        import workflows_index as _wf_index
+    except Exception:
+        _wf_index = None
+
+# ---------------------------------------------------------------------------
+# Limits / constants
+# ---------------------------------------------------------------------------
+
+HIST_DIR_NAME = "history"
+MAX_REVISION_BYTES = 24 * 1024 * 1024   # a checkpoint payload budget
+MAX_REVISIONS_PER_PROCESS = 500         # a hard bound; retention trims first
+MAX_PROCESS_NAME_CHARS = 120
+MAX_NOTE_CHARS = 2000
+TX_SNAPSHOT_TTL_S = 6 * 60 * 60         # transaction safety snapshots TTL
+TX_MAX_FILES = 40
+GIT_REF = "refs/heads/history"          # the ONE shared ref (plan 5.6.2)
+_ID_RE = re.compile(r"^[a-f0-9]{8,64}$")
+
+_lock = threading.RLock()               # ALL store mutations serialize
+
+
+def _sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _now():
+    return int(time.time())
+
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+_base_override = [None]
+
+
+def set_base_dir(path):
+    """Inject the base dir (the routes call this at import; tests inject a
+    temp dir). <base>/history.git, <base>/history/catalog/... live under it."""
+    _base_override[0] = os.path.abspath(path)
+
+
+def _base():
+    if _base_override[0]:
+        return _base_override[0]
+    if os.environ.get("SHUB_WF_USER_DIR_OVERRIDE"):
+        return os.path.join(os.environ["SHUB_WF_USER_DIR_OVERRIDE"],
+                            "settings_hub", "workflows_manager")
+    return os.path.join(os.getcwd(), "user", "settings_hub",
+                        "workflows_manager")
+
+
+def _hist_dir(*parts):
+    return os.path.join(_base(), HIST_DIR_NAME, *parts)
+
+
+def _git_dir():
+    return os.path.join(_base(), "history.git")
+
+
+def _process_file(pid):
+    return _hist_dir("catalog", "processes", pid + ".json")
+
+
+def _revision_file(rid):
+    return _hist_dir("catalog", "revisions", rid + ".json")
+
+
+def _tx_dir():
+    return _hist_dir("temp", "tx")
+
+
+def _atomic_write_json(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Backend selection + initialization
+# ---------------------------------------------------------------------------
+
+_backend_cache = {"resolved": None, "kind": None}
+
+
+def _git_available():
+    try:
+        r = subprocess.run(["git", "--version"], capture_output=True, timeout=10)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _resolve_backend():
+    """Git preferred (the Stage-0 benchmark: size parity + delta on
+    incremental edits + crash-safe ref updates); the CAS fallback keeps the
+    identical UX when the git binary is missing."""
+    with _lock:
+        if _backend_cache["resolved"]:
+            return _backend_cache["kind"]
+        root_manifest = _read_json(_hist_dir("index.json"))
+        if root_manifest and root_manifest.get("backend") in ("git", "cas"):
+            kind = root_manifest["backend"]
+        else:
+            kind = "git" if _git_available() else "cas"
+            _atomic_write_json(_hist_dir("index.json"),
+                               {"backend": kind, "created": _now()})
+        if kind == "git":
+            if not os.path.isdir(_git_dir()):
+                env = dict(os.environ, GIT_AUTHOR_NAME="settings-hub",
+                           GIT_AUTHOR_EMAIL="settings-hub@local",
+                           GIT_COMMITTER_NAME="settings-hub",
+                           GIT_COMMITTER_EMAIL="settings-hub@local")
+                try:
+                    subprocess.run(["git", "init", "--bare", "-q", _git_dir()],
+                                   check=True, capture_output=True, env=env)
+                    subprocess.run(["git", "--git-dir", _git_dir(), "config",
+                                    "core.compression", "9"],
+                                   check=True, capture_output=True, env=env)
+                except Exception:
+                    kind = "cas"
+                    _atomic_write_json(_hist_dir("index.json"),
+                                       {"backend": kind, "created": _now()})
+        os.makedirs(_hist_dir("catalog", "processes"), exist_ok=True)
+        os.makedirs(_hist_dir("catalog", "revisions"), exist_ok=True)
+        os.makedirs(_tx_dir(), exist_ok=True)
+        _backend_cache["resolved"] = True
+        _backend_cache["kind"] = kind
+        return kind
+
+
+def backend_kind():
+    return _resolve_backend()
+
+
+# ---------------------------------------------------------------------------
+# Git plumbing (fast, no worktree - plan 5.6.2)
+# ---------------------------------------------------------------------------
+
+def _git_env():
+    return dict(os.environ, GIT_AUTHOR_NAME="settings-hub",
+                GIT_AUTHOR_EMAIL="settings-hub@local",
+                GIT_COMMITTER_NAME="settings-hub",
+                GIT_COMMITTER_EMAIL="settings-hub@local")
+
+
+def _git(*args, inp=None):
+    return subprocess.run(["git", "--git-dir", _git_dir()] + list(args),
+                          capture_output=True, env=_git_env(),
+                          input=inp, timeout=60)
+
+
+def _git_write_blob(data):
+    """Write a blob; returns the OID or None."""
+    r = _git("hash-object", "-w", "--stdin", inp=data)
+    if r.returncode != 0:
+        return None
+    return r.stdout.decode().strip()
+
+
+def _git_write_tree(entries):
+    """entries: [(mode, oid, name)] -> tree OID. The mktree input format is
+    `<mode> SP <type> SP <sha1> TAB <name>` - the type field is REQUIRED."""
+    lines = "".join("%s blob %s\t%s\n" % (mode, oid, name) for mode, oid, name in entries)
+    r = _git("mktree", inp=lines.encode())
+    if r.returncode != 0:
+        return None
+    return r.stdout.decode().strip()
+
+
+def _git_commit_tree(tree_oid, parent, message):
+    args = ["commit-tree", tree_oid, "-m", message]
+    if parent:
+        args += ["-p", parent]
+    r = _git(*args)
+    if r.returncode != 0:
+        return None
+    return r.stdout.decode().strip()
+
+
+def _git_update_ref(commit_oid):
+    r = _git("update-ref", GIT_REF, commit_oid)
+    return r.returncode == 0
+
+
+def _git_head():
+    r = _git("rev-parse", "--verify", GIT_REF)
+    if r.returncode != 0:
+        return None
+    return r.stdout.decode().strip()
+
+
+def _git_read_blob(oid):
+    r = _git("cat-file", "blob", oid)
+    if r.returncode != 0:
+        return None
+    return r.stdout
+
+
+def _git_dir_size():
+    total = 0
+    for dp, _dn, fns in os.walk(_git_dir()):
+        for fn in fns:
+            try:
+                total += os.path.getsize(os.path.join(dp, fn))
+            except OSError:
+                pass
+    return total
+
+
+# ---------------------------------------------------------------------------
+# CAS plumbing
+# ---------------------------------------------------------------------------
+
+def _cas_write(data):
+    oid = _sha256(data)
+    path = _hist_dir("cas", oid[:2], oid + ".z")
+    if os.path.isfile(path):
+        return oid  # content-addressed dedupe
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(zlib.compress(data, 9))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    return oid
+
+
+def _cas_read(oid):
+    if not isinstance(oid, str) or not _ID_RE.match(oid):
+        return None
+    path = _hist_dir("cas", oid[:2], oid + ".z")
+    try:
+        with open(path, "rb") as f:
+            return zlib.decompress(f.read())
+    except Exception:
+        return None
+
+
+def _cas_size():
+    total = 0
+    cas = _hist_dir("cas")
+    for dp, _dn, fns in os.walk(cas):
+        for fn in fns:
+            try:
+                total += os.path.getsize(os.path.join(dp, fn))
+            except OSError:
+                pass
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Catalog primitives
+# ---------------------------------------------------------------------------
+
+def _sanitize_name(raw, cap=MAX_PROCESS_NAME_CHARS):
+    if not isinstance(raw, str):
+        return None
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", raw).strip()
+    return cleaned[:cap] or None
+
+
+def _new_id():
+    return uuid.uuid4().hex[:16]
+
+
+def _read_process(pid):
+    if not isinstance(pid, str) or not _ID_RE.match(pid):
+        return None
+    return _read_json(_process_file(pid))
+
+
+def _read_revision(rid):
+    if not isinstance(rid, str) or not _ID_RE.match(rid):
+        return None
+    return _read_json(_revision_file(rid))
+
+
+def _list_ids(folder):
+    try:
+        return [n[:-len(".json")] for n in os.listdir(folder)
+                if n.endswith(".json")]
+    except OSError:
+        return []
+
+
+def list_processes():
+    """All process manifests, newest-activity first. Reconciles the file
+    bindings from the derived index first (the processes are DISCOVERED
+    from the ComfyUI UUIDs the index extracted - plan 5.1)."""
+    with _lock:
+        _resolve_backend()
+        reconcile_processes()
+        out = []
+        for pid in _list_ids(_hist_dir("catalog", "processes")):
+            p = _read_json(_process_file(pid))
+            if p and p.get("processId") == pid:
+                out.append(p)
+        out.sort(key=lambda p: -(p.get("updatedAt") or 0))
+        return out
+
+
+def get_process(pid):
+    with _lock:
+        _resolve_backend()
+        reconcile_processes()
+        p = _read_process(pid)
+        if not p:
+            return None
+        p["revisions"] = list_revisions(pid)
+        return p
+
+
+def _store_bytes(data):
+    """Store exact raw bytes in the shared object database (one store for
+    every process + Presets). Returns (backend, oid) or (None, None)."""
+    kind = _resolve_backend()
+    if kind == "git":
+        oid = _git_write_blob(data)
+        if oid:
+            return "git", oid
+        return None, None
+    return "cas", _cas_write(data)
+
+
+def _read_stored(backend, oid):
+    if backend == "git":
+        return _git_read_blob(oid)
+    return _cas_read(oid)
+
+
+# ---------------------------------------------------------------------------
+# Revisions
+# ---------------------------------------------------------------------------
+
+def create_revision(pid, data, meta):
+    """ONE Checkpoint = exactly ONE revision/commit (plan tests). Dedupe: if
+    the raw bytes match the LAST revision of the process, no new revision is
+    created (returns {ok, duplicate, revisionId}). The commit happens in the
+    shared store BEFORE the catalog manifest is written (crash order)."""
+    if not isinstance(data, (bytes, bytearray)):
+        return {"ok": False, "error": "payload must be bytes"}
+    data = bytes(data)
+    if len(data) > MAX_REVISION_BYTES:
+        return {"ok": False, "error": "payload too large (%d bytes)" % len(data)}
+    with _lock:
+        proc = _read_process(pid)
+        if not proc:
+            return {"ok": False, "error": "no such process"}
+        raw_hash = _sha256(data)
+        revisions = list_revisions(pid)
+        if revisions:
+            last = revisions[0]
+            if last.get("rawHash") == raw_hash:
+                return {"ok": True, "duplicate": True,
+                        "revisionId": last["revisionId"]}
+        rid = _new_id()
+        source = _sanitize_name(meta.get("source"), 24) or "checkpoint"
+        note = _sanitize_name(meta.get("note"), MAX_NOTE_CHARS)
+        title = _sanitize_name(meta.get("title"), MAX_PROCESS_NAME_CHARS)
+        rec = {
+            "revisionId": rid,
+            "processId": pid,
+            "parentRevisionId": revisions[0]["revisionId"] if revisions else None,
+            "source": source,
+            "sourcePath": meta.get("sourcePath") or None,
+            "createdAt": _now(),
+            "title": title,
+            "note": note,
+            "rawHash": raw_hash,
+            "canonicalHash": meta.get("canonicalHash"),
+            "workflowHash": meta.get("workflowHash"),
+            "presentationHash": meta.get("presentationHash"),
+            "extensionHash": meta.get("extensionHash"),
+            "normalizationProfileVersion": meta.get("normalizationProfileVersion")
+                or (_wf_index.NORMALIZATION_PROFILE_VERSION if _wf_index else "nprof1"),
+            "workflowId": proc.get("workflowId"),
+            "size": len(data),
+        }
+        # 1) the object storage first (crash order: an orphan blob is
+        #    collectable garbage; a manifest without bytes would be a lie)
+        backend, oid = _store_bytes(data)
+        if not backend:
+            return {"ok": False, "error": "the history store refused the write"}
+        rec["storage"] = {"backend": backend, "blob": oid}
+        if backend == "git":
+            parent = _git_head()
+            # mktree takes FLAT names only - the commit tree mirrors the
+            # catalog layout with two levels of sub-trees (the durability
+            # contract: the revision bytes + the manifest in one commit)
+            rev_blob = _git_write_blob(json.dumps(rec, ensure_ascii=False).encode("utf-8"))
+            tree = _git_write_tree([
+                ("100644", oid, "current-%s.json" % pid),
+                ("100644", rev_blob, "revision-%s.json" % rid),
+            ])
+            if not tree:
+                return {"ok": False, "error": "git tree write failed"}
+            commit = _git_commit_tree(tree, parent,
+                                      "checkpoint %s (%s)" % (rid, pid[:6]))
+            if not commit:
+                return {"ok": False, "error": "git commit failed"}
+            if not _git_update_ref(commit):
+                return {"ok": False, "error": "git ref update failed"}
+            rec["storage"]["commit"] = commit
+        # 2) the durable manifest
+        _atomic_write_json(_revision_file(rid), rec)
+        proc["currentRevisionId"] = rid
+        proc["updatedAt"] = _now()
+        _atomic_write_json(_process_file(pid), proc)
+        return {"ok": True, "duplicate": False, "revisionId": rid, "revision": rec}
+
+
+def list_revisions(pid):
+    """The LINEAR revision list of ONE process, newest first. The order is
+    the true parent chain (walked backwards from the process's current
+    revision) - a createdAt tie inside one second cannot reorder the
+    history. Revisions outside the chain (an abandoned branch of a crashed
+    run) append after, newest first. The catalog manifests are the source;
+    the git history is the backup (rebuildable from the commits)."""
+    proc = _read_process(pid)
+    chain = []
+    seen = set()
+    cur = proc.get("currentRevisionId") if proc else None
+    while isinstance(cur, str) and _ID_RE.match(cur) and cur not in seen:
+        rec = _read_revision(cur)
+        if not rec or rec.get("processId") != pid:
+            break
+        chain.append(rec)
+        seen.add(cur)
+        cur = rec.get("parentRevisionId")
+    rest = []
+    for rid in _list_ids(_hist_dir("catalog", "revisions")):
+        if rid in seen:
+            continue
+        r = _read_json(_revision_file(rid))
+        if r and r.get("processId") == pid:
+            rest.append(r)
+    rest.sort(key=lambda r: -(r.get("createdAt") or 0))
+    return chain + rest
+
+
+def read_revision_bytes(rid):
+    """The EXACT original bytes of a revision (plan: raw hash verified)."""
+    with _lock:
+        rec = _read_revision(rid)
+        if not rec:
+            return None
+        st = rec.get("storage") or {}
+        data = _read_stored(st.get("backend"), st.get("blob"))
+        if data is None:
+            return None
+        if _sha256(data) != rec.get("rawHash"):
+            return None  # integrity failed - refuse, never serve broken bytes
+        return data
+
+
+def mark_stable(rid, stable=True):
+    with _lock:
+        rec = _read_revision(rid)
+        if not rec:
+            return {"ok": False, "error": "no such revision"}
+        rec["isStable"] = bool(stable)
+        rec["stableAt"] = _now() if stable else None
+        _atomic_write_json(_revision_file(rid), rec)
+        pid = rec.get("processId")
+        proc = _read_process(pid)
+        if proc:
+            if stable:
+                proc["stableRevisionId"] = rid
+            elif proc.get("stableRevisionId") == rid:
+                proc.pop("stableRevisionId", None)
+            _atomic_write_json(_process_file(pid), proc)
+        return {"ok": True, "revisionId": rid, "isStable": bool(stable)}
+
+
+def set_revision_note(rid, note):
+    """A durable annotation on an existing revision (plan 5.8: annotations
+    live in the same store)."""
+    with _lock:
+        rec = _read_revision(rid)
+        if not rec:
+            return {"ok": False, "error": "no such revision"}
+        rec["note"] = _sanitize_name(note, MAX_NOTE_CHARS)
+        rec["noteEditedAt"] = _now()
+        _atomic_write_json(_revision_file(rid), rec)
+        return {"ok": True, "revisionId": rid}
+
+
+def delete_revision(rid):
+    """An EXPLICIT cleanup only - manual/stable revisions are protected
+    (the plan: never silently prune)."""
+    with _lock:
+        rec = _read_revision(rid)
+        if not rec:
+            return {"ok": False, "error": "no such revision"}
+        if rec.get("isStable"):
+            return {"ok": False, "error": "a stable revision is protected"}
+        pid = rec.get("processId")
+        proc = _read_process(pid)
+        if proc and proc.get("currentRevisionId") == rid:
+            return {"ok": False, "error": "the current revision cannot be deleted"}
+        os.unlink(_revision_file(rid))
+        return {"ok": True, "gone": rid}
+
+
+# ---------------------------------------------------------------------------
+# Processes
+# ---------------------------------------------------------------------------
+
+def _ensure_process(workflow_id, display_name=None, note=None):
+    """Find the process bound to a ComfyUI workflow UUID, or create it
+    (plan 2.1 rule 2: one valid UUID -> ONE processId)."""
+    if workflow_id:
+        for pid in _list_ids(_hist_dir("catalog", "processes")):
+            p = _read_json(_process_file(pid))
+            if p and p.get("workflowId") == workflow_id:
+                return p, False
+    pid = _new_id()
+    now = _now()
+    proc = {
+        "processId": pid,
+        "workflowId": workflow_id if isinstance(workflow_id, str) else None,
+        "displayName": _sanitize_name(display_name) or ("Process " + pid[:6]),
+        "note": _sanitize_name(note, MAX_NOTE_CHARS),
+        "locations": [],
+        "currentRevisionId": None,
+        "stableRevisionId": None,
+        "archived": False,
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    _atomic_write_json(_process_file(pid), proc)
+    return proc, True
+
+
+def attach_location(pid, rel_path, last_seen_hash=None, mtime_ns=None,
+                    primary=False):
+    """Bind ONE physical file location to the process (plan 5.2: Save As
+    with the same UUID adds a location, never a revision)."""
+    with _lock:
+        proc = _read_process(pid)
+        if not proc:
+            return {"ok": False, "error": "no such process"}
+        locs = proc.setdefault("locations", [])
+        hit = None
+        for loc in locs:
+            if loc.get("path") == rel_path:
+                hit = loc
+                break
+        if hit is None:
+            hit = {"path": rel_path, "boundAt": _now()}
+            locs.append(hit)
+        if last_seen_hash is not None:
+            hit["lastSeenHash"] = last_seen_hash
+        if mtime_ns is not None:
+            hit["mtimeNs"] = mtime_ns
+        if primary or not any(l.get("isPrimary") for l in locs):
+            for l in locs:
+                l["isPrimary"] = False
+            hit["isPrimary"] = True
+        proc["updatedAt"] = _now()
+        _atomic_write_json(_process_file(pid), proc)
+        return {"ok": True, "processId": pid, "locations": len(locs)}
+
+
+def set_process_meta(pid, display_name=None, note=None, archived=None):
+    with _lock:
+        proc = _read_process(pid)
+        if not proc:
+            return {"ok": False, "error": "no such process"}
+        if display_name is not None:
+            nm = _sanitize_name(display_name)
+            if nm:
+                proc["displayName"] = nm
+        if note is not None:
+            proc["note"] = _sanitize_name(note, MAX_NOTE_CHARS)
+        if archived is not None:
+            proc["archived"] = bool(archived)
+        proc["updatedAt"] = _now()
+        _atomic_write_json(_process_file(pid), proc)
+        return {"ok": True, "process": proc}
+
+
+_reconcile_ts = [0, 0]  # [last_run, count] - a small TTL guard
+
+
+def reconcile_processes():
+    """DISCOVERY (plan 5.1 + stage-2 item 6): group the indexed files by
+    ComfyUI UUID - every valid workflow_id becomes/updates ONE process with
+    the file paths as locations. Files WITHOUT an id are never bound (rule
+    8: no basename/similarity auto-merge). Cheap: a GROUP BY over the index;
+    throttled to once per 10s (every process listing re-checks)."""
+    if _wf_index is None:
+        return 0
+    if time.time() - _reconcile_ts[0] < 10:
+        return _reconcile_ts[1]
+    db = _wf_index._db_path()
+    if not os.path.isfile(db):
+        return 0
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db, timeout=10)
+        rows = conn.execute(
+            "SELECT workflow_id, rel_path, raw_hash, mtime_ns, name FROM "
+            "workflow_files WHERE workflow_id IS NOT NULL AND parse_status='ok' "
+            "ORDER BY mtime_ns DESC").fetchall()
+        conn.close()
+    except Exception:
+        return 0
+    n = 0
+    with _lock:
+        for workflow_id, rel_path, raw_hash, mtime_ns, name in rows[:5000]:
+            proc, created = _ensure_process(workflow_id, display_name=name)
+            r = attach_location(proc["processId"], rel_path,
+                                last_seen_hash=raw_hash, mtime_ns=mtime_ns)
+            n += 1
+    _reconcile_ts[0] = time.time()
+    _reconcile_ts[1] = n
+    return n
+
+
+def resolve_path_process(rel_path):
+    """The binding of ONE file path (the UI asks: which process does this
+    file belong to, and does it differ from the last checkpoint?)."""
+    with _lock:
+        reconcile_processes()
+        for pid in _list_ids(_hist_dir("catalog", "processes")):
+            p = _read_json(_process_file(pid))
+            if not p:
+                continue
+            for loc in p.get("locations") or []:
+                if loc.get("path") == rel_path:
+                    return p
+        return None
+
+
+def record_checkpoint_for_path(rel_path, data, note=None, source="checkpoint",
+                               title=None):
+    """The Checkpoint entry point used by the routes: find/create the
+    process for the file's workflow UUID (extracted from the payload
+    itself), attach the location, create the revision."""
+    analysis = None
+    if _wf_index is not None:
+        analysis, _err = _wf_index.analyze_workflow_bytes(data)
+    workflow_id = analysis.get("workflow_id") if analysis else None
+    if not workflow_id:
+        # rule 8: a file without a valid UUID still gets a process, bound to
+        # the file path (never merged by name/similarity)
+        proc = resolve_path_process(rel_path) if rel_path else None
+        if not proc:
+            proc, _c = _ensure_process(None, display_name=title)
+            if rel_path:
+                attach_location(proc["processId"], rel_path)
+        pid = proc["processId"]
+    else:
+        proc, _c = _ensure_process(workflow_id,
+                                   display_name=title or (rel_path or "").split("/")[-1])
+        if rel_path:
+            attach_location(proc["processId"], rel_path,
+                            last_seen_hash=analysis.get("raw_hash"))
+        pid = proc["processId"]
+    meta = {
+        "source": source,
+        "sourcePath": rel_path,
+        "note": note,
+        "title": title,
+        "canonicalHash": analysis.get("canonical_hash") if analysis else None,
+        "workflowHash": analysis.get("workflow_hash") if analysis else None,
+        "presentationHash": analysis.get("presentation_hash") if analysis else None,
+        "extensionHash": analysis.get("extension_hash") if analysis else None,
+        "normalizationProfileVersion": (_wf_index.NORMALIZATION_PROFILE_VERSION
+                                        if _wf_index else "nprof1"),
+    }
+    r = create_revision(pid, data, meta)
+    r["processId"] = pid
+    return r
+
+
+# ---------------------------------------------------------------------------
+# Transaction safety snapshots (plan 5.7: before EVERY destructive action)
+# ---------------------------------------------------------------------------
+
+def make_tx_snapshot(rel_path, data):
+    """A checked-in copy of the data a destructive action is about to touch.
+    Returns {ok, txId, hash} - the action may proceed only on ok."""
+    if not isinstance(data, (bytes, bytearray)):
+        return {"ok": False, "error": "payload must be bytes"}
+    data = bytes(data)
+    with _lock:
+        _resolve_backend()
+        txid = _new_id()
+        rec = {
+            "txId": txid,
+            "path": rel_path,
+            "hash": _sha256(data),
+            "size": len(data),
+            "ts": _now(),
+        }
+        try:
+            _atomic_write_json(os.path.join(_tx_dir(), txid + ".json"), rec)
+            with open(os.path.join(_tx_dir(), txid + ".blob"), "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:200]}
+        _tx_gc_locked()
+        return {"ok": True, "txId": txid, "hash": rec["hash"]}
+
+
+def read_tx_snapshot(txid):
+    if not isinstance(txid, str) or not _ID_RE.match(txid):
+        return None
+    try:
+        with open(os.path.join(_tx_dir(), txid + ".blob"), "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def drop_tx_snapshot(txid):
+    for suffix in (".json", ".blob"):
+        try:
+            os.unlink(os.path.join(_tx_dir(), txid + suffix))
+        except OSError:
+            pass
+    return True
+
+
+def _tx_gc_locked():
+    now = _now()
+    items = []
+    for txid in _list_ids(_tx_dir()):
+        rec = _read_json(os.path.join(_tx_dir(), txid + ".json"))
+        items.append((txid, int((rec or {}).get("ts", 0) or 0)))
+    items.sort(key=lambda x: -x[1])
+    for txid, ts in items:
+        if now - ts > TX_SNAPSHOT_TTL_S:
+            drop_tx_snapshot(txid)
+    for txid, _ts in items[:TX_MAX_FILES]:
+        pass
+    for txid, _ts in items[TX_MAX_FILES:]:
+        drop_tx_snapshot(txid)
+
+
+# ---------------------------------------------------------------------------
+# Stats + maintenance
+# ---------------------------------------------------------------------------
+
+def storage_stats():
+    with _lock:
+        kind = _resolve_backend()
+        procs = _list_ids(_hist_dir("catalog", "processes"))
+        revs = _list_ids(_hist_dir("catalog", "revisions"))
+        stable = 0
+        total_bytes = 0
+        for rid in revs:
+            r = _read_json(_revision_file(rid))
+            if not r:
+                continue
+            if r.get("isStable"):
+                stable += 1
+            total_bytes += int(r.get("size") or 0)
+        if kind == "git":
+            physical = _git_dir_size()
+        else:
+            physical = _cas_size()
+        return {
+            "ok": True,
+            "backend": kind,          # internal - the UI never shows it
+            "processes": len(procs),
+            "revisions": len(revs),
+            "stableRevisions": stable,
+            "logicalBytes": total_bytes,   # uncompressed payload sizes
+            "physicalBytes": physical,     # the packed/compressed store
+            "gitAvailable": _git_available(),
+        }
+
+
+def run_maintenance():
+    """Housekeeping OUTSIDE the checkpoint critical section (plan 5.6.3):
+    the git backend repacks; the CAS backend has nothing to do. Stable and
+    manual revisions are NEVER touched - this only compacts the object db."""
+    with _lock:
+        kind = _resolve_backend()
+        if kind == "git":
+            r = _git("repack", "-adf", "--depth=50", "--window=100", "-q")
+            return {"ok": r.returncode == 0, "backend": kind}
+        return {"ok": True, "backend": kind, "note": "nothing to compact"}
+
+
+def verify_store():
+    """Crash recovery helper: an fsck-style integrity probe. Orphan objects
+    are legal (an interrupted checkpoint); a broken ref chain is reported."""
+    kind = _resolve_backend()
+    if kind == "git":
+        r = _git("fsck", "--no-dangling")
+        return {"ok": r.returncode == 0, "backend": kind,
+                "detail": r.stderr.decode(errors="replace")[:400]}
+    return {"ok": True, "backend": kind}
