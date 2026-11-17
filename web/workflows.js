@@ -227,9 +227,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v116";
+const WF_WEB_VERSION = "v117";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v116";
+globalThis.__SettingsHubLoaded["workflows"] = "v117";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -240,8 +240,18 @@ const LS_UI = "settingshub.workflows.ui";      // {x,y,w,h,min,chipX,chipY,tab}
 const LS_PREF = "settingshub.workflows.pref";  // {keepUnsaved,closeEmptyTemp,warnOnQueue}
 const LS_RECENT = "settingshub.workflows.recent"; // ring buffer of closed tabs
 const LS_CLIENT = "settingshub.workflows.client"; // v112: the browser-session id (server recent manifests)
+// v117: the owner's 'Recently closed items' setting (5/10/15/20/30, default
+// 15) - ONE active limit feeds the ring, the render, the server manifest
+// upload AND the Clear button; shrinking TRIMS the ring immediately and the
+// evicted tempIds free their snapshots through the manifest sync (the
+// cross-browser refs are honored server-side)
+const LS_RECENT_LIMIT = "settingshub.workflows.recentLimit";
+const RECENT_CHOICES = [5, 10, 15, 20, 30];
+// v117: the Files similarity grouping (the owner's plan section 4)
+const LS_GROUPS = "settingshub.workflows.groups"; // {on,threshold,kind}
+const GROUP_THRESHOLD_CHOICES = [80, 85, 90, 95, 100];
 const Z_PANEL = "99900";               // same layer as the stack / chat panels
-const RECENT_MAX = 15;
+const RECENT_MAX = 15;                 // the DEFAULT limit (the setting wins)
 // v108: the Files-tab quick-period bounds ("today" / "7d" / "30d" chips -
 // a lower mtime bound only, so a skewed clock can never hide a fresh file)
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -277,6 +287,37 @@ function esc(s) {
 
 function verNum(s) {
     return parseInt(String(s || "").replace(/\D+/g, ""), 10) || 0;
+}
+
+/** v117: the ACTIVE Recently-closed limit (the owner's plan section 3).
+ *  A broken/stale localStorage value falls back to the default 15. NOTE:
+ *  lsJson() only returns OBJECTS - a bare number would fall back to the
+ *  default, so the raw value is parsed here. */
+function recentLimit() {
+    try {
+        const v = JSON.parse(localStorage.getItem(LS_RECENT_LIMIT) || "null");
+        return RECENT_CHOICES.includes(v) ? v : RECENT_MAX;
+    } catch (_) { return RECENT_MAX; }
+}
+
+/** v117: apply a new limit IMMEDIATELY (no reload): the ring is trimmed,
+ *  the evicted tempIds go through the manifest sync (the server frees the
+ *  snapshots no OTHER browser session references) and the tab re-renders. */
+function setRecentLimit(n) {
+    const v = RECENT_CHOICES.includes(n) ? n : RECENT_MAX;
+    saveJson(LS_RECENT_LIMIT, v);
+    const lim = recentLimit();
+    if (Array.isArray(recent) && recent.length > lim) {
+        for (const r of recent.slice(lim)) {
+            if (r && typeof r.tempId === "string" && r.tempId)
+                _pendingEvicted.push(r.tempId);
+        }
+        recent = recent.slice(0, lim);
+        persistRecent();
+        syncRecentManifest();
+    }
+    if (uiTab === "files") renderAll();
+    return v;
 }
 
 function localToast(msg, ms = 2600) {
@@ -1431,6 +1472,64 @@ let serverList = { files: [], total: 0, hasMore: false, nextCursor: null,
     loading: false, error: null };
 let filesUuid = "";             // the advanced filter: exact/partial ComfyUI UUID
 
+// v117 (the owner's plan section 4): the FILES SIMILARITY GROUPING state.
+// on/threshold/kind persist in localStorage; the ANSWER (groups + rows) is
+// a fetch cache with a short TTL - the server computes it over the WHOLE
+// index and caches it in SQLite, so the client never recomputes anything.
+let groupsState = { on: false, threshold: 90, kind: "all",
+    data: null, loading: false, error: null, collapsed: {} };
+
+function loadGroupsPrefs() {
+    try {
+        const v = lsJson(LS_GROUPS, null);
+        if (v && typeof v === "object") {
+            groupsState.on = !!v.on;
+            const th = parseInt(v.threshold, 10);
+            if (GROUP_THRESHOLD_CHOICES.includes(th)) groupsState.threshold = th;
+            if (v.kind === "same_uuid" || v.kind === "exact" || v.kind === "similar")
+                groupsState.kind = v.kind;
+        }
+    } catch (_) {}
+}
+
+function saveGroupsPrefs() {
+    saveJson(LS_GROUPS, { on: groupsState.on, threshold: groupsState.threshold,
+        kind: groupsState.kind });
+}
+
+/** v117: fetch the server-built groups (threshold + kind are server params;
+ *  the server caches the full computation in SQLite, the kind filter is
+ *  applied there). force=true drops the cache (Refresh / after a delete). */
+async function runGroups(force = false) {
+    if (!idxMode() || !groupsState.on || filesView !== "list") return;
+    if (groupsState.loading) return;
+    if (groupsState.data && !force &&
+        Date.now() - (groupsState.data.ts || 0) < 15000) return;
+    groupsState.loading = true;
+    if (force) groupsState.data = null;
+    groupsState.error = null;
+    renderAll();
+    try {
+        const res = await jfetch("/settings_hub/workflows/index/groups?threshold=" +
+            encodeURIComponent(groupsState.threshold) + "&kind=" +
+            encodeURIComponent(groupsState.kind));
+        if (res.json?.ok) {
+            groupsState.data = { ...res.json, ts: Date.now() };
+        } else {
+            groupsState.error = (res.json && res.json.error) ||
+                (res.status === 404 ? "the groups route is missing (an old py) - update the FULL pack"
+                    : "HTTP " + res.status);
+        }
+    } catch (e) {
+        groupsState.error = String((e && e.message) || e);
+    }
+    groupsState.loading = false;
+    if (uiTab === "files") renderAll();
+}
+
+// v117: the persisted grouping prefs (on/threshold/kind) load ONCE at boot
+loadGroupsPrefs();
+
 function idxMode() { return idxReady === true; }
 
 /** The Files-tab list query the server answers: search + filters + sort +
@@ -1864,6 +1963,9 @@ let recentSyncT = null;    // the debounce of the manifest sync
 // candidates accumulate here - the plan's reference accounting needs them
 // to survive the whole burst)
 let _pendingEvicted = [];
+// v117: the armed Clear of the Recently closed list (a two-click confirm -
+// the plan's 'Clear Recently closed' button next to the group header)
+let recentClearArmed = null;   // a timeout id - the 2.5s disarm window
 
 function sanitizeRecent() {
     const ok = (r) => r && typeof r === "object" &&
@@ -1871,7 +1973,7 @@ function sanitizeRecent() {
             r.snap !== null && typeof r.snap === "object" ||
             (typeof r.path === "string" && r.path &&
                 !r.path.toLowerCase().endsWith(".null")));
-    recent = recent.filter(ok).slice(0, RECENT_MAX);
+    recent = recent.filter(ok).slice(0, recentLimit());
 }
 
 function reloadRecent() {
@@ -1885,7 +1987,7 @@ function persistRecent() {
     // the v106 degrade ladder guards the FALLBACK embeds only now - an
     // entry carrying a server tempId has no snap and is a few dozen chars
     let used = 0;
-    const list = recent.slice(0, RECENT_MAX).map((r) => {
+    const list = recent.slice(0, recentLimit()).map((r) => {
         if (!r || !r.snap) return r;
         used += JSON.stringify(r.snap).length;
         return used > RECENT_BUDGET ? { path: r.path, name: r.name, ts: r.ts } : r;
@@ -1898,10 +2000,10 @@ function persistRecent() {
  *  reference union comes back; the evicted temps of THIS ring are deleted
  *  ONLY when NO manifest references them anymore (cross-browser safe).
  *  Never throws; a failure just leaves the v107 semantics for this close. */
-function syncRecentManifest() {
+function syncRecentManifest(immediate = false) {
     if (!serverState) return;
     clearTimeout(recentSyncT);
-    recentSyncT = setTimeout(async () => {
+    const send = async () => {
         const evicted = _pendingEvicted;
         _pendingEvicted = [];
         try {
@@ -1910,7 +2012,7 @@ function syncRecentManifest() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     clientId: clientSessionId(),
-                    entries: recent.slice(0, RECENT_MAX).map((r) => ({
+                    entries: recent.slice(0, recentLimit()).map((r) => ({
                         path: r.path || null, name: r.name || "Unsaved",
                         ts: r.ts || 0, tempId: r.tempId || null, snap: null,
                     })),
@@ -1935,7 +2037,32 @@ function syncRecentManifest() {
         } catch (_) {
             _pendingEvicted.push(...evicted); // the local ring stays the fallback
         }
-    }, 600);
+    };
+    // v117: the Clear button flushes IMMEDIATELY (the plan: 'немедленно
+    // отправлять пустой entries: []') - every other path keeps the ~600ms
+    // debounce that collapses bursts of closes
+    if (immediate) void send();
+    else recentSyncT = setTimeout(send, 600);
+}
+
+/** v117 (the owner's plan section 3): clear the Recently closed list of
+ *  THIS browser session only. The workflow files, Presets, Favorites and
+ *  the Process history are NEVER touched. The empty manifest goes to the
+ *  server immediately ({entries: []} for this clientId - the other
+ *  browsers' manifests stay), and this session's evicted snapshots are
+ *  freed ONLY when no other session's manifest still references them (the
+ *  server's refs union answers that). The tab shows 'Nothing closed yet'
+ *  right away. */
+function recentClearAll() {
+    recentClearArmed = null;
+    const evicted = (Array.isArray(recent) ? recent : [])
+        .map((r) => (r && typeof r.tempId === "string" && r.tempId) || null)
+        .filter(Boolean);
+    _pendingEvicted.push(...evicted);
+    recent = [];
+    persistRecent();
+    syncRecentManifest(true);   // the plan: the empty manifest goes NOW
+    renderAll();
 }
 
 /** v112 boot: adopt the SERVER manifest for this session (the plan: the
@@ -1949,7 +2076,7 @@ async function loadRecentFromServer() {
         const res = await jfetch("/settings_hub/workflows/recent/" + encodeURIComponent(cid));
         if (res.json?.ok && Array.isArray(res.json.entries)) {
             recent = res.json.entries.filter((r) => r && typeof r === "object")
-                .slice(0, RECENT_MAX);
+                .slice(0, recentLimit());
             sanitizeRecent();
             persistRecent();
             recentServer = true;
@@ -2005,7 +2132,7 @@ function recordRecent(w, snap = null) {
         }
         recent = [{ path, name, ts: Date.now(),
                 ...(tempId ? { tempId } : {}), ...(embed ? { snap: embed } : {}) },
-            ...prev.filter((r) => !same(r))].slice(0, RECENT_MAX);
+            ...prev.filter((r) => !same(r))].slice(0, recentLimit());
         // v112: collect the tempIds that just LEFT the ring - the debounced
         // manifest sync owns their deletion (server reference union first;
         // the old direct dropEvictedTemps could orphan ANOTHER browser's
@@ -2064,6 +2191,11 @@ let fileSel = new Set();            // the Files-tab selection (normalized paths
 let fileOpsArmed = false;
 let fileOpsUndo = null;             // {opId, expiresAt} of the last batch
 let fileOpsBusy = false;
+// v117 (the owner's plan section 2): the PREVIEW-driven confirm state - the
+// first click fetches the server's preview (which versions become
+// unreachable, which copies stay, which presets point at the files) and the
+// strip renders it; the second click performs the deletion.
+let fileOpsConfirm = null;          // {data, paths} of the current preview
 let chipMoved = false;              // the chip drag-vs-click discriminator
 let presetsSearch = "";
 // v112 stage 4 (plan 9): the category/tag filter state (compact - hidden
@@ -3188,12 +3320,19 @@ function filesTabHtml() {
     // request per 30s max; the answer patches the already-rendered rows in
     // place, later re-renders read the cache directly.
     refreshHistBadges();
+    // v117: the similarity groups fetch (server-side over the WHOLE index;
+    // a TTL cache so re-renders never stampede). The request fires ONLY on
+    // a data miss - the render loop stays single-shot.
+    if (groupsState.on && idxMode() && filesView === "list" &&
+        !groupsState.data && !groupsState.loading && !groupsState.error) {
+        void runGroups(true);
+    }
     // v107: temp tabs reopen from their SERVER snapshot (tempId ->
     // temp/<id>.json; the v106 embed is the fallback) - no file path, the
     // row is found by ts, carries a (snapshot) badge and its own tooltip.
     // v108: the 🕘 section is a list-mode citizen - the tree view is a pure
     // file browser and restores the habitual Files view when switched back.
-    const rec = filesView === "list" ? recent.slice(0, RECENT_MAX).map((r) =>
+    const rec = filesView === "list" ? recent.slice(0, recentLimit()).map((r) =>
         `<div class="hub-wf-row hub-wf-row-recent" data-path="${esc(r.path || "")}" data-rts="${esc(String(r.ts || 0))}">` +
         `<button type="button" class="hub-wf-name" data-act="reopen" data-path="${esc(r.path || "")}" data-rts="${esc(String(r.ts || 0))}" ` +
         `title="${(r.tempId || r.snap) ? "Snapshot - restores the tab as it was when closed" : esc(r.path || "")}">🕘 ${esc(r.name)}${(r.tempId || r.snap) && !r.path ? " <span class=\"hub-wf-snap\">(snapshot)</span>" : ""}</button>` +
@@ -3242,6 +3381,17 @@ function filesTabHtml() {
         `<span class="hub-wf-flabel">KB</span></span>` +
         `<button type="button" class="hub-wf-act" data-act="fclear" title="Clear every advanced filter (folder, dates, size)">✕</button>` +
         `</div>`;
+    // v117: the similarity-kind filter chips (the group controls row)
+    const groupKindChip = (kind, label) =>
+        `<button type="button" class="hub-wf-act hub-wf-fchip${groupsState.kind === kind ? " hub-wf-fchip-on" : ""}" data-act="groupkind" data-kind="${kind}" ` +
+        `title="Show ${label.toLowerCase()} only (the groups are computed once on the server - flipping the filter is free)">${label}</button>`;
+    // v117 (the owner's plan section 2): the DELETE CONFIRM strip - the
+    // preview data lands here BEFORE anything is deleted: what dies, which
+    // versions become unreachable WITH the files (Undo restores the .json
+    // file(s) only), which same-UUID copies stay untouched, which presets
+    // point at the deleted files (the presets are never deleted).
+    const delConfirm = (fileOpsArmed && fileOpsConfirm)
+        ? filesDeleteConfirmHtml(fileOpsConfirm.data) : "";
     // v108: the rows - the flat list or the folder tree. Both share the
     // savedFileRowHtml rows (checkbox, name, path sub-line, ★) and the
     // fileRowsShown cap.
@@ -3277,7 +3427,44 @@ function filesTabHtml() {
         rows = out.join("");
         if (capHit) more = `<button type="button" class="hub-wf-more" data-act="morefiles">Show more</button>`;
     } else {
-        if (idxList) {
+        if (idxList && groupsState.on) {
+            // v117: the GROUPED view (the owner's plan section 4) - the
+            // groups are built SERVER-side over the whole index; the rows
+            // are the ordinary Files rows with every action they carry in
+            // the flat list. Collapsible headers name the kind, the file
+            // count and (for Similar) the min/avg score.
+            const gd = groupsState.data;
+            if (groupsState.loading && !gd) {
+                rows = `<div class="hub-wf-emptylist">Building the groups over the indexed library…</div>`;
+            } else if (groupsState.error && !gd) {
+                rows = `<div class="hub-wf-planwarn">⚠ The groups are unavailable: ${esc(groupsState.error)}</div>`;
+            } else if (gd) {
+                const out = [];
+                const kindIcon = { same_uuid: "⧉", exact: "⧉", similar: "≈" };
+                for (const g of (gd.groups || [])) {
+                    const collapsed = !!groupsState.collapsed[g.key];
+                    const scoreTxt = g.kind === "similar" &&
+                        Number.isFinite(g.minScore)
+                        ? ` · ${g.minScore}%${Number.isFinite(g.avgScore) ? "–" + g.avgScore + "%" : ""}` : "";
+                    out.push(`<div class="hub-wf-sect hub-wf-sect-row">` +
+                        `<button type="button" class="hub-wf-act" data-act="groupfold" data-key="${esc(g.key)}" ` +
+                        `title="${collapsed ? "Expand the group" : "Collapse the group"}">${collapsed ? "▸" : "▾"} ${kindIcon[g.kind] || ""} ${esc(g.label)} · ${g.count} file(s)${scoreTxt}</button>` +
+                        `<span class="hub-wf-snap" title="A visual grouping only - nothing is merged, moved or deleted automatically">${g.kind === "same_uuid" ? "one workflow id" : g.kind === "exact" ? "100%" : "estimate ≥ " + groupsState.threshold + "%"}</span></div>`);
+                    if (!collapsed) {
+                        for (const f of (g.files || []))
+                            out.push(savedFileRowHtml(f, 1));
+                    }
+                }
+                out.push(`<div class="hub-wf-sect">Outside the groups (${gd.ungroupedTotal || 0})</div>`);
+                for (const f of (gd.ungrouped || []))
+                    out.push(savedFileRowHtml(f, 0));
+                if ((gd.ungroupedTotal || 0) > (gd.ungrouped || []).length)
+                    out.push(`<div class="hub-wf-emptylist">… and ${gd.ungroupedTotal - (gd.ungrouped || []).length} more ungrouped files (the grouped view caps its answer - use the flat list to page through everything)</div>`);
+                rows = out.join("");
+                more = groupsState.loading
+                    ? `<div class="hub-wf-emptylist">Recomputing…</div>` : "";
+            }
+        } else if (idxList) {
             // the SERVER page (index mode): the rows are already filtered/
             // sorted/paginated backend-side - render as-is
             rows = idxList.map((f) => savedFileRowHtml(f, 0)).join("");
@@ -3365,14 +3552,36 @@ function filesTabHtml() {
         viewBtn("tree", "🌲", "Folder tree - expand/collapse any depth, enter folders, breadcrumbs") +
         `<button type="button" class="hub-wf-act hub-wf-fchip${filesFavOnly ? " hub-wf-fchip-on" : ""}" data-act="favonly" title="Show only the favorites (★)">★${filesFav.size ? " " + filesFav.size : ""}</button>` +
         `<button type="button" class="hub-wf-act hub-wf-fchip${filesAdvOpen ? " hub-wf-advbtn-on" : ""}" data-act="fadv" title="Advanced filters: folder, modified date range, file size range">⚗${filesActiveFilterCount() ? " " + filesActiveFilterCount() : ""}</button>` +
+        // v117 (the owner's plan section 4): the similarity grouping toggle -
+        // default OFF, the flat list stays exactly as it is today
+        `<button type="button" class="hub-wf-act hub-wf-fchip${groupsState.on ? " hub-wf-fchip-on" : ""}" data-act="grouptoggle" ` +
+        `title="Group similar workflows: files with the same UUID, exact graph copies and structurally similar workflows render as collapsible groups (built SERVER-side over the whole index - nothing is merged, moved or deleted)">◫ Group</button>` +
         quickChip("today", "Today") +
         quickChip("7d", "7d") +
         quickChip("30d", "30d") +
         `</div>` +
-        adv + stateNote +
+        // v117: the group controls row (threshold + the kind filter) - only
+        // while the grouping is on; the estimate disclaimer lives on the
+        // chips' tooltips, the percentage is an estimate, never a proof
+        (groupsState.on && idxMode()
+            ? `<div class="hub-wf-fadv">` +
+              `<select class="hub-wf-fsel" data-wf="groupthresh" title="The similarity threshold: 80-100%, step 5. 95-100% = very similar, 85-94% = similar. The % is a structural/content ESTIMATE, not an identity guarantee">` +
+              GROUP_THRESHOLD_CHOICES.map((t) =>
+                  `<option value="${t}"${groupsState.threshold === t ? " selected" : ""}>≥ ${t}%</option>`).join("") +
+              `</select>` +
+              groupKindChip("all", "All groups") +
+              groupKindChip("same_uuid", "Same UUID") +
+              groupKindChip("exact", "Exact copies") +
+              groupKindChip("similar", "Similar") +
+              `<button type="button" class="hub-wf-act" data-act="grouprefetch" title="Recompute the groups from the current index">⟳</button>` +
+              `</div>`
+            : "") +
+        adv + stateNote + delConfirm +
         `<div class="hub-wf-scroll">` +
         (filesView === "list"
-            ? `<div class="hub-wf-sect">🕘 Recently closed${recentServer === false ? " <span class=\"hub-wf-snap\" title=\"An old py without the recent routes - the ring lives in this browser only\">(local only)</span>" : ""}</div>` +
+            ? `<div class="hub-wf-sect hub-wf-sect-row">🕘 Recently closed${recentServer === false ? " <span class=\"hub-wf-snap\" title=\"An old py without the recent routes - the ring lives in this browser only\">(local only)</span>" : ""}` +
+              `<button type="button" class="hub-wf-act hub-wf-fchip${recentClearArmed ? " hub-wf-armed" : ""}" data-act="recentclear" ` +
+              `title="${recentClearArmed ? "Click AGAIN to clear THIS browser's Recently closed list (the workflow files, Presets, Favorites and Process history stay untouched)" : "Clear this browser's Recently closed list - other browser sessions keep their own lists; the workflow files, Presets, Favorites and Process history are never touched"}">${recentClearArmed ? "⚠ Click AGAIN to clear" : "✕ Clear"}</button></div>` +
               `<div class="hub-wf-list hub-wf-list-recent">${rec || `<div class="hub-wf-emptylist">Nothing closed yet</div>`}</div>` +
               `<div class="hub-wf-sect">All saved workflows</div>`
             : `<div class="hub-wf-sect">${filesTreeFolder ? "📁 " + esc(filesTreeFolder) : "📁 Folder tree"}</div>` + crumbs) +
@@ -3415,16 +3624,101 @@ function filesSelOutsideCount() {
     return n;
 }
 
+/** v117 (the owner's plan section 2): the confirm-strip HTML built from the
+ *  server preview - every number comes from the server data, never a guess.
+ *  The strip says: what is deleted, whose versions become unreachable (and
+ *  die WITH the files - the Undo restores the .json file(s) ONLY), which
+ *  same-UUID copies stay untouched (their history remains reachable through
+ *  them) and which presets reference the files (the presets are NEVER
+ *  deleted with them). */
+function filesDeleteConfirmHtml(pv) {
+    if (!pv || typeof pv !== "object") return "";
+    const t = pv.totals || {};
+    const files = pv.files || [];
+    const orphanFiles = files.filter((f) => f.willOrphanVersions);
+    const sharedFiles = files.filter((f) => (f.otherLocations || []).length > 0);
+    const presets = pv.presetsAffected || [];
+    const lines = [];
+    lines.push(`⚠ Delete <b>${Number(t.selected) || fileSel.size} selected file(s)</b> from the disk.`);
+    if (orphanFiles.length) {
+        const names = orphanFiles.slice(0, 3)
+            .map((f) => esc(baseName(f.path))).join(", ");
+        lines.push(`<span class="hub-wf-missing">◷</span> For <b>${orphanFiles.length}</b> file(s) ` +
+            `(<b>${Number(t.orphanVersions) || 0}</b> saved version(s)) no live copy stays on disk - ` +
+            `the versions become unreachable and are deleted <b>with the files</b>. ` +
+            `↩ Undo restores the <b>.json file(s) only - never the deleted versions</b>.` +
+            (orphanFiles.length > 3 ? ` (${names}, …)` : ` (${names})`));
+    }
+    if (sharedFiles.length) {
+        lines.push(`⧉ <b>${sharedFiles.length}</b> file(s) share their workflow UUID with other files ` +
+            `that are <b>NOT selected</b> - those copies stay byte-for-byte on disk ` +
+            `and the shared history remains reachable through them.`);
+    }
+    if (presets.length) {
+        const names = presets.slice(0, 4).map((p) => esc(p.name || p.id)).join(", ");
+        lines.push(`<span class="hub-wf-snap">💾</span> Preset(s) reference the deleted files: <b>${names}</b>` +
+            (presets.length > 4 ? ` +${presets.length - 4} more` : "") +
+            `. The presets themselves are <b>NOT deleted</b> (they keep the item; it will show the missing mark).`);
+    }
+    if (!orphanFiles.length && !sharedFiles.length && !presets.length) {
+        lines.push(`No saved versions and no preset references are affected.`);
+    }
+    return `<div class="hub-wf-planwarn">${lines.join("<br>")}` +
+        `<div class="hub-wf-planacts hub-wf-planacts-end" style="margin-top:4px">` +
+        `<button type="button" class="hub-wf-act hub-wf-armed" data-act="filedel" ` +
+        `title="Click AGAIN to delete the selected files (a verified safety copy of each is kept for 2 h; the unreachable versions described above are erased for good)">` +
+        `${fileOpsBusy ? "…" : "⚠ Click AGAIN to delete " + fileSel.size}</button>` +
+        `<button type="button" class="hub-wf-act" data-act="filedelcancel" title="Do not delete anything">✕ Cancel</button>` +
+        `</div></div>`;
+}
+
 /** v116 (plan 7.6): the FILES batch delete - the owner's cut (delete only,
- *  no move/copy). Armed two-click confirm; the server verifies a safety
- *  snapshot of EVERY file before the first unlink (a failure deletes
- *  nothing); per-file results; the History is NEVER deleted; Undo stays
- *  available for 2 h. The selection/list/index/favorites refresh after. */
+ *  no move/copy). v117 (the owner's plan section 2): the first click runs
+ *  the SERVER preview (which versions become unreachable and die with the
+ *  files, which same-UUID copies stay, which presets reference the paths)
+ *  and renders the confirm strip; the armed second click performs the
+ *  deletion. Only the SELECTED files are ever touched on disk; a process
+ *  that lost its last live file has its unreachable versions erased by the
+ *  server (the strip said so); the History stays reachable through every
+ *  surviving copy. The selection/list/index/favorites refresh after. */
 async function filesDeleteSelected() {
     if (fileOpsBusy) return;
     const paths = [...fileSel];
     if (!paths.length) { localToast("Nothing selected"); return; }
+    const pathKey = paths.join("|");
+    // STEP 1 - the preview confirm (the plan: the dialog BEFORE deletion)
+    if (!fileOpsArmed || !fileOpsConfirm || fileOpsConfirm.paths !== pathKey) {
+        fileOpsBusy = true;
+        renderAll();
+        try {
+            const res = await jfetch("/settings_hub/workflows/files/delete", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ paths, preview: true }),
+            });
+            if (res.json?.ok) {
+                fileOpsConfirm = { data: res.json, paths: pathKey };
+                fileOpsArmed = true;
+            } else {
+                fileOpsArmed = false;
+                fileOpsConfirm = null;
+                localToast("The delete preview failed: " +
+                    ((res.json && res.json.error) || "HTTP " + res.status), 5000);
+            }
+        } catch (e) {
+            fileOpsArmed = false;
+            fileOpsConfirm = null;
+            localToast("The delete preview failed: " +
+                String((e && e.message) || e), 4200);
+        }
+        fileOpsBusy = false;
+        renderAll();
+        return;
+    }
+    // STEP 2 - confirmed: the real deletion (only the checked files)
     fileOpsBusy = true;
+    fileOpsArmed = false;
+    fileOpsConfirm = null;
     renderAll();
     let res = null;
     try {
@@ -3441,7 +3735,6 @@ async function filesDeleteSelected() {
         return;
     }
     fileOpsBusy = false;
-    fileOpsArmed = false;
     const j = res.json || {};
     if (res.status === 409 || res.status === 400) {
         // the preflight/validate refusal - NOTHING was deleted
@@ -3454,6 +3747,8 @@ async function filesDeleteSelected() {
     }
     const removed = Number(j.removed) || 0;
     const failed = Number(j.failed) || 0;
+    const orphanP = Number(j.orphanedProcesses) || 0;
+    const orphanR = Number(j.orphanedRevisions) || 0;
     if (removed) {
         fileSel = new Set([...fileSel].filter((p) =>
             !(j.results || []).some((r) => r.removed && sameWfPath(r.path, p))));
@@ -3463,10 +3758,14 @@ async function filesDeleteSelected() {
     renderAll();
     localToast("Deleted " + removed + " file(s)" +
         (failed ? " · " + failed + " FAILED" : "") +
-        (removed && j.undo ? " · ↩ Undo available (2 h)" : "") +
-        (removed ? " · the history is kept" : ""), 5200);
+        (orphanP ? " · " + orphanP + " unreachable version set(s) (" + orphanR +
+            " version(s)) deleted with them" : "") +
+        (removed && j.undo ? " · ↩ Undo restores the file(s) (2 h)" : ""), 6000);
     await refreshSavedFiles();
-    if (idxMode()) await runServerList(true, true);
+    if (idxMode()) {
+        await runServerList(true, true);
+        void runGroups(true);   // the groups must reflect the deletion
+    }
     refreshHistBadges(true);
     if (uiTab === "files") renderAll();
 }
@@ -3750,23 +4049,77 @@ async function onBodyClick(e) {
             }
             return;
         }
-        // v116 (plan 7.6): the Files batch delete + undo + clear selection
+        // v116 (plan 7.6): the Files batch delete + undo + clear selection.
+        // v117: the arming lives INSIDE filesDeleteSelected - the first click
+        // fetches the preview and renders the confirm strip, the second
+        // click (armed) deletes.
         case "filedel": {
             if (!fileSel.size) return;
-            if (!fileOpsArmed) {
-                fileOpsArmed = true;
-                renderAll();
-                return;
-            }
-            fileOpsArmed = false;
             void filesDeleteSelected();
+            return;
+        }
+        case "filedelcancel": {
+            fileOpsArmed = false;
+            fileOpsConfirm = null;
+            renderAll();
             return;
         }
         case "fileundo": void filesUndoDelete(); return;
         case "fileclear": {
             fileSel.clear();
             fileOpsArmed = false;
+            fileOpsConfirm = null;
             renderAll();
+            return;
+        }
+        // v117 (the owner's plan section 3): the armed Clear of the
+        // Recently closed list (this browser session only)
+        case "recentclear": {
+            if (recentClearArmed) {
+                clearTimeout(recentClearArmed);
+                recentClearArmed = null;
+                recentClearAll();
+                return;
+            }
+            recentClearArmed = setTimeout(() => {
+                recentClearArmed = null;
+                if (uiTab === "files") renderAll();
+            }, ARM_MS);
+            renderAll();
+            return;
+        }
+        // v117 (the owner's plan section 4): the similarity groups controls
+        case "grouptoggle": {
+            groupsState.on = !groupsState.on;
+            saveGroupsPrefs();
+            groupsState.data = null;
+            groupsState.error = null;
+            // the plan: with the grouping on the FILES tab leaves the tree
+            // for the grouped list
+            if (groupsState.on && filesView === "tree") filesView = "list";
+            if (groupsState.on) void runGroups(true);
+            renderAll();
+            return;
+        }
+        case "groupkind": {
+            const k = btn.dataset.kind || "all";
+            groupsState.kind = (k === "same_uuid" || k === "exact" ||
+                k === "similar") ? k : "all";
+            saveGroupsPrefs();
+            // the kind filter is a server param - refetch (the SQLite cache
+            // makes it free)
+            void runGroups(true);
+            return;
+        }
+        case "groupfold": {
+            const key = btn.dataset.key || "";
+            if (groupsState.collapsed[key]) delete groupsState.collapsed[key];
+            else groupsState.collapsed[key] = true;
+            renderAll();
+            return;
+        }
+        case "grouprefetch": {
+            void runGroups(true);
             return;
         }
         case "treefold": {
@@ -3964,6 +4317,17 @@ function onBodyChange(e) {
         return;
     }
     // ---- v108 Files tab: the advanced filter inputs ------------------------
+    if (el.matches('[data-wf="groupthresh"]')) {
+        // v117: the similarity threshold (80-100 step 5) - a server param,
+        // the answer refetches immediately (the SQLite cache keeps it cheap)
+        const t = parseInt(el.value, 10);
+        if (GROUP_THRESHOLD_CHOICES.includes(t)) {
+            groupsState.threshold = t;
+            saveGroupsPrefs();
+            void runGroups(true);
+        }
+        return;
+    }
     if (el.matches('[data-wf="ffolder"]')) {
         filesFolder = el.value || "";
         fileRowsShown = ROW_LIST_CAP;
@@ -4729,22 +5093,36 @@ function openWfSettingsPop() {
         `<select class="hub-cs-sel" data-wf="font">` +
         fsChoices.map((p) => `<option value="${p}">${esc(uiFontScaleLabel(p))}</option>`).join("") +
         `</select></label>` +
-        `<div class="hub-cs-sect">Storage folder (v84 mechanics)</div>` +
+        // v117 (the owner's plan section 3): the Recently-closed limit -
+        // applied IMMEDIATELY (the ring trims, the evicted snapshots free
+        // through the manifest sync honoring other browsers' refs)
+        `<label class="hub-cs-row"><span>Recently closed items</span>` +
+        `<select class="hub-cs-sel" data-wf="recentlimit" title="How many entries the Files tab keeps in the Recently closed list (this browser session). Shrinking trims the list at once; the freed reopen snapshots are deleted only when no other browser session still points at them">` +
+        RECENT_CHOICES.map((n) => `<option value="${n}"${recentLimit() === n ? " selected" : ""}>${n}</option>`).join("") +
+        `</select></label>` +
+        `<div class="hub-cs-sect">Storage folder</div>` +
         `<div class="hub-cs-row"><span class="hub-cs-box">` +
         `<input type="text" class="hub-cs-in hub-cs-path" data-wf="root" ` +
         `placeholder="default: user/settings_hub/workflows" spellcheck="false" autocomplete="off">` +
         `<button type="button" class="hub-cs-chip" data-wf-btn="rootdef">default</button></span></div>` +
         `<div class="hub-cs-info" data-wf="rootinfo"></div>` +
-        `<div class="hub-cs-hint">Enter applies the folder, Esc reverts it. Switching the folder NEVER moves ` +
-        `data: the presets/temp of the DEFAULT location stay readable while a custom root is active ` +
-        `(an id present in both resolves to the active copy, writes go where the data already lives - ` +
-        `no duplicates, no loss; ONE file per preset: presets/&lt;id&gt;.json - copy a file to transfer that ` +
-        `preset); the root choice itself lives in the DEFAULT user folder (workflows_root.json), and so do ` +
-        `the Files-tab favorites (workflows_favorites.json). The reopen snapshots of closed temp tabs live ` +
-        `in the SAME root's reserved temp/ folder (one &lt;id&gt;.json per closed tab, while the tab figures ` +
-        `in 🕘 Recently closed) - and the presets/temp housekeeping NEVER mixes into the Files list. ` +
-        `🗑 on a preset card deletes it (click twice). Hidden panel: ` +
-        `the mini panel (🗂) or ComfyUI Settings → SettingsHub → 'Mini panel'.</div>` +
+        // v117 (the owner's plan section 1): ONE short sentence instead of
+        // the wall of text - it must fit the small popup without pushing the
+        // controls out of view; the technical details moved into a CLOSED by
+        // default <details> block
+        `<div class="hub-cs-hint">Choose where Workflow Manager stores presets and temporary reopen snapshots. ` +
+        `Changing this folder does not move or delete existing data.</div>` +
+        `<details class="hub-wf-advdetails" data-wf="rootadv">` +
+        `<summary class="hub-wf-sect" style="cursor:pointer" title="The technical details of the storage mechanics">Advanced details</summary>` +
+        `<div class="hub-cs-hint">` +
+        `Roots: the DEFAULT root is user/settings_hub/workflows; a CUSTOM root replaces it as the ACTIVE one. ` +
+        `While a custom root is active the default one stays READABLE (an id present in both roots resolves to the ACTIVE copy; writes go where the data already lives) - ` +
+        `no duplicates, no loss, and switching NEVER moves or deletes anything.<br>` +
+        `Layout: one file per preset - presets/&lt;id&gt;.json; the reopen snapshots of closed temp tabs live in temp/&lt;id&gt;.json of the SAME root.<br>` +
+        `Service files: the root choice itself (workflows_root.json) and the Files-tab favorites (workflows_favorites.json) live in the DEFAULT user dir - a root switch cannot hide them.<br>` +
+        `The presets/ and temp/ housekeeping NEVER mixes into the Files list.<br>` +
+        `🗑 on a preset card deletes it (click twice). Hidden panel: the mini panel (🗂) or ComfyUI Settings → SettingsHub → 'Mini panel'.` +
+        `</div></details>` +
         // v116 (plan 5.4/10.4): the STORAGE DASHBOARD - the measured physical
         // bytes of every manager component next to the logical payload sum;
         // Analyze refreshes, Compact runs the verified history rebuild (an
@@ -4778,6 +5156,13 @@ function openWfSettingsPop() {
     fsSel.value = String(getUiFontScale());
     fsSel.addEventListener("change", () => {
         fsSel.value = String(setUiFontScale(fsSel.value));
+    });
+    // v117: the Recently-closed limit - applied IMMEDIATELY (the ring trims,
+    // the evicted tempIds free through the manifest sync)
+    const rcSel = pop.querySelector('[data-wf="recentlimit"]');
+    rcSel.value = String(recentLimit());
+    rcSel.addEventListener("change", () => {
+        rcSel.value = String(setRecentLimit(parseInt(rcSel.value, 10)));
     });
 
     const rootIn = pop.querySelector('[data-wf="root"]');
@@ -5570,20 +5955,26 @@ function renderHistPop() {
               `${st.armedDel ? "⚠ Click AGAIN to delete " + nSel : "🗑 Delete selected" + (nSel ? " (" + nSel + ")" : "")}</button>` +
               `<button type="button" class="hub-wf-act" data-act="histdeldone" title="Leave the manage mode">✓ Done</button>`
             : `<button type="button" class="hub-wf-act" data-act="histdelmode" title="Manage the versions: select and delete the checkpoints you do not need">🗑 Manage versions</button>`;
-        // v115 (owner request): the WHOLE-PROCESS delete - an armed confirm
-        // strip with TWO scopes: EVERYTHING (all versions + every file of
-        // every location, each file safety-snapshotted server-side first) or
-        // the history only (the files stay). The strip names the exact
-        // counts so the destructive scope is never a surprise.
-        const nLocs = Array.isArray(st.proc?.locations) ? st.proc.locations.length : 0;
+        // v115 (owner request): the process deletion - an armed confirm strip.
+        // v117 (the owner's delete plan): PLAIN LANGUAGE, no jargon, and the
+        // dangerous UUID-wide file deletion is GONE - the file scope is the
+        // panel's CURRENT file only; the copies with the same UUID on disk
+        // are never touched, and the versions die only when no copy survives.
+        const locs = Array.isArray(st.proc?.locations) ? st.proc.locations : [];
+        const nLocs = locs.length;
+        const nOthers = locs.filter((l) =>
+            normWfPath(String(l?.path || "")) !== normWfPath(st.path)).length;
         const procDelUi = st.armedProc && st.pid
-            ? `<div class="hub-wf-planwarn">⚠ Delete <b>${esc(procName)}</b> and ALL tails: ` +
-              `${st.revs.length} version(s) + ${nLocs} file location(s).` +
+            ? `<div class="hub-wf-planwarn">⚠ Delete <b>${esc(procName)}</b>` +
+              `<div class="hub-wf-filesub" style="margin:3px 0">Current file: ${esc(baseName(st.path))}` +
+              ` · ${st.revs.length} saved version(s)` +
+              (nOthers ? ` · ${nOthers} other file(s) with the same UUID stay on disk` : ` · no other copies on disk`) +
+              `</div>` +
               `<div class="hub-wf-planacts hub-wf-planacts-end" style="margin-top:4px">` +
               `<button type="button" class="hub-wf-act hub-wf-armed" data-act="histprocyes" ` +
-              `title="Delete the process, ALL ${st.revs.length} saved version(s) AND the ${nLocs} workflow file(s) (a safety copy of each file is kept for 6 h)">${st.procDelBusy ? "…" : "⚠ Delete EVERYTHING: versions + files"}</button>` +
+              `title="Delete the CURRENT file only (${nOthers ? "the other " + nOthers + " file(s) with the same UUID are NOT touched - the versions stay reachable through them" : "no other copies exist - the saved versions are deleted with the file"})">${st.procDelBusy ? "…" : "Delete current file (and versions if no copies left)"}</button>` +
               `<button type="button" class="hub-wf-act" data-act="histprochist" ` +
-              `title="Erase all ${st.revs.length} saved version(s) but KEEP the workflow file(s)">${st.procDelBusy ? "…" : "Versions only - keep the file(s)"}</button>` +
+              `title="Erase all ${st.revs.length} saved version(s); the workflow file(s) stay byte-for-byte">${st.procDelBusy ? "…" : "Delete stored versions only - keep files"}</button>` +
               `<button type="button" class="hub-wf-act" data-act="histproccancel" title="Do not delete anything">✕ Cancel</button>` +
               `</div></div>`
             : "";
@@ -5611,7 +6002,7 @@ function renderHistPop() {
             // v113: ONE bottom actions row - ✎ Process and ✕ Close used to
             // sit in two stacked planacts strips and read as a column
             `<div class="hub-wf-planacts hub-wf-planacts-end">${cmpBtn}${manageBtns}` +
-            (st.pid && !st.armedProc ? `<button type="button" class="hub-wf-act" data-act="histprocarm" title="Delete the WHOLE process with all tails: every saved version, every location, the process itself (a confirmed two-step action)">🗑 Delete process</button>` : "") +
+            (st.pid && !st.armedProc ? `<button type="button" class="hub-wf-act" data-act="histprocarm" title="Delete this file and its versions - files with the same UUID that you did NOT select are never touched (a confirmed two-step action)">🗑 Delete process</button>` : "") +
             `<button type="button" class="hub-wf-act" data-act="histmeta" title="Rename the process / edit the shared note">✎ Process</button>` +
             `<button type="button" class="hub-wf-act" data-act="histclose" title="Close the history panel">✕ Close</button></div>`;
         // the restore confirm strip
@@ -5876,12 +6267,14 @@ async function histDeleteSelected() {
     }
 }
 
-/** v115 (owner request): the WHOLE-PROCESS deletion - "удалить сами процессы
- *  со всеми хвостами". One call erases the process, ALL its versions and
- *  (optionally) every workflow file of every location - each file is
- *  safety-snapshotted server-side before the unlink. The panel closes, the
- *  row badges and the file lists refresh (a files-delete makes the rows
- *  disappear, a history-only delete just strips the count chips). */
+/** v115 (owner request): the process deletion. v117 (the owner's delete
+ *  plan): deleteFiles=true deletes ONLY the panel's CURRENT file (the exact
+ *  path goes to the server) - the other files with the same UUID on disk
+ *  are NEVER touched. The server erases the stored versions only when no
+ *  live copy remains (keptHistory=false); otherwise the answer says
+ *  keptHistory and the versions stay reachable through the surviving
+ *  copies. deleteFiles=false is the explicit versions-only erasure - the
+ *  files stay byte-for-byte. The panel closes, the badges/lists refresh. */
 async function histDeleteProcess(deleteFiles) {
     const st = histState;
     if (!st?.pid || st.procDelBusy) return;
@@ -5891,7 +6284,11 @@ async function histDeleteProcess(deleteFiles) {
         encodeURIComponent(st.pid) + "/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ deleteFiles: !!deleteFiles }),
+        // v117: the file scope is the CURRENT file only - never the whole
+        // UUID (the plan's main principle)
+        body: JSON.stringify(deleteFiles
+            ? { deleteFiles: true, path: st.path }
+            : { deleteFiles: false }),
     });
     st.procDelBusy = false;
     // v116 (plan 3.5): the preflight/partial refusal - the process and its
@@ -5910,13 +6307,24 @@ async function histDeleteProcess(deleteFiles) {
         const files = Array.isArray(res.json.files) ? res.json.files : [];
         const removed = files.filter((f) => f.removed).length;
         const failed = files.filter((f) => f.error).length;
+        const kept = !!res.json.keptHistory;
+        const remaining = Number(res.json.remainingLocations) || 0;
         closeHistPop();
         refreshHistBadges(true);   // the count + duplicate chips on the rows
         await refreshSavedFiles();
-        if (idxMode()) await runServerList(true, true);
-        localToast("Process deleted: " + n + " version(s)" +
-            (deleteFiles ? " + " + removed + " file(s)" : " · the file(s) stay") +
-            (failed ? " · " + failed + " file(s) FAILED" : ""), 5000);
+        if (idxMode()) {
+            await runServerList(true, true);
+            void runGroups(true);   // the file set changed
+        }
+        localToast(kept
+            // the file died, the versions live on through the other copies
+            ? "Deleted the current file" +
+              (failed ? " · " + failed + " file(s) FAILED" : "") +
+              " · the " + n + " saved version(s) stay reachable through " +
+              remaining + " other file(s) with the same UUID"
+            : "Process deleted: " + n + " version(s)" +
+              (deleteFiles ? " + " + removed + " file(s)" : " · the file(s) stay") +
+              (failed ? " · " + failed + " file(s) FAILED" : ""), 6000);
     } else {
         const why = (res.json && res.json.error) || ("HTTP " + res.status);
         st.armedProc = false;
@@ -6510,6 +6918,20 @@ export function __workflowsTestHooks() {
         openWfSettingsPop: () => openWfSettingsPop(),
         wfPop: () => wfPop,
         closeWfPop,
+        // v117: the owner's plan features (the groups, the Recently-closed
+        // limit + Clear; the filesOpsState hook below carries the preview)
+        groupsState: () => ({ ...groupsState,
+            data: groupsState.data ? { ...groupsState.data } : null }),
+        setGroupsState: (patch = {}) => {
+            if ("on" in patch) groupsState.on = !!patch.on;
+            if ("threshold" in patch) groupsState.threshold = patch.threshold;
+            if ("kind" in patch) groupsState.kind = patch.kind;
+            saveGroupsPrefs();
+        },
+        runGroups,
+        setRecentLimit: (n) => setRecentLimit(n),
+        recentLimit: () => recentLimit(),
+        recentClearAll: () => recentClearAll(),
         openImportPop: () => openImportPop(),
         importPop: () => importPop,
         closeImportPop,
@@ -6604,7 +7026,10 @@ export function __workflowsTestHooks() {
         selectUuidFiles: (u) => selectUuidFiles(u),
         filesOpsState: () => ({ armed: fileOpsArmed, undo: fileOpsUndo,
             busy: fileOpsBusy, sel: [...fileSel],
-            selOutside: filesSelOutsideCount() }),
+            selOutside: filesSelOutsideCount(),
+            confirm: fileOpsConfirm ? { paths: fileOpsConfirm.paths,
+                totals: fileOpsConfirm.data?.totals,
+                presets: fileOpsConfirm.data?.presetsAffected } : null }),
         setFileOpsUndo: (v) => { fileOpsUndo = v; },
         addFileSel: (paths) => { for (const p of (paths || [])) fileSel.add(normWfPath(p)); },
         histSearchNotes: () => histSearchNotes(),

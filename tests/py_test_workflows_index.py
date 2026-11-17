@@ -623,6 +623,184 @@ check("duplicates: structuralCandidates is part of the answer",
       "structuralCandidates" in _dg and isinstance(_dg.get("structuralCandidates"), list),
       json.dumps(sorted(_dg.keys())))
 # ---------------------------------------------------------------------------
+# v117 (nprof2): the SIMILARITY SIGNATURES + the groups. The owner's plan:
+# presentation never lowers the score, the ComfyUI Duplicate (a new state.id,
+# byte-identical everything else) is an exact copy, the volatile widgets
+# (seed / control_after_generate) never count, the score is deterministic.
+# ---------------------------------------------------------------------------
+check("v117: the profile is nprof2 and the schema is 2",
+      widx.NORMALIZATION_PROFILE_VERSION == "nprof2" and
+      widx.SCHEMA_VERSION == "2",
+      widx.NORMALIZATION_PROFILE_VERSION + "/" + widx.SCHEMA_VERSION)
+
+def wf_v117(uid, seed=1, pos=(0, 0), extra_link=None):
+    return {"id": uid, "revision": 7,
+            "nodes": [
+                {"id": 10, "type": "KSampler", "pos": list(pos),
+                 "size": [300, 100], "collapsed": True,
+                 "widgets_values": {"seed": 12345, "steps": 20 + seed,
+                                    "cfg": 8.0}},
+                {"id": 20, "type": "VAEDecode", "pos": [500, 300]},
+            ],
+            "links": ([[1, 10, 0, 20, 0, "LATENT"]] +
+                      ([[2, 20, 0, 99, 0, "IMAGE"]] if extra_link else [])),
+            "extra": {"ds": {"scale": 1.0 + seed / 10, "offset": [7, 9]},
+                      "frontendVersion": "1.24.4"},
+            "version": 0.4}
+
+_r1, _ = widx.analyze_workflow_bytes(json.dumps(wf_v117("id-a")).encode())
+# the ComfyUI Duplicate: ONLY the id changes (+ any presentation noise)
+_r2, _ = widx.analyze_workflow_bytes(json.dumps(
+    wf_v117("id-b", seed=1, pos=(999, 888))).encode())
+check("v117 sig: the Duplicate (new id, moved canvas) keeps the SAME graph hash",
+      _r2["sig_graph_hash"] == _r1["sig_graph_hash"],
+      json.dumps({"a": _r1["sig_graph_hash"], "b": _r2["sig_graph_hash"]}))
+check("v117 sig: a different id still changes the OLD workflow_hash",
+      _r2["workflow_hash"] != _r1["workflow_hash"])
+# a REAL graph change (an extra link) must change the signature
+_r3, _ = widx.analyze_workflow_bytes(json.dumps(
+    wf_v117("id-c", extra_link=True)).encode())
+check("v117 sig: a different LINK SET changes the graph hash",
+      _r3["sig_graph_hash"] != _r1["sig_graph_hash"],
+      json.dumps({"a": _r1["sig_graph_hash"][:10],
+                  "c": _r3["sig_graph_hash"][:10]}))
+# the node renumbering (ids 10/20 -> 100/200, the same edges) never matters
+_wfrenum = wf_v117("id-d")
+_wfrenum["nodes"][0]["id"] = 100
+_wfrenum["nodes"][1]["id"] = 200
+_wfrenum["links"] = [[1, 100, 0, 200, 0, "LATENT"]]
+_r4, _ = widx.analyze_workflow_bytes(json.dumps(_wfrenum).encode())
+check("v117 sig: the renumbered nodes keep the SAME normalized edge keys",
+      _r4["sig_edges"] == _r1["sig_edges"],
+      json.dumps({"edges": _r4["sig_edges"]}))
+check("v117 sig: the seed is masked in the named-widget form",
+      json.dumps(_r1["sig_widgets"]).count("<v>") >= 1,
+      _r1["sig_widgets"])
+check("v117 sig: the multiset hash counts DUPLICATE node types",
+      widx._node_type_multiset({"nodes": [
+          {"type": "A"}, {"type": "A"}, {"type": "B"}]}) == ["A", "A", "B"])
+
+# the deterministic score: presentation differences are invisible; the
+# structure dominates; the same node types with DIFFERENT links never earn a
+# falsely high score
+_fa = {"types": ["KSampler", "VAEDecode"],
+       "edges": ["KSampler|0>VAEDecode|0"],
+       "widgets": [{"t": "KSampler",
+                    "w": [["seed", "<v>"], ["steps", 20], ["cfg", 8.0]]},
+                   {"t": "VAEDecode", "w": []}],
+       "models": []}
+check("v117 score: identical features = 100",
+      widx.similarity_score(_fa, json.loads(json.dumps(_fa))) == 100)
+_fb = json.loads(json.dumps(_fa))
+_fb["widgets"][0]["w"][1][1] = 35   # a numeric-only config difference
+_fb["widgets"][0]["w"][2][1] = 12.5
+_sc_num = widx.similarity_score(_fa, _fb)
+check("v117 score: a numeric widget mismatch is SOFTENED, not fatal",
+      90 <= _sc_num < 100, str(_sc_num))
+_fc = json.loads(json.dumps(_fa))
+_fc["edges"] = ["VAEDecode|0>KSampler|0"]   # rewired
+_sc_edge = widx.similarity_score(_fa, _fc)
+check("v117 score: rewired links drop the score far below the threshold",
+      _sc_edge < 80, str(_sc_edge))
+_fd = json.loads(json.dumps(_fa))
+_fd["edges"] = []
+_fd["widgets"] = []
+_sc_empty = widx.similarity_score(_fa, _fd)
+check("v117 score: the same types with NO links/widgets never score high",
+      _sc_empty < 80, str(_sc_empty))
+
+# the GROUPS over a scanned library: same_uuid, exact copies, similar with
+# the threshold + the anchor (no chaining), the kind filter, the cache
+write_lib("v117_u1.json", wf_v117("v117-same-uuid"))
+write_lib("v117_u2.json", wf_v117("v117-same-uuid"))
+write_lib("v117_e1.json", wf_v117("v117-exact-a"))
+write_lib("v117_e2.json", wf_v117("v117-exact-b"))   # the Duplicate twin
+write_lib("v117_d1.json", wf_v117("v117-diff", extra_link=True))
+scan(force=True)
+_g = widx.similarity_groups(user_scope="default", threshold=90)
+check("v117 groups: the answer is ok + nprof2 + the threshold echo",
+      _g.get("ok") and _g.get("profile") == "nprof2" and
+      _g.get("threshold") == 90,
+      json.dumps({k: _g.get(k) for k in ("ok", "profile", "threshold")}))
+_kinds = {}
+for g in _g.get("groups", []):
+    _kinds.setdefault(g["kind"], []).append(g)
+check("v117 groups: the same-UUID pair is ONE same_uuid group",
+      len([g for g in _kinds.get("same_uuid", [])
+           if g.get("workflowId") == "v117-same-uuid"]) == 1,
+      json.dumps([g.get("key") for g in _kinds.get("same_uuid", [])]))
+check("v117 groups: the Duplicate twin is an exact group with 100%",
+      any(g.get("count") == 2 and g.get("minScore") == 100 and
+          {f["path"] for f in g.get("files", [])} ==
+          {"workflows/v117_e1.json", "workflows/v117_e2.json"}
+          for g in _kinds.get("exact", [])),
+      json.dumps([g.get("key") for g in _kinds.get("exact", [])]))
+check("v117 groups: the DIFFERENT graph with the same node types is NOT grouped",
+      all(not [f for f in g.get("files", [])
+               if f["path"].endswith("v117_d1.json")]
+          for g in _g.get("groups", [])),
+      json.dumps([g.get("key") for g in _g.get("groups", [])]))
+check("v117 groups: every file sits in AT MOST ONE group",
+      sum(g["count"] for g in _g.get("groups", [])) +
+      _g.get("ungroupedTotal", 0) == _g.get("totalFiles", -1),
+      json.dumps({"groups": sum(g["count"] for g in _g.get("groups", [])),
+                  "ungrouped": _g.get("ungroupedTotal"),
+                  "total": _g.get("totalFiles")}))
+_g2 = widx.similarity_groups(user_scope="default", threshold=90)
+check("v117 groups: the second call is served from the SQLite cache",
+      _g2.get("cached") is True and
+      len(_g2.get("groups", [])) == len(_g.get("groups", [])),
+      json.dumps({"cached": _g2.get("cached")}))
+_g3 = widx.similarity_groups(user_scope="default", threshold=90,
+                             kind="exact")
+check("v117 groups: the kind filter narrows WITHOUT recomputing",
+      _g3.get("cached") is True and
+      all(g["kind"] == "exact" for g in _g3.get("groups", [])) and
+      any({f["path"] for f in g.get("files", [])} ==
+          {"workflows/v117_e1.json", "workflows/v117_e2.json"}
+          for g in _g3.get("groups", [])),
+      json.dumps([g.get("key") for g in _g3.get("groups", [])]))
+# the cache invalidation: a changed file re-indexes and the answer recomputes
+write_lib("v117_u1.json", wf_v117("v117-same-uuid", seed=5))
+scan(force=False)
+_g4 = widx.similarity_groups(user_scope="default", threshold=90)
+check("v117 groups: a re-index invalidates the cached answer",
+      _g4.get("cached") is False,
+      json.dumps({"cached": _g4.get("cached")}))
+# the anchor rule: the group members are compared ONLY against the anchor -
+# a low-similarity tail member never chains a third file into the group
+_g5 = widx.similarity_groups(user_scope="default", threshold=95)
+check("v117 groups: the strict threshold keeps the groups tight",
+      all(g["kind"] != "similar" for g in _g5.get("groups", [])) or
+      all(g["count"] <= 3 for g in _g5.get("groups", [])
+          if g["kind"] == "similar"),
+      json.dumps([g.get("count") for g in _g5.get("groups", [])]))
+# the broad-bucket guard: a bucket bigger than SIM_MAX_BUCKET is skipped.
+# The probe files carry NO uuid (never grouped by id) and pairwise-DIFFERENT
+# edge sets (never an exact group) - their ONLY common feature is the node
+# type multiset, so they land in ONE types bucket together with d1.
+_old_bucket = widx.SIM_MAX_BUCKET
+widx.SIM_MAX_BUCKET = 2
+try:
+    for i in range(4):
+        _wf = wf_v117("v117-wide-%d" % i, seed=i)
+        # a per-file edge set (never two files share the exact graph)
+        _wf["links"] = [[1, 10, 0, 20, i % 2, "LATENT"]]
+        write_lib("v117_w%d.json" % i, _wf)
+    scan(force=True)
+    _gb = widx.similarity_groups(user_scope="default", threshold=80)
+    check("v117 groups: a bucket over the cap is SKIPPED (reported honestly)",
+          _gb.get("skippedBroad", 0) >= 1,
+          json.dumps({"skipped": _gb.get("skippedBroad"),
+                      "ok": _gb.get("ok"), "error": _gb.get("error"),
+                      "groups": [(g.get("kind"), g.get("count"))
+                                 for g in _gb.get("groups", [])],
+                      "ungrouped": _gb.get("ungroupedTotal"),
+                      "total": _gb.get("totalFiles")}))
+finally:
+    widx.SIM_MAX_BUCKET = _old_bucket
+
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # cleanup
 shutil.rmtree(TMP, ignore_errors=True)

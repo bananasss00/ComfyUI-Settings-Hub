@@ -1065,8 +1065,8 @@ def _cas_blob_path(oid):
     return _hist_dir("cas", oid[:2], oid + ".z")
 
 
-def delete_process(pid, delete_files=False, file_remover=None,
-                   file_preflight=None):
+def delete_process(pid, delete_files=False, only_paths=None,
+                   file_remover=None, file_preflight=None):
     """v115 (owner request): "кнопка удалять сами процессы со всеми
     хвостами" - erase ONE process AND everything attached to it: every
     revision manifest, the stored blobs no other revision references (the
@@ -1093,7 +1093,16 @@ def delete_process(pid, delete_files=False, file_remover=None,
         (or delete_files=False: the explicit "versions only" choice): the
         revision manifests, the uniquely-owned CAS blobs and the process
         manifest die; the answer reports the reclaimed bytes honestly (the
-        git backend keeps its reachable commit chain and reports 0)."""
+        git backend keeps its reachable commit chain and reports 0).
+
+    v117 (the owner's delete plan): the DANGEROUS UUID-wide deletion is
+    GONE. only_paths scopes the file deletion to the EXACT files the user
+    chose (the Process-history panel passes the panel's CURRENT file): the
+    other files of the same UUID on disk are NEVER touched. After the
+    removal the scoped paths are DETACHED from the process; the history is
+    erased ONLY when no live location remains - otherwise the answer says
+    {keptHistory: true, remainingLocations: N} and the versions stay
+    reachable through the surviving copies."""
     if not isinstance(pid, str) or not _ID_RE.match(pid):
         return {"ok": False, "error": "bad processId"}
     if file_remover is not None and not callable(file_remover):
@@ -1108,11 +1117,20 @@ def delete_process(pid, delete_files=False, file_remover=None,
         _cache_load_locked()
         revs = list(_rev_cache["of_pid"].get(pid) or [])
         locations = sorted(_proc_cache["paths_of"].get(pid) or ())
+        # v117: scope the file deletion to the EXACT paths the user chose
+        # (unknown paths are ignored - never a silent wider deletion)
+        scoped = None
+        if delete_files and only_paths is not None:
+            if not isinstance(only_paths, (list, tuple, set)):
+                return {"ok": False, "error": "only_paths must be a list"}
+            scoped = sorted(set(str(p) for p in only_paths
+                                if isinstance(p, str) and p) & set(locations))
+        targets = scoped if scoped is not None else locations
         files = []
         if delete_files:
             # PHASE 0 - the FULL preflight before anything is touched
             if file_preflight is not None:
-                for lp in locations:
+                for lp in targets:
                     try:
                         res = file_preflight(lp) or {"path": lp}
                     except Exception as e:   # a hostile checker must not wed the store
@@ -1129,7 +1147,7 @@ def delete_process(pid, delete_files=False, file_remover=None,
             # PHASE 1 - the physical removal (every file checked above)
             if file_remover is not None:
                 files = []
-                for lp in locations:
+                for lp in targets:
                     try:
                         files.append(file_remover(lp) or {"path": lp})
                     except Exception as e:
@@ -1146,8 +1164,32 @@ def delete_process(pid, delete_files=False, file_remover=None,
                                       % (len(failed), len(files))),
                             "files": files,
                             "deletedRevisions": 0}
-        # PHASE 2 - the history erasure (the requested files are all gone,
-        # or delete_files=False: the explicit versions-only choice)
+        # v117: the scoped deletion detaches the removed paths FIRST - the
+        # history dies only when the process lost its LAST live location
+        kept_history = False
+        remaining = 0
+        if scoped is not None:
+            for lp in scoped:
+                try:
+                    detach_location(pid, lp)
+                except Exception:
+                    pass
+            _cache_load_locked()
+            remaining = len(_proc_cache["paths_of"].get(pid) or ())
+            if remaining > 0:
+                kept_history = True
+        # PHASE 2 - the history erasure (the requested files are all gone
+        # and no location survives, or delete_files=False: the explicit
+        # versions-only choice)
+        if kept_history:
+            _reconcile_ts[0] = 0   # the discovery must re-run immediately
+            return {"ok": True, "processId": pid,
+                    "deletedRevisions": 0,
+                    "freedBytes": 0,
+                    "files": files,
+                    "keptHistory": True,
+                    "remainingLocations": remaining,
+                    "backend": _resolve_backend()}
         freed = 0
         gone_oids = set()
         for r in revs:
@@ -1218,7 +1260,10 @@ def detach_locations(rel_paths):
     """v116 (plan 7.8): the Files-delete route unbinds EVERY deleted path
     from its process - the history STAYS (an orphaned process keeps its
     revisions and can be re-linked when a file with the same UUID appears).
-    Returns {ok, detached: [{path, processId, removed}]}."""
+    Returns {ok, detached: [{path, processId, removed, remaining}]}.
+    v117: every entry also carries the process's REMAINING location count
+    AFTER the detach (the Files-delete route uses it to erase the versions
+    that lost their last live file - the owner's "orphaned versions" rule)."""
     out = []
     if not isinstance(rel_paths, (list, tuple, set)):
         return {"ok": False, "error": "paths must be a list"}
@@ -1230,12 +1275,80 @@ def detach_locations(rel_paths):
                 continue
             pid = (_proc_cache["by_path"].get("default") or {}).get(rp)
             if not pid:
-                out.append({"path": rp, "processId": None, "removed": False})
+                out.append({"path": rp, "processId": None, "removed": False,
+                            "remaining": None})
                 continue
             r = detach_location(pid, rp)
+            _cache_load_locked()
+            remaining = len(_proc_cache["paths_of"].get(pid) or ())
             out.append({"path": rp, "processId": pid,
-                        "removed": bool(r.get("ok")) and not r.get("unchanged")})
+                        "removed": bool(r.get("ok")) and not r.get("unchanged"),
+                        "remaining": remaining})
         return {"ok": True, "detached": out}
+
+
+def paths_preview(rel_paths, user_scope="default"):
+    """v117 (the owner's delete plan): the DATA for the Files-delete confirm
+    dialog - computed BEFORE anything is deleted, never a guess. For every
+    selected path: the owning process, its total locations, the OTHER
+    (unselected) live files that keep the same history, the version count
+    that would become unreachable (and deleted with the file) when no live
+    copy survives, and the preset references pointing at the path (the
+    presets themselves are NEVER touched - the warning is informational).
+    Returns {ok, files: [{path, processId, processName, revisions,
+    locations, otherLocations, willOrphanVersions}], presetsAffected,
+    totals}."""
+    sel = [p for p in (rel_paths or []) if isinstance(p, str) and p]
+    sel_set = set(sel)
+    files = []
+    presets_affected = []
+    with _lock:
+        reconcile_processes()
+        _cache_load_locked()
+        seen_pids = set()
+        for rp in sel:
+            pid = (_proc_cache["by_path"].get("default") or {}).get(rp)
+            info = {"path": rp, "processId": pid, "processName": None,
+                    "revisions": 0, "locations": 0, "otherLocations": [],
+                    "willOrphanVersions": False}
+            if pid:
+                proc = _proc_cache["by_pid"].get(pid) or {}
+                info["processName"] = proc.get("displayName") or None
+                locs = sorted(_proc_cache["paths_of"].get(pid) or ())
+                info["locations"] = len(locs)
+                info["otherLocations"] = [p for p in locs if p not in sel_set]
+                _rev_cache_load_locked()
+                info["revisions"] = len(_rev_cache["of_pid"].get(pid) or ())
+                info["willOrphanVersions"] = (
+                    bool(info["revisions"]) and not info["otherLocations"])
+                if pid not in seen_pids:
+                    seen_pids.add(pid)
+            files.append(info)
+    # the PRESET references (best effort - the presets live in the store
+    # module; a read failure must never kill the preview)
+    try:
+        from . import workflows_store as _store
+    except Exception:
+        try:
+            import workflows_store as _store
+        except Exception:
+            _store = None
+    if _store is not None and hasattr(_store, "presets_referencing_paths"):
+        try:
+            presets_affected = _store.presets_referencing_paths(sel)
+        except Exception:
+            presets_affected = []
+    orphan_pids = {f["processId"] for f in files
+                   if f["willOrphanVersions"] and f["processId"]}
+    return {"ok": True, "files": files,
+            "presetsAffected": presets_affected,
+            "totals": {
+                "selected": len(sel),
+                "orphanProcesses": len(orphan_pids),
+                "orphanVersions": sum(f["revisions"] for f in files
+                                      if f["willOrphanVersions"]),
+                "presetsAffected": len(presets_affected),
+            }}
 
 
 def expire_reconcile_cache():

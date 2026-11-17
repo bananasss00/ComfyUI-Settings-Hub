@@ -5565,6 +5565,36 @@ textarea.hub-text-area.hub-stack-drop-hot-text:focus {
     overflow-wrap: anywhere;
 }
 
+/* v117: the collapsible 'Advanced details' block of the Workflows settings
+   popup (the storage folder section) - CLOSED by default so the short
+   description fits a small popup; the summary reads as a quiet section row */
+.hub-wf-advdetails {
+    margin: 4px 2px 2px;
+    border: 1px dashed #33334e;
+    border-radius: 6px;
+    overflow-wrap: anywhere;
+}
+.hub-wf-advdetails > summary {
+    padding: 4px 8px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    color: #8f8fb8;
+    user-select: none;
+    list-style: none;
+}
+.hub-wf-advdetails > summary::before {
+    content: "\25B8  ";
+    color: #6c6c96;
+}
+.hub-wf-advdetails[open] > summary::before {
+    content: "\25BE  ";
+}
+.hub-wf-advdetails > summary:hover { color: #c8c8ec; }
+.hub-wf-advdetails > .hub-cs-hint {
+    margin: 2px 8px 8px;
+    border-top: 1px solid #26263c;
+    padding-top: 6px;
+}
+
 /* --- 📜 system prompt popup ------------------------------------------------ */
 
 /* v88: the catalog (the user's own .txt files in models/LLM/prompts):

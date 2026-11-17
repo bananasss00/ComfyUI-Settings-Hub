@@ -1721,6 +1721,256 @@ loop(PDEL(FakeRequest(match_info={"pid": mig["id"]})))
 
 reset_state()
 # ===========================================================================
+# v117: the owner's delete plan + the similarity groups.
+#   * Files → Delete selected deletes ONLY the checked files; a process that
+#     lost its LAST live file dies WITH the file (orphaned versions), a
+#     process with other live copies keeps everything; the preview answers
+#     the confirm-dialog data BEFORE anything is deleted; a preset that
+#     references a deleted file is named but NEVER touched.
+#   * the Process-history route deletes EXACTLY the passed path (the
+#     same-UUID siblings are never touched); the versions die only when no
+#     live copy remains.
+#   * presets_referencing_paths (the confirm-dialog warning).
+#   * _evict_temp_files honors the cross-browser reference union.
+#   * /index/groups: the same_uuid + exact-copy groups, the kind filter,
+#     the SQLite result cache (+ the invalidation on any re-index).
+# ===========================================================================
+HGROUPS = H[("GET", "/settings_hub/workflows/index/groups")]
+
+DU = "uuuuuuuu-4444-4444-4444-444444444444"
+U2 = "uuuuuuuu-6666-6666-6666-666666666666"
+EX1 = "uuuuuuuu-7777-7777-7777-777777777777"
+EX2 = "uuuuuuuu-8888-8888-8888-888888888888"
+SOLO = "vvvvvvvv-5555-5555-5555-555555555555"
+
+def wf_copy(uid, seed="s1", pos=(0, 0)):
+    """The exact-copy generator: everything except the top-level id is
+    byte-identical (the ComfyUI Duplicate signature)."""
+    return {"id": uid, "revision": 1,
+            "nodes": [{"id": 1, "type": "KSampler", "pos": list(pos),
+                       "widgets_values": [seed]},
+                      {"id": 2, "type": "VAEDecode", "pos": [40, 40]}],
+            "links": [[1, 1, 0, 2, 0, "LATENT"]],
+            "extra": {"ds": {"scale": 1.0, "offset": [0, 0]},
+                      "frontendVersion": "1.24.4"},
+            "version": 0.4}
+
+# ---- A) the preview + the delete with the orphan cleanup -------------------
+lib_write("dup_a.json", wf_v116(DU, seed="a"))
+lib_write("dup_b.json", wf_v116(DU, seed="a"))
+lib_write("solo.json", wf_v116(SOLO))
+r = loop(HIST(FakeRequest(json_body={"path": "workflows/dup_a.json",
+                                     "source": "disk"})))
+pid_dup = r.json().get("processId")
+r = loop(HIST(FakeRequest(json_body={"path": "workflows/dup_b.json",
+                                     "source": "disk"})))
+check("v117 setup: the second same-UUID file joins ONE process",
+      r.json().get("ok") and r.json().get("processId") == pid_dup,
+      json.dumps(r.json()))
+r = loop(HIST(FakeRequest(json_body={"path": "workflows/solo.json",
+                                     "source": "disk"})))
+pid_solo = r.json().get("processId")
+r = loop(PPOST(FakeRequest(json_body={"name": "v117 ref preset",
+                                      "items": [{"kind": "path",
+                                                "path": "workflows/dup_a.json"}],
+                                      "activePath": "workflows/dup_a.json"})))
+ref_preset = r.json().get("preset") or {}
+wf_store._wf_index.scan_index(
+    workflows_user_dirs=wf_store._workflows_user_dirs(FakeRequest()),
+    hide_dirs_fn=wf_store._files_hide_dirs, user_scope="default", force=True)
+
+# the PREVIEW: the dialog data BEFORE anything is deleted
+r = loop(FDEL(FakeRequest(json_body={"paths": ["workflows/dup_a.json"],
+                                     "preview": True})))
+pj = r.json()
+check("v117 preview: answers the per-file process data",
+      pj.get("ok") and pj.get("totals", {}).get("selected") == 1 and
+      len(pj.get("files", [])) == 1,
+      json.dumps(pj.get("totals")))
+_f0 = (pj.get("files") or [{}])[0]
+check("v117 preview: the sibling copy keeps the history reachable",
+      _f0.get("otherLocations") == ["workflows/dup_b.json"] and
+      _f0.get("willOrphanVersions") is False and
+      _f0.get("revisions", 0) >= 1,
+      json.dumps(_f0))
+check("v117 preview: the referencing preset is NAMED",
+      any(p.get("id") == ref_preset.get("id")
+          for p in pj.get("presetsAffected", [])),
+      json.dumps(pj.get("presetsAffected")))
+check("v117 preview: NOTHING was deleted",
+      os.path.isfile(os.path.join(LIBDIR, "dup_a.json")) and
+      wf_store._wf_hist._read_process(pid_dup) is not None)
+
+# the REAL delete of ONE of two copies: the history survives
+r = loop(FDEL(FakeRequest(json_body={"paths": ["workflows/dup_a.json"]})))
+fj = r.json()
+check("v117 delete: the selected file dies, the sibling copy keeps the process",
+      fj.get("ok") and fj.get("removed") == 1 and
+      fj.get("orphanedProcesses") == 0 and
+      os.path.isfile(os.path.join(LIBDIR, "dup_b.json")) and
+      wf_store._wf_hist._read_process(pid_dup) is not None,
+      json.dumps({k: fj.get(k) for k in ("ok", "removed", "orphanedProcesses")}))
+check("v117 delete: the referencing preset is NEVER deleted",
+      wf_store._load_preset_file(ref_preset.get("id")) is not None)
+check("v117 delete: the versions stay reachable through the surviving copy",
+      len(wf_store._wf_hist.list_revisions(pid_dup)) >= 1 and
+      wf_store._wf_hist._proc_cache["paths_of"].get(pid_dup) == {
+          "workflows/dup_b.json"},
+      json.dumps({"revs": len(wf_store._wf_hist.list_revisions(pid_dup)),
+                  "locs": sorted(wf_store._wf_hist._proc_cache["paths_of"]
+                                 .get(pid_dup) or ())}))
+
+# deleting the LAST copy erases the unreachable versions with the file
+r = loop(FDEL(FakeRequest(json_body={"paths": ["workflows/dup_b.json"]})))
+fj = r.json()
+check("v117 delete: the LAST copy takes the orphaned versions with it",
+      fj.get("ok") and fj.get("removed") == 1 and
+      fj.get("orphanedProcesses") == 1 and
+      fj.get("orphanedRevisions", 0) >= 1,
+      json.dumps({k: fj.get(k) for k in ("removed", "orphanedProcesses",
+                                         "orphanedRevisions")}))
+check("v117 delete: the erased process is really gone",
+      wf_store._wf_hist._read_process(pid_dup) is None and
+      len(wf_store._wf_hist.list_revisions(pid_dup)) == 0)
+r = loop(FDEL(FakeRequest(json_body={"paths": ["workflows/solo.json"]})))
+check("v117 delete: a single-file process with history dies the same way",
+      r.json().get("ok") and r.json().get("orphanedProcesses") == 1 and
+      wf_store._wf_hist._read_process(pid_solo) is None,
+      json.dumps(r.json()))
+
+# ---- B) the Process-history route: the path-scoped file deletion -----------
+lib_write("p_a.json", wf_v116(U2, seed="p1"))
+lib_write("p_b.json", wf_v116(U2, seed="p1"))
+r = loop(HIST(FakeRequest(json_body={"path": "workflows/p_a.json",
+                                     "source": "disk"})))
+pid_p = r.json().get("processId")
+r = loop(HIST(FakeRequest(json_body={"path": "workflows/p_b.json",
+                                     "source": "disk"})))
+r = loop(HPDEL(FakeRequest(match_info={"pid": pid_p},
+                           json_body={"deleteFiles": True,
+                                      "path": "workflows/p_a.json"})))
+hj = r.json()
+check("v117 history route: ONLY the passed path was deleted",
+      hj.get("ok") and hj.get("keptHistory") is True and
+      hj.get("remainingLocations") == 1 and
+      os.path.isfile(os.path.join(LIBDIR, "p_b.json")) and
+      not os.path.isfile(os.path.join(LIBDIR, "p_a.json")),
+      json.dumps(hj))
+check("v117 history route: the versions survive with the sibling copy",
+      len(wf_store._wf_hist.list_revisions(pid_p)) == 1,
+      json.dumps({"revs": len(wf_store._wf_hist.list_revisions(pid_p))}))
+r = loop(HPDEL(FakeRequest(match_info={"pid": pid_p},
+                           json_body={"deleteFiles": False})))
+hj = r.json()
+check("v117 history route: versions-only erases the history, the file stays byte-for-byte",
+      hj.get("ok") and hj.get("deletedRevisions") == 1 and
+      os.path.isfile(os.path.join(LIBDIR, "p_b.json")),
+      json.dumps(hj))
+r = loop(HPDEL(FakeRequest(match_info={"pid": pid_p},
+                           json_body={"deleteFiles": False})))
+check("v117 history route: the erased process answers 'no such process' (409)",
+      r.status == 409 and r.json().get("ok") is False,
+      json.dumps({"status": r.status}))
+
+# ---- C) presets_referencing_paths (the canonical + case-insensitive match) -
+rr = wf_store.presets_referencing_paths(["workflows/dup_a.json"])
+check("v117 preset refs: the referencing preset is found",
+      any(p.get("id") == ref_preset.get("id") for p in rr),
+      json.dumps(rr))
+rr = wf_store.presets_referencing_paths(["workflows/DUP_A.JSON"])
+check("v117 preset refs: the match is case-insensitive (a Windows spelling)",
+      any(p.get("id") == ref_preset.get("id") for p in rr),
+      json.dumps(rr))
+rr = wf_store.presets_referencing_paths(["workflows/never.json"])
+check("v117 preset refs: a non-referenced path answers empty",
+      rr == [], json.dumps(rr))
+
+# ---- D) _evict_temp_files honors the cross-browser reference union ---------
+check("v117 evict: the temp cap grew to 128 (30 entries per session)",
+      wf_store.MAX_TEMP_FILES == 128, str(wf_store.MAX_TEMP_FILES))
+_tdir = wf_store._temp_dir()
+os.makedirs(_tdir, exist_ok=True)
+tids = []
+for i in range(130):
+    tid = "%04x%s" % (i, "a" * 8)   # the temp ids are HEX (the _ID_RE contract)
+    tids.append(tid)
+    with open(os.path.join(_tdir, tid + ".json"), "w", encoding="utf-8") as fh:
+        json.dump({"id": tid, "ts": 1700000000 + i, "seq": i,
+                   "name": "t%d" % i, "graph": {"nodes": []}}, fh)
+# the manifest of ANOTHER browser session references the 2 OLDEST temps
+_mrec = {"entries": [{"tempId": tids[0]}, {"tempId": tids[1]}],
+         "updatedAt": int(time.time())}
+wf_store._mgr_write_json(wf_store._mgr_dir("recent"), "cidOther", _mrec)
+wf_store._evict_temp_files()
+alive = [t for t in tids
+         if os.path.isfile(os.path.join(_tdir, t + ".json"))]
+check("v117 evict: the referenced snapshots of ANOTHER session survive the cap",
+      len(alive) == 130 and tids[0] in alive and tids[1] in alive,
+      json.dumps({"alive": len(alive)}))
+wf_store._mgr_delete(wf_store._mgr_dir("recent"), "cidOther")
+wf_store._evict_temp_files()
+alive2 = [t for t in tids
+          if os.path.isfile(os.path.join(_tdir, t + ".json"))]
+check("v117 evict: with no manifest left the cap applies again (128)",
+      len(alive2) == wf_store.MAX_TEMP_FILES and
+      tids[0] not in alive2 and tids[1] not in alive2,
+      json.dumps({"alive": len(alive2)}))
+for t in alive2:
+    try:
+        os.unlink(os.path.join(_tdir, t + ".json"))
+    except OSError:
+        pass
+
+# ---- E) the /index/groups route --------------------------------------------
+lib_write("g_u1.json", wf_v116(DU, seed="g1"))
+lib_write("g_u2.json", wf_v116(DU, seed="g1"))
+# the EXACT copy pair: different UUIDs, byte-identical apart from the id
+lib_write("g_e1.json", wf_copy(EX1))
+lib_write("g_e2.json", wf_copy(EX2))
+wf_store._wf_index.scan_index(
+    workflows_user_dirs=wf_store._workflows_user_dirs(FakeRequest()),
+    hide_dirs_fn=wf_store._files_hide_dirs, user_scope="default", force=True)
+r = loop(HGROUPS(FakeRequest(query={"threshold": "90"})))
+gj = r.json()
+check("v117 groups: the route answers with the profile + the weights",
+      gj.get("ok") and gj.get("profile") == "nprof2" and
+      isinstance(gj.get("weights"), dict),
+      json.dumps({k: gj.get(k) for k in ("ok", "profile", "weights")}))
+kinds = {}
+for g in gj.get("groups", []):
+    kinds.setdefault(g.get("kind"), []).append(g)
+check("v117 groups: the same-UUID files form ONE same_uuid group",
+      any(len(g.get("files", [])) == 2 for g in kinds.get("same_uuid", [])),
+      json.dumps(kinds.get("same_uuid", [])))
+check("v117 groups: the ComfyUI-Duplicate pair lands in an exact group (100%)",
+      any(len(g.get("files", [])) == 2 and g.get("minScore") == 100
+          for g in kinds.get("exact", [])),
+      json.dumps(kinds.get("exact", [])))
+check("v117 groups: the ungrouped rows carry the page shape",
+      all("path" in f and "workflowId" in f for f in gj.get("ungrouped", [])),
+      json.dumps((gj.get("ungrouped") or [{}])[0]))
+r = loop(HGROUPS(FakeRequest(query={"threshold": "90"})))
+check("v117 groups: the second call answers from the SQLite cache",
+      r.json().get("ok") and r.json().get("cached") is True,
+      json.dumps({"cached": r.json().get("cached")}))
+r = loop(HGROUPS(FakeRequest(query={"threshold": "90", "kind": "same_uuid"})))
+check("v117 groups: the kind filter narrows the answer",
+      r.json().get("ok") and
+      all(g.get("kind") == "same_uuid" for g in r.json().get("groups", [])) and
+      r.json().get("groups"),
+      json.dumps([g.get("kind") for g in r.json().get("groups", [])]))
+# the invalidation: a changed file re-indexes -> the cache key moves
+lib_write("g_u1.json", wf_v116(DU, seed="CHANGED"))
+wf_store._wf_index.scan_index(
+    workflows_user_dirs=wf_store._workflows_user_dirs(FakeRequest()),
+    hide_dirs_fn=wf_store._files_hide_dirs, user_scope="default")
+r = loop(HGROUPS(FakeRequest(query={"threshold": "90"})))
+check("v117 groups: ANY re-index invalidates the cached answer",
+      r.json().get("ok") and r.json().get("cached") is False,
+      json.dumps({"cached": r.json().get("cached")}))
+
+reset_state()
+# ===========================================================================
 
 print()
 print("PASS: %d  FAIL: %d" % (PASS, FAIL))

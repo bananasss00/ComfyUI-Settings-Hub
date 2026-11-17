@@ -885,6 +885,128 @@ check("v116 stats: the logical/physical split + the tx counters",
                                           "physicalBytes")}))
 
 # ---------------------------------------------------------------------------
+# v117: the delete plan - delete_process(only_paths=[...]) touches ONLY the
+# passed path (the same-UUID siblings are NEVER touched), the history dies
+# only when the process lost its LAST live location; paths_preview answers
+# the confirm-dialog data BEFORE anything is deleted.
+# ---------------------------------------------------------------------------
+h117 = load_mod("shub_hist_v117", "py/workflows_history.py")
+h117.set_base_dir(os.path.join(TMP, "settings_hub", "workflows_manager",
+                               "v117store"))
+h117._backend_cache["resolved"] = None
+h117._git_available = lambda: False   # the CAS backend - honest freed bytes
+
+V117U = "77777777-8888-9999-aaaa-bbbbccccdddd"
+write_lib("v117_a.json", wf_bytes(V117U, seed="A"))
+write_lib("v117_b.json", wf_bytes(V117U, seed="A"))
+write_lib("v117_solo.json", wf_bytes("77777777-8888-9999-aaaa-bbbbccccddee",
+                                     seed="S"))
+widx.scan_index(workflows_user_dirs=[LIB], hide_dirs_fn=lambda d: [],
+                user_scope="default", force=True)
+h117._reconcile_ts[0] = 0
+h117.reconcile_processes("default")
+_p117 = h117.resolve_path_process("workflows/v117_a.json", "default")
+check("v117 setup: the two copies bind to ONE process",
+      _p117 is not None and
+      len(_p117.get("locations") or []) == 2,
+      json.dumps(_p117 or {}))
+_pid117 = _p117["processId"]
+_rk = h117.record_checkpoint_for_path("workflows/v117_a.json",
+                                      wf_bytes(V117U, seed="A"),
+                                      source="checkpoint")
+check("v117 setup: the process owns a revision", _rk.get("ok"),
+      json.dumps(_rk))
+
+_removed_calls = []
+def _v117_remover(rel):
+    _removed_calls.append(rel)
+    try:
+        os.unlink(os.path.join(LIB, rel[len("workflows/"):]))
+    except OSError:
+        pass
+    return {"path": rel, "removed": True}
+
+# the scoped deletion: ONLY the passed path dies, the history survives
+_d117 = h117.delete_process(_pid117, delete_files=True,
+                            only_paths=["workflows/v117_a.json"],
+                            file_remover=_v117_remover,
+                            file_preflight=lambda rel: {"path": rel,
+                                                        "ok": True})
+check("v117 scoped delete: the remover saw EXACTLY the passed path",
+      _removed_calls == ["workflows/v117_a.json"],
+      json.dumps(_removed_calls))
+check("v117 scoped delete: keptHistory with the sibling location",
+      _d117.get("ok") and _d117.get("keptHistory") is True and
+      _d117.get("remainingLocations") == 1 and
+      _d117.get("deletedRevisions") == 0,
+      json.dumps({k: _d117.get(k) for k in ("ok", "keptHistory",
+                                            "remainingLocations")}))
+check("v117 scoped delete: the sibling file stayed on disk",
+      os.path.isfile(os.path.join(LIB, "v117_b.json")))
+check("v117 scoped delete: the revision survives",
+      len(h117.list_revisions(_pid117)) == 1,
+      json.dumps({"revs": len(h117.list_revisions(_pid117))}))
+
+# the scoped deletion of the LAST location erases the whole object
+_d2 = h117.delete_process(_pid117, delete_files=True,
+                          only_paths=["workflows/v117_b.json"],
+                          file_remover=_v117_remover,
+                          file_preflight=lambda rel: {"path": rel,
+                                                      "ok": True})
+check("v117 scoped delete: the last location erases process + versions",
+      _d2.get("ok") and _d2.get("keptHistory") is not True and
+      _d2.get("deletedRevisions") == 1 and
+      h117._read_process(_pid117) is None and
+      len(h117.list_revisions(_pid117)) == 0,
+      json.dumps({k: _d2.get(k) for k in ("ok", "keptHistory",
+                                          "deletedRevisions")}))
+
+# the versions-only erasure never touches the files
+_p3 = h117.resolve_path_process("workflows/v117_solo.json", "default")
+_rk3 = h117.record_checkpoint_for_path("workflows/v117_solo.json",
+                                       wf_bytes("77777777-8888-9999-aaaa-bbbbccccddee",
+                                                seed="S2"),
+                                       source="checkpoint")
+# the PREVIEW of the single-copy versioned file (BEFORE any deletion)
+_pv2 = h117.paths_preview(["workflows/v117_solo.json"], "default")
+_f2 = (_pv2.get("files") or [{}])[0]
+check("v117 preview: the last copy of a versioned file is the orphan case",
+      _pv2.get("ok") and _f2.get("willOrphanVersions") is True and
+      _pv2.get("totals", {}).get("orphanVersions", 0) >= 1 and
+      _pv2.get("totals", {}).get("orphanProcesses", 0) == 1,
+      json.dumps({"f": _f2, "t": _pv2.get("totals")}))
+_d3 = h117.delete_process(_p3["processId"], delete_files=False)
+check("v117 versions-only: the history dies, the file stays byte-for-byte",
+      _d3.get("ok") and _d3.get("deletedRevisions") == 1 and
+      os.path.isfile(os.path.join(LIB, "v117_solo.json")),
+      json.dumps(_d3))
+
+# paths_preview: the dialog data BEFORE anything is deleted
+write_lib("v117_p1.json", wf_bytes("77777777-8888-9999-aaaa-bbbbccccddff",
+                                   seed="P"))
+write_lib("v117_p2.json", wf_bytes("77777777-8888-9999-aaaa-bbbbccccddff",
+                                   seed="P"))
+widx.scan_index(workflows_user_dirs=[LIB], hide_dirs_fn=lambda d: [],
+                user_scope="default", force=True)
+h117._reconcile_ts[0] = 0
+h117.reconcile_processes("default")
+_pp = h117.record_checkpoint_for_path("workflows/v117_p1.json",
+                                      wf_bytes("77777777-8888-9999-aaaa-bbbbccccddff",
+                                               seed="P"),
+                                      source="checkpoint")
+_pv = h117.paths_preview(["workflows/v117_p1.json"], "default")
+_f = (_pv.get("files") or [{}])[0]
+check("v117 preview: the sibling copy keeps the history reachable",
+      _pv.get("ok") and _f.get("otherLocations") == ["workflows/v117_p2.json"]
+      and _f.get("willOrphanVersions") is False and _f.get("revisions") >= 1,
+      json.dumps(_f))
+_pv3 = h117.paths_preview([], "default")
+check("v117 preview: an empty selection answers an empty plan",
+      _pv3.get("ok") and _pv3.get("files") == [] and
+      _pv3.get("totals", {}).get("selected") == 0,
+      json.dumps(_pv3))
+
+# ---------------------------------------------------------------------------
 shutil.rmtree(TMP, ignore_errors=True)
 print()
 print("PASS: %d  FAIL: %d" % (PASS, FAIL))

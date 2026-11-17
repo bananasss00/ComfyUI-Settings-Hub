@@ -511,6 +511,36 @@ function makeFakeApi() {
                     sameWorkflowDiffCanvas: [], sameUuidDiffContent: [],
                     structuralCandidates: [], noUuidCount: 0 });
             }
+            // v117: the SIMILARITY GROUPS stub - the fake index drives the
+            // groups: files sharing a workflow_id land in one same_uuid group
+            if (p === "/settings_hub/workflows/index/groups" && method === "GET") {
+                if (idxModeFlag === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                const qp3 = new URLSearchParams(String(u).split("?")[1] || "");
+                const kind = qp3.get("kind") || "all";
+                const byId = new Map();
+                for (const f of idxFiles) {
+                    if (!f.workflowId) continue;
+                    if (!byId.has(f.workflowId)) byId.set(f.workflowId, []);
+                    byId.get(f.workflowId).push(f);
+                }
+                const groups = [];
+                const grouped = new Set();
+                for (const [wid, fs] of byId) {
+                    if (fs.length < 2) continue;
+                    for (const f of fs) grouped.add(f.path);
+                    groups.push({ kind: "same_uuid", key: "uuid:" + wid,
+                        label: "Same workflow ID", workflowId: wid,
+                        count: fs.length, anchor: fs[0].path, files: fs });
+                }
+                const ungrouped = idxFiles.filter((f) => !grouped.has(f.path));
+                let answer = { ok: true, profile: "nprof2",
+                    threshold: parseInt(qp3.get("threshold") || "90", 10),
+                    groups, ungrouped, ungroupedTotal: ungrouped.length,
+                    totalFiles: idxFiles.length, skippedBroad: 0, cached: false };
+                if (kind !== "all")
+                    answer = { ...answer, groups: groups.filter((g) => g.kind === kind), kind };
+                return jsonResp(answer);
+            }
             // v116 (plan 4.6): the NOTES search stub
             if (p === "/settings_hub/workflows/index/notes" && method === "GET") {
                 if (notesMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
@@ -524,6 +554,32 @@ function makeFakeApi() {
                 if (fileDelMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
                 const paths = body2.paths || [];
                 if (paths.length > 40) return jsonResp({ ok: false, error: "too many files in one batch (max 40)", limit: 40 }, 400);
+                // v117: the PREVIEW mode - the confirm-dialog data computed
+                // from the fake state, NOTHING is deleted
+                if (body2.preview) {
+                    const resultsPv = [];
+                    const filesPv = [];
+                    for (const pt of paths) {
+                        const alive = fileFs.has(pt);
+                        resultsPv.push({ path: pt, ok: true, removed: false,
+                            missing: !alive });
+                        const row = idxFiles.find((f) => f.path === pt);
+                        const sameLocs = row?.workflowId
+                            ? idxFiles.filter((f) => f.workflowId === row.workflowId
+                                && f.path !== pt).map((f) => f.path) : [];
+                        filesPv.push({ path: pt, processId: row?.workflowId
+                            ? "proc-" + row.workflowId : null,
+                            processName: null, revisions: 0,
+                            locations: sameLocs.length + 1,
+                            otherLocations: sameLocs,
+                            willOrphanVersions: false });
+                    }
+                    return jsonResp({ ok: true, files: filesPv,
+                        presetsAffected: [],
+                        totals: { selected: paths.length, orphanProcesses: 0,
+                            orphanVersions: 0, presetsAffected: 0 },
+                        results: resultsPv });
+                }
                 const results = [];
                 if (fileDelMode === "snapshotfail") {
                     for (const pt of paths) results.push({ path: pt, ok: false, removed: false, error: "the safety snapshot failed verification" });
@@ -550,6 +606,7 @@ function makeFakeApi() {
                 return jsonResp({ ok: results.every((r) => !r.error), opId, results,
                     removed: removed.length, failed: results.filter((r) => r.error).length,
                     indexRowsDropped: removed.length, locationsDetached: 0,
+                    orphanedProcesses: 0, orphanedRevisions: 0,
                     undo: removed.length ? { opId, expiresAt: Date.now() / 1000 | 0 + 7200 } : null,
                     note: removed.length ? "the process history is NEVER deleted with the files" : null });
             }
@@ -790,10 +847,12 @@ function makeFakeApi() {
                 }
                 return jsonResp({ ok: true, deleted, skipped });
             }
-            // v115: the WHOLE-PROCESS delete ("удалить сами процессы со всеми
-            // хвостами") - the fake mirrors the real route: every revision
-            // dies, the process entry dies, deleteFiles removes every
-            // location's simulated file row (tx snapshot recorded first)
+            // v115→v117: the process delete - the fake mirrors the REAL
+            // v117 route: {deleteFiles:true, path} deletes EXACTLY THAT file
+            // (tx snapshot first), detaches it and KEEPS the process + its
+            // revisions while another location survives; the versions die
+            // only when the process lost its LAST live file. {deleteFiles:
+            // false} erases the versions and keeps every file.
             const mHistProcDel = p.match(/^\/settings_hub\/workflows\/history\/process\/([^/]+)\/delete$/);
             if (mHistProcDel && method === "POST") {
                 if (procDelMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
@@ -803,25 +862,43 @@ function makeFakeApi() {
                 let body2 = {};
                 try { body2 = JSON.parse(opts.body || "{}"); } catch (_) {}
                 const delFiles = !!(body2 && body2.deleteFiles);
+                const onlyPath = typeof body2?.path === "string" && body2.path
+                    ? body2.path : null;
+                const targets = delFiles
+                    ? (onlyPath
+                        ? (proc.locations || []).filter((l) => l.path === onlyPath)
+                        : (proc.locations || []))
+                    : [];
                 const files = [];
+                for (const l of targets) {
+                    const row = idxFiles.find((f) => f.path === l.path);
+                    if (!row) { files.push({ path: l.path, removed: false, reason: "missing" }); continue; }
+                    txStore.set("tx" + (++histStore.seq), { path: l.path, ts: Date.now() / 1000 | 0 });
+                    files.push({ path: l.path, removed: true,
+                        bytes: row.size || 10, snapshot: "tx" + histStore.seq });
+                }
+                // v117: detach the removed paths; the history dies ONLY when
+                // no live location remains
                 if (delFiles) {
-                    for (const l of proc.locations || []) {
-                        const row = idxFiles.find((f) => f.path === l.path);
-                        if (!row) { files.push({ path: l.path, removed: false, reason: "missing" }); continue; }
-                        txStore.set("tx" + (++histStore.seq), { path: l.path, ts: Date.now() / 1000 | 0 });
-                        files.push({ path: l.path, removed: true,
-                            bytes: row.size || 10, snapshot: "tx" + histStore.seq });
+                    const gone = files.filter((f) => f.removed).map((f) => f.path);
+                    proc.locations = (proc.locations || []).filter((l) => !gone.includes(l.path));
+                    for (let i = idxFiles.length - 1; i >= 0; i--) {
+                        if (gone.includes(idxFiles[i].path)) idxFiles.splice(i, 1);
+                    }
+                    if (proc.locations.length > 0) {
+                        return jsonResp({ ok: true, processId: pid,
+                            deletedRevisions: 0, freedBytes: 0, files,
+                            keptHistory: true,
+                            remainingLocations: proc.locations.length,
+                            indexRowsDropped: gone.length });
                     }
                 }
                 const n = histRevList(pid).length;
                 for (const r of histRevList(pid)) histStore.revisions.delete(r.revisionId);
                 histStore.processes.delete(pid);
-                const gone = files.filter((f) => f.removed).map((f) => f.path);
-                for (let i = idxFiles.length - 1; i >= 0; i--) {
-                    if (gone.includes(idxFiles[i].path)) idxFiles.splice(i, 1);
-                }
+                const goneAll = files.filter((f) => f.removed).map((f) => f.path);
                 return jsonResp({ ok: true, processId: pid, deletedRevisions: n,
-                    freedBytes: 0, files, indexRowsDropped: gone.length });
+                    freedBytes: 0, files, indexRowsDropped: goneAll.length });
             }
             if (p === "/settings_hub/workflows/history/storage" && method === "GET") {
                 return jsonResp({ ok: true, backend: "stub", processes: histStore.processes.size,
@@ -1595,21 +1672,24 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v116", /"workflows":\s*"v116"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v117", /"workflows":\s*"v117"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v116 (the quality and reliability pass)",
-    ENTRY_SRC.includes("web build: v116 - THE QUALITY AND RELIABILITY PASS") &&
+check("the entry banner names v117 (the delete plan + groups release)",
+    ENTRY_SRC.includes("web build: v117 - THE DELETE PLAN + GROUPS") &&
     ENTRY_SRC.includes("THE WORKFLOW MANAGER ROADMAP"));
-check("styles.css?v=116", ENTRY_SRC.includes("styles.css?v=116"));
-check("the module self-reports v116",
+check("styles.css?v=117", ENTRY_SRC.includes("styles.css?v=117"));
+check("the module self-reports v117",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v116"'));
-check("the web stamp literal is v116",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v117"'));
+check("the web stamp literal is v117",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v116"'));
-check("py stamp bumps together (v116)",
+        .includes('const WF_WEB_VERSION = "v117"'));
+check("py stamp bumps together (v117)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v116"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v117"'));
+check("v117 routes registered (groups + files delete preview)",
+    ["/settings_hub/workflows/index/groups"]
+        .every((s) => fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8").includes(s)));
 check("v116 routes registered (files delete/undo + notes + compact)",
     [".post(\"/settings_hub/workflows/files/delete\")",
      ".post(\"/settings_hub/workflows/files/undo\")",
@@ -2019,8 +2099,13 @@ await settle();
         wfSrc.includes("ONE FILE PER PRESET on the server - presets/<id>.json inside the storage"));
     check("WK header: the Storage footer names the per-preset folder",
         /Storage: py\/workflows_store\.py - <user>\/settings_hub\/workflows\/ with ONE\n\/\/ file per preset \(presets\/<id>\.json, v104\)/.test(wfSrc));
-    check("WK popup: the storage-folder hint names the per-preset files (v108 wording keeps the contract)",
-        wfSrc.includes("no duplicates, no loss; ONE file per preset: presets/&lt;id&gt;.json - copy a file to transfer that"));
+    // v117: the long hint moved into the CLOSED Advanced details block - the
+    // per-preset file contract is still DOCUMENTED in the popup, just one
+    // click deeper
+    check("WK popup: the Advanced details block names the per-preset files (v117 short-description contract)",
+        wfSrc.includes("Advanced details") &&
+        wfSrc.includes("Layout: one file per preset - presets/&lt;id&gt;.json") &&
+        wfSrc.includes("Choose where Workflow Manager stores presets and temporary reopen snapshots"));
     check("WK export: the per-preset toast names the server file (the transfer hint)",
         wfSrc.includes('+ " (it also lives as presets/" + p.id + ".json in the storage folder)"'));
 
@@ -2186,7 +2271,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v117"); // ahead of the pack (v116) - a stale web file
+    fakeApi.__setHealthVersion("v118"); // ahead of the pack (v117) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -4128,16 +4213,26 @@ phase("ZY v115: the duplicate-ID counter on the rows + the WHOLE-PROCESS delete 
         badgeZy && badgeZy.textContent === "2",
         JSON.stringify({ badge: badgeZy?.textContent || null }));
 
-    // 3) the armed WHOLE-PROCESS delete: the strip names the exact counts,
-    //    Cancel disarms, the confirmed scope deletes files + versions
+    // 3) the armed process delete (v117: PLAIN LANGUAGE + the file scope is
+    //    the panel's CURRENT file ONLY - the other same-UUID copies are
+    //    never touched, the versions survive when a copy stays)
     await hooks.histPopEl().querySelector('[data-act="histprocarm"]').click();
     await settle(20);
     const stripZy = hooks.histPopEl().querySelector(".hub-wf-planwarn");
-    check("ZY: the ARMED strip appears with the exact counts",
+    check("ZY: the ARMED strip names the current file, the versions and the surviving copies",
         hooks.histPopEl().querySelector('[data-act="histprocyes"]') !== null &&
-        (stripZy?.textContent || "").includes("2 version(s)") &&
-        (stripZy?.textContent || "").includes("2 file location(s)"),
+        (stripZy?.textContent || "").includes("2 saved version(s)") &&
+        (stripZy?.textContent || "").includes("1 other file(s) with the same UUID stay on disk") &&
+        !(stripZy?.textContent || "").includes("tails") &&
+        !(stripZy?.textContent || "").includes("EVERYTHING"),
         stripZy?.textContent || "no strip");
+    check("ZY: the strip carries the plain-language labels",
+        (hooks.histPopEl().querySelector('[data-act="histprocyes"]')?.textContent || "")
+            .includes("Delete current file (and versions if no copies left)") &&
+        (hooks.histPopEl().querySelector('[data-act="histprochist"]')?.textContent || "")
+            .includes("Delete stored versions only - keep files"),
+        JSON.stringify({ yes: hooks.histPopEl().querySelector('[data-act="histprocyes"]')?.textContent,
+            hist: hooks.histPopEl().querySelector('[data-act="histprochist"]')?.textContent }));
     check("ZY: the entry button hides while armed",
         !hooks.histPopEl().querySelector('[data-act="histprocarm"]'));
     await hooks.histPopEl().querySelector('[data-act="histproccancel"]').click();
@@ -4149,25 +4244,32 @@ phase("ZY v115: the duplicate-ID counter on the rows + the WHOLE-PROCESS delete 
     await settle(20);
     await hooks.histPopEl().querySelector('[data-act="histprocyes"]').click();
     await settle(60);
-    check("ZY: the confirmed EVERYTHING-delete closes the panel",
+    check("ZY: the confirmed CURRENT-FILE delete closes the panel",
         !hooks.histPopEl());
-    check("ZY: the process + ALL its revisions died",
-        !fakeApi.__histStore().processes.has("pzydup000000001") &&
+    // v117: the file dies, the OTHER same-UUID copy + the whole history stay
+    check("ZY: the CURRENT file row left the Files list",
+        !bodyZy().querySelector('[data-fpath="workflows/zya.json"]'),
+        bodyZy().querySelectorAll("[data-fpath]").length + " rows left");
+    check("ZY: the OTHER same-UUID copy was NEVER touched (still on disk)",
+        !!bodyZy().querySelector('[data-fpath="workflows/zyb.json"]'),
+        "zyb.json stays");
+    check("ZY: the process + its revisions SURVIVED (keptHistory)",
+        fakeApi.__histStore().processes.has("pzydup000000001") &&
         [...fakeApi.__histStore().revisions.values()]
-            .every((r) => r.processId !== "pzydup000000001"));
+            .filter((r) => r.processId === "pzydup000000001").length === 2,
+        JSON.stringify({ proc: fakeApi.__histStore().processes.has("pzydup000000001"),
+            revs: [...fakeApi.__histStore().revisions.values()]
+                .filter((r) => r.processId === "pzydup000000001").length }));
     check("ZY: the tx snapshots were recorded BEFORE the unlink",
-        fakeApi.__txStore().size >= 2,
+        fakeApi.__txStore().size >= 1,
         String(fakeApi.__txStore().size));
-    check("ZY: the toast names versions + files",
+    check("ZY: the toast names the surviving copies",
         [...document.querySelectorAll(".hub-sh-note")]
-            .some((t) => (t.textContent || "").includes("Process deleted: 2 version(s) + 2 file(s)")),
+            .some((t) => (t.textContent || "").includes("Deleted the current file") &&
+                (t.textContent || "").includes("1 other file(s) with the same UUID")),
         JSON.stringify([...document.querySelectorAll(".hub-sh-note")]
             .map((t) => t.textContent)));
-    check("ZY: BOTH duplicate rows left the Files list",
-        !bodyZy().querySelector('[data-fpath="workflows/zya.json"]') &&
-        !bodyZy().querySelector('[data-fpath="workflows/zyb.json"]'),
-        bodyZy().querySelectorAll("[data-fpath]").length + " rows left");
-    check("ZY: the untouched file stays",
+    check("ZY: the untouched solo file stays",
         !!bodyZy().querySelector('[data-fpath="workflows/zyc.json"]'));
 
     // 4) the HISTORY-ONLY scope: the versions die, the file stays
@@ -4502,8 +4604,172 @@ phase("ZZ v116: the honest refresh, the Files DELETE with undo, the select-uuid,
 }
 
 // ===========================================================================
+phase("AAA v117: the delete preview + the confirm strip, the similarity groups UI, the Recently-closed limit + Clear");
+{
+    const pnlA = () => hooks.panelEl();
+    const bodyA = () => pnlA().querySelector(".hub-wf-body");
+    fakeApi.__setIdxMode("ok");
+    fakeApi.__setBadgesMode("ok");
+    fakeApi.__setFileDelMode("ok");
+    const aRow = (path, hash, wf) => ({ path, name: path.split("/")[1],
+        size: 10, mtime: 100, workflowId: wf || null, rawHash: hash,
+        workflowHash: "wf-" + hash, presentationHash: "pres-" + hash,
+        parseStatus: null, nodeCount: 1, nodeTypes: [], modelRefs: [] });
+    fakeApi.__setIdxFiles([
+        aRow("workflows/aaa1.json", "a1", "aaa-uuid-x"),
+        aRow("workflows/aaa2.json", "a2", "aaa-uuid-x"),
+        aRow("workflows/aaa3.json", "a3", "aaa-uuid-y"),
+        aRow("workflows/aaa4.json", "a4", "aaa-uuid-y"),
+        aRow("workflows/aaa5.json", "a5", null),
+    ]);
+    fakeApi.__fileFs(["workflows/aaa1.json", "workflows/aaa2.json",
+        "workflows/aaa3.json", "workflows/aaa4.json", "workflows/aaa5.json"]);
+    hooks.setTab("files");
+    await settle();
+    await hooks.runServerList(true);
+    await settle();
 
-console.log(`\nworkflows smoke: PASS ${pass}  FAIL ${fail}`);// ===========================================================================
+    // ---- 1) the similarity GROUPS UI (the owner's plan section 4) --------
+    hooks.setGroupsState({ on: true, threshold: 90, kind: "all" });
+    await hooks.runGroups(true);
+    await settle();
+    check("AAA groups: the toggle renders the group headers with the counts",
+        bodyA().textContent.includes("Same workflow ID") &&
+        bodyA().textContent.includes("2 file(s)"),
+        bodyA().querySelector(".hub-wf-list")?.textContent?.slice(0, 200));
+    check("AAA groups: the rows render INSIDE the groups with every action",
+        !!bodyA().querySelector('[data-fpath="workflows/aaa1.json"]') &&
+        !!bodyA().querySelector('[data-fcheck="workflows/aaa1.json"]') &&
+        !!bodyA().querySelector('[data-fpath="workflows/aaa1.json"] [data-act="filehist"]'),
+        "checkbox + history inside a group");
+    check("AAA groups: the ungrouped rows follow the groups",
+        bodyA().textContent.includes("Outside the groups") &&
+        !!bodyA().querySelector('[data-fpath="workflows/aaa5.json"]'),
+        "ungrouped section");
+    const foldBtnA = bodyA().querySelector('[data-act="groupfold"]');
+    foldBtnA.click();
+    await settle();
+    check("AAA groups: collapsing hides the member rows (the header stays)",
+        !bodyA().querySelector('[data-fpath="workflows/aaa1.json"]') &&
+        !!bodyA().querySelector('[data-act="groupfold"]'),
+        "folded");
+    bodyA().querySelector('[data-act="groupfold"]').click();
+    await settle();
+    const thrSelA = bodyA().querySelector('[data-wf="groupthresh"]');
+    check("AAA groups: the threshold select carries 80-100 (step 5, default 90)",
+        !!thrSelA && thrSelA.options.length === 5 && thrSelA.value === "90",
+        String(thrSelA?.value));
+    check("AAA groups: the kind chips are all present",
+        !!bodyA().querySelector('[data-act="groupkind"][data-kind="same_uuid"]') &&
+        !!bodyA().querySelector('[data-act="groupkind"][data-kind="exact"]') &&
+        !!bodyA().querySelector('[data-act="groupkind"][data-kind="similar"]'),
+        "4 filter chips + refresh");
+    await bodyA().querySelector('[data-act="groupkind"][data-kind="same_uuid"]').click();
+    await settle(30);
+    check("AAA groups: the kind filter narrows to the same-UUID groups",
+        hooks.groupsState().kind === "same_uuid" &&
+        bodyA().querySelector('[data-fpath="workflows/aaa1.json"]') &&
+        bodyA().querySelector('[data-fpath="workflows/aaa2.json"]') &&
+        !bodyA().textContent.includes("Exact graph copy"),
+        hooks.groupsState().kind);
+    check("AAA groups: the on/threshold/kind prefs persist in localStorage",
+        JSON.parse(dom.window.localStorage.getItem("settingshub.workflows.groups"))
+            .kind === "same_uuid",
+        dom.window.localStorage.getItem("settingshub.workflows.groups"));
+    hooks.setGroupsState({ on: false, kind: "all" });
+    hooks.renderAll();
+    await settle();
+
+    // ---- 2) the DELETE preview + the confirm strip (plan section 2) ------
+    const acheck = (pt) => bodyA().querySelector(`[data-fcheck="${pt}"]`);
+    acheck("workflows/aaa1.json").checked = true;
+    acheck("workflows/aaa1.json").dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    await bodyA().querySelector('[data-act="filedel"]').click();
+    await settle(40);
+    check("AAA delete: the first click renders the PREVIEW confirm strip",
+        hooks.filesOpsState().armed &&
+        !!hooks.filesOpsState().confirm &&
+        bodyA().textContent.includes("Click AGAIN to delete") &&
+        bodyA().textContent.includes("Cancel"),
+        bodyA().querySelector(".hub-wf-planwarn")?.textContent?.slice(0, 200));
+    check("AAA delete: the strip names the surviving same-UUID copies",
+        (bodyA().querySelector(".hub-wf-planwarn")?.textContent || "")
+            .includes("NOT selected"),
+        "the shared-history note");
+    await bodyA().querySelector('[data-act="filedelcancel"]').click();
+    await settle();
+    check("AAA delete: Cancel disarms and deletes NOTHING",
+        !hooks.filesOpsState().armed && !hooks.filesOpsState().confirm &&
+        fakeApi.__fileFsHas("workflows/aaa1.json"),
+        JSON.stringify(hooks.filesOpsState()));
+    // the armed second click performs the deletion (only the checked file)
+    await bodyA().querySelector('[data-act="filedel"]').click();
+    await settle(40);
+    await bodyA().querySelector('[data-act="filedel"]').click();
+    await settle(60);
+    check("AAA delete: the confirmed delete removes ONLY the checked file",
+        !fakeApi.__fileFsHas("workflows/aaa1.json") &&
+        fakeApi.__fileFsHas("workflows/aaa2.json") &&
+        !!hooks.filesOpsState().undo?.opId,
+        JSON.stringify({ a1: fakeApi.__fileFsHas("workflows/aaa1.json"),
+            a2: fakeApi.__fileFsHas("workflows/aaa2.json"),
+            undo: hooks.filesOpsState().undo }));
+    await bodyA().querySelector('[data-act="fileundo"]').click();
+    await settle(60);
+    check("AAA delete: the Undo restores the file",
+        fakeApi.__fileFsHas("workflows/aaa1.json"),
+        "restored");
+
+    // ---- 3) the Recently-closed limit + Clear (plan section 3) -----------
+    check("AAA recent: the default limit is 15",
+        hooks.recentLimit() === 15, String(hooks.recentLimit()));
+    hooks.setRecentLimit(5);
+    const savedLim = dom.window.localStorage.getItem("settingshub.workflows.recentLimit");
+    check("AAA recent: the limit setting applies + persists",
+        hooks.recentLimit() === 5 &&
+        JSON.parse(savedLim) === 5,
+        JSON.stringify({ limit: hooks.recentLimit(), saved: savedLim }));
+    hooks.resetRecent();
+    hooks.recordRecent(makeTab({ path: "workflows/aaa1.json" }));
+    hooks.recordRecent(makeTab({ path: "workflows/aaa3.json" }));
+    hooks.recordRecent(makeTab({ path: null, name: "Unsaved 1",
+        isTemporary: true }));
+    await settle(30);
+    hooks.renderAll();
+    check("AAA recent: the ring feeds the Files list",
+        bodyA().textContent.includes("Recently closed") &&
+        bodyA().querySelectorAll(".hub-wf-row-recent").length >= 2,
+        bodyA().querySelector(".hub-wf-list-recent")?.textContent?.slice(0, 120));
+    const clearBtn = bodyA().querySelector('[data-act="recentclear"]');
+    check("AAA recent: the Clear button sits next to the group header",
+        !!clearBtn, clearBtn?.textContent);
+    await clearBtn.click();
+    await settle();
+    check("AAA recent: the first click ARMS (no wipe yet)",
+        bodyA().querySelector('[data-act="recentclear"]').textContent.includes("AGAIN") &&
+        bodyA().querySelectorAll(".hub-wf-row-recent").length >= 2,
+        bodyA().querySelector('[data-act="recentclear"]')?.textContent);
+    await bodyA().querySelector('[data-act="recentclear"]').click();
+    await settle(30);
+    check("AAA recent: the confirmed Clear empties the list (Nothing closed yet)",
+        bodyA().textContent.includes("Nothing closed yet") &&
+        bodyA().querySelectorAll(".hub-wf-row-recent").length === 0,
+        bodyA().querySelector(".hub-wf-list-recent")?.textContent?.slice(0, 80));
+    const cidA = dom.window.localStorage.getItem("settingshub.workflows.client") || "";
+    const cidA2 = cidA.startsWith("\"") ? JSON.parse(cidA) : cidA;
+    check("AAA recent: the empty manifest reached the server for THIS session",
+        !!cidA2 &&
+        Array.isArray(fakeApi.__recentStore().get(cidA2)?.entries) &&
+        fakeApi.__recentStore().get(cidA2).entries.length === 0,
+        JSON.stringify(fakeApi.__recentStore().get(cidA2)?.entries));
+    hooks.setRecentLimit(15);
+    fakeApi.__setIdxFiles([]);
+    hooks.setTab("open");
+    await settle();
+}
+
+// ===========================================================================
 
 console.log(`\nworkflows smoke: PASS ${pass}  FAIL ${fail}`);
 if (failures.length) {

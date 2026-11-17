@@ -30,9 +30,31 @@ LAYERED FINGERPRINTS (plan 2.2) - one hash per question:
     extension_hash    the unclassified/behavior-relevant extra metadata
     structural_hash   optional topology fingerprint (sorted node types) -
                       similarity HINT only, never an identity proof
-    normalization_profile_version  the rules version ("nprof1") - a rule
+    normalization_profile_version  the rules version ("nprof2") - a rule
                       change re-indexes, old hashes are never silently
                       reinterpreted
+
+v117 SIMILARITY SIGNATURES (the owner's Files-grouping plan) - the scan
+computes FOUR extra per-row features that make the grouping a pure SQLite
+query (no file reads at group time):
+    sig_graph_hash    the ID-INDEPENDENT graph fingerprint: the workflow
+                      document minus the top-level id/revision and the
+                      confirmed presentation fields. Two files that share it
+                      are "Exact graph copy, different UUID" (100%) - the
+                      ComfyUI Duplicate path regenerates ONLY state.id
+                      (workflowService.ts duplicateWorkflow), so the saved
+                      duplicate matches its original here.
+    sig_types_hash    the hash of the node-type MULTISET (counts kept). The
+                      cheap candidate bucket for the "Similar" score.
+    sig_edges         the normalized link list as (source_type, origin_slot)
+                      -> (target_type, target_slot) pairs - node ids and
+                      link ids never enter the key.
+    sig_widgets       the per-node widget values, volatile entries (seed /
+                      control_after_generate) masked, so two runs of one
+                      pipeline with different seeds stay similar.
+The similarity SCORE itself is computed only for candidate pairs and the
+result is cached in the similarity_cache table (invalidated by any re-index
+or profile change) - the plan's performance contract for 2000+ libraries.
 
 EXTRACTION (plan 4.5) - only what the schema actually carries:
     workflow_id (top-level "id"), node count, node classes, node titles,
@@ -60,8 +82,24 @@ import time
 MAX_ANALYZE_BYTES = 8 * 1024 * 1024      # plan 4.4: no unbounded reads
 MAX_SEARCH_TEXT_CHARS = 20000           # the FTS payload budget per file
 MAX_ERROR_CHARS = 200
-NORMALIZATION_PROFILE_VERSION = "nprof1"
-SCHEMA_VERSION = "1"
+NORMALIZATION_PROFILE_VERSION = "nprof2"   # v117: the similarity signatures
+SCHEMA_VERSION = "2"                       # v117: +4 sig columns + the cache
+
+# v117 similarity-group bounds (the plan's performance contract: a 2000+
+# library must answer from SQLite, the detailed score runs for CANDIDATES
+# only; the cache table keeps repeat queries free)
+SIM_MAX_BUCKET = 60        # a candidate bucket bigger than this is skipped
+SIM_MAX_GROUPS = 200       # the groups answer cap
+SIM_UNGROUPED_CAP = 300    # the ungrouped rows carried in one answer
+SIM_CACHE_ROWS = 64        # the LRU cap of the similarity_cache table
+# the deterministic score weights (they sum to 1.0 and live in the answer so
+# the UI can explain the estimate honestly)
+SIM_WEIGHTS = {"types": 0.35, "edges": 0.40, "widgets": 0.15, "models": 0.10}
+# volatile widget keys - their value NEVER lowers the similarity (two runs
+# of one pipeline differ by the seed only)
+SIM_VOLATILE_KEYS = {"seed", "noise_seed", "rand_seed", "random_seed",
+                     "control_after_generate", "batch_seed"}
+SIM_NUMERIC_PENALTY = 0.4  # a numeric (e.g. steps/cfg) mismatch is softened
 # v116 (plan 3.1): the per-pass walk bound. The bound no longer lies: a
 # truncated pass is reported (stats + meta) and the vanished-row prune is
 # SKIPPED - unverified rows are never deleted. Tests shrink the bound
@@ -216,6 +254,104 @@ def _extract_models(obj, out, depth=0):
                 _extract_models(v, out, depth + 1)
 
 
+def _sig_graph_doc(wf):
+    """The ID-INDEPENDENT graph document (v117): the presentation-stripped
+copy WITHOUT the top-level id and revision. This is the fingerprint that
+recognizes a ComfyUI Duplicate: duplicateWorkflow regenerates ONLY state.id,
+so the saved copy is byte-identical apart from the id (and the file name).
+The original document is NEVER modified."""
+    g, _presentation = _strip_presentation(wf)
+    g2 = dict(g)
+    for k in ("id", "revision"):
+        g2.pop(k, None)
+    return g2
+
+
+def _extract_edges(wf):
+    """The normalized link keys (v117): ['srcType|slot>dstType|slot', ...]
+sorted + counted. Node ids and link ids NEVER enter the key - a graph that
+differs only by renumbering scores 100% on the edge feature. Handles both
+the v1 array links [id, origin_id, origin_slot, target_id, target_slot, type]
+and the newer object links. Bounded to 6000 keys."""
+    nodes = wf.get("nodes") if isinstance(wf.get("nodes"), list) else []
+    id2type = {}
+    for n in nodes:
+        if isinstance(n, dict) and isinstance(n.get("id"), (int, float)):
+            id2type[n["id"]] = str(n.get("type") or "?")
+    links = wf.get("links") if isinstance(wf.get("links"), list) else []
+    out = []
+    for lk in links[:6000]:
+        if isinstance(lk, dict):
+            oid = lk.get("origin_id")
+            oslot = lk.get("origin_slot")
+            tid = lk.get("target_id")
+            tslot = lk.get("target_slot")
+        elif isinstance(lk, (list, tuple)) and len(lk) >= 5:
+            oid, oslot, tid, tslot = lk[1], lk[2], lk[3], lk[4]
+        else:
+            continue
+        out.append("%s|%s>%s|%s" % (id2type.get(oid, "?"), oslot,
+                                    id2type.get(tid, "?"), tslot))
+    out.sort()
+    return out
+
+
+def _norm_widget_value(v):
+    """Scalar normalization for the widget signature: floats that are whole
+compare equal to ints (0.9 vs 1 - ComfyUI round-trips), everything else
+passes through; a value that is not JSON-serializable degrades to str."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        f = float(v)
+        return int(f) if f.is_integer() else round(f, 6)
+    if isinstance(v, str):
+        return v
+    try:
+        json.dumps(v)
+        return v
+    except (TypeError, ValueError):
+        return str(v)[:80]
+
+
+def _extract_widgets(wf):
+    """The per-node widget signature (v117): a sorted list of
+{"t": node_type, "w": [values...]} records. Volatile keys (seed /
+control_after_generate) are masked in the named-widget dict form; the
+positional list form keeps the raw scalars (the SCORE weakens numeric
+mismatches instead - a masked seed would also hide real config). Bounded
+to 400 nodes."""
+    nodes = wf.get("nodes") if isinstance(wf.get("nodes"), list) else []
+    out = []
+    for n in nodes[:400]:
+        if not isinstance(n, dict):
+            continue
+        t = str(n.get("type") or "?")
+        wv = n.get("widgets_values")
+        if isinstance(wv, dict):
+            vals = [[str(k), "<v>" if str(k).lower() in SIM_VOLATILE_KEYS
+                     else _norm_widget_value(v)]
+                    for k, v in sorted(wv.items(), key=lambda kv: str(kv[0]))]
+        elif isinstance(wv, (list, tuple)):
+            vals = [_norm_widget_value(v) for v in wv[:60]]
+        else:
+            if wv is None:
+                continue
+            vals = [_norm_widget_value(wv)]
+        out.append({"t": t, "w": vals})
+    out.sort(key=lambda r: json.dumps(r, sort_keys=True, ensure_ascii=False))
+    return out
+
+
+def _node_type_multiset(wf):
+    """The node types WITH duplicates (the plan: a multiset, not a unique
+list) - sorted, capped. The sig_types_hash bucket key hashes this."""
+    nodes = wf.get("nodes") if isinstance(wf.get("nodes"), list) else []
+    types = sorted(str(n.get("type") or "?") for n in nodes
+                   if isinstance(n, dict))
+    return types[:4000]
+
+
 def _collect_text_values(obj, out, depth=0):
     """The search-text harvest: strings from widget/input-like keys, node
     titles and types. Depth- and size-bounded."""
@@ -251,6 +387,10 @@ def analyze_workflow_bytes(raw):
         "presentation_hash": None,
         "extension_hash": None,
         "structural_hash": None,
+        "sig_graph_hash": None,
+        "sig_types_hash": None,
+        "sig_edges": None,
+        "sig_widgets": None,
         "workflow_id": None,
         "node_count": None,
         "node_types": None,
@@ -304,6 +444,19 @@ def analyze_workflow_bytes(raw):
     rec["extension_hash"] = _sha256(ecanon.encode("utf-8")) if ecanon else None
     rec["structural_hash"] = _sha256(
         _canon_json(sorted(t for t in types if t)).encode("utf-8")) if types else None
+    # v117: the similarity signatures (nprof2) - the ID-INDEPENDENT graph
+    # hash, the node-type multiset bucket key and the bounded edge/widget
+    # features the score reads straight from SQLite (never a file re-read)
+    sigdoc = _sig_graph_doc(wf)
+    sc = _canon_json(sigdoc)
+    rec["sig_graph_hash"] = _sha256(sc.encode("utf-8")) if sc else None
+    ms = _node_type_multiset(wf)
+    mc = _canon_json(ms)
+    rec["sig_types_hash"] = _sha256(mc.encode("utf-8")) if mc else None
+    edges = _extract_edges(wf)
+    rec["sig_edges"] = _canon_json(edges) if edges else None
+    widgets = _extract_widgets(wf)
+    rec["sig_widgets"] = _canon_json(widgets) if widgets else None
     rec["normalized"] = True
     # the summaries
     known_extra = {}
@@ -473,6 +626,8 @@ def _ensure_schema(conn):
               "raw_hash TEXT, canonical_hash TEXT, workflow_hash TEXT,"
               "presentation_hash TEXT, extension_hash TEXT,"
               "structural_hash TEXT,"
+              "sig_graph_hash TEXT, sig_types_hash TEXT,"
+              "sig_edges TEXT, sig_widgets TEXT,"
               "normalization_profile_version TEXT,"
               "extra_summary TEXT, node_count INTEGER,"
               "node_types TEXT, node_titles TEXT, model_refs TEXT,"
@@ -480,6 +635,27 @@ def _ensure_schema(conn):
               "parse_status TEXT, parse_error TEXT,"
               "indexed_at INTEGER,"
               "PRIMARY KEY (user_scope, root_key, rel_path))")
+    # v117: the nprof2 similarity signature columns - an OLD DB (schema 1)
+    # gains them through the guarded ALTER TABLE pass below (CREATE with the
+    # new columns covers only the fresh databases)
+    have = {r[1] for r in conn.execute(
+        "PRAGMA table_info(workflow_files)").fetchall()}
+    for col in ("sig_graph_hash", "sig_types_hash", "sig_edges",
+                "sig_widgets"):
+        if col not in have:
+            try:
+                conn.execute("ALTER TABLE workflow_files ADD COLUMN %s TEXT"
+                             % col)
+            except sqlite3.DatabaseError:
+                pass
+    # v117: the similarity RESULT cache (the plan: cache the grouping in
+    # SQLite, invalidate on ANY re-index or profile change). The key carries
+    # (scope, threshold, profile, row_sig) where row_sig is the count +
+    # max(indexed_at) of the scope - any scan pass that (re)writes a row
+    # changes the signature and the stale entries simply stop being read.
+    c.execute("CREATE TABLE IF NOT EXISTS similarity_cache ("
+              "cache_key TEXT PRIMARY KEY, kind_filter TEXT,"
+              "payload TEXT, created_at INTEGER)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_wf_id "
               "ON workflow_files (user_scope, workflow_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_wf_mtime "
@@ -655,11 +831,13 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                                 " workflow_id, raw_hash, canonical_hash,"
                                 " workflow_hash, presentation_hash,"
                                 " extension_hash, structural_hash,"
+                                " sig_graph_hash, sig_types_hash, sig_edges,"
+                                " sig_widgets,"
                                 " normalization_profile_version, extra_summary,"
                                 " node_count, node_types, node_titles,"
                                 " model_refs, search_text, parse_status,"
                                 " parse_error, indexed_at)"
-                                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                 (user_scope, root_key, key[2], fn,
                                  rel.rsplit("/", 1)[0] if "/" in rel else "",
                                  sig[0], sig[1], sig[2], mtime_sec,
@@ -667,6 +845,8 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                                  rec["canonical_hash"], rec["workflow_hash"],
                                  rec["presentation_hash"], rec["extension_hash"],
                                  rec["structural_hash"],
+                                 rec["sig_graph_hash"], rec["sig_types_hash"],
+                                 rec["sig_edges"], rec["sig_widgets"],
                                  NORMALIZATION_PROFILE_VERSION,
                                  json.dumps(rec["extra_summary"], ensure_ascii=False),
                                  rec["node_count"],
@@ -852,17 +1032,22 @@ def refresh_paths(db=None, user_scope="default", root_dirs=None,
                             " workflow_id, raw_hash, canonical_hash,"
                             " workflow_hash, presentation_hash,"
                             " extension_hash, structural_hash,"
+                            " sig_graph_hash, sig_types_hash, sig_edges,"
+                            " sig_widgets,"
                             " normalization_profile_version, extra_summary,"
                             " node_count, node_types, node_titles,"
                             " model_refs, search_text, parse_status,"
                             " parse_error, indexed_at)"
-                            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (user_scope, root_key, rel, fn, folder,
                              sig[0], sig[1], sig[2], mtime_sec,
                              rec["workflow_id"], rec["raw_hash"],
                              rec["canonical_hash"], rec["workflow_hash"],
                              rec["presentation_hash"], rec["extension_hash"],
-                             rec["structural_hash"], NORMALIZATION_PROFILE_VERSION,
+                             rec["structural_hash"],
+                             rec["sig_graph_hash"], rec["sig_types_hash"],
+                             rec["sig_edges"], rec["sig_widgets"],
+                             NORMALIZATION_PROFILE_VERSION,
                              json.dumps(rec["extra_summary"], ensure_ascii=False),
                              rec["node_count"],
                              json.dumps(rec["node_types"], ensure_ascii=False),
@@ -1494,3 +1679,335 @@ def duplicate_groups(db=None, user_scope="default"):
         out["ok"] = False
         out["error"] = str(e)[:MAX_ERROR_CHARS]
     return out
+
+
+# ---------------------------------------------------------------------------
+# v117: SIMILARITY GROUPS (the owner's Files-grouping plan). A deterministic,
+# versioned estimate - never an identity proof, never an automatic merge.
+# The features come straight from the sig_* columns the scan maintains, the
+# detailed score runs for CANDIDATE pairs only and the result is cached in
+# similarity_cache (invalidated by any re-index or profile change).
+# ---------------------------------------------------------------------------
+
+def _multiset_jaccard(a, b):
+    """Multiset Jaccard: sum(min) / sum(max) over counted keys (the plan:
+    a node-type MULTISET, not a unique list). Two EMPTY multisets are
+    neutral-identical (1.0) - the feature can only lower the score when it
+    actually disagrees."""
+    if not a and not b:
+        return 1.0
+    ca, cb = {}, {}
+    for x in a:
+        ca[x] = ca.get(x, 0) + 1
+    for x in b:
+        cb[x] = cb.get(x, 0) + 1
+    inter = sum(min(n, cb.get(k, 0)) for k, n in ca.items())
+    union = sum(max(ca.get(k, 0), cb.get(k, 0)) for k in set(ca) | set(cb))
+    return inter / union if union else 1.0
+
+
+def _widget_node_score(wa, wb):
+    """One aligned node pair: the positional widget compare. Numeric
+    mismatches are SOFTENED (SIM_NUMERIC_PENALTY) - two runs of one pipeline
+    differ by seed/steps only; volatile keys were already masked at scan
+    time in the named-dict form. A length difference dilutes the score."""
+    if not wa and not wb:
+        return 1.0
+    n = min(len(wa), len(wb))
+    eq = 0.0
+    for i in range(n):
+        va, vb = wa[i], wb[i]
+        if va == vb:
+            eq += 1.0
+        elif (isinstance(va, (int, float)) and not isinstance(va, bool)
+              and isinstance(vb, (int, float)) and not isinstance(vb, bool)):
+            eq += SIM_NUMERIC_PENALTY
+    return eq / max(len(wa), len(wb))
+
+
+def _widgets_similarity(recs_a, recs_b):
+    """Align the per-node widget records BY TYPE (never by node id): same
+    type pairs compare positionally, extra unmatched nodes cost. Both empty
+    -> neutral 1.0."""
+    if not recs_a and not recs_b:
+        return 1.0
+    bya, byb = {}, {}
+    for r in recs_a:
+        bya.setdefault(r["t"], []).append(r["w"])
+    for r in recs_b:
+        byb.setdefault(r["t"], []).append(r["w"])
+    total, score = 0, 0.0
+    for t in set(bya) | set(byb):
+        la, lb = bya.get(t, []), byb.get(t, [])
+        m = min(len(la), len(lb))
+        for i in range(m):
+            score += _widget_node_score(la[i], lb[i])
+            total += 1
+        total += max(len(la), len(lb)) - m   # unmatched nodes cost fully
+    return score / total if total else 1.0
+
+
+def similarity_score(fa, fb):
+    """The deterministic 0-100 similarity estimate (the plan: structure +
+    content, presentation never counts). Weights live in SIM_WEIGHTS and are
+    echoed in every answer so the UI can explain the number honestly."""
+    s = (SIM_WEIGHTS["types"] * _multiset_jaccard(fa["types"], fb["types"])
+         + SIM_WEIGHTS["edges"] * _multiset_jaccard(fa["edges"], fb["edges"])
+         + SIM_WEIGHTS["widgets"] * _widgets_similarity(fa["widgets"],
+                                                        fb["widgets"])
+         + SIM_WEIGHTS["models"] * _multiset_jaccard(fa["models"],
+                                                     fb["models"]))
+    return int(round(100.0 * s))
+
+
+_SIM_ROW_SQL = (
+    "SELECT rel_path, name, folder, size_bytes, mtime_sec, workflow_id,"
+    " raw_hash, canonical_hash, workflow_hash, presentation_hash,"
+    " extension_hash, structural_hash, node_count, node_types, model_refs,"
+    " sig_graph_hash, sig_types_hash, sig_edges, sig_widgets"
+    " FROM workflow_files WHERE user_scope=? AND parse_status='ok'"
+    " AND normalization_profile_version=? ORDER BY rel_path")
+
+
+def _similarity_rows(conn, user_scope):
+    """Every current-profile row as (features dict, page-shaped row dict).
+    parse-broken/too-large files are skipped (they carry no graph); rows of
+    an OLD profile are skipped too - a scan pass re-indexes them."""
+    feats, rows = {}, []
+    for (rel, name, folder, size_bytes, mtime_sec, wf_id, raw_hash,
+         canon_hash, wf_hash, pres_hash, ext_hash, struct_hash, node_count,
+         node_types, model_refs, sig_graph, sig_types, sig_edges,
+         sig_widgets) in conn.execute(_SIM_ROW_SQL,
+                                      (user_scope,
+                                       NORMALIZATION_PROFILE_VERSION)).fetchall():
+        try:
+            edges = json.loads(sig_edges) if sig_edges else []
+            widgets = json.loads(sig_widgets) if sig_widgets else []
+            types = json.loads(node_types) if node_types else []
+            models = json.loads(model_refs) if model_refs else []
+        except ValueError:
+            continue
+        feats[rel] = {
+            "types": types, "edges": edges, "widgets": widgets,
+            "models": models, "sig_graph": sig_graph, "sig_types": sig_types,
+        }
+        rows.append({
+            "path": rel, "name": name, "folder": folder,
+            "size": int(size_bytes or 0), "mtime": int(mtime_sec or 0),
+            "workflowId": wf_id, "rawHash": raw_hash,
+            "canonicalHash": canon_hash, "workflowHash": wf_hash,
+            "presentationHash": pres_hash, "extensionHash": ext_hash,
+            "structuralHash": struct_hash,
+            "nodeCount": int(node_count or 0),
+            "nodeTypes": types, "modelRefs": models,
+            "parseStatus": "ok", "parseError": None,
+        })
+    return feats, rows
+
+
+def _similarity_cache_key(conn, user_scope, threshold):
+    """scope|threshold|profile|count|max(mtime_ns)|max(indexed_at) - ANY
+    re-indexed row bumps max(indexed_at), any deletion bumps the count, any
+    save bumps max(mtime_ns): the stale entries stop being read and the LRU
+    trim reclaims the space."""
+    row = conn.execute(
+        "SELECT count(*), max(mtime_ns), max(indexed_at) FROM workflow_files"
+        " WHERE user_scope=?", (user_scope,)).fetchone()
+    return "%s|%d|%s|%s|%s|%s" % (
+        user_scope, threshold, NORMALIZATION_PROFILE_VERSION,
+        row[0] or 0, row[1] or 0, row[2] or 0), int(row[0] or 0)
+
+
+def _similarity_cache_get(conn, key):
+    try:
+        row = conn.execute(
+            "SELECT payload FROM similarity_cache WHERE cache_key=?",
+            (key,)).fetchone()
+        if row:
+            return json.loads(row[0])
+    except (ValueError, sqlite3.DatabaseError):
+        pass
+    return None
+
+
+def _similarity_cache_put(conn, key, payload):
+    try:
+        conn.execute("INSERT OR REPLACE INTO similarity_cache "
+                     "(cache_key, kind_filter, payload, created_at) "
+                     "VALUES (?,?,?,?)",
+                     (key, "all",
+                      json.dumps(payload, ensure_ascii=False), int(time.time())))
+        conn.execute("DELETE FROM similarity_cache WHERE cache_key IN ("
+                     "SELECT cache_key FROM similarity_cache "
+                     "ORDER BY created_at DESC LIMIT -1 OFFSET ?)",
+                     (SIM_CACHE_ROWS,))
+        # the answer connection closes WITHOUT a commit in the caller - the
+        # cache write must persist on its own (best effort)
+        conn.commit()
+    except sqlite3.DatabaseError:
+        pass   # the cache is best effort - the live computation already ran
+
+
+def _similarity_filter(answer, kind):
+    """The client-side kind filter ('same_uuid' / 'exact' / 'similar')
+applied to a FULL cached answer - flipping the filter never recomputes."""
+    if kind not in ("same_uuid", "exact", "similar"):
+        return answer
+    answer = dict(answer)
+    answer["groups"] = [g for g in answer.get("groups", [])
+                        if g.get("kind") == kind]
+    answer["kind"] = kind
+    return answer
+
+
+def similarity_groups(db=None, user_scope="default", threshold=90,
+                      kind=None):
+    """The Files-tab grouping (v117): groups over the WHOLE index, built
+    server-side (the plan: the flat list is server-paginated, so grouping a
+    single client page would lie). Priority: Same UUID > Exact graph copy >
+    Similar; every file lands in AT MOST ONE group (anchor-based, no
+    chaining); the rest ships as `ungrouped`. The kind filter ('same_uuid' /
+    'exact' / 'similar') only filters the ANSWER - the full computation is
+    cached so flipping the filter is free."""
+    db = db or _db_path()
+    try:
+        threshold = int(threshold)
+    except (TypeError, ValueError):
+        threshold = 90
+    threshold = max(80, min(100, threshold))
+    out = {"ok": True, "profile": NORMALIZATION_PROFILE_VERSION,
+           "threshold": threshold, "weights": SIM_WEIGHTS,
+           "groups": [], "ungrouped": [], "ungroupedTotal": 0,
+           "totalFiles": 0, "skippedBroad": 0, "cached": False}
+    try:
+        with _db_lock:
+            init_db(db)
+            conn = _connect(db)
+            try:
+                cache_key, total_files = _similarity_cache_key(
+                    conn, user_scope, threshold)
+                out["totalFiles"] = total_files
+                cached = _similarity_cache_get(conn, cache_key)
+                if isinstance(cached, dict) and cached.get("groups") is not None:
+                    cached["cached"] = True
+                    cached["threshold"] = threshold
+                    return _similarity_filter(cached, kind)
+                feats, rows = _similarity_rows(conn, user_scope)
+                rows_by_path = {r["path"]: r for r in rows}
+                grouped = set()
+                groups = []
+                # 1) SAME UUID - every workflow_id shared by 2+ files
+                by_id = {}
+                for r in rows:
+                    wid = r["workflowId"]
+                    if wid:
+                        by_id.setdefault(wid, []).append(r["path"])
+                for wid, paths in sorted(by_id.items(),
+                                         key=lambda kv: (-len(kv[1]), kv[0])):
+                    if len(paths) < 2:
+                        continue
+                    members = sorted(paths)
+                    grouped.update(members)
+                    groups.append({
+                        "kind": "same_uuid",
+                        "key": "uuid:" + wid,
+                        "label": "Same workflow ID",
+                        "workflowId": wid,
+                        "count": len(members),
+                        "anchor": members[0],
+                        "files": [rows_by_path[p] for p in members],
+                    })
+                    if len(groups) >= SIM_MAX_GROUPS:
+                        break
+                # 2) EXACT GRAPH COPY, DIFFERENT UUID - one sig_graph_hash:
+                #    the id/revision-stripped document is byte-identical (the
+                #    ComfyUI Duplicate signature). Files still sharing a UUID
+                #    already live in a same_uuid group, so the remaining
+                #    members really carry different ids.
+                if len(groups) < SIM_MAX_GROUPS:
+                    by_graph = {}
+                    for rel, f in feats.items():
+                        if rel in grouped or not f["sig_graph"]:
+                            continue
+                        by_graph.setdefault(f["sig_graph"], []).append(rel)
+                    for gh, paths in sorted(by_graph.items(),
+                                            key=lambda kv: (-len(kv[1]), kv[0])):
+                        if len(paths) < 2:
+                            continue
+                        members = sorted(paths)
+                        grouped.update(members)
+                        groups.append({
+                            "kind": "exact",
+                            "key": "graph:" + gh,
+                            "label": "Exact graph copy, different UUID",
+                            "count": len(members),
+                            "minScore": 100, "avgScore": 100,
+                            "anchor": members[0],
+                            "files": [rows_by_path[p] for p in members],
+                        })
+                        if len(groups) >= SIM_MAX_GROUPS:
+                            break
+                # 3) SIMILAR - candidate buckets by the node-type multiset
+                #    hash (cheap SQLite GROUP BY), the detailed score runs
+                #    ONLY inside a bucket and ONLY against the ANCHOR (the
+                #    newest file) - no chain growth, no transitive closure.
+                if len(groups) < SIM_MAX_GROUPS:
+                    by_types = {}
+                    for rel, f in feats.items():
+                        if rel in grouped or not f["sig_types"]:
+                            continue
+                        by_types.setdefault(f["sig_types"], []).append(rel)
+                    for h, paths in sorted(by_types.items(),
+                                           key=lambda kv: (-len(kv[1]),
+                                                           kv[0])):
+                        if len(paths) < 2:
+                            continue
+                        if len(paths) > SIM_MAX_BUCKET:
+                            out["skippedBroad"] += 1
+                            continue
+                        members = sorted(
+                            paths,
+                            key=lambda p: (-rows_by_path[p]["mtime"], p))
+                        anchor = members[0]
+                        fa = feats[anchor]
+                        hits, scores = [], []
+                        for p in members[1:]:
+                            sc = similarity_score(fa, feats[p])
+                            if sc >= threshold:
+                                hits.append(p)
+                                scores.append(sc)
+                        if not hits:
+                            continue
+                        sel = [anchor] + hits
+                        grouped.update(sel)
+                        groups.append({
+                            "kind": "similar",
+                            "key": "types:" + h + ":" + anchor,
+                            "label": "Similar workflows",
+                            "count": len(sel),
+                            "minScore": min(scores),
+                            "avgScore": int(round(sum(scores)
+                                                  / len(scores))),
+                            "anchor": anchor,
+                            "files": [rows_by_path[p] for p in sel],
+                        })
+                        if len(groups) >= SIM_MAX_GROUPS:
+                            break
+                ungrouped = [r for r in rows if r["path"] not in grouped]
+                out["ungroupedTotal"] = len(ungrouped)
+                out["ungrouped"] = ungrouped[:SIM_UNGROUPED_CAP]
+                out["groups"] = groups[:SIM_MAX_GROUPS]
+                out["totalFiles"] = len(rows)
+                cacheable = dict(out)
+                cacheable.pop("cached", None)
+                cacheable.pop("kind", None)
+                _similarity_cache_put(conn, cache_key, cacheable)
+                return _similarity_filter(out, kind)
+            finally:
+                conn.close()
+    except sqlite3.DatabaseError as e:
+        return {"ok": False, "error": str(e)[:MAX_ERROR_CHARS],
+                "profile": NORMALIZATION_PROFILE_VERSION,
+                "threshold": threshold, "weights": SIM_WEIGHTS,
+                "groups": [], "ungrouped": [], "ungroupedTotal": 0,
+                "totalFiles": 0, "skippedBroad": 0, "cached": False}

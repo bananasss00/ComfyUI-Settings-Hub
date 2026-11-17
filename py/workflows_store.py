@@ -168,7 +168,10 @@ MAX_PATH_CHARS = 300
 MAX_ACTIVE_PATH_CHARS = MAX_PATH_CHARS
 # v107: the temp-snapshot folder cap (a root must stay bounded even when a
 # client never cleans its recently-closed evictions up - multi-browser).
-MAX_TEMP_FILES = 40
+MAX_TEMP_FILES = 128   # v117: up to 30 entries PER browser session (the
+                       # owner's Recently-closed-items setting) - 40 evicted
+                       # other sessions' live snapshots; the eviction now
+                       # also honors the cross-browser reference union
 # v112 (plan 3.1/3.6): the reserved WORKFLOWS-MANAGER service folder of the
 # DEFAULT user dir - outside every workflows/ walk root and outside the
 # re-pointable storage root: undo snapshots, recently-closed manifests and
@@ -642,6 +645,48 @@ def _read_presets():
     return list(out.values())
 
 
+def presets_referencing_paths(paths):
+    """v117 (the owner's delete plan): WHICH presets point at the files the
+    user is about to delete - the confirm-dialog warning. A preset item of
+    kind 'path' (or the preset's activePath) referencing a selected path
+    (both sides canonicalized through _clean_item_path, so './x.json' and
+    'workflows/x.json' spellings collapse) reports {id, name, paths}. The
+    presets themselves are NEVER touched by a file delete - this list is
+    informational only."""
+    sel = set()
+    for p in (paths or []):
+        c = _clean_item_path(p) if isinstance(p, str) else None
+        if c:
+            sel.add(c)
+            sel.add(c.lower())
+    if not sel:
+        return []
+    hits = {}
+    for p in _read_presets():
+        pid = p.get("id")
+        if not isinstance(pid, str):
+            continue
+        refs = set()
+        items = p.get("items")
+        if isinstance(items, list):
+            for it in items:
+                if not isinstance(it, dict) or it.get("kind") != "path":
+                    continue
+                c = _clean_item_path(it.get("path"))
+                if c and (c in sel or c.lower() in sel):
+                    refs.add(c)
+        ap = _clean_item_path(p.get("activePath"))
+        if ap and (ap in sel or ap.lower() in sel):
+            refs.add(ap)
+        if refs:
+            rec = hits.setdefault(pid, {"id": pid,
+                                        "name": p.get("name") or pid,
+                                        "paths": set()})
+            rec["paths"].update(refs)
+    return [{"id": r["id"], "name": r["name"], "paths": sorted(r["paths"])}
+            for r in hits.values()]
+
+
 def _count_preset_files():
     """Cheap MAX_PRESETS guard: the per-preset files of the ACTIVE root (no
     parsing) - new presets are created here, so THIS folder is the one the
@@ -844,7 +889,14 @@ def _evict_temp_files():
     """Keep every folder bounded: the OLDEST temp snapshots beyond
     MAX_TEMP_FILES are deleted PER ROOT (newest-by-ts win; the default root
     is evicted in its own right so a switch cannot let it grow forever).
-    Best effort - a locked file skips itself. Runs after every PUT."""
+    v117 (the owner's Recently-closed plan): a snapshot that ANY active
+    browser manifest still references is NEVER evicted (_recent_refs - the
+    cross-browser reference union; the plan: 'при эвикции не удалять temp
+    snapshots, на которые ещё ссылаются активные manifests') - a referenced
+    survivor may push the folder past the cap, which is correct: the cap is
+    a garbage bound, not a hard ceiling on live data. Best effort - a locked
+    file skips itself. Runs after every PUT."""
+    refs = _recent_refs()
     for root in _roots_all():
         tdir = os.path.join(root, _TEMP_DIR_NAME)
         try:
@@ -863,6 +915,8 @@ def _evict_temp_files():
                               "seq": int(it.get("seq", 0) or 0)})
         items.sort(key=lambda it: (-it["ts"], -it["seq"]))
         for it in items[MAX_TEMP_FILES:]:
+            if it["id"] in refs:
+                continue   # another browser session still points at it
             try:
                 os.unlink(_temp_file_in(root, it["id"]))
             except OSError:
@@ -1541,7 +1595,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v116"
+WORKFLOWS_SERVER_VERSION = "v117"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -2268,15 +2322,32 @@ def _fileops_gc_locked():
 @PromptServer.instance.routes.post("/settings_hub/workflows/files/delete")
 async def workflows_files_delete(request):
     """DELETE the selected workflow files. Body {paths: ['workflows/<rel>',
-    ...]}. Everything validates BEFORE the first unlink (plan 7.6/7.7):
-    library-relative paths only, traversal/symlink checks, the batch cap,
-    a verified safety snapshot per file. A preflight failure answers 409
-    with per-file reasons and deletes NOTHING."""
+    ...], preview?: bool}. Everything validates BEFORE the first unlink
+    (plan 7.6/7.7): library-relative paths only, traversal/symlink checks,
+    the batch cap, a verified safety snapshot per file. A preflight failure
+    answers 409 with per-file reasons and deletes NOTHING.
+
+    v117 (the owner's delete plan) - TWO new contracts:
+    * preview:true runs the validate step ONLY and answers with the confirm
+      dialog data (paths_preview + presets_referencing_paths): how many
+      files will die, which processes lose their LAST live file (their
+      versions become unreachable and are deleted WITH the files), which
+      processes have OTHER live files on disk (their history survives), and
+      which presets reference the selected paths (informational - a preset
+      is never deleted with a file).
+    * the real delete erases the ORPHANED VERSIONS: a process that lost its
+      last live file (locations == 0 after the detach) is deleted together
+      with the file (checkpoints + manifests + the unreferenced CAS blobs)
+      so the store never keeps invisible, unreachable versions. Other live
+      files with the SAME UUID keep their process and its history intact.
+      The Undo of the delete restores the FILE bytes only - the erased
+      versions are gone for good (the confirm dialog says so)."""
     try:
         body = await request.json()
     except Exception:
         return web.json_response({"ok": False, "error": "bad json"}, status=400)
     paths = body.get("paths") if isinstance(body, dict) else None
+    preview = bool(body.get("preview")) if isinstance(body, dict) else False
     if not isinstance(paths, list) or not paths:
         return web.json_response({"ok": False, "error": "paths (a non-empty list) are required"},
                                  status=400)
@@ -2295,6 +2366,8 @@ async def workflows_files_delete(request):
             res["error"] = "bad path"
             plan.append(res)
             continue
+        if not rel.startswith("workflows/"):
+            rel = "workflows/" + rel
         res["path"] = rel
         phys, _wroot = _resolve_library_file(request, rel)
         if not phys:
@@ -2302,6 +2375,13 @@ async def workflows_files_delete(request):
             plan.append(res)
             continue
         if not os.path.isfile(phys):
+            if preview:
+                # the preview still reports the process data for a path that
+                # is already gone (the panel may show a stale page)
+                res["ok"] = True
+                res["missing"] = True
+                plan.append(res)
+                continue
             res["error"] = "not a regular file (missing?)"
             plan.append(res)
             continue
@@ -2314,6 +2394,14 @@ async def workflows_files_delete(request):
              "error": "some paths are invalid - nothing was deleted",
              "results": [{k: v for k, v in p.items() if k != "phys"}
                          for p in plan]}, status=400)
+    # 1b) v117: the PREVIEW - the confirm-dialog data, NOTHING is deleted
+    if preview:
+        pv = _wf_hist.paths_preview([p["path"] for p in plan], scope) \
+            if _wf_hist is not None else {"ok": False, "files": [],
+                                          "presetsAffected": [], "totals": {}}
+        pv["results"] = [{k: v for k, v in p.items() if k != "phys"}
+                         for p in plan]
+        return web.json_response(pv)
     # 2) the preflight: snapshot + VERIFY every file (plan 7.6: a failed
     #    snapshot stops the batch BEFORE the first deletion)
     for p in plan:
@@ -2378,12 +2466,29 @@ async def workflows_files_delete(request):
         except Exception:
             dropped = 0
     detached = []
+    orphaned_processes = 0
+    orphaned_revisions = 0
     if removed and _wf_hist is not None:
         try:
             d = _wf_hist.detach_locations([p["path"] for p in removed])
             detached = d.get("detached") or []
         except Exception:
             detached = []
+        # v117 (the owner's delete plan): a process that lost its LAST live
+        # file has unreachable versions - they are deleted WITH the file so
+        # the store keeps no invisible history. A process with OTHER live
+        # files (same UUID, not selected) keeps everything untouched.
+        for d in detached:
+            pid = d.get("processId")
+            if not pid or d.get("remaining") != 0:
+                continue
+            try:
+                dr = _wf_hist.delete_process(pid, delete_files=False)
+                if dr.get("ok"):
+                    orphaned_processes += 1
+                    orphaned_revisions += int(dr.get("deletedRevisions") or 0)
+            except Exception:
+                pass
     if removed:
         try:
             favs = _read_file_favs()
@@ -2401,9 +2506,14 @@ async def workflows_files_delete(request):
         "failed": len(failed),
         "indexRowsDropped": dropped,
         "locationsDetached": len([d for d in detached if d.get("removed")]),
+        "orphanedProcesses": orphaned_processes,
+        "orphanedRevisions": orphaned_revisions,
         "undo": undo,
-        "note": "the process history is NEVER deleted with the files"
-                if removed else None,
+        "note": ("the Undo restores the FILE bytes only - the versions of a "
+                 "process that lost its last live file are gone for good")
+                if removed and orphaned_processes else
+                ("the process history is NEVER deleted with the files"
+                 if removed else None),
     }, status=200 if not failed else 207)
 
 
@@ -2949,6 +3059,30 @@ async def workflows_index_duplicates(request):
     return web.json_response(res)
 
 
+@PromptServer.instance.routes.get("/settings_hub/workflows/index/groups")
+async def workflows_index_groups(request):
+    """v117 (the owner's Files-grouping plan): the SIMILARITY GROUPS over
+    the WHOLE index - built SERVER-side (the flat list is server-paginated;
+    grouping one client page would lie). Query: threshold (80-100, default
+    90, step 5), kind (all | same_uuid | exact | similar). The features come
+    from the nprof2 sig_* columns the scan maintains; the score runs for
+    candidate pairs only and the result is cached in SQLite (invalidated by
+    any re-index or profile change). The answer carries full page-shaped
+    rows so the Files tab renders its ordinary rows inside the groups."""
+    if _wf_index is None:
+        return web.json_response({"ok": False, "error": "index module unavailable"},
+                                 status=404)
+    scope = _request_user_scope(request)
+    qp = request.query
+    threshold = qp.get("threshold") or 90
+    kind = qp.get("kind") or "all"
+    res = _wf_index.similarity_groups(user_scope=scope, threshold=threshold,
+                                      kind=kind)
+    res["ok"] = "error" not in res
+    res["scope"] = scope
+    return web.json_response(res)
+
+
 @PromptServer.instance.routes.get("/settings_hub/workflows/index/notes")
 async def workflows_index_notes(request):
     """v116 (plan 4.6): the NOTES search - process notes, revision titles
@@ -3307,7 +3441,17 @@ async def workflows_history_process_delete(request):
     hardened locator (realpath-bound to the library roots). When the files
     are gone their derived-index rows are dropped too - a stale row would
     let the discovery reconcile resurrect the erased process from a ghost
-    location on the next throttled pass."""
+    location on the next throttled pass.
+
+    v117 (the owner's delete plan): the UUID-WIDE deletion is retired. Body
+    {deleteFiles: true, path: 'workflows/<rel>'} deletes EXACTLY THAT file
+    (the panel's current file - the plan: 'the other files of the same UUID
+    on disk are NEVER touched'), detaches it and erases the history ONLY
+    when no live location remains; with other copies alive the answer says
+    {keptHistory: true, remainingLocations: N} and the versions stay
+    reachable through them. Body {deleteFiles: true} WITHOUT a path keeps
+    the explicit whole-process consent (the armed strip) - and body
+    {deleteFiles: false} is the versions-only erasure (files untouched)."""
     if _wf_hist is None:
         return web.json_response({"ok": False, "error": "history module unavailable"},
                                  status=404)
@@ -3317,6 +3461,16 @@ async def workflows_history_process_delete(request):
     except Exception:
         body = {}
     delete_files = bool(body.get("deleteFiles")) if isinstance(body, dict) else False
+    # v117: the optional path scope - ONLY this file dies, never its
+    # same-UUID siblings (the plan's main principle)
+    only_paths = None
+    if isinstance(body, dict):
+        p = body.get("path") or body.get("onlyPath")
+        if isinstance(p, str) and p.strip():
+            only_paths = [p.strip()]
+        elif isinstance(body.get("onlyPaths"), list):
+            only_paths = [x for x in body["onlyPaths"]
+                          if isinstance(x, str) and x.strip()]
 
     def _locate_or_result(rel):
         """The common hardened validation: returns (phys, None) or
@@ -3381,21 +3535,29 @@ async def workflows_history_process_delete(request):
         return res
 
     r = _wf_hist.delete_process(pid, delete_files=delete_files,
+                                only_paths=only_paths,
                                 file_remover=_remove_file if delete_files else None,
                                 file_preflight=_preflight if delete_files else None)
     if not r.get("ok"):
         # plan 3.5: a preflight/partial failure is a CONFLICT, not a crash
         return web.json_response(r, status=409)
     dropped = 0
-    if delete_files and _wf_index is not None:
-        try:
-            gone = [f.get("path") for f in r.get("files") or [] if f.get("removed")]
-            if gone:
+    gone_paths = [f.get("path") for f in r.get("files") or []
+                  if f.get("removed")]
+    if delete_files and gone_paths:
+        if _wf_index is not None:
+            try:
                 fr = _wf_index.forget_paths(
-                    user_scope=_request_user_scope(request), rel_paths=gone)
+                    user_scope=_request_user_scope(request), rel_paths=gone_paths)
                 dropped = int(fr.get("removed") or 0)
+            except Exception:
+                dropped = 0   # the scan's own prune pass is the safety net
+        # the physical files vanished - the discovery must re-bind NOW, not
+        # after the 10s throttle (a stale ghost location would resurrect)
+        try:
+            _wf_hist.expire_reconcile_cache()
         except Exception:
-            dropped = 0   # the scan's own prune pass is the safety net
+            pass
     r["indexRowsDropped"] = dropped
     return web.json_response(r, status=200)
 
