@@ -18,6 +18,11 @@ Covers the plan's mandatory acceptance items:
   * the transaction safety snapshot: made + verified BEFORE a destructive
     replace; a failed replace rolls back; TTL GC;
   * stable revisions are protected from deletion;
+  * v114: a BATCH deletion of SPECIFIC revisions (the owner's cleanup flow):
+    the same protections in one call, the batch skip report, and the SPLICED
+    parent chain (a middle-of-chain delete keeps the lineage linear);
+  * v114: revision_badges() - the per-file version indicator data
+    ({rel_path: {count, stable}}, processes without revisions cost nothing);
   * process discovery by UUID (reconcile): same UUID -> one process with
     multiple locations; different UUID -> different processes; no-UUID
     files never auto-bind;
@@ -391,6 +396,99 @@ _u3 = hist._proc_cache["by_uuid"].get("33333333-3333-3333-3333-333333333333")
 check("v113 cache: the uuid map holds the fresh binding",
       _u3 == r4.get("processId"),
       json.dumps({"map": _u3, "want": r4.get("processId")}))
+
+# ---------------------------------------------------------------------------
+# 16) v114 (owner request): the version-cleanup flow - delete SPECIFIC
+# revisions in ONE batch (checkboxes + a dynamic Select all / Deselect all
+# in the Process-history panel), the stable + current protections stay
+# SERVER-side, a deleted revision is SPLICED out of the parent chain (the
+# descendants must never become an invisible branch), and the Files rows
+# get the version-count INDICATOR from revision_badges().
+# A FRESH controlled process (uuid 4444.., one location) keeps the
+# assertions exact - the earlier sections share pid1 across concurrency
+# and dedupe phases.
+_b4a = hist.record_checkpoint_for_path(
+    "workflows/p4.json", wf_bytes("44444444-4444-4444-4444-444444444444", seed="c1"),
+    note="first", source="checkpoint")
+_b4b = hist.record_checkpoint_for_path(
+    "workflows/p4.json", wf_bytes("44444444-4444-4444-4444-444444444444", seed="c2"),
+    note="second", source="checkpoint")
+_b4c = hist.record_checkpoint_for_path(
+    "workflows/p4.json", wf_bytes("44444444-4444-4444-4444-444444444444", seed="c3"),
+    note="third", source="checkpoint")
+check("v114 setup: the fresh process carries exactly 3 chained revisions",
+      _b4a.get("ok") and _b4b.get("ok") and _b4c.get("ok") and
+      len(hist.list_revisions(_b4a["processId"])) == 3,
+      json.dumps([_b4a.get("error"), _b4b.get("error"), _b4c.get("error")]))
+_pid4 = _b4a["processId"]
+_v1, _v2, _v3 = (hist.list_revisions(_pid4)[2],   # oldest (parent None)
+                 hist.list_revisions(_pid4)[1],   # middle
+                 hist.list_revisions(_pid4)[0])   # newest = CURRENT
+
+# the badges BEFORE any deletion: the location carries the full count;
+# a path with no process/revisions contributes nothing
+_badges = hist.revision_badges()
+check("v114 badges: the p4 location shows the full count",
+      _badges.get("workflows/p4.json", {}).get("count") == 3 and
+      _badges.get("workflows/p4.json", {}).get("stable") == 0,
+      json.dumps(_badges.get("workflows/p4.json")))
+check("v114 badges: the other processes keep their own counts",
+      _badges.get("workflows/p2.json", {}).get("count") == 1 and
+      (_badges.get("workflows/p1.json", {}).get("count") or 0) >= 3,
+      json.dumps({k: _badges.get(k) for k in
+                  ("workflows/p2.json", "workflows/p1.json")}))
+check("v114 badges: a path without a process is absent from the map",
+      "workflows/noid.json" not in _badges, json.dumps(sorted(_badges)))
+
+_d = hist.delete_revisions("not-a-list")
+check("v114 delete: a non-list payload refuses with a clear error",
+      not _d.get("ok") and "revisionIds" in _d.get("error", ""), json.dumps(_d))
+
+# the MIDDLE deletion splices the chain: the current revision re-links to v1
+_d = hist.delete_revisions([_v2["revisionId"]])
+check("v114 delete: the middle-of-chain revision is deleted",
+      _d.get("ok") and _d.get("deleted") == [_v2["revisionId"]] and
+      not _d.get("skipped"), json.dumps(_d))
+_chain = hist.list_revisions(_pid4)
+check("v114 splice: the lineage stays linear (current -> v1, no gap)",
+      [r["revisionId"] for r in _chain] == [_v3["revisionId"], _v1["revisionId"]] and
+      _chain[0]["parentRevisionId"] == _v1["revisionId"],
+      json.dumps([(r["revisionId"][:6], (r["parentRevisionId"] or "")[:6]) for r in _chain]))
+check("v114 delete: the manifest is really gone",
+      hist._read_revision(_v2["revisionId"]) is None)
+check("v114 badges: the count follows the deletion",
+      hist.revision_badges().get("workflows/p4.json", {}).get("count") == 2)
+
+# the protection contract in ONE batch: stable -> skip, current -> skip,
+# unknown rid -> skip; NOTHING is deleted
+hist.mark_stable(_v1["revisionId"], True)
+_d = hist.delete_revisions([_v1["revisionId"], _v3["revisionId"], "f" * 16])
+check("v114 delete: the batch reports every protected/missing rid",
+      _d.get("ok") and _d.get("deleted") == [] and len(_d.get("skipped", [])) == 3 and
+      any("stable" in s["reason"] for s in _d["skipped"]) and
+      any("current" in s["reason"] for s in _d["skipped"]) and
+      any("no such revision" in s["reason"] for s in _d["skipped"]),
+      json.dumps(_d))
+check("v114 delete: the protected versions survive",
+      len(hist.list_revisions(_pid4)) == 2)
+check("v114 badges: the stable counter is visible in the indicator",
+      hist.revision_badges().get("workflows/p4.json", {}).get("stable") == 1)
+
+# unmark stable -> the deletion goes through; the store keeps exactly one
+# (current) version and the badge drops to 1
+hist.mark_stable(_v1["revisionId"], False)
+_d = hist.delete_revisions([_v1["revisionId"]])
+check("v114 delete: after the unmark the last non-current version deletes",
+      _d.get("ok") and _d.get("deleted") == [_v1["revisionId"]], json.dumps(_d))
+_final = hist.list_revisions(_pid4)
+check("v114 delete: only the current revision remains",
+      [r["revisionId"] for r in _final] == [_v3["revisionId"]],
+      json.dumps([r["revisionId"][:6] for r in _final]))
+_b2 = hist.revision_badges()
+check("v114 badges: the indicator reads 1 stable 0 after the cleanup",
+      _b2.get("workflows/p4.json", {}).get("count") == 1 and
+      _b2.get("workflows/p4.json", {}).get("stable") == 0,
+      json.dumps(_b2.get("workflows/p4.json")))
 
 # ---------------------------------------------------------------------------
 shutil.rmtree(TMP, ignore_errors=True)

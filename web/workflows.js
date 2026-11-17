@@ -227,9 +227,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v113";
+const WF_WEB_VERSION = "v114";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v113";
+globalThis.__SettingsHubLoaded["workflows"] = "v114";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -3169,6 +3169,10 @@ function presetsTabHtml() {
 }
 
 function filesTabHtml() {
+    // v114: the version indicator needs the badge cache - ONE TTL-guarded
+    // request per 30s max; the answer patches the already-rendered rows in
+    // place, later re-renders read the cache directly.
+    refreshHistBadges();
     // v107: temp tabs reopen from their SERVER snapshot (tempId ->
     // temp/<id>.json; the v106 embed is the fallback) - no file path, the
     // row is found by ts, carries a (snapshot) badge and its own tooltip.
@@ -3384,6 +3388,13 @@ function savedFileRowHtml(f, depth = 0) {
         : (f.parseStatus === "too_large_to_index"
             ? `<span class="hub-wf-snap" title="The file is too large for the index analysis - it still opens normally">…MB</span>` : "");
     const meta = [f.mtime ? fmtDateTime(f.mtime) : "", fmtSize(f.size)].filter(Boolean).join(" · ");
+    // v114: the version indicator - the 🕘 button wears a small count chip
+    // when the file's process has saved versions (the badge cache is fed by
+    // ONE /history/badges request for the whole tab)
+    const hrev = histBadgeCount(f.path);
+    const hrevChip = hrev > 0
+        ? `<span class="hub-wf-hbadge">${hrev > 99 ? "99+" : String(hrev)}</span>` : "";
+    const hrevTitle = histBadgeTitle(f.path);
     return `<div class="hub-wf-row${openNow ? " hub-wf-row-active" : ""}" data-fpath="${esc(f.path)}"${ind}>` +
         `<input type="checkbox" class="hub-wf-fcheck" data-fcheck="${esc(f.path)}"${fileSel.has(norm) ? " checked" : ""} title="Select for Open selected / Save selected as preset">` +
         `<span class="hub-wf-filecol">` +
@@ -3394,7 +3405,7 @@ function savedFileRowHtml(f, depth = 0) {
         (idxReady === false ? "" : `<button type="button" class="hub-wf-cbtn" data-act="fileinspect" data-path="${esc(f.path)}" ` +
         `title="Inspect: the identity, the nodes, the models, the parameters, the dependencies of this workflow">🔍</button>`) +
         (idxReady === false ? "" : `<button type="button" class="hub-wf-cbtn" data-act="filehist" data-path="${esc(f.path)}" ` +
-        `title="Process history: the Checkpoints, Compare, Restore of this workflow${uuid ? " (UUID " + uuid + ")" : ""}">🕘</button>`) +
+        `title="Process history: the Checkpoints, Compare, Restore of this workflow${uuid ? " (UUID " + uuid + ")" : ""}${hrevTitle}">${hrevChip}🕘</button>`) +
         `<button type="button" class="hub-wf-favbtn${fav ? " hub-wf-favbtn-on" : ""}" data-act="filefav" data-path="${esc(f.path)}" ` +
         `title="${fav ? "Remove from favorites" : "Add to favorites (★)"}">${fav ? "★" : "☆"}</button>` +
         `</div>`;
@@ -4844,10 +4855,84 @@ function containPopTextKeys(pop) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// v114 (owner request): the VERSION INDICATOR on the Files rows - "когда у
+// процесса есть версии должно быть видно". One small request feeds the WHOLE
+// tab (GET /history/badges -> {rel_path: {count, stable}}; processes without
+// revisions contribute nothing), the answer lands in a module cache and the
+// already-rendered rows are patched IN PLACE (no re-render churn). Rows
+// rendered later read the same cache at render time. The 30s TTL keeps
+// typing/filtering free of extra traffic; an old py without the route is
+// silent (the rows stay unbadged, nothing else breaks).
+// ---------------------------------------------------------------------------
+
+let histBadges = { map: null, ts: 0, inflight: null };
+const HIST_BADGE_TTL_MS = 30000;
+
+function histBadgeCount(path) {
+    const m = histBadges.map;
+    if (!m) return 0;
+    const b = m[normWfPath(path)];
+    return b && b.count > 0 ? b.count : 0;
+}
+
+function histBadgeTitle(path) {
+    const m = histBadges.map;
+    const b = m ? m[normWfPath(path)] : null;
+    if (!b || !(b.count > 0)) return "";
+    return " · " + b.count + " saved version(s)" +
+        (b.stable > 0 ? " (" + b.stable + " stable)" : "");
+}
+
+function applyHistBadges() {
+    try {
+        document.querySelectorAll('[data-act="filehist"][data-path]').forEach((btn) => {
+            const n = histBadgeCount(btn.dataset.path);
+            const ex = btn.querySelector(".hub-wf-hbadge");
+            if (n > 0) {
+                if (ex) ex.textContent = String(n);
+                else {
+                    const s = document.createElement("span");
+                    s.className = "hub-wf-hbadge";
+                    s.textContent = String(n);
+                    btn.appendChild(s);
+                }
+            } else if (ex) ex.remove();
+            // the tooltip carries the count too (stripped first - a re-render
+            // already baked the current suffix in)
+            const base = (btn.title || "").replace(/ · \d+ saved version.*$/, "");
+            btn.title = base + histBadgeTitle(btn.dataset.path);
+        });
+    } catch (_) {}
+}
+
+function refreshHistBadges(force) {
+    const fresh = histBadges.map !== null && Date.now() - histBadges.ts < HIST_BADGE_TTL_MS;
+    if (!force && fresh) return;
+    if (histBadges.inflight) return;
+    histBadges.inflight = (async () => {
+        try {
+            const res = await jfetch("/settings_hub/workflows/history/badges");
+            if (res.json?.ok && res.json.badges && typeof res.json.badges === "object") {
+                histBadges.map = res.json.badges;
+                applyHistBadges();
+            }
+        } catch (_) { /* an old py without the route - the rows stay unbadged */ }
+        // the timestamp ticks on EVERY completed attempt (even a 404) - a
+        // stale pack must not turn every re-render into a request storm
+        histBadges.ts = Date.now();
+        histBadges.inflight = null;
+    })();
+}
+
 async function openHistPop(path, anchorBtn) {
     if (histPop) { closeHistPop(); return; }
+    // v114: manage - the version-cleanup mode (checkboxes + Select all /
+    // Deselect all + an armed Delete selected); delSel holds the chosen
+    // revisionIds; armedDel is the second-click confirm state.
     histState = { path, pid: null, proc: null, revs: [], loading: true,
         error: null, cpBusy: false, armedRestore: null, compare: null,
+        manage: false, delSel: new Set(), armedDel: false,
         anchor: popAnchorRect(anchorBtn) };
     histPop = document.createElement("div");
     histPop.className = "hub-menu hub-wf-histpop";
@@ -4883,6 +4968,15 @@ async function openHistPop(path, anchorBtn) {
                 histState.cmpA = histState.cmpB;
                 histState.cmpB = el.dataset.hcmp;
             }
+            renderHistPop();
+        }
+        // v114: the manage-mode deletion checkboxes (the radio above is the
+        // Compare pair; the two never show at once)
+        if (el.matches("[data-hdel]") && histState) {
+            const rid = el.dataset.hdel;
+            if (el.checked) histState.delSel.add(rid);
+            else histState.delSel.delete(rid);
+            histState.armedDel = false;   // a changed selection disarms
             renderHistPop();
         }
     });
@@ -4924,13 +5018,31 @@ async function refreshHistState() {
     renderHistPop();
 }
 
+/** v114: the server's protection contract mirrored for the UI - stable and
+ *  current revisions get a DISABLED checkbox (the server decides anyway). */
+function histRevProtectReason(r) {
+    if (r.isStable) return "Marked stable - protected from deletion";
+    if (histState?.proc?.currentRevisionId === r.revisionId)
+        return "The current version - restore another one first";
+    return "";
+}
+
 function histRevRowHtml(r, i) {
     const lbl = histRevLabel(r);
     const stable = !!r.isStable;
     const sel = histState.sel === r.revisionId;
+    // v114: in manage mode the Compare radio gives way to the deletion
+    // checkbox; protected rows are disabled with the reason on the tooltip
+    const lead = histState.manage
+        ? (() => {
+            const prot = histRevProtectReason(r);
+            return `<input type="checkbox" data-hdel="${esc(r.revisionId)}"${histState.delSel.has(r.revisionId) ? " checked" : ""}${prot ? " disabled" : ""} ` +
+                `title="${prot ? "Cannot delete: " + esc(prot) : "Select for deletion"}">`;
+        })()
+        : `<input type="radio" name="hub-wf-histcmp" data-hcmp="${esc(r.revisionId)}"${histState.cmpA === r.revisionId ? " checked" : ""} ` +
+        `title="Select two versions for Compare">`;
     return `<div class="hub-wf-item${sel ? " hub-wf-item-open" : ""}" data-hrev="${esc(r.revisionId)}">` +
-        `<input type="radio" name="hub-wf-histcmp" data-hcmp="${esc(r.revisionId)}"${histState.cmpA === r.revisionId ? " checked" : ""} ` +
-        `title="Select two versions for Compare">` +
+        lead +
         `<button type="button" class="hub-wf-name" data-act="histopen" data-rid="${esc(r.revisionId)}" ` +
         `title="Open this version as an independent COPY (the source file is never touched)">` +
         `${esc(lbl.title || ("Checkpoint " + (histState.revs.length - i)))}</button>` +
@@ -4968,15 +5080,37 @@ function renderHistPop() {
         const revs = st.revs.length
             ? st.revs.map(histRevRowHtml).join("")
             : `<div class="hub-wf-emptylist">No checkpoints yet - the ordinary ComfyUI Save does not create history; press 📌 Checkpoint to fix the current state.</div>`;
+        // v114: in manage mode the section header carries the DYNAMIC
+        // Select all / Deselect all button (the owner's wording: "выделить
+        // все/снять все - динамическая кнопка"): it selects every
+        // DELETABLE version, the label flips when all of them are chosen
+        const delIds = st.revs.filter((r) => !histRevProtectReason(r))
+            .map((r) => r.revisionId);
+        const allSel = delIds.length > 0 &&
+            delIds.every((rid) => st.delSel.has(rid));
+        const sectHead = st.manage
+            ? `<div class="hub-wf-sect hub-wf-sect-row">Checkpoints (newest first)` +
+              `<button type="button" class="hub-wf-act hub-wf-fchip" data-act="histdelall" ` +
+              `title="${allSel ? "Clear the selection" : "Select every deletable version (stable + current stay protected)"}">${allSel ? "Deselect all" : "Select all"}</button></div>`
+            : `<div class="hub-wf-sect">Checkpoints (newest first)</div>`;
         const cmpBtn = st.cmpA && st.cmpB
             ? `<button type="button" class="hub-wf-act" data-act="histcompare">⚖ Compare the selected versions</button>` : "";
+        // v114: the manage-mode actions - the armed Delete selected + Done;
+        // the plain mode carries ONE 🗑 Manage versions entry button
+        const nSel = st.delSel.size;
+        const manageBtns = st.manage
+            ? `<button type="button" class="hub-wf-act${st.armedDel ? " hub-wf-armed" : ""}" data-act="histdelsel" ` +
+              `title="${st.armedDel ? "Click AGAIN to delete the selected versions" : "Delete the selected versions (stable + current are protected)"}">` +
+              `${st.armedDel ? "⚠ Click AGAIN to delete " + nSel : "🗑 Delete selected" + (nSel ? " (" + nSel + ")" : "")}</button>` +
+              `<button type="button" class="hub-wf-act" data-act="histdeldone" title="Leave the manage mode">✓ Done</button>`
+            : `<button type="button" class="hub-wf-act" data-act="histdelmode" title="Manage the versions: select and delete the checkpoints you do not need">🗑 Manage versions</button>`;
         const compareBox = st.compare ? st.compare : "";
-        body = head + cp + `<div class="hub-wf-sect">Checkpoints (newest first)</div>` +
+        body = head + cp + sectHead +
             `<div class="hub-wf-list">${revs}</div>` +
             compareBox +
             // v113: ONE bottom actions row - ✎ Process and ✕ Close used to
             // sit in two stacked planacts strips and read as a column
-            `<div class="hub-wf-planacts hub-wf-planacts-end">${cmpBtn}` +
+            `<div class="hub-wf-planacts hub-wf-planacts-end">${cmpBtn}${manageBtns}` +
             `<button type="button" class="hub-wf-act" data-act="histmeta" title="Rename the process / edit the shared note">✎ Process</button>` +
             `<button type="button" class="hub-wf-act" data-act="histclose" title="Close the history panel">✕ Close</button></div>`;
         // the restore confirm strip
@@ -5073,6 +5207,7 @@ async function histCreateCheckpoint(source) {
         if (res.json?.ok) {
             st.noteDraft = "";
             await refreshHistState();
+            refreshHistBadges(true);   // v114: the row count chip changes
             if (res.json.duplicate) {
                 localToast("Identical to the last checkpoint - nothing duplicated");
             } else {
@@ -5125,6 +5260,35 @@ async function histRestore(rid, confirmReplace) {
     }
 }
 
+/** v114 (owner request): the batch deletion of the SELECTED versions - the
+ *  server protects stable + current and splices the parent chain; the UI
+ *  refreshes the list AND the row badges afterwards. */
+async function histDeleteSelected() {
+    const st = histState;
+    if (!st?.pid || !st.delSel?.size) return;
+    const rids = [...st.delSel];
+    const res = await jfetch("/settings_hub/workflows/history/revision/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ revisionIds: rids }),
+    });
+    st.armedDel = false;
+    if (res.json?.ok) {
+        const n = (res.json.deleted || []).length;
+        const sk = (res.json.skipped || []).length;
+        st.delSel.clear();
+        localToast("Deleted " + n + " version(s)" +
+            (sk ? " · " + sk + " protected/missing skipped" : ""));
+        await refreshHistState();
+        refreshHistBadges(true);   // the count chips on the Files rows
+    } else {
+        const why = (res.json && res.json.error) || ("HTTP " + res.status);
+        localToast((res.status === 404
+            ? "The delete route is missing (an old py) - update the FULL pack."
+            : "Delete failed: " + why), 4200);
+    }
+}
+
 function histPopClick(act, btn) {
     const st = histState;
     if (!st) return;
@@ -5167,6 +5331,39 @@ function histPopClick(act, btn) {
             return;
         }
         case "histcompare": void runHistCompare(); return;
+        // v114: the version-cleanup actions
+        case "histdelmode": {
+            st.manage = !st.manage;
+            st.armedDel = false;
+            st.delSel.clear();
+            renderHistPop();
+            return;
+        }
+        case "histdelall": {
+            // the DYNAMIC Select all / Deselect all - the label reflects the
+            // state; selecting covers only the DELETABLE versions
+            const ids = st.revs.filter((r) => !histRevProtectReason(r))
+                .map((r) => r.revisionId);
+            const allSel = ids.length > 0 && ids.every((rid) => st.delSel.has(rid));
+            if (allSel) st.delSel.clear();
+            else ids.forEach((rid) => st.delSel.add(rid));
+            st.armedDel = false;
+            renderHistPop();
+            return;
+        }
+        case "histdelsel": {
+            if (!st.delSel.size) return;
+            if (!st.armedDel) { st.armedDel = true; renderHistPop(); return; }
+            void histDeleteSelected();
+            return;
+        }
+        case "histdeldone": {
+            st.manage = false;
+            st.armedDel = false;
+            st.delSel.clear();
+            renderHistPop();
+            return;
+        }
         case "histmeta": {
             const nm = prompt("Process name:", st.proc?.displayName || "");
             if (nm === null) return;
@@ -5717,12 +5914,21 @@ export function __workflowsTestHooks() {
         // v112 stage 2.5: the history panel hooks
         openHistPop: (p) => openHistPop(p),
         closeHistPop,
-        histState: () => histState ? JSON.parse(JSON.stringify(histState)) : null,
+        histState: () => histState
+            ? JSON.parse(JSON.stringify({ ...histState, delSel: [...(histState.delSel || [])] }))
+            : null,
         histPopEl: () => histPop,
         histCreateCheckpoint: (src) => histCreateCheckpoint(src),
         histRestore: (rid, confirmReplace) => histRestore(rid, confirmReplace),
         runHistCompare: () => runHistCompare(),
         refreshHistState: () => refreshHistState(),
+        // v114: the version-cleanup + the row badge indicator hooks
+        histDeleteSelected: () => histDeleteSelected(),
+        histRevProtectReason: (r) => histRevProtectReason(r),
+        histBadgeCount: (p) => histBadgeCount(p),
+        histBadgesState: () => ({ map: histBadges.map ? { ...histBadges.map } : null, ts: histBadges.ts }),
+        refreshHistBadges: (force) => refreshHistBadges(force),
+        applyHistBadges: () => applyHistBadges(),
         setIdxReady: (v) => { idxReady = v; },
         runServerList: (reset) => runServerList(reset),
         ensureIndexStatus: () => ensureIndexStatus(),

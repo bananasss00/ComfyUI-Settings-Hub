@@ -175,6 +175,8 @@ function makeFakeApi() {
     // v112 stage 2.5: the HISTORY stub (processes + revisions + tx snapshots)
     const histStore = { processes: new Map(), revisions: new Map(), seq: 0 };
     const txStore = new Map();
+    // v114: the row-badge + batch-delete stub controls
+    let badgesMode = "ok";           // "ok" | "stale" (an old py: the route 404s)
     // v112 stage 4: the preset version archives (pid -> {versions, seq})
     const pverStore = new Map();
     const pverArchive = (pid, changedBy) => {
@@ -611,6 +613,48 @@ function makeFakeApi() {
                 }
                 return jsonResp({ ok: true, revisionId: rec.revisionId, isStable: rec.isStable });
             }
+            // v114: the version INDICATOR (GET /history/badges) + the BATCH
+            // deletion (POST /history/revision/delete) - the fake mirrors the
+            // real protection contract (stable + current survive, the parent
+            // chain is spliced)
+            if (p === "/settings_hub/workflows/history/badges" && method === "GET") {
+                if (badgesMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                const out = {};
+                for (const pr of histStore.processes.values()) {
+                    const revs = histRevList(pr.processId);
+                    if (!revs.length) continue;
+                    const info = { count: revs.length,
+                        stable: revs.filter((r) => r.isStable).length };
+                    for (const l of pr.locations || []) out[l.path] = info;
+                }
+                return jsonResp({ ok: true, badges: out });
+            }
+            if (p === "/settings_hub/workflows/history/revision/delete" && method === "POST") {
+                let body2 = {};
+                try { body2 = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                if (!Array.isArray(body2.revisionIds)) {
+                    return jsonResp({ ok: false, error: "revisionIds (a list) is required" }, 400);
+                }
+                const deleted = [], skipped = [];
+                for (const rid of body2.revisionIds.slice(0, 1000)) {
+                    const rec = histStore.revisions.get(rid);
+                    if (!rec) { skipped.push({ revisionId: rid, reason: "no such revision" }); continue; }
+                    if (rec.isStable) { skipped.push({ revisionId: rid, reason: "a stable revision is protected" }); continue; }
+                    const proc = histStore.processes.get(rec.processId);
+                    if (proc && proc.currentRevisionId === rid) {
+                        skipped.push({ revisionId: rid, reason: "the current revision cannot be deleted" });
+                        continue;
+                    }
+                    for (const other of histStore.revisions.values()) {
+                        if (other.revisionId !== rid && other.parentRevisionId === rid) {
+                            other.parentRevisionId = rec.parentRevisionId || null;
+                        }
+                    }
+                    histStore.revisions.delete(rid);
+                    deleted.push(rid);
+                }
+                return jsonResp({ ok: true, deleted, skipped });
+            }
             if (p === "/settings_hub/workflows/history/storage" && method === "GET") {
                 return jsonResp({ ok: true, backend: "stub", processes: histStore.processes.size,
                     revisions: histStore.revisions.size, stableRevisions: 0,
@@ -758,6 +802,8 @@ function makeFakeApi() {
         __histStore: () => histStore,
         __txStore: () => txStore,
         __pverStore: () => pverStore,
+        // v114: the badges + batch-delete stub controls
+        __setBadgesMode: (m) => { badgesMode = m; },
         // v108: the Files listing + the favorites controls
         __setWfFiles: (v) => { wfFiles = v; },
         __wfFavs: () => wfFavs.slice(),
@@ -1367,19 +1413,21 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v113", /"workflows":\s*"v113"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v114", /"workflows":\s*"v114"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v113", ENTRY_SRC.includes("web build: v113 - THE WORKFLOW MANAGER ROADMAP"));
-check("styles.css?v=113", ENTRY_SRC.includes("styles.css?v=113"));
-check("the module self-reports v113",
+check("the entry banner names v114 (the cleanup release + the roadmap kept)",
+    ENTRY_SRC.includes("web build: v114 - THE VERSION CLEANUP + INDICATOR") &&
+    ENTRY_SRC.includes("THE WORKFLOW MANAGER ROADMAP"));
+check("styles.css?v=114", ENTRY_SRC.includes("styles.css?v=114"));
+check("the module self-reports v114",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v113"'));
-check("the web stamp literal is v113",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v114"'));
+check("the web stamp literal is v114",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v113"'));
-check("py stamp bumps together (v113)",
+        .includes('const WF_WEB_VERSION = "v114"'));
+check("py stamp bumps together (v114)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v113"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v114"'));
 check("v107 routes registered (temp list/put/get/delete)",
     [".get(\"/settings_hub/workflows/temp\")", ".post(\"/settings_hub/workflows/temp\")",
      ".get(\"/settings_hub/workflows/temp/{tid}\")", ".delete(\"/settings_hub/workflows/temp/{tid}\")"]
@@ -1946,7 +1994,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v114"); // ahead of the pack (v113) - a stale web file
+    fakeApi.__setHealthVersion("v115"); // ahead of the pack (v114) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -3623,6 +3671,188 @@ phase("WZ v113: the search keeps focus + the keys stay inside the panel; the big
         ip && ip.style.left === "98px" && ip.style.top === "154px",
         JSON.stringify({ left: ip?.style.left, top: ip?.style.top }));
     hooks.closeInspPop();
+    fakeApi.__setIdxFiles([]);
+    hooks.setTab("open");
+    await settle();
+}
+
+// ===========================================================================
+phase("ZX v114: the version indicator on the rows + the manage/delete of SPECIFIC versions");
+{
+    const pnlZx = () => hooks.panelEl();
+    const bodyZx = () => pnlZx().querySelector(".hub-wf-body");
+    fakeApi.__setIdxMode("ok");
+    fakeApi.__setIdxFiles([
+        { path: "workflows/zx.json", name: "zx.json", size: 10, mtime: 100,
+          workflowId: "zx-uuid-1", rawHash: "hash-1" },
+        { path: "workflows/zx_plain.json", name: "zx_plain.json", size: 10, mtime: 110,
+          workflowId: "zx-uuid-2", rawHash: "hash-plain" },
+    ]);
+    fakeApi.__setBadgesMode("ok");
+    // reset the fake history store for a deterministic phase
+    for (const k of [...fakeApi.__histStore().processes.keys()]) fakeApi.__histStore().processes.delete(k);
+    for (const k of [...fakeApi.__histStore().revisions.keys()]) fakeApi.__histStore().revisions.delete(k);
+    fakeApi.__histStore().seq = 0;
+    hooks.setTab("files");
+    await settle();
+    await hooks.runServerList(true);
+    await settle();
+
+    // 1) no revisions yet - NO badge chip on the 🕘 buttons
+    const histBtnZx = bodyZx().querySelector('[data-act="filehist"][data-path="workflows/zx.json"]');
+    check("ZX: the file row carries the 🕘 history action", !!histBtnZx);
+    check("ZX: without versions there is NO count chip yet",
+        histBtnZx && !histBtnZx.querySelector(".hub-wf-hbadge"),
+        histBtnZx?.innerHTML || "no btn");
+    // 2) two checkpoints through the REAL pop flow -> the badge reads 2
+    histBtnZx.getBoundingClientRect = () => ({
+        left: 50, top: 100, right: 90, bottom: 120, width: 40, height: 20,
+        x: 50, y: 100, toJSON() { return this; },
+    });
+    await histBtnZx.click();
+    await settle(20);
+    const hpZx = hooks.histPopEl();
+    check("ZX: the history pop opens", !!hpZx);
+    const cpBtn = hpZx.querySelector('[data-act="histcheckpoint"]');
+    check("ZX: the Checkpoint action is present", !!cpBtn);
+    await cpBtn.click();
+    await settle(30);
+    // the second checkpoint needs DIFFERENT disk bytes - bump the row hash
+    fakeApi.__setIdxFiles([
+        { path: "workflows/zx.json", name: "zx.json", size: 10, mtime: 100,
+          workflowId: "zx-uuid-1", rawHash: "hash-2" },
+        { path: "workflows/zx_plain.json", name: "zx_plain.json", size: 10, mtime: 110,
+          workflowId: "zx-uuid-2", rawHash: "hash-plain" },
+    ]);
+    await hpZx.querySelector('[data-act="histcheckpoint"]').click();
+    await settle(30);
+    check("ZX: two checkpoints built the history",
+        hooks.histState().revs.length === 2,
+        String(hooks.histState().revs.length));
+    const badge1 = bodyZx().querySelector('[data-act="filehist"][data-path="workflows/zx.json"] .hub-wf-hbadge');
+    check("ZX: the VERSION INDICATOR shows 2 on the row (the owner's ask)",
+        badge1 && badge1.textContent === "2",
+        JSON.stringify({ badge: badge1?.textContent || null }));
+    const plainBtn = bodyZx().querySelector('[data-act="filehist"][data-path="workflows/zx_plain.json"]');
+    check("ZX: a process WITHOUT versions still shows no chip",
+        plainBtn && !plainBtn.querySelector(".hub-wf-hbadge"),
+        plainBtn?.innerHTML || "no btn");
+    check("ZX: the row tooltip names the version count",
+        (plainBtn?.title || "").includes("") &&
+        bodyZx().querySelector('[data-act="filehist"][data-path="workflows/zx.json"]').title.includes("2 saved version"),
+        bodyZx().querySelector('[data-act="filehist"][data-path="workflows/zx.json"]').title.slice(-40));
+
+    // 3) the manage mode: checkboxes + the DYNAMIC Select all / Deselect all
+    await hpZx.querySelector('[data-act="histdelmode"]').click();
+    await settle(20);
+    const manageOn = hooks.histState().manage;
+    const boxes = [...hooks.histPopEl().querySelectorAll("[data-hdel]")];
+    const disabledBoxes = boxes.filter((b) => b.disabled);
+    check("ZX: the manage mode swaps the radios for deletion checkboxes",
+        manageOn && boxes.length === 2,
+        JSON.stringify({ manage: manageOn, boxes: boxes.length }));
+    check("ZX: the CURRENT version's checkbox is disabled (protected)",
+        disabledBoxes.length === 1, String(disabledBoxes.length));
+    let selAll = hooks.histPopEl().querySelector('[data-act="histdelall"]');
+    check("ZX: the DYNAMIC select button starts as 'Select all'",
+        selAll && selAll.textContent === "Select all", selAll?.textContent);
+    selAll.click();
+    await settle(20);
+    selAll = hooks.histPopEl().querySelector('[data-act="histdelall"]');
+    const checkedNow = [...hooks.histPopEl().querySelectorAll("[data-hdel]:checked")].length;
+    check("ZX: Select all checks every DELETABLE version (1 of 2)",
+        checkedNow === 1, String(checkedNow));
+    check("ZX: the DYNAMIC button flips to 'Deselect all'",
+        selAll && selAll.textContent === "Deselect all", selAll?.textContent);
+    check("ZX: the selection is visible in the state",
+        hooks.histState().delSel.length === 1 &&
+        hooks.histState().delSel[0] !== hooks.histState().proc.currentRevisionId,
+        JSON.stringify(hooks.histState().delSel));
+    selAll.click();
+    await settle(20);
+    selAll = hooks.histPopEl().querySelector('[data-act="histdelall"]');
+    check("ZX: Deselect all clears + flips the label back",
+        selAll.textContent === "Select all" &&
+        hooks.histPopEl().querySelectorAll("[data-hdel]:checked").length === 0,
+        selAll.textContent);
+
+    // 4) the armed batch deletion: select all -> Delete selected (2 clicks)
+    selAll.click();
+    await settle(20);
+    const delBtn = () => hooks.histPopEl().querySelector('[data-act="histdelsel"]');
+    check("ZX: the delete button carries the selection count",
+        delBtn() && delBtn().textContent.includes("(1)"), delBtn()?.textContent);
+    delBtn().click();
+    await settle(20);
+    check("ZX: the FIRST click ARMS (never deletes straight away)",
+        delBtn().classList.contains("hub-wf-armed") &&
+        delBtn().textContent.includes("Click AGAIN"),
+        delBtn()?.textContent);
+    delBtn().click();
+    await settle(40);
+    check("ZX: the confirmed delete removed the selected version",
+        hooks.histState().revs.length === 1, String(hooks.histState().revs.length));
+    const badge2 = bodyZx().querySelector('[data-act="filehist"][data-path="workflows/zx.json"] .hub-wf-hbadge');
+    check("ZX: the badge follows the deletion (2 -> 1)",
+        badge2 && badge2.textContent === "1", JSON.stringify({ badge: badge2?.textContent || null }));
+    check("ZX: the toast names the deletion",
+        [...document.querySelectorAll(".hub-sh-note")]
+            .some((t) => (t.textContent || "").includes("Deleted 1")),
+        JSON.stringify([...document.querySelectorAll(".hub-sh-note")]
+            .map((t) => t.textContent)));
+
+    // 5) the stable protection inside the manage mode (the mode is STILL ON
+    // after the deletion - the refresh kept it)
+    // a fresh hash first - the dedupe contract would swallow a repeat
+    // checkpoint of the SAME bytes (and must)
+    fakeApi.__setIdxFiles([
+        { path: "workflows/zx.json", name: "zx.json", size: 10, mtime: 100,
+          workflowId: "zx-uuid-1", rawHash: "hash-3" },
+        { path: "workflows/zx_plain.json", name: "zx_plain.json", size: 10, mtime: 110,
+          workflowId: "zx-uuid-2", rawHash: "hash-plain" },
+    ]);
+    check("ZX: the manage mode survives the deletion refresh",
+        hooks.histState().manage === true, String(hooks.histState().manage));
+    await hooks.histCreateCheckpoint("checkpoint");   // rev #2 (hash-3 disk)
+    await settle(30);
+    const oldRid = hooks.histState().revs[1].revisionId;   // the older one
+    await (async () => {   // mark it stable through the REAL ★ action
+        const btn = hooks.histPopEl().querySelector(`[data-act="histstable"][data-rid="${oldRid}"]`);
+        btn.click();
+        await settle(30);
+    })();
+    await settle(20);
+    const boxOld = hooks.histPopEl().querySelector(`[data-hdel="${oldRid}"]`);
+    check("ZX: a STABLE version's checkbox is disabled with the reason",
+        boxOld && boxOld.disabled &&
+        (boxOld.title || "").includes("protected"), boxOld?.title);
+    const selAll2 = hooks.histPopEl().querySelector('[data-act="histdelall"]');
+    selAll2.click();
+    await settle(20);
+    const nowChecked = [...hooks.histPopEl().querySelectorAll("[data-hdel]:checked")].length;
+    check("ZX: Select all NEVER selects the protected versions",
+        nowChecked === 0, String(nowChecked));
+    // the delete button with an empty selection stays a no-op (no arm)
+    const emptyDel = hooks.histPopEl().querySelector('[data-act="histdelsel"]');
+    emptyDel.click();
+    await settle(20);
+    check("ZX: an empty selection never arms the delete",
+        !hooks.histState().armedDel, JSON.stringify(hooks.histState().armedDel));
+    await hooks.histPopEl().querySelector('[data-act="histdeldone"]').click();
+    await settle(20);
+    check("ZX: Done leaves the manage mode (radios are back)",
+        !hooks.histState().manage &&
+        hooks.histPopEl().querySelectorAll("[data-hcmp]").length === 2 &&
+        hooks.histPopEl().querySelectorAll("[data-hdel]").length === 0, "manage off");
+
+    // 6) an old py without the badges route: silent, no chips, rows intact
+    fakeApi.__setBadgesMode("stale");
+    hooks.refreshHistBadges(true);
+    await settle(30);
+    check("ZX: a stale pack never crashes the badge fetch",
+        bodyZx().querySelectorAll('[data-act="filehist"]').length === 2, "rows ok");
+    hooks.closeHistPop();
+    fakeApi.__setBadgesMode("ok");
     fakeApi.__setIdxFiles([]);
     hooks.setTab("open");
     await settle();

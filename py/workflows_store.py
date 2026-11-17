@@ -1375,7 +1375,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v113"
+WORKFLOWS_SERVER_VERSION = "v114"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -2679,6 +2679,47 @@ async def workflows_history_revision_note(request):
         return web.json_response({"ok": False, "error": "bad json"}, status=400)
     note = body.get("note") if isinstance(body, dict) else None
     return web.json_response(_wf_hist.set_revision_note(rid, note))
+
+
+@PromptServer.instance.routes.post("/settings_hub/workflows/history/revision/delete")
+async def workflows_history_revision_delete(request):
+    """v114 (owner request): the version-cleanup flow - delete SPECIFIC
+    revisions of ONE or MORE processes in one call (the Process-history
+    panel selects them with checkboxes + a dynamic Select all / Deselect
+    all). The protection contract lives SERVER-side (the UI only grays the
+    protected rows out): stable revisions and the CURRENT revision of a
+    process are never deleted; a deleted revision is spliced out of the
+    parent chain so the lineage stays linear."""
+    if _wf_hist is None:
+        return web.json_response({"ok": False, "error": "history module unavailable"},
+                                 status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    rids = body.get("revisionIds") if isinstance(body, dict) else None
+    if not isinstance(rids, list):
+        return web.json_response({"ok": False, "error": "revisionIds (a list) is required"},
+                                 status=400)
+    r = _wf_hist.delete_revisions(rids)
+    return web.json_response(r, status=200 if r.get("ok") else 400)
+
+
+@PromptServer.instance.routes.get("/settings_hub/workflows/history/badges")
+async def workflows_history_badges(request):
+    """v114 (owner request): the version INDICATOR for the Files rows - the
+    user must see at a glance which workflows carry saved versions. One
+    small answer for the whole tab: {rel_path: {count, stable}} for the
+    processes that HAVE revisions (the rest costs nothing). An old pack
+    without this route simply shows no badges."""
+    if _wf_hist is None:
+        return web.json_response({"ok": False, "error": "history module unavailable"},
+                                 status=404)
+    try:
+        badges = _wf_hist.revision_badges()
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)[:200]}, status=500)
+    return web.json_response({"ok": True, "badges": badges})
 
 
 @PromptServer.instance.routes.post("/settings_hub/workflows/history/process/{pid}/restore/{rid}")

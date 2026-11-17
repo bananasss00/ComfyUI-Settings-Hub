@@ -6210,6 +6210,33 @@ body.sh-modal-open .hub-sh-note {
     padding: 2px 2px 0;
     user-select: none;
 }
+/* v114: the Process-history manage mode - the section header carries the
+   dynamic Select all / Deselect all button on the same line */
+.hub-wf-sect.hub-wf-sect-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.hub-wf-sect.hub-wf-sect-row .hub-wf-act { flex: 0 0 auto; }
+/* v114: the version indicator chip on the Files rows' 🕘 button - a small
+   count badge shown only when the file's process has saved versions */
+.hub-wf-hbadge {
+    display: inline-block;
+    min-width: 13px;
+    padding: 0 3px;
+    margin-right: 3px;
+    border-radius: 8px;
+    background: rgba(255, 149, 0, 0.22);
+    border: 1px solid rgba(255, 160, 40, 0.55);
+    color: #ffc37a;
+    font-size: calc(var(--sh-fs, 1) * 9px);
+    line-height: 13px;
+    font-weight: 700;
+    text-align: center;
+    vertical-align: middle;
+    pointer-events: none;
+}
 /* v103: the cap existed since v101 but WITHOUT overflow - 15 recent rows
    painted straight over the "All saved workflows" section below. The group
    is now its own little scroll area: capped at 30% of the panel, scrolling

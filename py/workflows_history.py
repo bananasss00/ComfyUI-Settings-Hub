@@ -734,22 +734,105 @@ def set_revision_note(rid, note):
         return {"ok": True, "revisionId": rid}
 
 
+def _delete_revision_locked(rid):
+    """The shared deletion core of delete_revision/delete_revisions (the
+    caller HOLDS _lock). One protection contract for every entry point:
+    a STABLE revision and the CURRENT revision of the process are never
+    deleted; a deleted revision is SPLICED out of the parent chain (its
+    children re-link to its parent) so the linear lineage survives a
+    middle-of-chain delete - the descendants must never become an
+    invisible branch. Returns None when the rid is protected/unknown,
+    or a {"reason": ...} string for the skip report."""
+    rec = _read_revision(rid)
+    if not rec:
+        return "no such revision"
+    if rec.get("isStable"):
+        return "a stable revision is protected"
+    pid = rec.get("processId")
+    proc = _read_process(pid) if pid else None
+    if proc and proc.get("currentRevisionId") == rid:
+        return "the current revision cannot be deleted"
+    parent = rec.get("parentRevisionId")
+    if pid:
+        _rev_cache_load_locked()
+        for other in (_rev_cache["of_pid"].get(pid) or []):
+            oid = other.get("revisionId")
+            if oid == rid or other.get("parentRevisionId") != rid:
+                continue
+            other["parentRevisionId"] = parent
+            _atomic_write_json(_revision_file(oid), other)
+            _rev_cache_put_locked(other)
+    if proc and proc.get("stableRevisionId") == rid:
+        # belt+braces: a stable rid cannot reach this line, but a stale
+        # pointer must not survive the deletion either
+        proc.pop("stableRevisionId", None)
+        proc["updatedAt"] = _now()
+        _atomic_write_json(_process_file(pid), proc)
+        _cache_put_locked(proc)
+    try:
+        os.unlink(_revision_file(rid))
+    except OSError:
+        pass
+    _rev_cache_drop_locked(rid)
+    return None
+
+
 def delete_revision(rid):
     """An EXPLICIT cleanup only - manual/stable revisions are protected
     (the plan: never silently prune)."""
     with _lock:
-        rec = _read_revision(rid)
-        if not rec:
-            return {"ok": False, "error": "no such revision"}
-        if rec.get("isStable"):
-            return {"ok": False, "error": "a stable revision is protected"}
-        pid = rec.get("processId")
-        proc = _read_process(pid)
-        if proc and proc.get("currentRevisionId") == rid:
-            return {"ok": False, "error": "the current revision cannot be deleted"}
-        os.unlink(_revision_file(rid))
-        _rev_cache_drop_locked(rid)
+        reason = _delete_revision_locked(rid)
+        if reason:
+            return {"ok": False, "error": reason}
         return {"ok": True, "gone": rid}
+
+
+def delete_revisions(rids):
+    """v114 (owner request): the BATCH deletion of SPECIFIC versions - the
+    Process-history panel got a manage mode (checkboxes + a dynamic
+    Select all / Deselect all + an armed Delete selected). One lock, one
+    pass; every rid passes the SAME protection contract as the single
+    delete (stable + current are protected server-side - the UI only
+    grays them out, the server decides); each deleted revision is spliced
+    out of the parent chain. The answer names every skip so the UI can
+    say exactly why a version survived."""
+    if not isinstance(rids, list):
+        return {"ok": False, "error": "revisionIds must be a list"}
+    clean = []
+    for x in rids[:1000]:
+        if isinstance(x, str) and _ID_RE.match(x):
+            clean.append(x)
+    deleted, skipped = [], []
+    with _lock:
+        for rid in clean:
+            reason = _delete_revision_locked(rid)
+            if reason:
+                skipped.append({"revisionId": rid, "reason": reason})
+            else:
+                deleted.append(rid)
+    return {"ok": True, "deleted": deleted, "skipped": skipped}
+
+
+def revision_badges():
+    """v114 (owner request): the per-FILE version indicator data - the Files
+    rows must SHOW when a process has versions. One call feeds the whole
+    tab: {rel_path: {count, stable}} for every process that HAS revisions;
+    a process without revisions (the bulk of a big library) contributes
+    NOTHING - the payload stays small even with 2000+ processes. The keys
+    are the same 'workflows/<rel>' paths the Files listing serves."""
+    with _lock:
+        reconcile_processes()   # throttled (10s); keeps the bindings fresh
+        _cache_load_locked()
+        _rev_cache_load_locked()
+        out = {}
+        for pid, revs in _rev_cache["of_pid"].items():
+            if not revs:
+                continue
+            info = {"count": len(revs),
+                    "stable": sum(1 for r in revs if r.get("isStable"))}
+            for lp in _proc_cache["paths_of"].get(pid) or ():
+                out[lp] = info
+        return out
 
 
 # ---------------------------------------------------------------------------
