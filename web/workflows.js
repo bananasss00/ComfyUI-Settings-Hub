@@ -227,9 +227,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v117";
+const WF_WEB_VERSION = "v119";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v117";
+globalThis.__SettingsHubLoaded["workflows"] = "v119";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -1477,7 +1477,12 @@ let filesUuid = "";             // the advanced filter: exact/partial ComfyUI UU
 // a fetch cache with a short TTL - the server computes it over the WHOLE
 // index and caches it in SQLite, so the client never recomputes anything.
 let groupsState = { on: false, threshold: 90, kind: "all",
-    data: null, loading: false, error: null, collapsed: {} };
+    data: null, loading: false, error: null, busy: false, collapsed: {} };
+// v118: a BUSY index (a scan holds the SQLite db) is a SOFT state - the
+// answer retries on a timer until the scan finishes; the v117 dead
+// 'The groups are unavailable: database is locked' note is retired.
+let groupsRetryT = null;
+let groupsRetryMs = 3000;
 
 function loadGroupsPrefs() {
     try {
@@ -1495,6 +1500,15 @@ function loadGroupsPrefs() {
 function saveGroupsPrefs() {
     saveJson(LS_GROUPS, { on: groupsState.on, threshold: groupsState.threshold,
         kind: groupsState.kind });
+}
+
+function scheduleGroupsRetry() {
+    clearTimeout(groupsRetryT);
+    groupsRetryT = setTimeout(() => {
+        groupsRetryT = null;
+        if (groupsState.on && idxMode() && filesView === "list" && uiTab === "files")
+            void runGroups(true);
+    }, groupsRetryMs);
 }
 
 /** v117: fetch the server-built groups (threshold + kind are server params;
@@ -1515,12 +1529,26 @@ async function runGroups(force = false) {
             encodeURIComponent(groupsState.kind));
         if (res.json?.ok) {
             groupsState.data = { ...res.json, ts: Date.now() };
+            groupsState.busy = false;
+            clearTimeout(groupsRetryT);
+            groupsRetryT = null;
+        } else if (res.json && res.json.busy) {
+            // v118: the index is busy (a scan holds the db) - a SOFT state:
+            // 'Indexing in progress' + an automatic retry until the scan
+            // finishes. Never a dead 'unavailable' note again.
+            groupsState.busy = true;
+            groupsState.error = null;
+            scheduleGroupsRetry();
         } else {
+            groupsState.busy = false;
+            clearTimeout(groupsRetryT);
+            groupsRetryT = null;
             groupsState.error = (res.json && res.json.error) ||
                 (res.status === 404 ? "the groups route is missing (an old py) - update the FULL pack"
                     : "HTTP " + res.status);
         }
     } catch (e) {
+        groupsState.busy = false;
         groupsState.error = String((e && e.message) || e);
     }
     groupsState.loading = false;
@@ -3324,7 +3352,8 @@ function filesTabHtml() {
     // a TTL cache so re-renders never stampede). The request fires ONLY on
     // a data miss - the render loop stays single-shot.
     if (groupsState.on && idxMode() && filesView === "list" &&
-        !groupsState.data && !groupsState.loading && !groupsState.error) {
+        !groupsState.data && !groupsState.loading && !groupsState.error &&
+        !groupsState.busy) {
         void runGroups(true);
     }
     // v107: temp tabs reopen from their SERVER snapshot (tempId ->
@@ -3436,33 +3465,46 @@ function filesTabHtml() {
             const gd = groupsState.data;
             if (groupsState.loading && !gd) {
                 rows = `<div class="hub-wf-emptylist">Building the groups over the indexed library…</div>`;
+            } else if (groupsState.busy && !gd) {
+                // v118: the scan holds the SQLite db - a SOFT state with an
+                // automatic retry; never the dead 'unavailable' note
+                rows = `<div class="hub-wf-emptylist">⏳ Indexing in progress - the groups will appear as soon as the scan finishes</div>`;
             } else if (groupsState.error && !gd) {
                 rows = `<div class="hub-wf-planwarn">⚠ The groups are unavailable: ${esc(groupsState.error)}</div>`;
             } else if (gd) {
-                const out = [];
-                const kindIcon = { same_uuid: "⧉", exact: "⧉", similar: "≈" };
-                for (const g of (gd.groups || [])) {
-                    const collapsed = !!groupsState.collapsed[g.key];
-                    const scoreTxt = g.kind === "similar" &&
-                        Number.isFinite(g.minScore)
-                        ? ` · ${g.minScore}%${Number.isFinite(g.avgScore) ? "–" + g.avgScore + "%" : ""}` : "";
-                    out.push(`<div class="hub-wf-sect hub-wf-sect-row">` +
-                        `<button type="button" class="hub-wf-act" data-act="groupfold" data-key="${esc(g.key)}" ` +
-                        `title="${collapsed ? "Expand the group" : "Collapse the group"}">${collapsed ? "▸" : "▾"} ${kindIcon[g.kind] || ""} ${esc(g.label)} · ${g.count} file(s)${scoreTxt}</button>` +
-                        `<span class="hub-wf-snap" title="A visual grouping only - nothing is merged, moved or deleted automatically">${g.kind === "same_uuid" ? "one workflow id" : g.kind === "exact" ? "100%" : "estimate ≥ " + groupsState.threshold + "%"}</span></div>`);
-                    if (!collapsed) {
-                        for (const f of (g.files || []))
-                            out.push(savedFileRowHtml(f, 1));
+                // v119: after a similarity-profile bump (nprof2 -> nprof3)
+                // every index row is old-profile until the next scan
+                // re-indexes it - a calm note instead of an empty grid
+                // (the boot scan runs automatically, the note self-heals)
+                if (gd.staleProfile && !(gd.groups || []).length &&
+                    !(gd.ungroupedTotal || 0)) {
+                    rows = `<div class="hub-wf-emptylist">⏳ The similarity profile was updated (v119 searches modified copies too) - the groups appear as soon as the index scan re-indexes the library (it runs automatically on the panel open, or press Refresh)</div>`;
+                } else {
+                    const out = [];
+                    const kindIcon = { same_uuid: "⧉", exact: "⧉", similar: "≈" };
+                    for (const g of (gd.groups || [])) {
+                        const collapsed = !!groupsState.collapsed[g.key];
+                        const scoreTxt = g.kind === "similar" &&
+                            Number.isFinite(g.minScore)
+                            ? ` · ${g.minScore}%${Number.isFinite(g.avgScore) ? "–" + g.avgScore + "%" : ""}` : "";
+                        out.push(`<div class="hub-wf-sect hub-wf-sect-row">` +
+                            `<button type="button" class="hub-wf-act" data-act="groupfold" data-key="${esc(g.key)}" ` +
+                            `title="${collapsed ? "Expand the group" : "Collapse the group"}">${collapsed ? "▸" : "▾"} ${kindIcon[g.kind] || ""} ${esc(g.label)} · ${g.count} file(s)${scoreTxt}</button>` +
+                            `<span class="hub-wf-snap" title="A visual grouping only - nothing is merged, moved or deleted automatically">${g.kind === "same_uuid" ? "one workflow id" : g.kind === "exact" ? "100%" : "estimate ≥ " + groupsState.threshold + "%"}</span></div>`);
+                        if (!collapsed) {
+                            for (const f of (g.files || []))
+                                out.push(savedFileRowHtml(f, 1));
+                        }
                     }
+                    out.push(`<div class="hub-wf-sect">Outside the groups (${gd.ungroupedTotal || 0})</div>`);
+                    for (const f of (gd.ungrouped || []))
+                        out.push(savedFileRowHtml(f, 0));
+                    if ((gd.ungroupedTotal || 0) > (gd.ungrouped || []).length)
+                        out.push(`<div class="hub-wf-emptylist">… and ${gd.ungroupedTotal - (gd.ungrouped || []).length} more ungrouped files (the grouped view caps its answer - use the flat list to page through everything)</div>`);
+                    rows = out.join("");
+                    more = groupsState.loading
+                        ? `<div class="hub-wf-emptylist">Recomputing…</div>` : "";
                 }
-                out.push(`<div class="hub-wf-sect">Outside the groups (${gd.ungroupedTotal || 0})</div>`);
-                for (const f of (gd.ungrouped || []))
-                    out.push(savedFileRowHtml(f, 0));
-                if ((gd.ungroupedTotal || 0) > (gd.ungrouped || []).length)
-                    out.push(`<div class="hub-wf-emptylist">… and ${gd.ungroupedTotal - (gd.ungrouped || []).length} more ungrouped files (the grouped view caps its answer - use the flat list to page through everything)</div>`);
-                rows = out.join("");
-                more = groupsState.loading
-                    ? `<div class="hub-wf-emptylist">Recomputing…</div>` : "";
             }
         } else if (idxList) {
             // the SERVER page (index mode): the rows are already filtered/
@@ -3565,7 +3607,7 @@ function filesTabHtml() {
         // chips' tooltips, the percentage is an estimate, never a proof
         (groupsState.on && idxMode()
             ? `<div class="hub-wf-fadv">` +
-              `<select class="hub-wf-fsel" data-wf="groupthresh" title="The similarity threshold: 80-100%, step 5. 95-100% = very similar, 85-94% = similar. The % is a structural/content ESTIMATE, not an identity guarantee">` +
+              `<select class="hub-wf-fsel" data-wf="groupthresh" title="The similarity threshold: 80-100%, step 5. 95-100% = very similar, 85-94% = similar. v119 searches the MODIFIED copies too (a node group added/removed, reroutes, another seed - all still group). The % is a structural/content ESTIMATE, not an identity guarantee">` +
               GROUP_THRESHOLD_CHOICES.map((t) =>
                   `<option value="${t}"${groupsState.threshold === t ? " selected" : ""}>≥ ${t}%</option>`).join("") +
               `</select>` +
@@ -4094,6 +4136,9 @@ async function onBodyClick(e) {
             saveGroupsPrefs();
             groupsState.data = null;
             groupsState.error = null;
+            groupsState.busy = false;          // v118: a fresh state per toggle
+            clearTimeout(groupsRetryT);
+            groupsRetryT = null;
             // the plan: with the grouping on the FILES tab leaves the tree
             // for the grouped list
             if (groupsState.on && filesView === "tree") filesView = "list";
@@ -4550,7 +4595,24 @@ function openSaveForm(mode = "new", targetPid = null) {
     renderAll();
 }
 
-function collectFormItems() {
+/** v118: the DISK-truth rung of the embed save. A saved tab whose graph was
+ *  never LOADED into the frontend store (a background tab at boot: no
+ *  activeState, no content, no ref.graph) serializes from its own FILE -
+ *  for an unmodified tab the disk copy IS the tab's content, byte for byte
+ *  the correct independent snapshot. */
+async function fetchDiskWorkflowJson(path) {
+    const n = normWfPath(path);
+    if (!n) return null;
+    const withPrefix = n.startsWith("workflows/") ? n : ("workflows/" + n);
+    try {
+        const res = await jfetch("/userdata/" + encodeURIComponent(withPrefix));
+        const j = res.json;
+        if (j && typeof j === "object" && !Array.isArray(j)) return j;
+    } catch (_) {}
+    return null;
+}
+
+async function collectFormItems() {
     if (!saveForm) return { error: "no form" };
     const items = [];
     let activePath = null;
@@ -4561,12 +4623,31 @@ function collectFormItems() {
         if (!r.checked) continue;
         const snap = r.isTemp || saveForm.snapMode;
         if (snap) {
-            const g = graphJsonOfOpenTab(r.tab);
+            // v118: a saved tab the store never LOADED (a background tab at
+            // boot) has no serializable graph - the old code refused the
+            // WHOLE save here ('Could not serialize ...'), and with the
+            // toast CSS missing the owner saw NOTHING happen. Healing
+            // ladder, cheapest first: the store's own loader (mirrors
+            // openStoreWorkflow's precondition) -> the disk file. A
+            // MODIFIED tab skips both - disk content would silently lose
+            // the edits, so it keeps the honest named error.
+            let g = graphJsonOfOpenTab(r.tab);
+            if (!g && r.path && !r.isModified) {
+                const wf = r.tab && r.tab.ref;
+                if (wf && !wf.isLoaded && !storeWorkflowHasContent(wf) &&
+                    typeof wf.load === "function") {
+                    try { await wf.load(); } catch (_) {}
+                    g = graphJsonOfOpenTab(r.tab);
+                }
+                if (!g) g = await fetchDiskWorkflowJson(r.path);
+            }
             if (!g) {
                 // plan 6.3: an unserializable tab keeps the form open and
                 // NAMES the tab - never a silent fallback to a stale copy
                 return { error: "Could not serialize the tab '" + r.name +
-                    "' - save it manually first, then retry" };
+                    (r.isModified
+                        ? "' (unsaved changes and no loaded state) - activate it, save it, then retry"
+                        : "' - save it manually first, then retry") };
             }
             // v112 stage 3 (plan 7.2): the snapshot ORIGIN metadata - the
             // snapshot stays an independent copy, the metadata only explains
@@ -4640,10 +4721,18 @@ async function saveModifiedFromForm() {
 async function commitFormSave(mode, targetPid) {
     if (!saveForm) return;
     if (saveForm.busy) return;   // v116 (plan 6.3): no double submit
+    // v118: read the typed name BEFORE any re-render - the busy render
+    // rebuilds the input from saveForm.name and would silently LOSE the
+    // name the owner typed (the WX smoke caught it)
+    const nameIn = panel?.querySelector('[data-wf="sfname"]');
+    const name = ((nameIn?.value ?? saveForm.name) || "").trim() || nextWorkspaceName();
+    // v118: busy BEFORE the collect - collectFormItems now awaits the
+    // healing rungs (ref.load / the disk fetch); a second click during
+    // those awaits must never double-submit
+    saveForm.busy = true;
+    renderAll();   // the Save button goes '…' + disabled
     try {
-        const nameIn = panel?.querySelector('[data-wf="sfname"]');
-        const name = ((nameIn?.value ?? saveForm.name) || "").trim() || nextWorkspaceName();
-        const c = collectFormItems();
+        const c = await collectFormItems();
         if (c.error) { localToast(c.error, 4200); return; }   // the form stays open
         if (!c.items || !c.items.length) { localToast("Nothing checked - check at least one tab"); return; }
         // v116 (plan 6.3): the SIZE preflight BEFORE the request - the
@@ -4660,8 +4749,6 @@ async function commitFormSave(mode, targetPid) {
                 ". Uncheck or save them separately.", 8000);
             return;
         }
-        saveForm.busy = true;
-        renderAll();   // the Save button goes '…' + disabled
         const res = await savePreset({
             id: targetPid || undefined,
             name, items: c.items,
@@ -4670,7 +4757,6 @@ async function commitFormSave(mode, targetPid) {
             tags: saveForm.tags?.length ? saveForm.tags : undefined,
             mode: mode || "create",
         });
-        saveForm.busy = false;
         if (res.ok) {
             // v116 (plan 6.3): the ACTIVE snapshot binds by its CONTENT hash
             // (+ name) against the SAVED items - two same-named snapshots
@@ -4694,19 +4780,25 @@ async function commitFormSave(mode, targetPid) {
                 name + "' (" + c.items.length + " item(s)" +
                 (nSnaps ? ", " + nSnaps + " snapshot(s)" : "") + ")");
         } else {
-            // plan 6.3: 400/413/500 are NAMED, the form stays open, the
-            // buttons unlock (no silent 'nothing happened')
+            // plan 6.3 + v118: 400/413/500 are NAMED, the form stays open,
+            // the buttons unlock (no silent 'nothing happened'). A transport
+            // 413 (a body cap BELOW the pack's own 10 MB budget) names itself
+            // instead of a bare 'HTTP 413'.
             localToast((res.stale
                 ? "The server has no workflows routes (old py) - update the FULL pack and RESTART ComfyUI."
-                : "Could not save the preset: " + (res.error || ("HTTP " + (res.status || "?")))), 5200);
-            renderAll();
+                : res.status === 413
+                    ? "Too large for the server (413) - uncheck the heaviest tabs, or update the FULL pack and RESTART ComfyUI (v118 raises the transport cap)."
+                    : "Could not save the preset: " + (res.error || ("HTTP " + (res.status || "?")))), 5200);
         }
     } catch (e) {
         // a throw here used to vanish as an unhandled rejection - the owner
-        // saw "nothing happens". Name the problem instead + unlock the form.
+        // saw "nothing happens". Name the problem instead.
+        localToast("Could not save the preset: " + String((e && e.message) || e), 4200);
+    } finally {
+        // v118: the unlock lives in finally - EVERY path (an early error
+        // return, a server refusal, a throw) re-enables the buttons
         if (saveForm) saveForm.busy = false;
         renderAll();
-        localToast("Could not save the preset: " + String((e && e.message) || e), 4200);
     }
 }
 
@@ -5482,6 +5574,8 @@ function teardown() {
     clearTimeout(pollT);
     clearInterval(pollT);
     pollT = null;
+    clearTimeout(groupsRetryT);   // v118: the groups busy-retry timer dies with the panel
+    groupsRetryT = null;
     closeDupPop();
     closeHistPop();
     closePverPop();
@@ -6928,6 +7022,13 @@ export function __workflowsTestHooks() {
             if ("kind" in patch) groupsState.kind = patch.kind;
             saveGroupsPrefs();
         },
+        // v118: the tests drive the retry cadence (the production default
+        // stays 3000ms)
+        setGroupsRetryMs: (ms) => {
+            const n = parseInt(ms, 10);
+            if (n >= 10) groupsRetryMs = n;
+        },
+        groupsBusy: () => !!groupsState.busy,
         runGroups,
         setRecentLimit: (n) => setRecentLimit(n),
         recentLimit: () => recentLimit(),

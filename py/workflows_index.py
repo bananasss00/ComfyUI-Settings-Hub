@@ -30,7 +30,7 @@ LAYERED FINGERPRINTS (plan 2.2) - one hash per question:
     extension_hash    the unclassified/behavior-relevant extra metadata
     structural_hash   optional topology fingerprint (sorted node types) -
                       similarity HINT only, never an identity proof
-    normalization_profile_version  the rules version ("nprof2") - a rule
+    normalization_profile_version  the rules version ("nprof3") - a rule
                       change re-indexes, old hashes are never silently
                       reinterpreted
 
@@ -55,6 +55,30 @@ query (no file reads at group time):
 The similarity SCORE itself is computed only for candidate pairs and the
 result is cached in the similarity_cache table (invalidated by any re-index
 or profile change) - the plan's performance contract for 2000+ libraries.
+
+v119 FLEXIBLE CANDIDATES (nprof3) - the owner's report: at the 80%
+threshold v117 found only ~10 groups, because the "Similar" stage bucketed
+the candidates by the sig_types_hash - the hash of the FULL node-type
+multiset, so a copy with ONE node added/removed changed the hash, landed
+in a different bucket and was never scored. Three fixes (the score
+formula, the weights and the anchor rule stay untouched):
+    1. The candidate pool is now the UNION of three cheap sources: the
+       exact multiset-hash bucket (the fast path), the UNIQUE-set bucket
+       (the same classes with different counts) and the RARE-TYPE pairs
+       (a node type seen in few files ties its carriers together - the
+       generic types never explode the pool). A cheap MATH prefilter
+       (the size band + the types floor derived from SIM_WEIGHTS) runs
+       first; the full score runs for survivors only, against the ANCHOR
+       (no chaining), bounded by a pair budget that is reported honestly.
+    2. The wiring noise is INVISIBLE to the features: a Reroute chain is
+       resolved THROUGH (A -> Reroute -> B contributes the direct edge
+       A > B - a reroute inserted or deleted on the canvas never changes
+       the edges), and Reroute/Note/MarkdownNote nodes leave the types
+       multiset and the widget signature (the owner's 'the links
+       switched' case scores by the semantic graph, not by the drawing).
+    3. The widget alignment per type is a greedy BEST-PAIR matching
+       instead of the sorted positional compare - one changed value can
+       no longer reorder the whole type bucket and mismatch its peers.
 
 EXTRACTION (plan 4.5) - only what the schema actually carries:
     workflow_id (top-level "id"), node count, node classes, node titles,
@@ -82,7 +106,11 @@ import time
 MAX_ANALYZE_BYTES = 8 * 1024 * 1024      # plan 4.4: no unbounded reads
 MAX_SEARCH_TEXT_CHARS = 20000           # the FTS payload budget per file
 MAX_ERROR_CHARS = 200
-NORMALIZATION_PROFILE_VERSION = "nprof2"   # v117: the similarity signatures
+NORMALIZATION_PROFILE_VERSION = "nprof3"   # v119: the flexible candidates
+# (nprof2 = v117 introduced the sig_* features; nprof3 = v119 makes the
+# Reroute/Note wiring noise INVISIBLE: the edges resolve through reroutes,
+# the noise types leave the multiset and the widget signature - the rule
+# change re-indexes every row once, honest per the profile contract)
 SCHEMA_VERSION = "2"                       # v117: +4 sig columns + the cache
 
 # v117 similarity-group bounds (the plan's performance contract: a 2000+
@@ -92,6 +120,20 @@ SIM_MAX_BUCKET = 60        # a candidate bucket bigger than this is skipped
 SIM_MAX_GROUPS = 200       # the groups answer cap
 SIM_UNGROUPED_CAP = 300    # the ungrouped rows carried in one answer
 SIM_CACHE_ROWS = 64        # the LRU cap of the similarity_cache table
+# v119 flexible-candidate bounds: the rare-type posting lists cap (a type
+# seen in MORE files is generic - KSampler/VAEDecode - and must never tie
+# thousands of pairs), the full-score budget per answer (the math
+# prefilter is free, the detailed score is the expensive step; the budget
+# is reported honestly as skippedPairs)
+SIM_RARE_DF_MAX_CAP = 60
+SIM_PAIR_BUDGET = 24000
+SIM_REROUTE_DEPTH = 32     # the reroute-chain walk cap (cycle defense)
+SIM_CAND_PAIRS = 150000    # the candidate-pair emission cap (pathological
+# libraries: the emission stops + candTruncated:true - honest, deterministic
+# order: the buckets first, then the rare types by df ascending)
+# the wiring/annotation noise: these node types NEVER enter the similarity
+# features (the edges resolve THROUGH a reroute; a note text is free)
+SIM_NOISE_TYPES = {"Reroute", "Note", "MarkdownNote"}
 # the deterministic score weights (they sum to 1.0 and live in the answer so
 # the UI can explain the estimate honestly)
 SIM_WEIGHTS = {"types": 0.35, "edges": 0.40, "widgets": 0.15, "models": 0.10}
@@ -254,6 +296,22 @@ def _extract_models(obj, out, depth=0):
                 _extract_models(v, out, depth + 1)
 
 
+def _is_sim_noise_type(t):
+    """v119: the wiring/annotation noise test. A type is noise when its
+    base name (the part before the '//frontend' suffix ComfyUI appends to
+    some virtual nodes) is Reroute/Note/MarkdownNote or starts with
+    'Reroute' (the rgthree/scene variants are reroutes too). The noise
+    nodes never carry semantic state: a reroute only forwards its input,
+    a note only holds free text."""
+    if not isinstance(t, str):
+        return False
+    base = t.split("//", 1)[0].strip()
+    # 'Reroute (rgthree)' is a reroute; 'RerouteOr...' is NOT (the prefix
+    # must end at a word boundary)
+    return (base in SIM_NOISE_TYPES or base == "Reroute"
+            or base.startswith("Reroute ") or base.startswith("Reroute("))
+
+
 def _sig_graph_doc(wf):
     """The ID-INDEPENDENT graph document (v117): the presentation-stripped
 copy WITHOUT the top-level id and revision. This is the fingerprint that
@@ -269,17 +327,29 @@ The original document is NEVER modified."""
 
 def _extract_edges(wf):
     """The normalized link keys (v117): ['srcType|slot>dstType|slot', ...]
-sorted + counted. Node ids and link ids NEVER enter the key - a graph that
-differs only by renumbering scores 100% on the edge feature. Handles both
-the v1 array links [id, origin_id, origin_slot, target_id, target_slot, type]
-and the newer object links. Bounded to 6000 keys."""
+    sorted + counted. Node ids and link ids NEVER enter the key - a graph that
+    differs only by renumbering scores 100% on the edge feature. Handles both
+    the v1 array links [id, origin_id, origin_slot, target_id, target_slot,
+    type] and the newer object links. Bounded to 6000 keys.
+
+    v119: a REROUTE CHAIN is resolved THROUGH - the link A -> Reroute ->
+    B contributes the direct edge A|slot > B|slot, so inserting or deleting
+    a reroute on the canvas never changes the edge features (the owner's
+    'the links switched' case is scored by the semantic graph, not by the
+    drawing). A chain that dead-ends keeps its reroute endpoint as-is."""
     nodes = wf.get("nodes") if isinstance(wf.get("nodes"), list) else []
     id2type = {}
     for n in nodes:
         if isinstance(n, dict) and isinstance(n.get("id"), (int, float)):
             id2type[n["id"]] = str(n.get("type") or "?")
+    reroute_ids = {nid for nid, t in id2type.items()
+                   if str(t).split("//", 1)[0].strip().startswith("Reroute")}
     links = wf.get("links") if isinstance(wf.get("links"), list) else []
-    out = []
+    # the reroute wiring: rin[reroute_id] = its INPUT (origin_id, slot),
+    # rout[reroute_id] = its OUTPUT (target_id, slot) - a reroute has one
+    # input and one output slot, the maps are consulted only for reroutes
+    rin, rout = {}, {}
+    parsed = []
     for lk in links[:6000]:
         if isinstance(lk, dict):
             oid = lk.get("origin_id")
@@ -290,8 +360,40 @@ and the newer object links. Bounded to 6000 keys."""
             oid, oslot, tid, tslot = lk[1], lk[2], lk[3], lk[4]
         else:
             continue
-        out.append("%s|%s>%s|%s" % (id2type.get(oid, "?"), oslot,
-                                    id2type.get(tid, "?"), tslot))
+        parsed.append((oid, oslot, tid, tslot))
+        if tid in reroute_ids:
+            rin[tid] = (oid, oslot)
+        if oid in reroute_ids:
+            rout[oid] = (tid, tslot)
+
+    def _walk(endpoint, nxt, slot):
+        # follow the chain while the endpoint is a reroute (depth-capped:
+        # a cyclic reroute wiring must never hang the scan)
+        node_id, node_slot = endpoint, slot
+        for _ in range(SIM_REROUTE_DEPTH):
+            if node_id not in reroute_ids:
+                break
+            step = nxt.get(node_id)
+            if step is None:
+                break
+            node_id, node_slot = step
+        return node_id, node_slot
+
+    out, resolved = [], set()
+    for oid, oslot, tid, tslot in parsed:
+        o2, s2 = _walk(oid, rin, oslot)
+        t2, s3 = _walk(tid, rout, tslot)
+        key = "%s|%s>%s|%s" % (id2type.get(o2, "?"), s2,
+                               id2type.get(t2, "?"), s3)
+        if oid in reroute_ids or tid in reroute_ids:
+            # the whole chain A -> R... -> B collapses to ONE semantic edge:
+            # every link of the chain resolves to the same pair, so the
+            # reroute-touched links dedupe (a reroute fan-out must not
+            # inflate the multiset); the untouched links keep their counts
+            resolved.add(key)
+        else:
+            out.append(key)
+    out.extend(sorted(resolved))
     out.sort()
     return out
 
@@ -316,17 +418,21 @@ passes through; a value that is not JSON-serializable degrades to str."""
 
 def _extract_widgets(wf):
     """The per-node widget signature (v117): a sorted list of
-{"t": node_type, "w": [values...]} records. Volatile keys (seed /
-control_after_generate) are masked in the named-widget dict form; the
-positional list form keeps the raw scalars (the SCORE weakens numeric
-mismatches instead - a masked seed would also hide real config). Bounded
-to 400 nodes."""
+    {"t": node_type, "w": [values...]} records. Volatile keys (seed /
+    control_after_generate) are masked in the named-widget dict form; the
+    positional list form keeps the raw scalars (the SCORE weakens numeric
+    mismatches instead - a masked seed would also hide real config). Bounded
+    to 400 nodes. v119: the wiring/annotation noise nodes (Reroute/Note)
+    never contribute a record - a reroute carries no widgets, and a note's
+    free text must not lower the similarity."""
     nodes = wf.get("nodes") if isinstance(wf.get("nodes"), list) else []
     out = []
     for n in nodes[:400]:
         if not isinstance(n, dict):
             continue
         t = str(n.get("type") or "?")
+        if _is_sim_noise_type(t):
+            continue
         wv = n.get("widgets_values")
         if isinstance(wv, dict):
             vals = [[str(k), "<v>" if str(k).lower() in SIM_VOLATILE_KEYS
@@ -345,10 +451,14 @@ to 400 nodes."""
 
 def _node_type_multiset(wf):
     """The node types WITH duplicates (the plan: a multiset, not a unique
-list) - sorted, capped. The sig_types_hash bucket key hashes this."""
+    list) - sorted, capped. The sig_types_hash bucket key hashes this.
+    v119: the wiring/annotation noise (Reroute/Note/MarkdownNote) is
+    dropped - a reroute or a note added on the canvas never changes the
+    bucket key."""
     nodes = wf.get("nodes") if isinstance(wf.get("nodes"), list) else []
     types = sorted(str(n.get("type") or "?") for n in nodes
-                   if isinstance(n, dict))
+                   if isinstance(n, dict)
+                   and not _is_sim_noise_type(n.get("type")))
     return types[:4000]
 
 
@@ -543,53 +653,75 @@ def _fts_available(conn):
         return False
 
 
+def _is_busy_error(e):
+    """v118: 'database is locked' / 'database is busy' - a TRANSIENT
+    contention state (a scan's open write txn, another process), NOT
+    corruption. Treating it as corruption quarantined LIVE indexes (the
+    v118 report: enabling Groups during a scan renamed the whole index db
+    to .corrupt-* and answered 'database is locked')."""
+    if isinstance(e, sqlite3.OperationalError):
+        s = str(e).lower()
+        return "locked" in s or "busy" in s
+    return False
+
+
 def init_db(db=None):
     """Create/migrate the schema. Returns (db_path, fts: bool). A corrupt
     DB is quarantined (renamed, never deleted - the owner inspects it) and
-    a fresh one is built; the user's JSON files are untouched."""
+    a fresh one is built; the user's JSON files are untouched. A BUSY db
+    (a concurrent writer, e.g. the scan's write txn) NEVER quarantines -
+    the schema is presumed present (every writer init_db's before its
+    txn); the caller's own statement answers the busy state through its
+    own error path and the next call finishes the probe."""
     db = db or _db_path()
     with _db_lock:
         os.makedirs(os.path.dirname(db), exist_ok=True)
+        conn = None
         try:
             conn = _connect(db)
-            ok = True
-        except sqlite3.DatabaseError:
-            ok = False
-        if ok:
-            try:
-                conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-            except sqlite3.DatabaseError:
-                ok = False
-            if ok:
-                try:
-                    _ensure_schema(conn)
-                    conn.commit()
-                    conn.close()
-                    _init_done.add(os.path.normpath(db))
-                    return db, _fts_flag(db)
-                except sqlite3.DatabaseError:
-                    ok = False
+            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            _ensure_schema(conn)
+            conn.commit()
             conn.close()
-        # corrupt -> quarantine + rebuild
-        stamp = int(time.time())
-        try:
-            os.replace(db, db + ".corrupt-%d" % stamp)
-        except OSError:
+            _init_done.add(os.path.normpath(db))
+            return db, _fts_flag(db)
+        except sqlite3.DatabaseError as e:
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.DatabaseError:
+                    pass
+            if _is_busy_error(e):
+                return db, False   # transient - the data stays untouched
+            # corrupt -> quarantine + rebuild
+            stamp = int(time.time())
             try:
-                os.unlink(db)
+                os.replace(db, db + ".corrupt-%d" % stamp)
             except OSError:
-                pass
-        for suf in ("-wal", "-shm"):
+                try:
+                    os.unlink(db)
+                except OSError:
+                    pass
+            for suf in ("-wal", "-shm"):
+                try:
+                    os.unlink(db + suf)
+                except OSError:
+                    pass
+            _init_done.discard(os.path.normpath(db))
+            conn = _connect(db)
             try:
-                os.unlink(db + suf)
-            except OSError:
-                pass
-        conn = _connect(db)
-        _ensure_schema(conn)
-        conn.commit()
-        conn.close()
-        _init_done.discard(os.path.normpath(db))
-        return db, _fts_flag(db)
+                _ensure_schema(conn)
+                conn.commit()
+            except sqlite3.DatabaseError as e2:
+                try:
+                    conn.close()
+                except sqlite3.DatabaseError:
+                    pass
+                if _is_busy_error(e2):
+                    return db, False   # still contended - retry next call
+                raise
+            conn.close()
+            return db, _fts_flag(db)
 
 
 def _fts_flag(db):
@@ -870,6 +1002,14 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                                     (user_scope, root_key, key[2])).fetchone()
                                 if rowid:
                                     _fts_sync(conn, rowid[0], final_search)
+                            # v118: commit PER FILE - the scan's write txn must
+                            # never span the whole pass. A minutes-long open
+                            # txn made every concurrent writer (the groups
+                            # cache, the notes, the status) wait out
+                            # busy_timeout and die 'database is locked'.
+                            # WAL + synchronous=NORMAL keeps a per-file
+                            # commit cheap (no fsync per commit).
+                            conn.commit()
                         if progress and stats["scanned"] % 200 == 0:
                             progress(stats)
                     if stats["truncated"]:
@@ -1265,6 +1405,16 @@ def search_notes(db=None, q=None, limit=40):
                 conn.commit()
             finally:
                 conn.close()
+    except sqlite3.OperationalError as e:
+        # v118: a locked db is TRANSIENT (a scan's write txn) - the answer
+        # says busy so the client retries on a timer instead of a dead end
+        if _is_busy_error(e):
+            out["ok"] = False
+            out["busy"] = True
+            out["error"] = str(e)[:MAX_ERROR_CHARS]
+            return out
+        out["ok"] = False
+        out["error"] = str(e)[:MAX_ERROR_CHARS]
     except sqlite3.DatabaseError as e:
         out["ok"] = False
         out["error"] = str(e)[:MAX_ERROR_CHARS]
@@ -1317,6 +1467,15 @@ def index_status(db=None, user_scope="default"):
                 conn.commit()
             finally:
                 conn.close()
+    except sqlite3.OperationalError as e:
+        # v118: a locked db is TRANSIENT - answer busy:true, never a dead end
+        if _is_busy_error(e):
+            out["ok"] = False
+            out["busy"] = True
+            out["error"] = str(e)[:MAX_ERROR_CHARS]
+            return out
+        out["ok"] = False
+        out["error"] = str(e)[:MAX_ERROR_CHARS]
     except sqlite3.DatabaseError as e:
         out["ok"] = False
         out["error"] = str(e)[:MAX_ERROR_CHARS]
@@ -1464,6 +1623,15 @@ def search_index(db=None, user_scope="default", q=None, workflow_id=None,
                 trow = conn.execute(count_sql, base_args).fetchone()
             finally:
                 conn.close()
+    except sqlite3.OperationalError as e:
+        # v118: a locked db is TRANSIENT - answer busy:true (the client
+        # retries on a timer); the empty page shape stays intact
+        if _is_busy_error(e):
+            return {"files": [], "total": 0, "has_more": False,
+                    "next_cursor": None, "busy": True,
+                    "error": str(e)[:MAX_ERROR_CHARS]}
+        return {"files": [], "total": 0, "has_more": False,
+                "next_cursor": None, "error": str(e)[:MAX_ERROR_CHARS]}
     except sqlite3.DatabaseError as e:
         return {"files": [], "total": 0, "has_more": False,
                 "next_cursor": None, "error": str(e)[:MAX_ERROR_CHARS]}
@@ -1675,6 +1843,15 @@ def duplicate_groups(db=None, user_scope="default"):
                 })
             finally:
                 conn.close()
+    except sqlite3.OperationalError as e:
+        # v118: a locked db is TRANSIENT (a scan's write txn) - answer busy
+        if _is_busy_error(e):
+            out["ok"] = False
+            out["busy"] = True
+            out["error"] = str(e)[:MAX_ERROR_CHARS]
+            return out
+        out["ok"] = False
+        out["error"] = str(e)[:MAX_ERROR_CHARS]
     except sqlite3.DatabaseError as e:
         out["ok"] = False
         out["error"] = str(e)[:MAX_ERROR_CHARS]
@@ -1706,6 +1883,27 @@ def _multiset_jaccard(a, b):
     return inter / union if union else 1.0
 
 
+def _counter_jaccard(ca, cb):
+    """The prefilter form of _multiset_jaccard over PRECOMPUTED counters
+    (v119: the candidate scan runs it thousands of times - it must never
+    rebuild the counters). Same semantics: two EMPTY counters are
+    neutral-identical (1.0)."""
+    if not ca and not cb:
+        return 1.0
+    if len(cb) < len(ca):
+        ca, cb = cb, ca
+    inter = 0
+    union = 0
+    for k, n in ca.items():
+        m = cb.get(k, 0)
+        inter += n if n < m else m
+        union += n if n > m else m
+    for k, n in cb.items():
+        if k not in ca:
+            union += n
+    return inter / union if union else 1.0
+
+
 def _widget_node_score(wa, wb):
     """One aligned node pair: the positional widget compare. Numeric
     mismatches are SOFTENED (SIM_NUMERIC_PENALTY) - two runs of one pipeline
@@ -1726,9 +1924,15 @@ def _widget_node_score(wa, wb):
 
 
 def _widgets_similarity(recs_a, recs_b):
-    """Align the per-node widget records BY TYPE (never by node id): same
-    type pairs compare positionally, extra unmatched nodes cost. Both empty
-    -> neutral 1.0."""
+    """Align the per-node widget records BY TYPE (never by node id). v119:
+    the pairs within one type bucket match by a greedy BEST-PAIR search
+    instead of the sorted positional compare - one changed value reordered
+    the sorted bucket and mismatched ALL its peers; the greedy keeps every
+    unchanged node matched with itself. A value mismatch is SOFTENED
+    (numeric), volatile keys were masked at scan time, unmatched nodes
+    cost fully. Both empty -> neutral 1.0. Deterministic: the records
+    iterate in their stored (sorted) order, ties keep the earliest
+    partner."""
     if not recs_a and not recs_b:
         return 1.0
     bya, byb = {}, {}
@@ -1739,22 +1943,59 @@ def _widgets_similarity(recs_a, recs_b):
     total, score = 0, 0.0
     for t in set(bya) | set(byb):
         la, lb = bya.get(t, []), byb.get(t, [])
-        m = min(len(la), len(lb))
-        for i in range(m):
-            score += _widget_node_score(la[i], lb[i])
-            total += 1
-        total += max(len(la), len(lb)) - m   # unmatched nodes cost fully
+        if not la or not lb:
+            total += max(len(la), len(lb))   # unmatched nodes cost fully
+            continue
+        if len(la) <= 8 and len(lb) <= 8:
+            # the greedy best-pair matching (the buckets are small - a
+            # type repeats a handful of times even in a big graph); an
+            # unmatched record costs FULLY (score 0), never a negative
+            used = [False] * len(lb)
+            for wa in la:
+                best_i, best_s = -1, 0.0
+                for j, wb in enumerate(lb):
+                    if used[j]:
+                        continue
+                    s = _widget_node_score(wa, wb)
+                    if s > best_s:
+                        best_s, best_i = s, j
+                if best_i >= 0:
+                    used[best_i] = True
+                score += best_s
+                total += 1
+            total += max(0, len(lb) - len(la))   # the unused partners cost
+        else:
+            # a pathologically wide bucket keeps the cheap sorted compare
+            la2 = sorted(la, key=lambda w: json.dumps(w, sort_keys=True,
+                                                      ensure_ascii=False))
+            lb2 = sorted(lb, key=lambda w: json.dumps(w, sort_keys=True,
+                                                      ensure_ascii=False))
+            m = min(len(la2), len(lb2))
+            for i in range(m):
+                score += _widget_node_score(la2[i], lb2[i])
+                total += 1
+            total += abs(len(la2) - len(lb2))
     return score / total if total else 1.0
 
 
 def similarity_score(fa, fb):
     """The deterministic 0-100 similarity estimate (the plan: structure +
     content, presentation never counts). Weights live in SIM_WEIGHTS and are
-    echoed in every answer so the UI can explain the number honestly."""
-    s = (SIM_WEIGHTS["types"] * _multiset_jaccard(fa["types"], fb["types"])
+    echoed in every answer so the UI can explain the number honestly.
+    v119: the wiring/annotation noise (Reroute/Note/MarkdownNote) leaves
+    the types and the widget features here too - the hand-built feature
+    dicts (the tests) and the scan-extracted ones behave identically."""
+    ta = [t for t in (fa.get("types") or [])
+          if not _is_sim_noise_type(t)]
+    tb = [t for t in (fb.get("types") or [])
+          if not _is_sim_noise_type(t)]
+    wa = [r for r in (fa.get("widgets") or [])
+          if not _is_sim_noise_type(r.get("t"))]
+    wb = [r for r in (fb.get("widgets") or [])
+          if not _is_sim_noise_type(r.get("t"))]
+    s = (SIM_WEIGHTS["types"] * _multiset_jaccard(ta, tb)
          + SIM_WEIGHTS["edges"] * _multiset_jaccard(fa["edges"], fb["edges"])
-         + SIM_WEIGHTS["widgets"] * _widgets_similarity(fa["widgets"],
-                                                        fb["widgets"])
+         + SIM_WEIGHTS["widgets"] * _widgets_similarity(wa, wb)
          + SIM_WEIGHTS["models"] * _multiset_jaccard(fa["models"],
                                                      fb["models"]))
     return int(round(100.0 * s))
@@ -1772,7 +2013,9 @@ _SIM_ROW_SQL = (
 def _similarity_rows(conn, user_scope):
     """Every current-profile row as (features dict, page-shaped row dict).
     parse-broken/too-large files are skipped (they carry no graph); rows of
-    an OLD profile are skipped too - a scan pass re-indexes them."""
+    an OLD profile are skipped too - a scan pass re-indexes them. v119: the
+    feats carry the noise-filtered types + the per-file type counter for
+    the cheap candidate prefilter (the display row keeps the RAW types)."""
     feats, rows = {}, []
     for (rel, name, folder, size_bytes, mtime_sec, wf_id, raw_hash,
          canon_hash, wf_hash, pres_hash, ext_hash, struct_hash, node_count,
@@ -1787,8 +2030,13 @@ def _similarity_rows(conn, user_scope):
             models = json.loads(model_refs) if model_refs else []
         except ValueError:
             continue
+        ftypes = [t for t in types if not _is_sim_noise_type(t)]
+        tc = {}
+        for t in ftypes:
+            tc[t] = tc.get(t, 0) + 1
         feats[rel] = {
-            "types": types, "edges": edges, "widgets": widgets,
+            "types": ftypes, "n": len(ftypes), "tc": tc,
+            "edges": edges, "widgets": widgets,
             "models": models, "sig_graph": sig_graph, "sig_types": sig_types,
         }
         rows.append({
@@ -1878,7 +2126,9 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
     out = {"ok": True, "profile": NORMALIZATION_PROFILE_VERSION,
            "threshold": threshold, "weights": SIM_WEIGHTS,
            "groups": [], "ungrouped": [], "ungroupedTotal": 0,
-           "totalFiles": 0, "skippedBroad": 0, "cached": False}
+           "totalFiles": 0, "skippedBroad": 0,
+           "candidatePairs": 0, "pairsScored": 0, "skippedPairs": 0,
+           "cached": False}
     try:
         with _db_lock:
             init_db(db)
@@ -1893,6 +2143,19 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                     cached["threshold"] = threshold
                     return _similarity_filter(cached, kind)
                 feats, rows = _similarity_rows(conn, user_scope)
+                # v119 honesty: a profile bump (nprof2 -> nprof3) makes EVERY
+                # row stale until the next scan pass re-indexes it - the
+                # answer must say so instead of showing an empty grid
+                if not rows:
+                    stale = conn.execute(
+                        "SELECT count(*) FROM workflow_files WHERE "
+                        "user_scope=? AND parse_status='ok' AND "
+                        "normalization_profile_version != ?",
+                        (user_scope,
+                         NORMALIZATION_PROFILE_VERSION)).fetchone()
+                    if stale and stale[0]:
+                        out["staleProfile"] = True
+                        out["staleFiles"] = int(stale[0])
                 rows_by_path = {r["path"]: r for r in rows}
                 grouped = set()
                 groups = []
@@ -1947,32 +2210,113 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                         })
                         if len(groups) >= SIM_MAX_GROUPS:
                             break
-                # 3) SIMILAR - candidate buckets by the node-type multiset
-                #    hash (cheap SQLite GROUP BY), the detailed score runs
-                #    ONLY inside a bucket and ONLY against the ANCHOR (the
-                #    newest file) - no chain growth, no transitive closure.
+                # 3) SIMILAR - v119 FLEXIBLE CANDIDATES. The v117 exact
+                #    types-hash bucket refused to score ANY copy whose node
+                #    multiset differs (the owner's 'only ~10 groups' report:
+                #    one added/removed node changed the hash, the pair was
+                #    never scored). The candidate pool is now the UNION of
+                #    three cheap sources - the exact multiset-hash bucket
+                #    (the fast path), the UNIQUE-set bucket (the same
+                #    classes with different counts) and the RARE-TYPE pairs
+                #    (a node type seen in few files ties its carriers; the
+                #    generic types are never rare, so the pool stays small
+                #    on a 2000+ library). A cheap MATH prefilter runs first:
+                #    the size band (a jaccard can never exceed min/max) +
+                #    the types floor (a pair below it cannot reach the
+                #    threshold even with the perfect other features). The
+                #    full score runs for survivors ONLY against the ANCHOR
+                #    (no chaining), bounded by SIM_PAIR_BUDGET and reported
+                #    honestly (pairsScored / skippedPairs).
                 if len(groups) < SIM_MAX_GROUPS:
-                    by_types = {}
-                    for rel, f in feats.items():
-                        if rel in grouped or not f["sig_types"]:
-                            continue
+                    open_paths = [rel for rel in feats
+                                  if rel not in grouped
+                                  and feats[rel]["sig_types"]]
+                    adj = {}
+                    cand_left = SIM_CAND_PAIRS
+
+                    def _emit(paths):
+                        # all pairs inside one candidate family (bounded:
+                        # the family itself is bounded, and the global cap
+                        # guards a pathological library)
+                        nonlocal cand_left
+                        for i in range(len(paths)):
+                            a = paths[i]
+                            for j in range(i + 1, len(paths)):
+                                b = paths[j]
+                                adj.setdefault(a, set()).add(b)
+                                adj.setdefault(b, set()).add(a)
+                                cand_left -= 1
+                                if cand_left <= 0:
+                                    return
+
+                    by_types, by_uset = {}, {}
+                    for rel in open_paths:
+                        f = feats[rel]
                         by_types.setdefault(f["sig_types"], []).append(rel)
-                    for h, paths in sorted(by_types.items(),
-                                           key=lambda kv: (-len(kv[1]),
-                                                           kv[0])):
-                        if len(paths) < 2:
+                        by_uset.setdefault("\x00".join(sorted(set(f["types"]))),
+                                           []).append(rel)
+                    for buckets in (by_types, by_uset):
+                        for paths in sorted(buckets.values(),
+                                            key=lambda ps: (-len(ps), ps[0])):
+                            if len(paths) < 2:
+                                continue
+                            if len(paths) > SIM_MAX_BUCKET:
+                                out["skippedBroad"] += 1
+                                continue
+                            _emit(paths)
+                    post = {}
+                    for rel in open_paths:
+                        for t in feats[rel]["tc"]:
+                            post.setdefault(t, []).append(rel)
+                    rare_max = max(8, min(SIM_RARE_DF_MAX_CAP,
+                                          len(open_paths) // 20))
+                    for t in sorted(post, key=lambda k: (len(post[k]), k)):
+                        members = post[t]
+                        if not (2 <= len(members) <= rare_max) or cand_left <= 0:
                             continue
-                        if len(paths) > SIM_MAX_BUCKET:
-                            out["skippedBroad"] += 1
+                        _emit(sorted(members))
+                    out["candidatePairs"] = sum(len(v) for v in adj.values()) // 2
+                    out["candTruncated"] = cand_left <= 0
+                    # the anchor clustering: the newest ungrouped file
+                    # anchors; the members are scored ONLY against the
+                    # anchor (never chained), every file sits in AT MOST
+                    # ONE group
+                    floor = max(0.0, (threshold / 100.0
+                                      - (1.0 - SIM_WEIGHTS["types"]))
+                                / SIM_WEIGHTS["types"])
+                    anchors = sorted(open_paths,
+                                     key=lambda p: (-rows_by_path[p]["mtime"],
+                                                    p))
+                    budget = SIM_PAIR_BUDGET
+                    for anchor in anchors:
+                        if anchor in grouped or len(groups) >= SIM_MAX_GROUPS:
                             continue
-                        members = sorted(
-                            paths,
+                        partners = sorted(
+                            (p for p in adj.get(anchor, ())
+                             if p not in grouped),
                             key=lambda p: (-rows_by_path[p]["mtime"], p))
-                        anchor = members[0]
+                        if not partners:
+                            continue
                         fa = feats[anchor]
+                        na, ta = fa["n"], fa["tc"]
                         hits, scores = [], []
-                        for p in members[1:]:
-                            sc = similarity_score(fa, feats[p])
+                        for p in partners:
+                            fb = feats[p]
+                            nb = fb["n"]
+                            # the cheap math prefilter (zero false
+                            # negatives): the size band + the types floor
+                            if na and nb:
+                                if (min(na, nb) / max(na, nb)) < floor:
+                                    continue
+                            elif (na == 0) != (nb == 0):
+                                continue
+                            if _counter_jaccard(ta, fb["tc"]) < floor:
+                                continue
+                            if budget <= 0:
+                                out["skippedPairs"] += 1
+                                continue
+                            budget -= 1
+                            sc = similarity_score(fa, fb)
                             if sc >= threshold:
                                 hits.append(p)
                                 scores.append(sc)
@@ -1982,7 +2326,7 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                         grouped.update(sel)
                         groups.append({
                             "kind": "similar",
-                            "key": "types:" + h + ":" + anchor,
+                            "key": "sim:" + anchor,
                             "label": "Similar workflows",
                             "count": len(sel),
                             "minScore": min(scores),
@@ -1991,8 +2335,7 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                             "anchor": anchor,
                             "files": [rows_by_path[p] for p in sel],
                         })
-                        if len(groups) >= SIM_MAX_GROUPS:
-                            break
+                    out["pairsScored"] = SIM_PAIR_BUDGET - max(budget, 0)
                 ungrouped = [r for r in rows if r["path"] not in grouped]
                 out["ungroupedTotal"] = len(ungrouped)
                 out["ungrouped"] = ungrouped[:SIM_UNGROUPED_CAP]
@@ -2005,6 +2348,22 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                 return _similarity_filter(out, kind)
             finally:
                 conn.close()
+    except sqlite3.OperationalError as e:
+        # v118: a locked db is TRANSIENT (a scan's write txn) - the answer
+        # says busy:true and the Files UI retries automatically; the empty
+        # shape stays intact so the render never breaks
+        if _is_busy_error(e):
+            return {"ok": False, "busy": True,
+                    "error": str(e)[:MAX_ERROR_CHARS],
+                    "profile": NORMALIZATION_PROFILE_VERSION,
+                    "threshold": threshold, "weights": SIM_WEIGHTS,
+                    "groups": [], "ungrouped": [], "ungroupedTotal": 0,
+                    "totalFiles": 0, "skippedBroad": 0, "cached": False}
+        return {"ok": False, "error": str(e)[:MAX_ERROR_CHARS],
+                "profile": NORMALIZATION_PROFILE_VERSION,
+                "threshold": threshold, "weights": SIM_WEIGHTS,
+                "groups": [], "ungrouped": [], "ungroupedTotal": 0,
+                "totalFiles": 0, "skippedBroad": 0, "cached": False}
     except sqlite3.DatabaseError as e:
         return {"ok": False, "error": str(e)[:MAX_ERROR_CHARS],
                 "profile": NORMALIZATION_PROFILE_VERSION,

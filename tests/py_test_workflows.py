@@ -1933,7 +1933,7 @@ wf_store._wf_index.scan_index(
 r = loop(HGROUPS(FakeRequest(query={"threshold": "90"})))
 gj = r.json()
 check("v117 groups: the route answers with the profile + the weights",
-      gj.get("ok") and gj.get("profile") == "nprof2" and
+      gj.get("ok") and gj.get("profile") == "nprof3" and
       isinstance(gj.get("weights"), dict),
       json.dumps({k: gj.get(k) for k in ("ok", "profile", "weights")}))
 kinds = {}

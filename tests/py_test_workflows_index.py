@@ -628,8 +628,8 @@ check("duplicates: structuralCandidates is part of the answer",
 # byte-identical everything else) is an exact copy, the volatile widgets
 # (seed / control_after_generate) never count, the score is deterministic.
 # ---------------------------------------------------------------------------
-check("v117: the profile is nprof2 and the schema is 2",
-      widx.NORMALIZATION_PROFILE_VERSION == "nprof2" and
+check("v119: the profile is nprof3 and the schema stays 2",
+      widx.NORMALIZATION_PROFILE_VERSION == "nprof3" and
       widx.SCHEMA_VERSION == "2",
       widx.NORMALIZATION_PROFILE_VERSION + "/" + widx.SCHEMA_VERSION)
 
@@ -718,8 +718,8 @@ write_lib("v117_e2.json", wf_v117("v117-exact-b"))   # the Duplicate twin
 write_lib("v117_d1.json", wf_v117("v117-diff", extra_link=True))
 scan(force=True)
 _g = widx.similarity_groups(user_scope="default", threshold=90)
-check("v117 groups: the answer is ok + nprof2 + the threshold echo",
-      _g.get("ok") and _g.get("profile") == "nprof2" and
+check("v117 groups: the answer is ok + nprof3 + the threshold echo",
+      _g.get("ok") and _g.get("profile") == "nprof3" and
       _g.get("threshold") == 90,
       json.dumps({k: _g.get(k) for k in ("ok", "profile", "threshold")}))
 _kinds = {}
@@ -799,6 +799,466 @@ try:
                       "total": _gb.get("totalFiles")}))
 finally:
     widx.SIM_MAX_BUCKET = _old_bucket
+
+# ---------------------------------------------------------------------------
+# v118: the BUSY db contract - a locked db is TRANSIENT, never corruption.
+# The v117 bug: init_db's probe DDL waited out busy_timeout against the
+# scan's open write txn, the OperationalError fell into the corrupt-db
+# quarantine branch and RENAMED THE LIVE INDEX to .corrupt-* (the groups
+# request wiped the index and answered 'database is locked').
+# ---------------------------------------------------------------------------
+_lib2 = os.path.join(TMP, "userlib2", "workflows")
+os.makedirs(_lib2, exist_ok=True)
+
+
+def _wf118(wid, seed=0):
+    return {"id": wid, "revision": 1,
+            "nodes": [{"id": 1, "type": "KSampler", "pos": [seed, 0],
+                       "widgets_values": ["s%d" % seed]},
+                      {"id": 2, "type": "SaveImage", "pos": [9, 9]}],
+            "links": [], "extra": {}, "version": 0.4}
+
+
+for _i in range(6):
+    _p = os.path.join(_lib2, "f%d.json" % _i)
+    with open(_p, "w") as _fh:
+        json.dump(_wf118("uuid-%d" % (_i % 3), seed=_i), _fh)
+
+_stats118 = widx.scan_index(workflows_user_dirs=[_lib2],
+                            hide_dirs_fn=lambda d: [], force=True)
+check("v118 busy: the scan over the fresh root is complete",
+      _stats118.get("ok") and _stats118.get("complete") and
+      _stats118.get("indexed") == 6,
+      json.dumps({k: _stats118.get(k)
+                  for k in ("ok", "complete", "indexed", "errors")}))
+
+# the dir may already carry a LEGITIMATE .corrupt-* left by the earlier
+# corruption-rebuild test - the busy contract asserts NO NEW one appears
+# (the -wal/-shm sidecars come and go with the connections - only the
+# .corrupt-* names are compared)
+_corrupt_before_busy = {n for n in os.listdir(os.path.dirname(DB))
+                        if ".corrupt-" in n}
+
+_fast_orig_connect = widx._connect
+
+
+def _fast_connect118(db):
+    _c = _fast_orig_connect(db)
+    _c.execute("PRAGMA busy_timeout=200")
+    return _c
+
+
+class _BusyConn:
+    """A connection whose every statement answers 'database is locked'."""
+    def __init__(self, real):
+        self._real = real
+
+    def execute(self, *a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    def commit(self):
+        pass
+
+    def close(self):
+        try:
+            self._real.close()
+        except sqlite3.DatabaseError:
+            pass
+
+
+def _dir_entries118():
+    return sorted(os.listdir(os.path.dirname(DB)))
+
+
+_connA = sqlite3.connect(DB, timeout=10)
+_connA.execute("PRAGMA busy_timeout=8000")
+_connA.execute("BEGIN IMMEDIATE")
+_connA.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('p118','1')")
+try:
+    widx._connect = _fast_connect118
+    try:
+        _res_init = widx.init_db(DB)
+        check("v118 busy: init_db answers (db, fts) WITHOUT quarantining",
+              isinstance(_res_init, tuple) and _res_init[0] == DB,
+              json.dumps(str(_res_init)))
+        _corrupt_now = {n for n in os.listdir(os.path.dirname(DB))
+                        if ".corrupt-" in n}
+        check("v118 busy: NO NEW .corrupt-* file appeared (the index survived)",
+              _corrupt_now == _corrupt_before_busy,
+              json.dumps(sorted(_corrupt_now)))
+        _connB = sqlite3.connect(DB, timeout=10)
+        _n = _connB.execute("SELECT count(*) FROM workflow_files").fetchone()[0]
+        _connB.close()
+        check("v118 busy: the indexed rows are intact during a foreign txn",
+              _n == 6, str(_n))
+        _g118 = widx.similarity_groups(user_scope="default", threshold=90)
+        check("v118 busy: the groups request SUCCEEDS during a foreign write txn (WAL)",
+              _g118.get("ok") is True and _g118.get("totalFiles") == 6 and
+              not _g118.get("busy"),
+              json.dumps({k: _g118.get(k)
+                          for k in ("ok", "busy", "error", "totalFiles")}))
+        check("v118 busy: the same-UUID groups still build during the txn",
+              any(g.get("kind") == "same_uuid" and g.get("count") == 2
+                  for g in _g118.get("groups", [])),
+              json.dumps([(g.get("kind"), g.get("count"))
+                          for g in _g118.get("groups", [])]))
+    finally:
+        widx._connect = _fast_orig_connect
+
+    # the CLASSIFICATION: a locked statement answers {ok:false, busy:true}
+    widx._connect = (lambda db: _BusyConn(sqlite3.connect(db)))
+    try:
+        _dup = widx.duplicate_groups(user_scope="default")
+        check("v118 busy: duplicate_groups classifies locked as busy:true",
+              _dup.get("ok") is False and _dup.get("busy") is True and
+              "locked" in str(_dup.get("error")),
+              json.dumps({k: _dup.get(k) for k in ("ok", "busy", "error")}))
+        _sr = widx.search_index(user_scope="default", q="")
+        check("v118 busy: search_index classifies locked as busy:true (the page shape intact)",
+              _sr.get("busy") is True and _sr.get("files") == [] and
+              "has_more" in _sr,
+              json.dumps({k: _sr.get(k) for k in ("busy", "error", "total")}))
+        _sn = widx.search_notes(q="x")
+        check("v118 busy: search_notes classifies locked as busy:true",
+              _sn.get("ok") is False and _sn.get("busy") is True,
+              json.dumps({k: _sn.get(k) for k in ("ok", "busy", "error")}))
+        _st = widx.index_status(user_scope="default")
+        check("v118 busy: index_status classifies locked as busy:true",
+              _st.get("ok") is False and _st.get("busy") is True,
+              json.dumps({k: _st.get(k) for k in ("ok", "busy", "error")}))
+    finally:
+        widx._connect = _fast_orig_connect
+
+    # a REAL OperationalError raised past the reads (simulating a write
+    # contention inside the answer build) keeps the busy contract
+    _orig_rows = widx._similarity_rows
+
+    def _busy_rows(conn, scope):
+        raise sqlite3.OperationalError("database is locked")
+
+    widx._similarity_rows = _busy_rows
+    try:
+        _gb = widx.similarity_groups(user_scope="default", threshold=90)
+        check("v118 busy: similarity_groups answers busy:true on a locked statement",
+              _gb.get("ok") is False and _gb.get("busy") is True and
+              "locked" in str(_gb.get("error")) and
+              _gb.get("groups") == [] and "threshold" in _gb,
+              json.dumps({k: _gb.get(k)
+                          for k in ("ok", "busy", "error", "threshold")}))
+    finally:
+        widx._similarity_rows = _orig_rows
+finally:
+    _connA.rollback()
+    _connA.close()
+
+# the quarantine still fires for REAL corruption (the contract unchanged)
+_connC = sqlite3.connect(DB, timeout=10)
+_connC.execute("PRAGMA busy_timeout=8000")
+_connC.execute("BEGIN IMMEDIATE")
+_connC.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('p118b','1')")
+try:
+    widx._connect = _fast_connect118
+    try:
+        _res_init2 = widx.init_db(DB)
+        _corrupt_now2 = {n for n in os.listdir(os.path.dirname(DB))
+                         if ".corrupt-" in n}
+        check("v118 busy: the second contended init also stays clean",
+              isinstance(_res_init2, tuple) and
+              _corrupt_now2 == _corrupt_before_busy,
+              json.dumps(sorted(_corrupt_now2)))
+    finally:
+        widx._connect = _fast_orig_connect
+finally:
+    _connC.rollback()
+    _connC.close()
+
+_corrupt_tmp = os.path.join(TMP, "corrupt118")
+os.makedirs(_corrupt_tmp, exist_ok=True)
+_corrupt_db = os.path.join(_corrupt_tmp, "c.db")
+with open(_corrupt_db, "wb") as _fh:
+    _fh.write(b"this is not a sqlite database at all" * 40)
+widx.set_db_path(_corrupt_db)
+try:
+    _rc = widx.init_db(_corrupt_db)
+    check("v118 busy: REAL corruption still quarantines + rebuilds",
+          isinstance(_rc, tuple) and
+          any(".corrupt-" in n for n in sorted(os.listdir(_corrupt_tmp))),
+          json.dumps(sorted(os.listdir(_corrupt_tmp))))
+finally:
+    widx.set_db_path(DB)
+
+# the PER-FILE COMMIT: the scan's write txn never spans the whole pass -
+# rows written so far are VISIBLE to a concurrent reader mid-scan
+_lib3 = os.path.join(TMP, "userlib3", "workflows")
+os.makedirs(_lib3, exist_ok=True)
+for _i in range(210):
+    _p = os.path.join(_lib3, "w%03d.json" % _i)
+    with open(_p, "w") as _fh:
+        json.dump(_wf118("uuid3-%d" % (_i % 7), seed=_i), _fh)
+_seen_progress = {"n": 0}
+
+
+def _progress118(_stats):
+    _seen_progress["n"] += 1
+    if _seen_progress.get("rows_at_first") is None:
+        _c = sqlite3.connect(DB, timeout=10)
+        try:
+            _seen_progress["rows_at_first"] = _c.execute(
+                "SELECT count(*) FROM workflow_files WHERE rel_path LIKE "
+                "'workflows/w%'").fetchone()[0]
+        finally:
+            _c.close()
+
+
+_stats3 = widx.scan_index(workflows_user_dirs=[_lib3],
+                          hide_dirs_fn=lambda d: [], force=True,
+                          progress=_progress118)
+check("v118 per-file commit: the progress callback fired mid-scan",
+      _seen_progress["n"] >= 1, str(_seen_progress["n"]))
+check("v118 per-file commit: rows are COMMITTED while the scan still runs (no whole-pass txn)",
+      (_seen_progress.get("rows_at_first") or 0) >= 100,
+      json.dumps(_seen_progress))
+check("v118 per-file commit: the pass itself still completes + indexes everything",
+      _stats3.get("complete") and _stats3.get("indexed") == 210,
+      json.dumps({k: _stats3.get(k)
+                  for k in ("ok", "complete", "indexed", "errors")}))
+
+# ---------------------------------------------------------------------------
+# v119: the FLEXIBLE similarity candidates (nprof3). The owner's report:
+# v117 bucketed the "Similar" stage by the FULL node-type multiset hash -
+# a copy with ONE node added/removed changed the hash and was never scored
+# (only ~10 groups at the 80% threshold on a heavily-modified library).
+# nprof3: the candidates are the union of the multiset bucket + the
+# unique-set bucket + the rare-type pairs, the wiring noise (Reroute/Note)
+# is invisible to the features, the widget alignment is a greedy best-pair.
+# ---------------------------------------------------------------------------
+check("v119 noise: _is_sim_noise_type covers the reroute variants + notes",
+      widx._is_sim_noise_type("Reroute") and
+      widx._is_sim_noise_type("Reroute (rgthree)") and
+      widx._is_sim_noise_type("Reroute//something") and
+      widx._is_sim_noise_type("Note") and
+      widx._is_sim_noise_type("MarkdownNote") and
+      not widx._is_sim_noise_type("KSampler") and
+      not widx._is_sim_noise_type("RerouteOr Something") and
+      not widx._is_sim_noise_type(None),
+      "noise test")
+
+
+def wf_v119_base(wid, seed=0):
+    # a 12-node pipeline: 10 UNIQUE node types, two DISTINCTIVE LS* classes
+    # (the rare-type candidate signal) + the generic ones
+    return {"id": wid, "revision": 1,
+            "nodes": [
+                {"id": 1, "type": "CheckpointLoaderSimple",
+                 "widgets_values": ["m.safetensors"]},
+                {"id": 2, "type": "CLIPTextEncode",
+                 "widgets_values": ["prompt %d" % seed]},
+                {"id": 3, "type": "CLIPTextEncode",
+                 "widgets_values": ["neg %d" % seed]},
+                {"id": 4, "type": "LSEncoder", "widgets_values": {"frames": 24}},
+                {"id": 5, "type": "LSWav2Vec", "widgets_values": {"chunk": 2}},
+                {"id": 6, "type": "LSDenoiser", "widgets_values": {"strength": 0.6}},
+                {"id": 7, "type": "KSampler",
+                 "widgets_values": {"seed": 5, "steps": 20}},
+                {"id": 8, "type": "KSampler",
+                 "widgets_values": {"seed": 6, "steps": 18}},
+                {"id": 9, "type": "VAEDecode"},
+                {"id": 10, "type": "SaveImage"},
+                {"id": 11, "type": "PreviewImage"},
+                {"id": 12, "type": "LSUpscale", "widgets_values": ["2x"]},
+            ],
+            "links": [
+                [1, 1, 0, 7, 0, "MODEL"], [2, 1, 0, 8, 0, "MODEL"],
+                [3, 2, 0, 7, 1, "CONDITIONING"], [4, 3, 0, 8, 1, "CONDITIONING"],
+                [5, 4, 0, 7, 2, "LATENT"], [6, 4, 0, 8, 2, "LATENT"],
+                [7, 5, 0, 6, 0, "AUDIO"],
+                [8, 7, 0, 9, 0, "LATENT"], [9, 8, 0, 12, 0, "LATENT"],
+                [10, 9, 0, 10, 0, "IMAGE"], [11, 9, 0, 11, 0, "IMAGE"],
+                [12, 12, 0, 8, 3, "LATENT"],
+            ],
+            "extra": {}, "version": 0.4}
+
+
+_lib4 = os.path.join(TMP, "userlib4", "workflows")
+os.makedirs(_lib4, exist_ok=True)
+# THE OWNER'S CASE: a copy with a TWO-NODE GROUP added (a small upscale
+# tail). v117: the multiset hash changed -> the pair was never scored.
+# v119: the rare LS* types tie the pair, the math prefilter passes, the
+# score 86 clears the 80% threshold.
+_a119 = wf_v119_base("v119-a")
+_b119 = wf_v119_base("v119-b")
+_b119["nodes"].extend([
+    {"id": 13, "type": "UpscalerX", "widgets_values": ["2x-model"]},
+    {"id": 14, "type": "ImageScaleBy", "widgets_values": {"scale": 1.5}},
+])
+_b119["links"].extend([[13, 9, 0, 13, 0, "IMAGE"],
+                       [14, 13, 0, 14, 0, "IMAGE"]])
+with open(os.path.join(_lib4, "v119_a.json"), "w") as _fh:
+    json.dump(_a119, _fh)
+with open(os.path.join(_lib4, "v119_b.json"), "w") as _fh:
+    json.dump(_b119, _fh)
+_stats119 = widx.scan_index(workflows_user_dirs=[_lib4],
+                            hide_dirs_fn=lambda d: [], force=True)
+check("v119 scan: the two modified-copy files index cleanly",
+      _stats119.get("ok") and _stats119.get("indexed") == 2,
+      json.dumps({k: _stats119.get(k) for k in ("ok", "indexed", "errors")}))
+_ga = widx.similarity_groups(user_scope="default", threshold=80)
+check("v119 similar: a copy with a node GROUP added is GROUPED at 80 (the owner's case, v117 refused)",
+      any(g.get("kind") == "similar" and
+          {f["path"] for f in g.get("files", [])} ==
+          {"workflows/v119_a.json", "workflows/v119_b.json"}
+          for g in _ga.get("groups", [])),
+      json.dumps([(g.get("kind"), g.get("count"), g.get("minScore"))
+                  for g in _ga.get("groups", [])]))
+_ga90 = widx.similarity_groups(user_scope="default", threshold=90)
+check("v119 similar: the SAME pair stays UNGROUPED at 90 (the score decides, not the prefilter)",
+      all(g.get("kind") != "similar" for g in _ga90.get("groups", [])),
+      json.dumps([(g.get("kind"), g.get("count"))
+                  for g in _ga90.get("groups", [])]))
+check("v119 similar: the honest counters are in the answer",
+      _ga.get("candidatePairs", 0) >= 1 and _ga.get("pairsScored", 0) >= 1
+      and "skippedPairs" in _ga,
+      json.dumps({k: _ga.get(k) for k in ("candidatePairs", "pairsScored",
+                                          "skippedPairs")}))
+
+# the REROUTE/NOTE invisibility: a reroute chain on one link + a note node
+# change NOTHING in the features - the pair scores 100 inside a similar
+# group (never an exact group: the graph document still differs)
+_lib5 = os.path.join(TMP, "userlib5", "workflows")
+os.makedirs(_lib5, exist_ok=True)
+_d1 = wf_v119_base("v119-d1")
+_d2 = wf_v119_base("v119-d2")
+_d2["nodes"].append({"id": 15, "type": "Reroute"})
+_d2["nodes"].append({"id": 16, "type": "Note",
+                     "widgets_values": ["the free text must not count"]})
+_d2["links"] = [lk for lk in wf_v119_base("v119-d2")["links"]
+                if not (lk[1] == 9 and lk[3] == 10)]
+_d2["links"].extend([[15, 9, 0, 15, 0, "IMAGE"],
+                     [16, 15, 0, 10, 0, "IMAGE"]])
+with open(os.path.join(_lib5, "v119_d1.json"), "w") as _fh:
+    json.dump(_d1, _fh)
+with open(os.path.join(_lib5, "v119_d2.json"), "w") as _fh:
+    json.dump(_d2, _fh)
+widx.scan_index(workflows_user_dirs=[_lib5], hide_dirs_fn=lambda d: [],
+                force=True)
+_gd = widx.similarity_groups(user_scope="default", threshold=95)
+check("v119 reroute: reroute chain + note node stay INVISIBLE - the pair groups at 95 with score 100",
+      any(g.get("kind") == "similar" and g.get("minScore") == 100 and
+          {f["path"] for f in g.get("files", [])} ==
+          {"workflows/v119_d1.json", "workflows/v119_d2.json"}
+          for g in _gd.get("groups", [])),
+      json.dumps([(g.get("kind"), g.get("count"), g.get("minScore"))
+                  for g in _gd.get("groups", [])]))
+check("v119 reroute: the pair is NOT an exact group (the graph doc still differs)",
+      all(not ({f["path"] for f in g.get("files", [])} ==
+               {"workflows/v119_d1.json", "workflows/v119_d2.json"})
+          for g in _gd.get("groups", []) if g.get("kind") == "exact"),
+      json.dumps([g.get("kind") for g in _gd.get("groups", [])]))
+
+# the _extract_edges reroute resolution: unit assertions
+_e_direct = widx._extract_edges({
+    "nodes": [{"id": 1, "type": "A"}, {"id": 2, "type": "B"}],
+    "links": [[1, 1, 0, 2, 0, "X"]]})
+_e_reroute = widx._extract_edges({
+    "nodes": [{"id": 1, "type": "A"}, {"id": 2, "type": "B"},
+               {"id": 3, "type": "Reroute"}],
+    "links": [[1, 1, 0, 3, 0, "X"], [2, 3, 0, 2, 0, "X"]]})
+_e_fanout = widx._extract_edges({
+    "nodes": [{"id": 1, "type": "A"}, {"id": 2, "type": "B"},
+               {"id": 4, "type": "B"}, {"id": 3, "type": "Reroute"}],
+    "links": [[1, 1, 0, 3, 0, "X"], [2, 3, 0, 2, 0, "X"],
+              [3, 3, 0, 4, 0, "X"]]})
+_e_cycle = widx._extract_edges({
+    "nodes": [{"id": 4, "type": "Reroute"}, {"id": 5, "type": "Reroute"}],
+    "links": [[1, 4, 0, 5, 0, "X"], [2, 5, 0, 4, 0, "X"]]})
+check("v119 edges: the direct link keeps its key",
+      _e_direct == ["A|0>B|0"], json.dumps(_e_direct))
+check("v119 edges: A>Reroute>B resolves to the SAME key as the direct link",
+      _e_reroute == _e_direct, json.dumps(_e_reroute))
+check("v119 edges: a reroute FAN-OUT dedupes to one semantic edge (no multiset inflation)",
+      _e_fanout == ["A|0>B|0"], json.dumps(_e_fanout))
+check("v119 edges: a cyclic reroute wiring terminates + dedupes to ONE edge",
+      _e_cycle == ["Reroute|0>Reroute|0"],
+      json.dumps(_e_cycle))
+
+# the widget greedy alignment: the swapped bucket order the positional
+# compare mismatched (both pairs scored 0) now aligns to 1.0
+_wa = [{"t": "KSampler", "w": [["seed", "<v>"], ["steps", 20]]},
+       {"t": "KSampler", "w": [["steps", 30]]}]
+_wb = [{"t": "KSampler", "w": [["steps", 30]]},
+       {"t": "KSampler", "w": [["seed", "<v>"], ["steps", 20]]}]
+check("v119 widgets: the greedy best-pair aligns a reordered bucket to 1.0",
+      widx._widgets_similarity(_wa, _wb) == 1.0,
+      str(widx._widgets_similarity(_wa, _wb)))
+_wc = [{"t": "KSampler", "w": [["seed", "<v>"], ["steps", 20]]},
+       {"t": "KSampler", "w": [["steps", 30]]}]
+_wd = [{"t": "KSampler", "w": [["seed", "<v>"], ["steps", 20]]}]
+check("v119 widgets: an unmatched extra node still costs fully",
+      abs(widx._widgets_similarity(_wc, _wd) - 0.5) < 1e-9,
+      str(widx._widgets_similarity(_wc, _wd)))
+check("v119 score: the noise types in a hand-built feature dict change NOTHING",
+      widx.similarity_score(
+          {"types": ["KSampler", "Reroute", "Note"], "edges": [],
+           "widgets": [], "models": []},
+          {"types": ["KSampler"], "edges": [], "widgets": [],
+           "models": []}) == 100,
+      str(widx.similarity_score(
+          {"types": ["KSampler", "Reroute", "Note"], "edges": [],
+           "widgets": [], "models": []},
+          {"types": ["KSampler"], "edges": [], "widgets": [],
+           "models": []})))
+
+# the pair budget: the full scores stay bounded + the skip is honest
+_lib6 = os.path.join(TMP, "userlib6", "workflows")
+os.makedirs(_lib6, exist_ok=True)
+for _i, _wid in enumerate(("v119-c1", "v119-c2", "v119-c3")):
+    with open(os.path.join(_lib6, "v119_c%d.json" % _i), "w") as _fh:
+        json.dump(wf_v119_base(_wid, seed=_i), _fh)
+widx.scan_index(workflows_user_dirs=[_lib6], hide_dirs_fn=lambda d: [],
+                force=True)
+_old_budget = widx.SIM_PAIR_BUDGET
+widx.SIM_PAIR_BUDGET = 1
+try:
+    _gb = widx.similarity_groups(user_scope="default", threshold=80)
+    check("v119 budget: the full scores stay inside the budget + the skips are counted",
+          _gb.get("ok") and _gb.get("pairsScored") <= 1 and
+          _gb.get("skippedPairs") >= 1,
+          json.dumps({k: _gb.get(k) for k in ("ok", "pairsScored",
+                                              "skippedPairs")}))
+    check("v119 budget: a group still builds from the scored pair",
+          any(g.get("kind") == "similar" for g in _gb.get("groups", [])),
+          json.dumps([(g.get("kind"),) for g in _gb.get("groups", [])]))
+finally:
+    widx.SIM_PAIR_BUDGET = _old_budget
+
+# the STALE-PROFILE honesty: after a profile bump every row is old-profile
+# until the next scan - the answer says so instead of an empty grid
+_stale_db = os.path.join(TMP, "staleprof", "settings_hub", "workflows_manager",
+                         "index", "workflow_index.db")
+os.makedirs(os.path.dirname(_stale_db), exist_ok=True)
+_stale_lib = os.path.join(TMP, "stalelib", "workflows")
+os.makedirs(_stale_lib, exist_ok=True)
+with open(os.path.join(_stale_lib, "s1.json"), "w") as _fh:
+    json.dump(wf_v119_base("v119-stale"), _fh)
+widx.set_db_path(_stale_db)
+try:
+    widx.scan_index(workflows_user_dirs=[_stale_lib],
+                    hide_dirs_fn=lambda d: [], force=True)
+    _sc = sqlite3.connect(_stale_db, timeout=10)
+    try:
+        _sc.execute("UPDATE workflow_files SET "
+                    "normalization_profile_version='nprof0'")
+        _sc.commit()
+    finally:
+        _sc.close()
+    _gs = widx.similarity_groups(user_scope="default", threshold=80)
+    check("v119 stale: the answer stays ok + names the stale profile",
+          _gs.get("ok") is True and _gs.get("staleProfile") is True and
+          _gs.get("staleFiles", 0) == 1 and _gs.get("totalFiles") == 0,
+          json.dumps({k: _gs.get(k) for k in ("ok", "staleProfile",
+                                              "staleFiles", "totalFiles")}))
+finally:
+    widx.set_db_path(DB)
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------

@@ -5745,6 +5745,33 @@ body.sh-modal-open .hub-sh-note {
     pointer-events: none !important;
 }
 
+/* v118: the BASE toast style - it never existed (only the modal guard
+   above), so every .hub-sh-note rendered as an unstyled div at the end of
+   <body>: below the fold / behind the ComfyUI canvas - INVISIBLE. Every
+   named error ("Could not save the preset: ...") looked like "nothing
+   happens" - the owner's repeated report about the embed save. Fixed once
+   for every module (chat / stack / launcher / compare / workflows). */
+.hub-sh-note {
+    position: fixed;
+    left: 50%;
+    bottom: 18px;
+    transform: translateX(-50%);
+    z-index: 99999;
+    max-width: min(620px, 92vw);
+    background: #1c1c30;
+    color: #e6ebf7;
+    border: 1px solid #3d4a80;
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-family: "Inter", -apple-system, sans-serif;
+    font-size: calc(var(--sh-fs, 1) * 12px);
+    line-height: 1.45;
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    pointer-events: auto;
+}
+
 /* v90 font-scale overflow guards: extra safety for the rows the curated
    conversions above cannot cover. Everything here is a no-op at scale 1. */
 /* settings rows: the box may shrink under a long label instead of pushing */

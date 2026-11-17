@@ -170,6 +170,7 @@ function makeFakeApi() {
     let undoMode = "ok";             // "ok" | "stale" | "fail" (413 oversized)
     // v112 stage 2: the DERIVED INDEX stub (the plan 4.x engine)
     let idxModeFlag = "stale";       // default: an old py (the earlier phases keep the v108 local behavior; WT flips it on)
+    let groupsModeFlag = "ok";       // v118: "ok" | "busy" (a scan holds the SQLite db)
     let idxFiles = [];               // the indexed library rows
     let idxScanCount = 0;
     // v116: the notes search + the Files delete/undo + the compact controls
@@ -515,6 +516,19 @@ function makeFakeApi() {
             // groups: files sharing a workflow_id land in one same_uuid group
             if (p === "/settings_hub/workflows/index/groups" && method === "GET") {
                 if (idxModeFlag === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                // v118: the BUSY answer (a scan holds the db) - the soft
+                // state the client must retry, never a dead 'unavailable'
+                if (groupsModeFlag === "busy")
+                    return jsonResp({ ok: false, busy: true,
+                        error: "database is locked", groups: [],
+                        ungrouped: [], ungroupedTotal: 0, totalFiles: 0 });
+                // v119: the STALE-PROFILE answer - after a similarity-profile
+                // bump every row is old-profile until the next scan pass
+                if (groupsModeFlag === "stale")
+                    return jsonResp({ ok: true, profile: "nprof3",
+                        staleProfile: true, staleFiles: idxFiles.length,
+                        groups: [], ungrouped: [], ungroupedTotal: 0,
+                        totalFiles: 0, cached: false });
                 const qp3 = new URLSearchParams(String(u).split("?")[1] || "");
                 const kind = qp3.get("kind") || "all";
                 const byId = new Map();
@@ -533,7 +547,7 @@ function makeFakeApi() {
                         count: fs.length, anchor: fs[0].path, files: fs });
                 }
                 const ungrouped = idxFiles.filter((f) => !grouped.has(f.path));
-                let answer = { ok: true, profile: "nprof2",
+                let answer = { ok: true, profile: "nprof3",
                     threshold: parseInt(qp3.get("threshold") || "90", 10),
                     groups, ungrouped, ungroupedTotal: ungrouped.length,
                     totalFiles: idxFiles.length, skippedBroad: 0, cached: false };
@@ -1041,6 +1055,8 @@ function makeFakeApi() {
         __setRecentMode: (m) => { recentMode = m; },
         // v112 stage 2: the index stub controls
         __setIdxMode: (m) => { idxModeFlag = m; },
+        // v118: the groups busy mode ("ok" | "busy")
+        __setGroupsMode: (m) => { groupsModeFlag = m; },
         __setIdxFiles: (v) => { idxFiles = v; },
         __idxScanCount: () => idxScanCount,
         // v116: the notes + files-delete + compact + hold controls
@@ -1672,21 +1688,33 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v117", /"workflows":\s*"v117"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v119", /"workflows":\s*"v119"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v117 (the delete plan + groups release)",
-    ENTRY_SRC.includes("web build: v117 - THE DELETE PLAN + GROUPS") &&
+check("the entry banner names v119 (the flexible similarity groups release)",
+    ENTRY_SRC.includes("web build: v119 - THE FLEXIBLE SIMILARITY GROUPS") &&
     ENTRY_SRC.includes("THE WORKFLOW MANAGER ROADMAP"));
-check("styles.css?v=117", ENTRY_SRC.includes("styles.css?v=117"));
-check("the module self-reports v117",
+check("styles.css?v=119", ENTRY_SRC.includes("styles.css?v=119"));
+check("the module self-reports v119",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v117"'));
-check("the web stamp literal is v117",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v119"'));
+check("the web stamp literal is v119",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v117"'));
-check("py stamp bumps together (v117)",
+        .includes('const WF_WEB_VERSION = "v119"'));
+check("py stamp bumps together (v119)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v117"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v119"'));
+check("v119 py: the flexible-candidate constants + the noise set exist",
+    (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
+        return src.includes('SIM_RARE_DF_MAX_CAP') && src.includes('SIM_PAIR_BUDGET')
+            && src.includes('SIM_CAND_PAIRS') && src.includes('SIM_NOISE_TYPES')
+            && src.includes('NORMALIZATION_PROFILE_VERSION = "nprof3"')
+            && src.includes('def _counter_jaccard') && src.includes('def _is_sim_noise_type');
+    })());
+check("the toast base CSS exists (the v118 silence fix)",
+    fs.readFileSync(path.join(WEB, "styles.css"), "utf8")
+        .includes(".hub-sh-note {") &&
+    /\.hub-sh-note\s*\{[^}]*position:\s*fixed/.test(
+        fs.readFileSync(path.join(WEB, "styles.css"), "utf8")));
 check("v117 routes registered (groups + files delete preview)",
     ["/settings_hub/workflows/index/groups"]
         .every((s) => fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8").includes(s)));
@@ -2015,7 +2043,7 @@ await settle();
         String(checksW2.map((c) => c.checked)));
     check("WJ sftoggle: the label flipped back to 'Select all'",
         togBtn()?.textContent === "Select all", togBtn()?.textContent);
-    const collEmpty = hooks.collectFormItems();
+    const collEmpty = await hooks.collectFormItems();
     check("WJ sftoggle: nothing checked -> collectFormItems returns no items",
         Array.isArray(collEmpty.items) && collEmpty.items.length === 0);
     // one manual check -> the label flips to Select all again (dynamic, not sticky)
@@ -2271,7 +2299,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v118"); // ahead of the pack (v117) - a stale web file
+    fakeApi.__setHealthVersion("v120"); // ahead of the pack (v119) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -3543,7 +3571,7 @@ phase("WV v112 stage 3 (plans 6/7/8): per-tab Save, snapshot mode, duplicates");
     const rowsForm = hooks.saveForm();
     check("WV: the form rows mark persisted rows (path mode)",
         rowsForm.rows.some((r) => !r.isTemp));
-    const c1 = hooks.collectFormItems();
+    const c1 = await hooks.collectFormItems();
     check("WV: OFF embeds persisted tabs as PATH items",
         c1.items.every((it) => it.kind === "path" || it.kind === "snapshot"),
         JSON.stringify(c1.items.map((it) => it.kind)));
@@ -3553,7 +3581,7 @@ phase("WV v112 stage 3 (plans 6/7/8): per-tab Save, snapshot mode, duplicates");
     check("WV: the toggle flips to ON with the explanation",
         hooks.snapMode() === true &&
         bodyWv().textContent.includes("Embed selected saved workflows as independent copies"));
-    const c2 = hooks.collectFormItems();
+    const c2 = await hooks.collectFormItems();
     check("WV: ON embeds the persisted tab as a snapshot WITH its origin metadata",
         c2.items.some((it) => it.kind === "snapshot" && it.sourcePath === "workflows/flux_main.json"),
         JSON.stringify(c2.items.map((it) => [it.kind, it.sourcePath || null])));
@@ -4676,6 +4704,19 @@ phase("AAA v117: the delete preview + the confirm strip, the similarity groups U
         JSON.parse(dom.window.localStorage.getItem("settingshub.workflows.groups"))
             .kind === "same_uuid",
         dom.window.localStorage.getItem("settingshub.workflows.groups"));
+    // ---- 1b) v119: the stale-profile note + the flexible tooltip --------
+    check("AAA v119 groups: the threshold tooltip names the flexible scoring",
+        thrSelA.title.includes("MODIFIED copies") && thrSelA.title.includes("reroutes"),
+        thrSelA.title);
+    fakeApi.__setGroupsMode("stale");
+    hooks.setGroupsState({ on: true, threshold: 90, kind: "all" });
+    await hooks.runGroups(true);
+    await settle();
+    check("AAA v119 groups: a stale profile (old nprof2 rows before the re-index) shows the calm note, never an empty grid",
+        bodyA().textContent.includes("similarity profile was updated") &&
+        bodyA().textContent.includes("index scan re-indexes"),
+        bodyA().querySelector(".hub-wf-list")?.textContent?.slice(0, 160));
+    fakeApi.__setGroupsMode("ok");
     hooks.setGroupsState({ on: false, kind: "all" });
     hooks.renderAll();
     await settle();
@@ -4764,6 +4805,183 @@ phase("AAA v117: the delete preview + the confirm strip, the similarity groups U
         fakeApi.__recentStore().get(cidA2).entries.length === 0,
         JSON.stringify(fakeApi.__recentStore().get(cidA2)?.entries));
     hooks.setRecentLimit(15);
+    fakeApi.__setIdxFiles([]);
+    hooks.setTab("open");
+    await settle();
+}
+
+// ===========================================================================
+phase("AB v118: the embed save HEALS an unloaded saved tab + the toasts are VISIBLE");
+{
+    const pnlB = () => hooks.panelEl();
+    const bodyB = () => pnlB().querySelector(".hub-wf-body");
+    hooks.clearPresets();
+    fakeApi.__setPresets([]);
+    wfStore.openWorkflows.length = 0;
+    wfStore.activeWorkflow = null;
+
+    // THE OWNER'S SCENARIO (reported three times): a saved tab the frontend
+    // store never LOADED (a background tab at boot) - no activeState, no
+    // content, no ref.graph. The v117 code refused the WHOLE save with a
+    // 'Could not serialize' toast that had NO CSS - the owner saw nothing.
+    const unloaded = makeTab({ path: "workflows/flux_main.json", nodes: [1, 2] });
+    delete unloaded.activeState;            // a never-loaded background tab
+    const loaded = makeTab({ path: "workflows/from_rung0.json", nodes: [5] });
+    wfStore.openWorkflows.push(unloaded, loaded);
+    wfStore.activeWorkflow = loaded;
+    await hooks.refreshOpen(true);
+    hooks.setTab("presets");
+    hooks.openSaveForm("new");
+    await settle();
+    // the REAL user path: the checkbox ON, then the Save-new BUTTON
+    const snapChk = bodyB().querySelector('[data-wf="sfnapmode"]');
+    snapChk.checked = true;
+    snapChk.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    check("AB embed: the embed toggle is ON before the save",
+        hooks.snapMode() === true, String(hooks.snapMode()));
+    const callsBefore = fakeApi.__calls().length;
+    await bodyB().querySelector('[data-wf-btn="savenew"]').click();
+    await settle(40);
+    const newCalls = fakeApi.__calls().slice(callsBefore);
+    const postCall = newCalls.find((c) =>
+        c.url === "/settings_hub/workflows/presets" && c.method === "POST");
+    check("AB embed: the unloaded saved tab serializes through the DISK-truth rung and the POST FIRES",
+        !!postCall, JSON.stringify(newCalls.map((c) => c.method + " " + c.url)));
+    const postBody = postCall ? JSON.parse(postCall.body) : null;
+    check("AB embed: the preset carries the EMBEDDED snapshot with the origin path",
+        !!postBody && postBody.items.length === 2 &&
+        postBody.items.every((it) => it.kind === "snapshot") &&
+        postBody.items.some((it) => it.sourcePath === "workflows/flux_main.json"),
+        JSON.stringify(postBody && postBody.items.map((it) => [it.kind, it.sourcePath || null])));
+    check("AB embed: the form CLOSED after the successful save",
+        !bodyB().querySelector('[data-wf-btn="savenew"]'),
+        bodyB().querySelector(".hub-wf-saveform") ? "form still open" : "closed");
+    const saveToast = [...document.querySelectorAll(".hub-sh-note")]
+        .map((t) => t.textContent).find((t) => t.includes("Saved preset"));
+    check("AB embed: the success toast is IN THE DOM (the base CSS now exists)",
+        !!saveToast, JSON.stringify([...document.querySelectorAll(".hub-sh-note")]
+            .map((t) => t.textContent)));
+    check("AB embed: the client list re-read the saved preset from the server",
+        hooks.presetsLoaded() === true && hooks.presets().length === 1,
+        JSON.stringify(hooks.presets().map((p) => p.name)));
+
+    // the healing order: ref.load (the store loader) BEFORE the disk fetch
+    wfStore.openWorkflows.length = 0;
+    const loaderTab = makeTab({ path: "workflows/flux_main.json", nodes: [7, 8] });
+    delete loaderTab.activeState;
+    loaderTab.isLoaded = false;                 // the openStoreWorkflow precondition
+    loaderTab.load = async () => { loaderTab.activeState = { nodes: [{ id: 9 }] }; };
+    wfStore.openWorkflows.push(loaderTab);
+    wfStore.activeWorkflow = loaderTab;
+    await hooks.refreshOpen(true);
+    hooks.openSaveForm("new");
+    await settle();
+    hooks.setSnapMode(true);
+    await settle();
+    const udBefore = fakeApi.__calls().length;
+    const coll = await hooks.collectFormItems();
+    check("AB embed: ref.load fills the state first - NO /userdata fetch needed",
+        coll.items.length === 1 && coll.items[0].kind === "snapshot" &&
+        !fakeApi.__calls().slice(udBefore).some((c) => c.url.startsWith("/userdata/")),
+        JSON.stringify(coll.items?.map((it) => [it.kind, it.graph?.nodes?.length])));
+
+    // a MODIFIED tab without any in-memory state refuses with a NAMED,
+    // VISIBLE error (disk content would silently lose the edits)
+    wfStore.openWorkflows.length = 0;
+    const brokenMod = makeTab({ path: "workflows/flux_main.json" });
+    delete brokenMod.activeState;
+    brokenMod.isModified = true;
+    delete brokenMod.load;
+    wfStore.openWorkflows.push(brokenMod);
+    wfStore.activeWorkflow = brokenMod;
+    await hooks.refreshOpen(true);
+    hooks.openSaveForm("new");
+    await settle();
+    hooks.setSnapMode(true);
+    await settle();
+    const callsBefore2 = fakeApi.__calls().length;
+    await bodyB().querySelector('[data-wf-btn="savenew"]').click();
+    await settle(40);
+    const posts2 = fakeApi.__calls().slice(callsBefore2).filter((c) =>
+        c.url === "/settings_hub/workflows/presets" && c.method === "POST");
+    check("AB embed: a modified stateless tab refuses the save (NO POST)",
+        posts2.length === 0, JSON.stringify(posts2));
+    const errToast = [...document.querySelectorAll(".hub-sh-note")]
+        .map((t) => t.textContent).find((t) => t.includes("Could not serialize"));
+    check("AB embed: the refusal NAMES the tab and is VISIBLE in the DOM",
+        !!errToast && errToast.includes("flux_main.json"),
+        JSON.stringify(errToast));
+    check("AB embed: the form stays open with the buttons UNLOCKED (finally)",
+        !!bodyB().querySelector('[data-wf-btn="savenew"]') &&
+        !bodyB().querySelector('[data-wf-btn="savenew"]').disabled,
+        bodyB().querySelector('[data-wf-btn="savenew"]')?.textContent);
+
+    // the CSS contract: the base .hub-sh-note rule EXISTS (it never did)
+    const css = fs.readFileSync(new URL("../web/styles.css", import.meta.url), "utf8");
+    check("AB embed: styles.css carries the BASE .hub-sh-note toast rule (the v118 silence fix)",
+        /\.hub-sh-note\s*\{[^}]*position:\s*fixed/.test(css) &&
+        /\.hub-sh-note\s*\{[^}]*z-index:\s*99999/.test(css),
+        "the unstyled-toast era is over");
+
+    wfStore.openWorkflows.length = 0;
+    await hooks.refreshOpen(true);
+    hooks.setTab("open");
+    await settle();
+}
+
+// ===========================================================================
+phase("AC v118: the groups BUSY state - a soft note + an automatic retry, never a dead end");
+{
+    const pnlC = () => hooks.panelEl();
+    const bodyC = () => pnlC().querySelector(".hub-wf-body");
+    fakeApi.__setIdxMode("ok");
+    fakeApi.__setGroupsMode("busy");
+    const cRow = (path, wf) => ({ path, name: path.split("/")[1],
+        size: 10, mtime: 100, workflowId: wf || null, rawHash: "h-" + path,
+        workflowHash: "wf-" + path, presentationHash: "p-" + path,
+        parseStatus: null, nodeCount: 1, nodeTypes: [], modelRefs: [] });
+    fakeApi.__setIdxFiles([
+        cRow("workflows/ac1.json", "ac-uuid"),
+        cRow("workflows/ac2.json", "ac-uuid"),
+        cRow("workflows/ac3.json", null),
+    ]);
+    fakeApi.__fileFs(["workflows/ac1.json", "workflows/ac2.json",
+        "workflows/ac3.json"]);
+    hooks.setGroupsRetryMs(40);   // the tests drive the cadence
+    hooks.setTab("files");
+    await settle();
+    await hooks.runServerList(true);
+    await settle();
+    hooks.setGroupsState({ on: true, threshold: 90, kind: "all" });
+    await hooks.runGroups(true);
+    await settle();
+    check("AC busy: the busy answer renders the CALM indexing note (no dead ⚠)",
+        bodyC().textContent.includes("Indexing in progress") &&
+        !bodyC().textContent.includes("The groups are unavailable"),
+        bodyC().querySelector(".hub-wf-list")?.textContent?.slice(0, 140));
+    check("AC busy: the client state carries busy=true",
+        hooks.groupsBusy() === true, String(hooks.groupsBusy()));
+    // the automatic retry lands when the scan finishes
+    fakeApi.__setGroupsMode("ok");
+    await settle(20);
+    check("AC busy: the retry fetched the groups after the scan finished",
+        bodyC().textContent.includes("Same workflow ID") &&
+        !!bodyC().querySelector('[data-fpath="workflows/ac1.json"]'),
+        bodyC().querySelector(".hub-wf-list")?.textContent?.slice(0, 120));
+    check("AC busy: busy=false after the successful fetch",
+        hooks.groupsBusy() === false, String(hooks.groupsBusy()));
+    // a toggle-off clears the busy state (a stale timer never resurrects it)
+    fakeApi.__setGroupsMode("busy");
+    await hooks.runGroups(true);
+    await settle();
+    const grpTgl = bodyC().querySelector('[data-act="grouptoggle"]');
+    grpTgl.click();
+    await settle();
+    check("AC busy: the toggle-off clears the busy state",
+        hooks.groupsBusy() === false, String(hooks.groupsBusy()));
+    hooks.setGroupsRetryMs(3000);
+    fakeApi.__setGroupsMode("ok");
     fakeApi.__setIdxFiles([]);
     hooks.setTab("open");
     await settle();

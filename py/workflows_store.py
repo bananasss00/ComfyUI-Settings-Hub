@@ -166,12 +166,32 @@ MAX_NAME_CHARS = 80
 MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024
 MAX_PATH_CHARS = 300
 MAX_ACTIVE_PATH_CHARS = MAX_PATH_CHARS
+
+
+# v118 (the owner's third report: embed-save "did nothing"): the pack's own
+# 10 MB snapshot budget must survive the TRANSPORT cap. ComfyUI builds the
+# aiohttp app in many builds with aiohttp's default client_max_size (1 MB) -
+# a multi-workflow embed POST then dies at the TRANSPORT layer with a bare
+# 413 HTML (the route never even runs, the client sees "HTTP 413"). aiohttp
+# reads app._client_max_size PER REQUEST, so raising it here takes effect
+# without a restart-order dependency. Guarded - a future aiohttp that moves
+# the attribute only degrades to the previous behavior (a named 413 toast).
+def _raise_transport_body_cap():
+    try:
+        app = PromptServer.instance.app
+        want = 16 * 1024 * 1024
+        cur = int(getattr(app, "_client_max_size", 0) or 0)
+        if cur < want:
+            app._client_max_size = want
+    except Exception:
+        pass
+
+
+_raise_transport_body_cap()
+
 # v107: the temp-snapshot folder cap (a root must stay bounded even when a
 # client never cleans its recently-closed evictions up - multi-browser).
-MAX_TEMP_FILES = 128   # v117: up to 30 entries PER browser session (the
-                       # owner's Recently-closed-items setting) - 40 evicted
-                       # other sessions' live snapshots; the eviction now
-                       # also honors the cross-browser reference union
+MAX_TEMP_FILES = 128
 # v112 (plan 3.1/3.6): the reserved WORKFLOWS-MANAGER service folder of the
 # DEFAULT user dir - outside every workflows/ walk root and outside the
 # re-pointable storage root: undo snapshots, recently-closed manifests and
@@ -1595,7 +1615,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v117"
+WORKFLOWS_SERVER_VERSION = "v119"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
