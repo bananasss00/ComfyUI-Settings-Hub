@@ -227,9 +227,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v120";
+const WF_WEB_VERSION = "v121";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v120";
+globalThis.__SettingsHubLoaded["workflows"] = "v121";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -660,6 +660,27 @@ function getOpenWorkflows() {
  *  a legacy listing cannot be trusted to have excluded the default storage
  *  folder (it lives OUTSIDE workflows/, but a hand-copied presets/ folder
  *  inside it must not surface either). */
+/** v121: every Files listing surfaces ONLY workflow files - the SAME rule
+ *  the index applies (`endswith(".json")`, case-insensitive; a
+ *  workflow.json.bak or an extensionless file is NOT a workflow). The pack's
+ *  own listing rung already filters server-side, but the native /userdata
+ *  rung lists EVERY file in the folder, so a .py/.bak used to surface in the
+ *  Files tab while the index (correctly) never counted it - the tab looked
+ *  like it was 'indexing trash'. The dropped names are never shown; the
+ *  COUNT lands in savedFilesNonJson next to the file counts. */
+function jsonWfOnly(list) {
+    const out = [];
+    let dropped = 0;
+    for (const f of (list || [])) {
+        const p = String(f?.path || "");
+        if (!p) continue;
+        if (!p.toLowerCase().endsWith(".json")) { dropped++; continue; }
+        out.push(f);
+    }
+    savedFilesNonJson = dropped;
+    return out;
+}
+
 async function getSavedWorkflows() {
     // v108 rung 0: the pack's own listing (size + mtime in one shot).
     // v109: only a NON-EMPTY answer wins - an ok:true files:[] reply
@@ -671,12 +692,12 @@ async function getSavedWorkflows() {
         if (res.json?.ok && Array.isArray(res.json.files) && res.json.files.length) {
             // v112 (plan 3.10): the backend cap surfaces as a truncation note
             lastFilesTruncated = !!res.json.truncated;
-            return res.json.files.map((f) => ({
+            return jsonWfOnly(res.json.files.map((f) => ({
                 path: normWfPath(f.path),
                 name: f.name || baseName(f.path),
                 size: Number(f.size) || 0,
                 mtime: Number(f.mtime) || 0,
-            })).filter((f) => f.path && !f.path.toLowerCase().includes("settings_hub/"));
+            })).filter((f) => f.path && !f.path.toLowerCase().includes("settings_hub/")));
         }
     } catch (_) { /* old py - the legacy rungs take over */ }
     lastFilesTruncated = false;
@@ -691,7 +712,7 @@ async function getSavedWorkflows() {
                 out.push({ path: p, name: baseName(p), size: 0, mtime: 0 });
             }
         }
-        if (out.length) return out;
+        if (out.length) return jsonWfOnly(out);
     }
     try {
         const r = await app.api.fetchApi("/userdata?dir=workflows&recurse=true&full_info=true");
@@ -722,9 +743,10 @@ async function getSavedWorkflows() {
                 if (p.toLowerCase().includes("settings_hub/")) continue; // v108: never mix
                 out.push({ path: p, name: baseName(p), size, mtime });
             }
-            return out;
+            return jsonWfOnly(out);
         }
     } catch (_) {}
+    savedFilesNonJson = 0;
     return [];
 }
 
@@ -1479,7 +1501,10 @@ let filesUuid = "";             // the advanced filter: exact/partial ComfyUI UU
 // on/threshold/kind persist in localStorage; the ANSWER (groups + rows) is
 // a fetch cache with a short TTL - the server computes it over the WHOLE
 // index and caches it in SQLite, so the client never recomputes anything.
-let groupsState = { on: false, threshold: 90, kind: "all",
+// v121: the default threshold is 60 (the spec's P2 - 90 only merged the
+// near-exact siblings and left the version families split into 'groups
+// of 3'; the persisted legacy default 90 migrates to 60 once).
+let groupsState = { on: false, threshold: 60, kind: "all",
     data: null, loading: false, error: null, busy: false, collapsed: {} };
 // v118: a BUSY index (a scan holds the SQLite db) is a SOFT state - the
 // answer retries on a timer until the scan finishes; the v117 dead
@@ -1494,6 +1519,12 @@ function loadGroupsPrefs() {
             groupsState.on = !!v.on;
             const th = parseInt(v.threshold, 10);
             if (GROUP_THRESHOLD_CHOICES.includes(th)) groupsState.threshold = th;
+            // v121: 90 was the SHIPPED default through v120 - a persisted 90
+            // is almost never a deliberate choice, and the owner's own data
+            // says it was too strict (the 'groups of 3' report). It migrates
+            // to the new default once; ANY other persisted value is a user
+            // choice and stays.
+            if (groupsState.threshold === 90) groupsState.threshold = 60;
             if (v.kind === "same_uuid" || v.kind === "exact" || v.kind === "similar")
                 groupsState.kind = v.kind;
         }
@@ -2206,6 +2237,11 @@ let presets = [];
 let openTabs = [];
 let savedFiles = [];       // lazily loaded (the Files tab + ⚠ missing marks)
 let savedFilesLoaded = false;
+// v121: how many non-.json files the LAST saved-files walk DROPPED (the
+// native /userdata rung lists every file in the folder - the filter below
+// hides everything that is not a workflow, the count keeps it honest:
+// 'seen but not a workflow', exactly the index's own contract).
+let savedFilesNonJson = 0;
 let uiTab = "open";        // "open" | "presets" | "files"
 let lockedKeys = new Set(); // 📌 session locks (in-memory only)
 let sessionUndo = null;    // 1-level {paths, activePath}
@@ -3485,12 +3521,26 @@ function filesTabHtml() {
                 } else {
                     const out = [];
                     const kindIcon = { same_uuid: "⧉", exact: "⧉", similar: "≈" };
-                    // v120 the ACCOUNTING: the kind filter hides the other
-                    // stages' groups while their members still leave the
-                    // ungrouped tail - without this note the owner's sums
-                    // "did not add up" (844 files in hidden Same-UUID/
-                    // Exact groups looked lost). kindCounts comes from the
-                    // server answer and covers every indexed file.
+                    // v121 P0 (the spec): the 'similar' filter is SOFT - the
+                    // same_uuid/exact groups STAY VISIBLE (badged 'shown for
+                    // context') because the version families share a
+                    // workflow_id and the hard filter used to hide exactly
+                    // the biggest groups behind the 'hidden by this filter'
+                    // note. They render AFTER the Similar groups.
+                    let shownGroups = gd.groups || [];
+                    if (groupsState.kind === "similar") {
+                        const simG = [], restG = [];
+                        for (const g of shownGroups)
+                            (g.kind === "similar" ? simG : restG).push(g);
+                        shownGroups = simG.concat(restG);
+                    }
+                    // v120 the ACCOUNTING: the HARD kind filters (same_uuid /
+                    // exact) hide the other stages' groups while their
+                    // members still leave the ungrouped tail - without this
+                    // note the owner's sums "did not add up" (844 files in
+                    // hidden Same-UUID/Exact groups looked lost). kindCounts
+                    // comes from the server answer and covers every indexed
+                    // file. Under the soft Similar filter nothing is hidden.
                     const kindCounts = gd.kindCounts || {};
                     const kindLabel = { same_uuid: "Same workflow ID",
                                         exact: "Exact copies",
@@ -3499,6 +3549,7 @@ function filesTabHtml() {
                     const hiddenLabels = [];
                     for (const k of Object.keys(kindCounts)) {
                         if (groupsState.kind !== "all" &&
+                            groupsState.kind !== "similar" &&
                             k !== groupsState.kind && kindCounts[k] > 0) {
                             hiddenCount += kindCounts[k];
                             hiddenLabels.push(kindLabel[k] || k);
@@ -3506,15 +3557,19 @@ function filesTabHtml() {
                     }
                     if (hiddenCount > 0)
                         out.push(`<div class="hub-wf-emptylist">ℹ ${hiddenCount} file(s) live in ${esc(hiddenLabels.join(" / "))} groups - hidden by this filter (All groups shows them)</div>`);
-                    for (const g of (gd.groups || [])) {
+                    for (const g of shownGroups) {
                         const collapsed = !!groupsState.collapsed[g.key];
                         const scoreTxt = g.kind === "similar" &&
                             Number.isFinite(g.minScore)
                             ? ` · ${g.minScore}%${Number.isFinite(g.avgScore) ? "–" + g.avgScore + "%" : ""}` : "";
+                        const ctxBadge = groupsState.kind === "similar" &&
+                            g.kind !== "similar"
+                            ? ` <span class="hub-wf-snap" title="The Similar filter is active - this group is a Same workflow ID / Exact copies group shown for context (nothing is hidden)">· shown for context</span>`
+                            : "";
                         out.push(`<div class="hub-wf-sect hub-wf-sect-row">` +
                             `<button type="button" class="hub-wf-act" data-act="groupfold" data-key="${esc(g.key)}" ` +
                             `title="${collapsed ? "Expand the group" : "Collapse the group"}">${collapsed ? "▸" : "▾"} ${kindIcon[g.kind] || ""} ${esc(g.label)} · ${g.count} file(s)${scoreTxt}</button>` +
-                            `<span class="hub-wf-snap" title="A visual grouping only - nothing is merged, moved or deleted automatically">${g.kind === "same_uuid" ? "one workflow id" : g.kind === "exact" ? "100%" : "estimate ≥ " + groupsState.threshold + "%"}</span></div>`);
+                            `<span class="hub-wf-snap" title="A visual grouping only - nothing is merged, moved or deleted automatically">${g.kind === "same_uuid" ? "one workflow id" : g.kind === "exact" ? "100%" : "estimate ≥ " + groupsState.threshold + "%"}${ctxBadge}</span></div>`);
                         if (!collapsed) {
                             for (const f of (g.files || []))
                                 out.push(savedFileRowHtml(f, 1));
@@ -3631,7 +3686,7 @@ function filesTabHtml() {
         // chips' tooltips, the percentage is an estimate, never a proof
         (groupsState.on && idxMode()
             ? `<div class="hub-wf-fadv">` +
-              `<select class="hub-wf-fsel" data-wf="groupthresh" title="The similarity threshold: 50-100%. 95-100% = very similar, 80-94% = similar, 50-79% = loose (a heavily modified copy joins when it still resembles the group). v119 searches the MODIFIED copies too (a node group added/removed, reroutes, another seed - all still group); v120 scores additions/removals softer and joins copies of copies through a group member. The % is a structural/content ESTIMATE, not an identity guarantee">` +
+              `<select class="hub-wf-fsel" data-wf="groupthresh" title="The similarity threshold: 50-100% (default 60). 95-100% = very similar, 80-94% = similar, 50-79% = loose (a heavily modified copy joins when it still resembles the group). v119 searches the MODIFIED copies too (a node group added/removed, reroutes, another seed - all still group); v120 scores additions/removals softer; v121 clusters by CONNECTED components - every pair above the threshold ties its two files into one group (a long version line merges), the name stem and the model set seed the candidate search (versioned families group even on a small library). The % is a structural/content ESTIMATE, not an identity guarantee">` +
               GROUP_THRESHOLD_CHOICES.map((t) =>
                   `<option value="${t}"${groupsState.threshold === t ? " selected" : ""}>≥ ${t}%</option>`).join("") +
               `</select>` +
@@ -3658,8 +3713,10 @@ function filesTabHtml() {
                 : serverList.files.length + " shown of " + serverList.total + " indexed")
             : (savedFilesLoaded ? (filesView === "tree"
                 ? list.length + " match(es)"
-                : list.length + " of " + savedFiles.length + " file(s)") : (filesLoadPending ? "reading…" : "no files loaded"))}` +
-        `${idxMode() && idxStats ? " · idx " + (idxStats.files || 0) + (idxStats.errors ? " (" + idxStats.errors + " bad json)" : "") : ""}` +
+                : list.length + " of " + savedFiles.length + " file(s)")
+                + (savedFilesNonJson ? " · " + savedFilesNonJson + " non-json hidden" : "")
+                : (filesLoadPending ? "reading…" : "no files loaded"))}` +
+        `${idxMode() && idxStats ? " · idx " + (idxStats.files || 0) + (idxStats.errors ? " (" + idxStats.errors + " bad json)" : "") + (idxStats.non_json ? " · " + idxStats.non_json + " non-json skipped" : "") : ""}` +
         `${filesTruncated ? " · ⚠ truncated" : ""}` +
         ` · ★ ${filesFav.size} · ${fileSel.size} selected` +
         `${filesLastScan ? " · scanned " + esc(fmtDateTime(Math.floor(filesLastScan / 1000))) : ""}` +
@@ -6941,6 +6998,7 @@ export function __workflowsTestHooks() {
         lockedKeys: () => new Set(lockedKeys),
         savedFiles: () => savedFiles.slice(),
         savedFilesLoaded: () => savedFilesLoaded,
+        savedFilesNonJson: () => savedFilesNonJson,
         refreshSavedFiles: () => refreshSavedFiles(),
         // v108 Files-tab file manager: state + the pure helpers for the tests
         filesState: () => ({

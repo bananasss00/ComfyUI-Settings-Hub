@@ -1615,7 +1615,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v120"
+WORKFLOWS_SERVER_VERSION = "v121"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -3084,17 +3084,20 @@ async def workflows_index_groups(request):
     """v117 (the owner's Files-grouping plan): the SIMILARITY GROUPS over
     the WHOLE index - built SERVER-side (the flat list is server-paginated;
     grouping one client page would lie). Query: threshold (50-100, default
-    90), kind (all | same_uuid | exact | similar). The features come
-    from the nprof2 sig_* columns the scan maintains; the score runs for
-    candidate pairs only and the result is cached in SQLite (invalidated by
-    any re-index or profile change). The answer carries full page-shaped
-    rows so the Files tab renders its ordinary rows inside the groups."""
+    60 since v121 - the spec's P2: 90 only merged near-exact siblings),
+    kind (all | same_uuid | exact | similar; 'similar' is SOFT since v121 -
+    the same_uuid/exact groups travel in the answer for the UI to badge).
+    The features come from the nprof3 sig_* columns the scan maintains; the
+    score runs for candidate pairs only and the result is cached in SQLite
+    (invalidated by any re-index or profile change). The answer carries full
+    page-shaped rows so the Files tab renders its ordinary rows inside the
+    groups."""
     if _wf_index is None:
         return web.json_response({"ok": False, "error": "index module unavailable"},
                                  status=404)
     scope = _request_user_scope(request)
     qp = request.query
-    threshold = qp.get("threshold") or 90
+    threshold = qp.get("threshold") or 60
     kind = qp.get("kind") or "all"
     res = _wf_index.similarity_groups(user_scope=scope, threshold=threshold,
                                       kind=kind)

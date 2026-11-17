@@ -113,13 +113,15 @@ NORMALIZATION_PROFILE_VERSION = "nprof3"   # v119: the flexible candidates
 # change re-indexes every row once, honest per the profile contract)
 SCHEMA_VERSION = "2"                       # v117: +4 sig columns + the cache
 
-# v120 score contract: the SCORE FORMULA changed (the jaccard+overlap blend
-# below) while the EXTRACTED features stay byte-identical - the stored sig_*
-# columns are still valid, only the cached similarity answers are stale.
-# The cache key carries this version so a bump invalidates the answers
-# WITHOUT a full re-index (a profile bump would re-parse every file for
-# nothing - the honest-cheap invalidation).
-SIM_SCORE_VERSION = "s2"
+# The score/answer contract version in the CACHE KEY: a bump invalidates
+# the cached similarity answers WITHOUT a full re-index (the extracted
+# features are byte-identical, a profile bump would re-parse every file
+# for nothing - the honest-cheap invalidation). s2 = the v120 jaccard+overlap
+# blend; s3 = v121 - the FORMULA is untouched, the ANSWER construction
+# changed: the similar stage now clusters by UNION-FIND over every scored
+# candidate edge >= threshold (the strict anchor-star + the JOIN pass are
+# retired) and the candidate pool gains the name-stem + model-set seeds.
+SIM_SCORE_VERSION = "s3"
 
 # v117 similarity-group bounds (the plan's performance contract: a 2000+
 # library must answer from SQLite, the detailed score runs for CANDIDATES
@@ -133,19 +135,19 @@ SIM_MAX_GROUPS = 200       # the groups answer cap
 SIM_UNGROUPED_CAP = 300    # the ungrouped rows carried in one answer
 SIM_CACHE_ROWS = 64        # the LRU cap of the similarity_cache table
 # v119 flexible-candidate bounds: the rare-type posting lists cap (a type
-# seen in MORE files is generic - KSampler/VAEDecode - and must never tie
-# thousands of pairs), the full-score budget per answer (the math
+# seen in MORE files than this is generic - KSampler/VAEDecode - and must
+# never tie thousands of pairs), the full-score budget per answer (the math
 # prefilter is free, the detailed score is the expensive step; the budget
-# is reported honestly as skippedPairs)
-SIM_RARE_DF_MAX_CAP = 60
+# is reported honestly as skippedPairs).
+# v121: the cap rises 60 -> 400 and rare_max itself now derives from the
+# LARGEST ALREADY-VISIBLE family (the same-UUID/exact groups + the name-stem
+# buckets), not from N//20 - on a small folder (N=113) the old formula
+# collapsed to 8 while the family signature nodes sit at df 8-11, so they
+# never posted and the candidate pool starved (the spec's P1 measurement:
+# rare_max=60 restored 100% candidate coverage on the owner's folder).
+SIM_RARE_DF_MAX_CAP = 400
+SIM_RARE_SLACK = 4        # rare_max = largest_visible_family + this slack
 SIM_PAIR_BUDGET = 24000
-# v120 the JOIN pass (the modified copy of a modified copy): after the
-# anchor pass every still-ungrouped file gets a bounded second chance to
-# join an EXISTING group through one of its members (the anchor-only rule
-# left such chains ungrouped). Bounded by its own budget + member cap,
-# reported honestly (joinScored / joinSkipped).
-SIM_JOIN_BUDGET = 12000
-SIM_JOIN_MEMBERS = 40
 SIM_REROUTE_DEPTH = 32     # the reroute-chain walk cap (cycle defense)
 SIM_CAND_PAIRS = 150000    # the candidate-pair emission cap (pathological
 # libraries: the emission stops + candTruncated:true - honest, deterministic
@@ -329,6 +331,42 @@ def _is_sim_noise_type(t):
     # must end at a word boundary)
     return (base in SIM_NOISE_TYPES or base == "Reroute"
             or base.startswith("Reroute ") or base.startswith("Reroute("))
+
+
+# v121: the version-insensitive FILENAME STEM - the seed the spec's P1
+# asked for. Versioned families literally share a name ('x-simp-batch-v3.1.1'
+# and 'x-simp-batch-v3.1.2' carry the same stem); version tokens (v1.5.3.2 /
+# 1.5.3 / v3 / v1_1), a trailing bare number (ref_image_01), the '(2)'
+# duplicate suffix and a copy/backup word are stripped, every non-alphanumeric
+# run collapses to one space, so 'x-simp-batch', 'x_simp_batch' and
+# 'X Simp Batch' share the bucket too. Deterministic and O(1) per file; the
+# candidate pairs it emits are still SCORE-GATED by the full similarity.
+_SIM_STEM_VERSION_RE = re.compile(
+    r"(?<![a-z0-9])v?\d+(?:[._]\d+)+(?![a-z0-9])")   # v1.5.3.2 / 1.5.3 / v1_1
+_SIM_STEM_VNUM_RE = re.compile(r"(?<![a-z0-9])v\d+(?![a-z0-9])")  # bare v3
+_SIM_STEM_TAILNUM_RE = re.compile(r"(?<![a-z0-9])\d+(?![a-z0-9])\s*$")  # _01
+_SIM_STEM_DUP_RE = re.compile(r"\(\s*\d+\s*\)")                   # the (2) suffix
+_SIM_STEM_COPY_RE = re.compile(
+    r"[\s_-]*(?:copy|copies|копия|копии|duplicate|backup)\d*[\s_-]*$")
+_SIM_STEM_NONWORD_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _name_stem(name):
+    """The version-insensitive filename stem (v121): '' when nothing
+    meaningful remains (a version-only name carries no family signal - the
+    model-set/rare-type seeds cover those files instead)."""
+    if not isinstance(name, str) or not name:
+        return ""
+    s = name.strip()
+    if s.lower().endswith(".json"):
+        s = s[:-5]
+    s = s.lower()
+    s = _SIM_STEM_DUP_RE.sub(" ", s)
+    s = _SIM_STEM_VERSION_RE.sub(" ", s)
+    s = _SIM_STEM_VNUM_RE.sub(" ", s)
+    s = _SIM_STEM_COPY_RE.sub(" ", s)
+    s = _SIM_STEM_TAILNUM_RE.sub(" ", s)
+    return _SIM_STEM_NONWORD_RE.sub(" ", s).strip()
 
 
 def _sig_graph_doc(wf):
@@ -892,7 +930,8 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
         return {"ok": False, "error": "a scan is already running",
                 "busy": True,
                 "scanned": 0, "indexed": 0, "changed": 0, "errors": 0,
-                "removed": 0, "skipped_same": 0, "too_large": 0}
+                "removed": 0, "skipped_same": 0, "too_large": 0,
+                "non_json": 0}
     try:
         with _db_lock:
             init_db(db)
@@ -901,6 +940,13 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                  "too_large": 0, "truncated": False,
                  "prune_skipped": False, "walk_errors": 0,
                  "complete": True,
+                 # v121: the non-.json files the walk SAW are counted (never
+                 # indexed - the endswith(".json") filter is correct and
+                 # stays). The count surfaces next to the indexed total so
+                 # 'the walk saw them, the index skips them' is visible
+                 # instead of the files silently disappearing into the
+                 # surface (the owner's '.py in the listing' report).
+                 "non_json": 0,
                  "db": db, "fts": _fts_enabled(db),
                  "profile": NORMALIZATION_PROFILE_VERSION}
         seen_keys = set()
@@ -933,6 +979,7 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                             os.path.join(dirpath, d))) not in hides)
                     for fn in sorted(filenames):
                         if not fn.lower().endswith(".json"):
+                            stats["non_json"] += 1
                             continue
                         full = os.path.join(dirpath, fn)
                         rel = os.path.relpath(full, root_dir).replace(os.sep, "/")
@@ -1065,6 +1112,9 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                 conn.execute(
                     "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                     ("last_scan_scope", user_scope))
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                    ("last_scan_non_json", str(stats["non_json"])))
             except sqlite3.DatabaseError:
                 pass
             conn.commit()
@@ -1452,7 +1502,7 @@ def index_status(db=None, user_scope="default"):
            "profile": NORMALIZATION_PROFILE_VERSION,
            "schema_version": SCHEMA_VERSION, "fts": False,
            "db_bytes": 0, "complete": True, "lastScanComplete": None,
-           "truncated": False}
+           "truncated": False, "non_json": 0}
     if not out["db_exists"]:
         return out
     out["db_bytes"] = os.path.getsize(db)
@@ -1473,16 +1523,27 @@ def index_status(db=None, user_scope="default"):
                 out["last_scan"] = int(row[3] or 0)
                 mrow = conn.execute(
                     "SELECT key, value FROM meta WHERE key IN "
-                    "('last_scan_complete', 'last_scan_scope')").fetchall()
+                    "('last_scan_complete', 'last_scan_scope', "
+                    "'last_scan_non_json')").fetchall()
                 md = {k: v for k, v in (mrow or [])}
                 if "last_scan_complete" in md:
                     out["lastScanComplete"] = md["last_scan_complete"] == "1"
                     out["complete"] = out["lastScanComplete"]
                     out["truncated"] = not out["complete"]
+                # v121: the walk's non-.json counter travels with the scan
+                # scope - a counter from ANOTHER scope's walk means nothing
+                # for this one (the same guard the completeness flag uses)
+                if "last_scan_non_json" in md:
+                    try:
+                        out["non_json"] = int(md["last_scan_non_json"] or 0)
+                    except (TypeError, ValueError):
+                        out["non_json"] = 0
                 if "last_scan_scope" in md and md["last_scan_scope"] != user_scope:
                     # the flag belongs to ANOTHER scope - this scope's rows
                     # may be older than the last complete pass
                     out["complete"] = False
+                    # v121: the non-.json counter belongs to THAT walk too
+                    out["non_json"] = 0
                 conn.commit()
             finally:
                 conn.close()
@@ -2177,8 +2238,17 @@ def _similarity_cache_put(conn, key, payload):
 
 def _similarity_filter(answer, kind):
     """The client-side kind filter ('same_uuid' / 'exact' / 'similar')
-applied to a FULL cached answer - flipping the filter never recomputes."""
-    if kind not in ("same_uuid", "exact", "similar"):
+applied to a FULL cached answer - flipping the filter never recomputes.
+v121: the 'similar' filter is SOFT - the same_uuid/exact groups stay in
+the answer (the UI renders them after the Similar ones, badged 'shown for
+context'): the version families share a workflow_id, so the hard filter
+hid exactly the biggest groups (the spec's P0 - the owner's 'the Similar
+view shows nothing'). 'same_uuid' / 'exact' stay precise stage views."""
+    if kind == "similar":
+        answer = dict(answer)
+        answer["kind"] = kind
+        return answer
+    if kind not in ("same_uuid", "exact"):
         return answer
     answer = dict(answer)
     answer["groups"] = [g for g in answer.get("groups", [])
@@ -2187,27 +2257,39 @@ applied to a FULL cached answer - flipping the filter never recomputes."""
     return answer
 
 
-def similarity_groups(db=None, user_scope="default", threshold=90,
+def similarity_groups(db=None, user_scope="default", threshold=60,
                       kind=None):
     """The Files-tab grouping (v117): groups over the WHOLE index, built
     server-side (the plan: the flat list is server-paginated, so grouping a
     single client page would lie). Priority: Same UUID > Exact graph copy >
-    Similar; every file lands in AT MOST ONE group (anchor-based, no
-    chaining); the rest ships as `ungrouped`. The kind filter ('same_uuid' /
-    'exact' / 'similar') only filters the ANSWER - the full computation is
-    cached so flipping the filter is free.
+    Similar; every file lands in AT MOST ONE group; the rest ships as
+    `ungrouped`. The kind filter ('same_uuid' / 'exact' / 'similar') only
+    shapes the ANSWER - the full computation is cached so flipping the
+    filter is free (v121: 'similar' is a SOFT filter - the same_uuid/exact
+    groups travel with the answer, badged, because the version families
+    live in them).
 
     v120: the threshold accepts 50-100 (the owner asked for looser
     matching); the sub-scores are the (jaccard + overlap) blend; the
     oversized candidate buckets are no longer SKIPPED (sub-bucketed by the
     model set + a bounded star); the answer carries kindCounts so the UI
     can account for EVERY indexed file (the kind filter hides whole
-    stages' members - the owner's 'many files unaccounted' report)."""
+    stages' members - the owner's 'many files unaccounted' report).
+
+    v121 (the spec's P1+P2): the default threshold is 60 (90 only merged
+    near-exact siblings - the owner's 'groups of 3' report); the candidate
+    pool gains the FILENAME-STEM and MODEL-SET seeds (versioned families
+    share a name stem and their models); rare_max derives from the largest
+    already-visible family instead of collapsing to 8 on a small folder;
+    the similar stage clusters by UNION-FIND over every scored candidate
+    edge >= threshold (connected components) - the strict anchor-star with
+    'no chaining' capped long version lines to the nearest few, the JOIN
+    pass is retired (the chaining IS the clustering now)."""
     db = db or _db_path()
     try:
         threshold = int(threshold)
     except (TypeError, ValueError):
-        threshold = 90
+        threshold = 60
     threshold = max(50, min(100, threshold))
     out = {"ok": True, "profile": NORMALIZATION_PROFILE_VERSION,
            "threshold": threshold, "weights": SIM_WEIGHTS,
@@ -2391,12 +2473,58 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                                             key=lambda ps: (-len(ps), ps[0])):
                             if len(paths) >= 2:
                                 _emit_bucket(paths)
+                    # v121 the FAMILY SEEDS (the spec's P1): the exact
+                    # type-set buckets miss a family the moment one node is
+                    # added/removed, and the rare-type pass starved on a
+                    # small folder - two O(n) seeds catch the versioned
+                    # families directly: the FILENAME STEM ('x-simp-batch-
+                    # v3.1.1' and 'x-simp-batch-v3.1.2' share one stem) and
+                    # the MODEL SET (a modified copy keeps its models). A
+                    # seed only PROPOSES candidates - the full score still
+                    # gates every pair, an over-generated pair costs a
+                    # prefilter check, never a false group.
+                    by_stem, by_models = {}, {}
+                    for rel in open_paths:
+                        st = _name_stem(rows_by_path[rel]["name"])
+                        if st:
+                            by_stem.setdefault(st, []).append(rel)
+                        ms = frozenset(feats[rel]["models"])
+                        if ms:
+                            by_models.setdefault("\x00".join(sorted(ms)),
+                                                 []).append(rel)
+                    for buckets in (by_stem, by_models):
+                        for paths in sorted(buckets.values(),
+                                            key=lambda ps: (-len(ps), ps[0])):
+                            if len(paths) >= 2:
+                                _emit_bucket(paths)
                     post = {}
                     for rel in open_paths:
                         for t in feats[rel]["tc"]:
                             post.setdefault(t, []).append(rel)
+                    # v121 rare_max derives from the LARGEST ALREADY-VISIBLE
+                    # family (the same_uuid/exact groups + the stem buckets
+                    # capped at one bucket), not from N//20 alone - on a
+                    # small folder the old formula collapsed to 8 while the
+                    # family signature nodes sit at df 8-11, so they never
+                    # posted and the candidates starved (the spec's P1:
+                    # rare_max=60 restored 100% coverage on the owner's
+                    # folder). A generic name ('untitled' x 500) cannot
+                    # inflate it - its bucket stays over the cap and
+                    # contributes nothing. A floor of min(N, 30) keeps even
+                    # a fully-invisible family (unique names AND models)
+                    # coverable on a small library; N//20 keeps the v119
+                    # continuity on big uniform ones.
+                    fam_size = 0
+                    for g_ in groups:
+                        if g_["kind"] in ("same_uuid", "exact"):
+                            fam_size = max(fam_size, g_["count"])
+                    for ps_ in by_stem.values():
+                        if len(ps_) <= SIM_MAX_BUCKET:
+                            fam_size = max(fam_size, len(ps_))
                     rare_max = max(8, min(SIM_RARE_DF_MAX_CAP,
-                                          len(open_paths) // 20))
+                                          max(len(open_paths) // 20,
+                                              min(len(open_paths), 30),
+                                              fam_size + SIM_RARE_SLACK)))
                     for t in sorted(post, key=lambda k: (len(post[k]), k)):
                         members = post[t]
                         if not (2 <= len(members) <= rare_max) or cand_left <= 0:
@@ -2404,10 +2532,18 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                         _emit(sorted(members))
                     out["candidatePairs"] = sum(len(v) for v in adj.values()) // 2
                     out["candTruncated"] = cand_left <= 0
-                    # the anchor clustering: the newest ungrouped file
-                    # anchors; the members are scored ONLY against the
-                    # anchor (never chained), every file sits in AT MOST
-                    # ONE group
+                    # v121 the CLUSTERING: UNION-FIND (connected components)
+                    # over every scored candidate edge >= threshold. The
+                    # v117-v120 anchor rule ('members are compared ONLY
+                    # against the anchor, no chaining') capped a long
+                    # version line to the handful nearest the one anchor -
+                    # the owner's 'groups of 3 while the family has 8-10'.
+                    # Version-adjacent pairs score 55-70; only the members
+                    # near the anchor cleared 90. The connected clustering
+                    # lets EVERY qualifying edge tie its pair, so the line
+                    # merges into one component. The cheap math prefilter
+                    # (zero false negatives) and SIM_PAIR_BUDGET bound the
+                    # cost; everything is reported honestly.
                     floor = max(0.0, (threshold / 100.0
                                       - (1.0 - SIM_WEIGHTS["types"]))
                                 / SIM_WEIGHTS["types"])
@@ -2417,22 +2553,18 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                     budget0 = SIM_PAIR_BUDGET
                     budget = budget0
                     scored_pairs = set()
-                    sim_meta = []
+                    edges = []
                     for anchor in anchors:
-                        if anchor in grouped or len(groups) >= SIM_MAX_GROUPS:
-                            continue
-                        partners = sorted(
-                            (p for p in adj.get(anchor, ())
-                             if p not in grouped),
-                            key=lambda p: (-rows_by_path[p]["mtime"], p))
-                        if not partners:
-                            continue
-                        fa = feats[anchor]
-                        na, ta = fa["n"], fa["tc"]
-                        hits, scores = [], []
-                        for p in partners:
+                        for p in sorted(
+                                adj.get(anchor, ()),
+                                key=lambda q: (-rows_by_path[q]["mtime"], q)):
+                            key = (anchor, p) if anchor <= p else (p, anchor)
+                            if key in scored_pairs:
+                                continue
+                            scored_pairs.add(key)
+                            fa = feats[anchor]
                             fb = feats[p]
-                            nb = fb["n"]
+                            na, nb = fa["n"], fb["n"]
                             # the cheap math prefilter (zero false
                             # negatives): the types blend floor - a pair
                             # below it cannot reach the threshold even
@@ -2441,7 +2573,8 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                             # half stays 1.0 on a subset/superset pair,
                             # so a size ratio is NOT a valid bound.)
                             if na and nb:
-                                if _counter_pair_score(ta, fb["tc"]) < floor:
+                                if _counter_pair_score(fa["tc"],
+                                                       fb["tc"]) < floor:
                                     continue
                             elif (na == 0) != (nb == 0):
                                 continue
@@ -2449,86 +2582,65 @@ def similarity_groups(db=None, user_scope="default", threshold=90,
                                 out["skippedPairs"] += 1
                                 continue
                             budget -= 1
-                            scored_pairs.add(
-                                (anchor, p) if anchor <= p else (p, anchor))
                             sc = similarity_score(fa, fb)
                             if sc >= threshold:
-                                hits.append(p)
-                                scores.append(sc)
-                        if not hits:
-                            continue
-                        sel = [anchor] + hits
-                        grouped.update(sel)
-                        g = {
-                            "kind": "similar",
-                            "key": "sim:" + anchor,
-                            "label": "Similar workflows",
-                            "count": len(sel),
-                            "minScore": min(scores),
-                            "avgScore": int(round(sum(scores)
-                                                  / len(scores))),
-                            "anchor": anchor,
-                            "files": [rows_by_path[p] for p in sel],
-                        }
-                        groups.append(g)
-                        sim_meta.append({"paths": sel, "scores": scores,
-                                         "g": g})
+                                edges.append((key[0], key[1], sc))
                     out["pairsScored"] = budget0 - max(budget, 0)
-                    # 3b) THE JOIN PASS (v120): a modified copy of a
-                    #     modified copy is often similar to a GROUP MEMBER
-                    #     but not to the anchor - the anchor-only rule
-                    #     left such chains ungrouped. Every still-ungrouped
-                    #     file scores against the members (anchor first,
-                    #     capped) of the existing groups in creation
-                    #     order; the first hit joins. The cheap floor runs
-                    #     per MEMBER (not per anchor - the member is the
-                    #     one the file resembles); already-scored pairs
-                    #     are skipped (the anchor pass answered them).
-                    join_budget = SIM_JOIN_BUDGET
-                    out["joinScored"] = 0
-                    out["joinSkipped"] = 0
-                    for f in anchors:
-                        if f in grouped or join_budget <= 0 \
-                                or len(groups) >= SIM_MAX_GROUPS:
+                    # union-find over the qualifying edges; the component's
+                    # root (its deterministic representative) is the NEWEST
+                    # member - the same anchor the v117-v120 groups carried
+                    parent = {}
+
+                    def _uf_find(x):
+                        r = x
+                        while parent[r] != r:
+                            r = parent[r]
+                        while parent[x] != r:
+                            parent[x], x = r, parent[x]
+                        return r
+
+                    for a, b, _sc in edges:
+                        parent.setdefault(a, a)
+                        parent.setdefault(b, b)
+                    for a, b, _sc in edges:
+                        ra, rb = _uf_find(a), _uf_find(b)
+                        if ra == rb:
                             continue
-                        fa = feats[f]
-                        na, ta = fa["n"], fa["tc"]
-                        joined = False
-                        for meta in sim_meta:
-                            for m in meta["paths"]:
-                                if join_budget <= 0:
-                                    out["joinSkipped"] += 1
-                                    break
-                                key = (f, m) if f <= m else (m, f)
-                                if key in scored_pairs:
-                                    continue
-                                fb = feats[m]
-                                nb = fb["n"]
-                                if na and nb:
-                                    if _counter_pair_score(ta,
-                                                           fb["tc"]) < floor:
-                                        continue
-                                elif (na == 0) != (nb == 0):
-                                    continue
-                                join_budget -= 1
-                                out["joinScored"] += 1
-                                scored_pairs.add(key)
-                                sc = similarity_score(fa, fb)
-                                if sc >= threshold:
-                                    meta["paths"].append(f)
-                                    meta["scores"].append(sc)
-                                    grouped.add(f)
-                                    joined = True
-                                    break
-                            if joined:
-                                break
-                    for meta in sim_meta:
-                        g = meta["g"]
-                        g["count"] = len(meta["paths"])
-                        g["minScore"] = min(meta["scores"])
-                        g["avgScore"] = int(round(sum(meta["scores"])
-                                                  / len(meta["scores"])))
-                        g["files"] = [rows_by_path[p] for p in meta["paths"]]
+                        ka = (-rows_by_path[ra]["mtime"], ra)
+                        kb = (-rows_by_path[rb]["mtime"], rb)
+                        if ka <= kb:
+                            parent[rb] = ra
+                        else:
+                            parent[ra] = rb
+                    comps = {}
+                    for a, b, sc in edges:
+                        c = comps.setdefault(_uf_find(a),
+                                             {"members": set(),
+                                              "scores": []})
+                        c["members"].add(a)
+                        c["members"].add(b)
+                        c["scores"].append(sc)
+                    for r in sorted(comps,
+                                    key=lambda k: (-rows_by_path[k]["mtime"],
+                                                   k)):
+                        if len(groups) >= SIM_MAX_GROUPS:
+                            break
+                        c = comps[r]
+                        members = sorted(
+                            c["members"],
+                            key=lambda p: (-rows_by_path[p]["mtime"], p))
+                        grouped.update(members)
+                        groups.append({
+                            "kind": "similar",
+                            "key": "sim:" + r,
+                            "label": "Similar workflows",
+                            "count": len(members),
+                            "minScore": min(c["scores"]),
+                            "avgScore": int(round(sum(c["scores"])
+                                                  / len(c["scores"]))),
+                            "anchor": r,
+                            "files": [rows_by_path[p] for p in members],
+                        })
                 ungrouped = [r for r in rows if r["path"] not in grouped]
                 out["ungroupedTotal"] = len(ungrouped)
                 out["ungrouped"] = ungrouped[:SIM_UNGROUPED_CAP]

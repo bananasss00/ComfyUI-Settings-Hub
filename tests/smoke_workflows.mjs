@@ -551,8 +551,14 @@ function makeFakeApi() {
                     threshold: parseInt(qp3.get("threshold") || "90", 10),
                     groups, ungrouped, ungroupedTotal: ungrouped.length,
                     totalFiles: idxFiles.length, skippedBroad: 0, cached: false };
-                if (kind !== "all")
+                if (kind === "similar") {
+                    // v121: the SOFT Similar filter - the same_uuid/exact
+                    // groups travel in the answer (the UI badges them);
+                    // only same_uuid/exact stay hard filters
+                    answer = { ...answer, kind };
+                } else if (kind !== "all") {
                     answer = { ...answer, groups: groups.filter((g) => g.kind === kind), kind };
+                }
                 return jsonResp(answer);
             }
             // v116 (plan 4.6): the NOTES search stub
@@ -1688,27 +1694,27 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v120", /"workflows":\s*"v120"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v121", /"workflows":\s*"v121"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v120 (the loose similarity match release)",
-    ENTRY_SRC.includes("web build: v120 - THE LOOSE SIMILARITY MATCH") &&
+check("the entry banner names v121 (the connected similarity clusters release)",
+    ENTRY_SRC.includes("web build: v121 - THE CONNECTED SIMILARITY CLUSTERS") &&
     ENTRY_SRC.includes("THE WORKFLOW MANAGER ROADMAP"));
-check("styles.css?v=120", ENTRY_SRC.includes("styles.css?v=120"));
-check("the module self-reports v120",
+check("styles.css?v=121", ENTRY_SRC.includes("styles.css?v=121"));
+check("the module self-reports v121",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v120"'));
-check("the web stamp literal is v120",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v121"'));
+check("the web stamp literal is v121",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v120"'));
-check("py stamp bumps together (v120)",
+        .includes('const WF_WEB_VERSION = "v121"'));
+check("py stamp bumps together (v121)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v120"'));
-check("v119 py: the flexible-candidate constants + the noise set exist",
+        .includes('WORKFLOWS_SERVER_VERSION = "v121"'));
+check("v121 py: the union-find clustering + the seeds + the honest non-json accounting exist",
     (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
-        return src.includes('SIM_RARE_DF_MAX_CAP') && src.includes('SIM_PAIR_BUDGET')
-            && src.includes('SIM_CAND_PAIRS') && src.includes('SIM_NOISE_TYPES')
-            && src.includes('NORMALIZATION_PROFILE_VERSION = "nprof3"')
-            && src.includes('def _counter_jaccard') && src.includes('def _is_sim_noise_type');
+        return src.includes('def _name_stem') && src.includes('SIM_RARE_SLACK')
+            && src.includes('SIM_RARE_DF_MAX_CAP = 400') && src.includes('SIM_SCORE_VERSION = "s3"')
+            && src.includes('"non_json"') && src.includes('last_scan_non_json')
+            && src.includes('def _uf_find');
     })());
 check("the toast base CSS exists (the v118 silence fix)",
     fs.readFileSync(path.join(WEB, "styles.css"), "utf8")
@@ -2299,7 +2305,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v121"); // ahead of the pack (v120) - a stale web file
+    fakeApi.__setHealthVersion("v122"); // ahead of the pack (v121) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -2598,6 +2604,10 @@ fakeApi.__setWfFiles([
     { path: "workflows/sub/deep/nested.json", name: "nested.json", size: 512000, mtime: NOW - 5 },
     { path: "workflows/settings_hub/junk.json", name: "junk.json", size: 1, mtime: NOW - 3 },
     { path: "workflows/old.json", name: "old.json", size: 4096, mtime: NOW - 20 * 86400 },
+    // v121: the non-.json files the walk saw - NEVER listed (the index's own
+    // contract), but COUNTED next to the file totals
+    { path: "workflows/helper.py", name: "helper.py", size: 999, mtime: NOW - 60 },
+    { path: "workflows/old.json.bak", name: "old.json.bak", size: 888, mtime: NOW - 61 },
 ]);
 hooks.setTab("files");
 await hooks.refreshSavedFiles();
@@ -2614,6 +2624,12 @@ check("WO: the settings_hub subtree never mixes into Files (the owner's contract
     !wofiles.some((f) => String(f.path).includes("settings_hub/")), JSON.stringify(wofiles));
 check("WO: the nested folder file is listed",
     wofiles.some((f) => f.path === "workflows/sub/deep/nested.json"));
+check("v121: the non-.json files never surface in the Files listing (.py / .bak)",
+    !wofiles.some((f) => !String(f.path).toLowerCase().endsWith(".json")),
+    JSON.stringify(wofiles.filter((f) => !String(f.path).toLowerCase().endsWith(".json"))));
+check("v121: the dropped non-.json files are COUNTED (2 seen)",
+    hooks.savedFilesNonJson() === 2,
+    String(hooks.savedFilesNonJson()));
 
 let wbody = wpanel.querySelector(".hub-wf-body");
 check("WO: the row sub-line shows the workflows-relative path + size + date",
@@ -4658,7 +4674,7 @@ phase("AAA v117: the delete preview + the confirm strip, the similarity groups U
     await settle();
 
     // ---- 1) the similarity GROUPS UI (the owner's plan section 4) --------
-    hooks.setGroupsState({ on: true, threshold: 90, kind: "all" });
+    hooks.setGroupsState({ on: true, threshold: 60, kind: "all" });
     await hooks.runGroups(true);
     await settle();
     check("AAA groups: the toggle renders the group headers with the counts",
@@ -4684,8 +4700,8 @@ phase("AAA v117: the delete preview + the confirm strip, the similarity groups U
     bodyA().querySelector('[data-act="groupfold"]').click();
     await settle();
     const thrSelA = bodyA().querySelector('[data-wf="groupthresh"]');
-    check("AAA groups: the threshold select carries 50-100 (default 90)",
-        !!thrSelA && thrSelA.options.length === 8 && thrSelA.value === "90",
+    check("AAA groups: the threshold select carries 50-100 (default 60 since v121)",
+        !!thrSelA && thrSelA.options.length === 8 && thrSelA.value === "60",
         String(thrSelA?.value));
     check("AAA groups: the kind chips are all present",
         !!bodyA().querySelector('[data-act="groupkind"][data-kind="same_uuid"]') &&
@@ -4704,12 +4720,28 @@ phase("AAA v117: the delete preview + the confirm strip, the similarity groups U
         JSON.parse(dom.window.localStorage.getItem("settingshub.workflows.groups"))
             .kind === "same_uuid",
         dom.window.localStorage.getItem("settingshub.workflows.groups"));
+    // v121 P0: the SOFT Similar filter - the same_uuid groups stay VISIBLE
+    // (badged 'shown for context') instead of vanishing behind the hidden
+    // note (the version families share a workflow id - the hard filter hid
+    // exactly the biggest groups)
+    await bodyA().querySelector('[data-act="groupkind"][data-kind="similar"]').click();
+    await settle(30);
+    check("AAA v121: the Similar filter shows the same-UUID groups badged 'shown for context'",
+        hooks.groupsState().kind === "similar" &&
+        !!bodyA().querySelector('[data-fpath="workflows/aaa1.json"]') &&
+        bodyA().textContent.includes("shown for context"),
+        bodyA().querySelector(".hub-wf-list")?.textContent?.slice(0, 300));
+    check("AAA v121: the Similar filter renders NO 'hidden by this filter' note (nothing is hidden)",
+        !bodyA().textContent.includes("hidden by this filter"),
+        bodyA().querySelector(".hub-wf-list")?.textContent?.slice(0, 200));
+    await bodyA().querySelector('[data-act="groupkind"][data-kind="all"]').click();
+    await settle(30);
     // ---- 1b) v119: the stale-profile note + the flexible tooltip --------
     check("AAA v119 groups: the threshold tooltip names the flexible scoring",
         thrSelA.title.includes("MODIFIED copies") && thrSelA.title.includes("reroutes"),
         thrSelA.title);
     fakeApi.__setGroupsMode("stale");
-    hooks.setGroupsState({ on: true, threshold: 90, kind: "all" });
+    hooks.setGroupsState({ on: true, threshold: 60, kind: "all" });
     await hooks.runGroups(true);
     await settle();
     check("AAA v119 groups: a stale profile (old nprof2 rows before the re-index) shows the calm note, never an empty grid",

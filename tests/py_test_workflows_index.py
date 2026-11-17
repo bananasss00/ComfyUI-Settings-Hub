@@ -1204,10 +1204,10 @@ check("v119 similar: the HEAVY copy stays OUT of every 90 group (the score decid
       all("workflows/v119_h.json" not in _paths_of(g)
           for g in _ga90.get("groups", [])
           if g.get("kind") == "similar") and
-      "joinScored" in _ga90 and "joinSkipped" in _ga90,
+      _ga90.get("pairsScored", 0) >= 1 and "skippedPairs" in _ga90,
       json.dumps({"groups": [(g.get("kind"), g.get("count"), g.get("minScore"))
                              for g in _ga90.get("groups", [])],
-                  "joinScored": _ga90.get("joinScored")}))
+                  "pairsScored": _ga90.get("pairsScored")}))
 _ga80h = widx.similarity_groups(user_scope="default", threshold=80)
 check("v120 similar: at 80 the heavy copy JOINS the family (one group of 3)",
       any(g.get("kind") == "similar" and
@@ -1450,16 +1450,17 @@ check("v120 join: the chain measures 93/91/85 (j1~j3 below 90 - the anchor pass 
       _s12 >= 90 and _s23 >= 90 and _s13 < 90,
       "%d/%d/%d" % (_s12, _s23, _s13))
 _gj = widx.similarity_groups(user_scope="default", threshold=90)
-check("v120 join: the copy-of-copy JOINS through the member j2 (one group of 3, joinScored reported)",
+check("v121 union-find: the copy-of-copy JOINS through its 91-edge to j2 (one group of 3; the v120 JOIN pass is retired - the chaining IS the clustering)",
       any(g.get("kind") == "similar" and
           {"workflows/v120_j1.json", "workflows/v120_j2.json",
            "workflows/v120_j3.json"} <= _paths_of(g)
           for g in _gj.get("groups", [])) and
-      _gj.get("joinScored", 0) >= 1 and "joinSkipped" in _gj,
+      _gj.get("pairsScored", 0) >= 2 and
+      all(k in _gj for k in ("candidatePairs", "skippedPairs")),
       json.dumps({"groups": [(g.get("kind"), g.get("count"))
                              for g in _gj.get("groups", [])],
-                  "joinScored": _gj.get("joinScored"),
-                  "joinSkipped": _gj.get("joinSkipped")}))
+                  "pairsScored": _gj.get("pairsScored"),
+                  "candidatePairs": _gj.get("candidatePairs")}))
 
 # the score-version cache invalidation: the FORMULA bump invalidates the
 # cached answers without a re-index (the features did not change)
@@ -1475,9 +1476,262 @@ finally:
     widx.SIM_SCORE_VERSION = _old_sv
 
 # ---------------------------------------------------------------------------
+# v121: the FILENAME-STEM seed, the family-aware rare_max, the UNION-FIND
+# clustering, the honest non-.json accounting, the 60 default, and the
+# spec's section-11 acceptance on an owner-shaped library.
 # ---------------------------------------------------------------------------
-# cleanup
-shutil.rmtree(TMP, ignore_errors=True)
+# 1) the stem unit rules (the P1 seed: versioned families share a name)
+check("v121 stem: the version SUFFIX strips (x-simp-batch-v*)",
+      widx._name_stem("x-simp-batch-v3.1.1.json") ==
+      widx._name_stem("x-simp-batch-v3.1.2.json") == "x simp batch",
+      repr((widx._name_stem("x-simp-batch-v3.1.1.json"),
+            widx._name_stem("x-simp-batch-v3.1.2.json"))))
+check("v121 stem: the version PREFIX strips too (vX_lite_*)",
+      widx._name_stem("v1_lite_obvpm_timeline.json") ==
+      widx._name_stem("v2_lite_obvpm_timeline.json") == "lite obvpm timeline",
+      repr((widx._name_stem("v1_lite_obvpm_timeline.json"),
+            widx._name_stem("v2_lite_obvpm_timeline.json"))))
+check("v121 stem: separators collapse (-/_/space)",
+      widx._name_stem("sp_merge_bundle_v2.json") ==
+      widx._name_stem("sp-merge-bundle.json") == "sp merge bundle",
+      repr((widx._name_stem("sp_merge_bundle_v2.json"),
+            widx._name_stem("sp-merge-bundle.json"))))
+check("v121 stem: the (2) duplicate suffix strips",
+      widx._name_stem("my flow (2).json") ==
+      widx._name_stem("my flow.json") == "my flow",
+      repr((widx._name_stem("my flow (2).json"),
+            widx._name_stem("my flow.json"))))
+check("v121 stem: a version-only name carries NO family signal",
+      widx._name_stem("v1.2.json") == "",
+      repr(widx._name_stem("v1.2.json")))
+check("v121 stem: h3_dev is NOT a version (no false strip)",
+      widx._name_stem("h3_dev.json") == "h3 dev",
+      repr(widx._name_stem("h3_dev.json")))
+check("v121 stem: a trailing bare number strips (ref_image_01)",
+      widx._name_stem("ref_image_01.json") ==
+      widx._name_stem("ref_image_02.json") == "ref image",
+      repr((widx._name_stem("ref_image_01.json"),
+            widx._name_stem("ref_image_02.json"))))
+
+# 2) the honest non-.json accounting (Task 1): the walk SEES the non-json
+#    files, counts them, never indexes them - and the DB stays .json-only
+_lib9 = os.path.join(TMP, "userlib9", "workflows")
+os.makedirs(os.path.join(_lib9, "sub"), exist_ok=True)
+with open(os.path.join(_lib9, "wf1.json"), "w") as _fh:
+    json.dump(wf_v119_base("v121-nj1"), _fh)
+with open(os.path.join(_lib9, "sub", "wf2.JSON"), "w") as _fh:
+    json.dump(wf_v119_base("v121-nj2"), _fh)   # uppercase - indexed too
+for _nj in ("helper.py", "notes.txt", "wf.json.bak", "noext", "wf.json.gz"):
+    with open(os.path.join(_lib9, _nj), "w") as _fh:
+        _fh.write("not a workflow")
+_stats9 = widx.scan_index(workflows_user_dirs=[_lib9],
+                          hide_dirs_fn=lambda d: [], force=True)
+check("v121 scan: the walk counts the non-.json files it saw",
+      _stats9.get("ok") and _stats9.get("non_json") == 5,
+      json.dumps({k: _stats9.get(k) for k in ("ok", "indexed", "non_json")}))
+check("v121 scan: the .json filter stays case-insensitive (wf2.JSON indexed)",
+      _stats9.get("indexed") == 2,
+      json.dumps({k: _stats9.get(k) for k in ("indexed", "scanned")}))
+_dbc = sqlite3.connect(DB)
+try:
+    _njrows = _dbc.execute(
+        "SELECT count(*) FROM workflow_files WHERE rel_path NOT LIKE '%.json'"
+    ).fetchone()[0]
+finally:
+    _dbc.close()
+check("v121 db: ZERO non-.json rows in workflow_files (the owner's Task-1 SELECT)",
+      _njrows == 0, str(_njrows))
+_st9 = widx.index_status(user_scope="default")
+check("v121 status: the non-.json counter travels from the last scan",
+      _st9.get("ok") and _st9.get("non_json") == 5,
+      json.dumps({k: _st9.get(k) for k in ("ok", "files", "non_json")}))
+
+# 3) the SPEC'S SECTION-11 ACCEPTANCE on an owner-shaped folder: 6 named
+#    version families + true singletons -> ONE group per family at the NEW
+#    default 60, the singletons stay ungrouped, the families never glue.
+_lib8 = os.path.join(TMP, "userlib8", "workflows")
+os.makedirs(_lib8, exist_ok=True)
+
+
+def _fam121(wid, sig, model, seed, grow=0, rewire=False):
+    """One version of one family: a family-PRIVATE backbone (the sig-prefixed
+    loader/encode/sampler/decode types - the real owner's families differ far
+    more than two graphs sharing six generic nodes) + the family signature
+    node + the family model + two generic nodes (CheckpointLoaderSimple,
+    SaveImage). The iterations GROW a tail (a node group added), REWIRE a
+    link (the edges churn - the spec's re-plumbed version) and change the
+    prompt - exactly the version-shape the owner described."""
+    w = {"id": wid, "revision": 1, "nodes": [
+        {"id": 1, "type": "CheckpointLoaderSimple", "widgets_values": [model]},
+        {"id": 2, "type": sig + "Encode",
+         "widgets_values": ["prompt wording %d" % seed]},
+        {"id": 3, "type": sig + "Encode", "widgets_values": ["neg"]},
+        {"id": 4, "type": sig, "widgets_values": {"p": seed}},
+        {"id": 5, "type": sig + "Sampler", "widgets_values": {"seed": 5}},
+        {"id": 6, "type": sig + "Decode"},
+        {"id": 7, "type": "SaveImage"},
+    ], "links": [
+        [1, 1, 0, 5, 0, "MODEL"],
+        [2, 2, 0, 5, 1, "CONDITIONING"],
+        [3, 4, 0, 5, 2, "LATENT"],
+        [4, 5, 0, 6, 0, "LATENT"],
+        [5, 6, 0, 7, 0, "IMAGE"],
+    ], "extra": {}, "version": 0.4}
+    if rewire:
+        w["links"][2] = [3, 4, 0, 6, 0, "LATENT"]
+        w["links"].append([6, 2, 0, 5, 2, "CONDITIONING"])
+    for i in range(grow):
+        _nid = 8 + i
+        w["nodes"].append({"id": _nid, "type": "UpscalerX",
+                           "widgets_values": ["2x-%d" % i]})
+        w["links"].append([6 + i, 6 if i == 0 else _nid - 1, 0, _nid, 0,
+                           "IMAGE"])
+    return w
+
+
+_fam121_defs = (
+    # (stem, signature node, model, versions: (suffix, grow, rewire))
+    ("context-loop-pro-v%s.json", "SigCtxLoop", "ctx-model.safetensors",
+     (("1", 0, False), ("1.1", 2, True), ("1.2", 2, True))),
+    ("sp_merge_bundle_v%s.json", "SigMergeBundle", "sp-model.safetensors",
+     (("1", 0, False), ("2", 1, False), ("3", 2, False))),
+    ("x-simp-batch-v%s.json", "SigXSimp", "xs-model.safetensors",
+     (("1", 0, False), ("2", 1, True), ("3", 2, False))),
+    ("x-simp-batch-turbo-v%s.json", "SigXSimpTurbo", "xst-model.safetensors",
+     (("1", 0, False), ("2", 2, False), ("3", 3, True))),
+    ("v%s_lite_obvpm_timeline.json", "SigObvpm", "obv-model.safetensors",
+     (("1", 0, False), ("2", 1, False), ("3", 2, True))),
+    ("h3_dev_v%s.json", "SigH3Dev", "h3-model.safetensors",
+     (("1", 0, False), ("2", 1, True), ("3", 2, False))),
+)
+_fam121_files = {}
+_fi = 0
+for _pat, _sig, _model, _vers in _fam121_defs:
+    _fam121_files.setdefault(_sig, [])
+    for _sfx, _grow, _rw in _vers:
+        _fi += 1
+        _name = _pat % _sfx
+        _wf = _fam121("v121-fam-%d" % _fi, _sig, _model, _fi,
+                      grow=_grow, rewire=_rw)
+        with open(os.path.join(_lib8, _name), "w") as _fh:
+            json.dump(_wf, _fh)
+        _fam121_files[_sig].append("workflows/" + _name)
+# the TRUE singletons: exotic types, own models, no version tokens - they
+# must stay OUT of every group at 60
+_single121 = (("solo-alpha.json", "SoloAlpha", "solo-a.safetensors"),
+              ("solo-beta.json", "SoloBeta", "solo-b.safetensors"),
+              ("solo-gamma.json", "SoloGamma", "solo-g.safetensors"))
+for _k, (_name, _sig, _model) in enumerate(_single121):
+    _wf = _fam121("v121-solo-%d" % _k, _sig, _model, 100 + _k)
+    # a solo shape: no backbone overlap with the families
+    _wf["nodes"] = [_n for _n in _wf["nodes"]
+                    if _n["type"] not in ("KSampler", "VAEDecode",
+                                          "SaveImage",
+                                          "CheckpointLoaderSimple")]
+    _wf["nodes"].extend([
+        {"id": 21, "type": _sig + "B", "widgets_values": {"x": _k}},
+        {"id": 22, "type": "PreviewImage"},
+    ])
+    _wf["links"] = [[1, 2, 0, 22, 0, "IMAGE"],
+                    [2, 21, 0, 2, 0, "SPECIAL"]]
+    with open(os.path.join(_lib8, _name), "w") as _fh:
+        json.dump(_wf, _fh)
+# a SAME-UUID pair (two names, one workflow id): the P0 soft-filter probe
+# needs a same_uuid group in the answer (the scan prunes the earlier test
+# libraries' rows, so the v117 pair is long gone by this point)
+for _pname in ("v121_pair_a.json", "v121_pair_b.json"):
+    with open(os.path.join(_lib8, _pname), "w") as _fh:
+        json.dump(_fam121("v121-shared-uuid", "SigPair", "pair-model.safetensors",
+                          7), _fh)
+widx.scan_index(workflows_user_dirs=[_lib8], hide_dirs_fn=lambda d: [],
+                force=True)
+_g121 = widx.similarity_groups(user_scope="default", threshold=60)
+check("v121 acceptance: the default threshold answers as 60",
+      _g121.get("ok") and _g121.get("threshold") == 60,
+      json.dumps({"ok": _g121.get("ok"), "th": _g121.get("threshold"),
+                  "err": _g121.get("error")}))
+_grouped121 = {}
+for _g in _g121.get("groups", []):
+    for _f in _g.get("files", []):
+        _grouped121[_f["path"]] = _g["key"]
+for _sig, _paths in _fam121_files.items():
+    _keys = {_grouped121.get(_p) for _p in _paths}
+    check("v121 acceptance: the %s family (3 versions, grown/rewired) is ONE group at 60"
+          % _sig,
+          len(_keys) == 1 and None not in _keys,
+          json.dumps({"keys": sorted(str(k) for k in _keys),
+                      "paths": _paths}))
+_solo_paths = ["workflows/" + _n for _n, _s, _m in _single121]
+check("v121 acceptance: every true singleton stays ungrouped at 60",
+      all(_p not in _grouped121 for _p in _solo_paths),
+      json.dumps({p: _grouped121.get(p) for p in _solo_paths}))
+check("v121 acceptance: the families never glue into one blob (the sig nodes keep the score apart)",
+      len({_grouped121.get(_p) for _ps in _fam121_files.values()
+           for _p in _ps}) == len(_fam121_files),
+      json.dumps(sorted(set(str(k) for k in _grouped121.values()))))
+check("v121 acceptance: the accounting still holds (kindCounts + ungrouped == total)",
+      sum((_g121.get("kindCounts") or {}).values()) +
+      _g121.get("ungroupedTotal", 0) == _g121.get("totalFiles", -1),
+      json.dumps({"kindCounts": _g121.get("kindCounts"),
+                  "ungrouped": _g121.get("ungroupedTotal"),
+                  "total": _g121.get("totalFiles")}))
+
+# 4) the rare_max starvation (the spec's P1 measured): a fully-INVISIBLE
+#    family (unique names, unique models, drifting node counts) on a small
+#    folder. The v119 formula (rare_max = max(8, N//20) = 8) starved it: the
+#    signature nodes sat at df 10 > 8 and never posted. v121 posts them.
+_lib10 = os.path.join(TMP, "userlib10", "workflows")
+os.makedirs(_lib10, exist_ok=True)
+for _i in range(10):
+    _wf = _fam121("v121-nv-%d" % _i, "SigRareNV", "nv-model-%d.safetensors"
+                  % _i, _i, grow=_i)
+    _wf["nodes"].extend([{"id": 40 + _k, "type": "Filler%d" % _i,
+                          "widgets_values": {"k": _k}} for _k in range(_i)])
+    with open(os.path.join(_lib10, "nva%d.json" % _i if _i < 9
+                           else "nvb1.json"), "w") as _fh:
+        json.dump(_wf, _fh)
+widx.scan_index(workflows_user_dirs=[_lib10], hide_dirs_fn=lambda d: [],
+                force=True)
+_gnv = widx.similarity_groups(user_scope="default", threshold=60)
+_nv_paths = {"workflows/nva%d.json" % _i for _i in range(9)} | \
+    {"workflows/nvb1.json"}
+_nv_group = None
+for _g in _gnv.get("groups", []):
+    if _nv_paths <= {f["path"] for f in _g.get("files", [])}:
+        _nv_group = _g
+check("v121 rare_max: the 10-file family with df-10 signature nodes and drifting counts still groups at 60 (the v119 rare_max=8 starved it)",
+      _nv_group is not None,
+      json.dumps({"groups": [(g.get("kind"), g.get("count"), g.get("minScore"))
+                             for g in _gnv.get("groups", [])],
+                  "cand": _gnv.get("candidatePairs"),
+                  "scored": _gnv.get("pairsScored")}))
+
+# 5) the soft 'similar' kind filter (the spec's P0): the same_uuid/exact
+#    groups travel in the answer instead of being hidden. The _lib10 scan
+#    above PRUNED the _lib8 rows (each walk owns the scope) - re-walk _lib8
+#    to bring the same-uuid pair back before probing the filter.
+widx.scan_index(workflows_user_dirs=[_lib8], hide_dirs_fn=lambda d: [],
+                force=True)
+_gsoft = widx.similarity_groups(user_scope="default", threshold=60,
+                                kind="similar")
+_gall = widx.similarity_groups(user_scope="default", threshold=60)
+check("v121 P0: kind=similar keeps the same_uuid/exact groups in the answer (nothing hidden)",
+      _gsoft.get("kind") == "similar" and
+      len(_gsoft.get("groups", [])) == len(_gall.get("groups", [])) and
+      any(g.get("kind") == "same_uuid" and
+          g.get("workflowId") == "v121-shared-uuid"
+          for g in _gsoft.get("groups", [])),
+      json.dumps({"soft": len(_gsoft.get("groups", [])),
+                  "all": len(_gall.get("groups", [])),
+                  "kinds": sorted({g.get("kind")
+                                   for g in _gsoft.get("groups", [])})}))
+_gexact = widx.similarity_groups(user_scope="default", threshold=60,
+                                 kind="exact")
+check("v121 P0: kind=exact stays a precise stage filter",
+      all(g.get("kind") == "exact" for g in _gexact.get("groups", [])),
+      json.dumps(sorted({g.get("kind") for g in _gexact.get("groups", [])})))
+
+
 
 print()
 print("PASS: %d  FAIL: %d" % (PASS, FAIL))
