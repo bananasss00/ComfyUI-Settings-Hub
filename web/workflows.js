@@ -227,9 +227,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v122";
+const WF_WEB_VERSION = "v123";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v122";
+globalThis.__SettingsHubLoaded["workflows"] = "v123";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -2301,16 +2301,20 @@ function savedPathIndex() {
     return _savedPathIdx;
 }
 
-function missingPathsOf(preset) {
+function missingPathsOfItems(items) {
     if (!savedFilesLoaded) return [];
     const known = savedPathIndex();
-    return (preset.items || [])
+    return (items || [])
         .filter((it) => it.kind === "path")
         .filter((it) => {
             const c = canonWfRel(it.path);
             return !c || !known.has(c); // unknown/unsafe path = missing
         })
         .map((it) => it.path);
+}
+
+function missingPathsOf(preset) {
+    return missingPathsOfItems(preset?.items);
 }
 
 // ---------------------------------------------------------------------------
@@ -2321,8 +2325,20 @@ function missingPathsOf(preset) {
 function buildApplyPlan(preset, opts = {}) {
     const pref = getPref();
     const keepUnsaved = opts.keepUnsaved != null ? !!opts.keepUnsaved : pref.keepUnsaved;
+    // v123 (owner request): open only the SELECTED tabs of a preset, not all
+    // of them. opts.onlyIdx = indices into preset.items; absent / covering
+    // every item = the old full-preset behavior. An UNSELECTED item counts
+    // as "not in the preset at all": its open tab retires with the rest
+    // (visible in the Will-close preview; 📌 and keep-unsaved still protect
+    // it), its file is never opened, its snapshot never spawns a tab, and
+    // the active-tab focus is skipped when the active item is unselected.
+    const allItems = Array.isArray(preset.items) ? preset.items : [];
+    const only = Array.isArray(opts.onlyIdx) && opts.onlyIdx.length < allItems.length
+        ? new Set(opts.onlyIdx.filter((i) => Number.isInteger(i) && i >= 0 && i < allItems.length))
+        : null;
+    const selItems = only ? allItems.filter((_, i) => only.has(i)) : allItems;
     // v112 (plan 3.3): ALL path set-membership goes through canonWfRel
-    const itemPaths = new Set((preset.items || [])
+    const itemPaths = new Set(selItems
         .filter((it) => it.kind === "path")
         .map((it) => canonWfRel(it.path))
         .filter(Boolean));
@@ -2343,9 +2359,9 @@ function buildApplyPlan(preset, opts = {}) {
     }
     const keptPaths = new Set(keep.filter((t) => t.path).map((t) => canonWfRel(t.path)));
     const openPaths = new Set(open.filter((t) => t.path).map((t) => canonWfRel(t.path)));
-    const toOpenPaths = (preset.items || [])
+    const toOpenPaths = selItems
         .filter((it) => it.kind === "path" && !keptPaths.has(canonWfRel(it.path)));
-    let toOpenSnaps = (preset.items || []).filter((it) => it.kind === "snapshot");
+    let toOpenSnaps = selItems.filter((it) => it.kind === "snapshot");
     // v112 stage 3 (plan 8): the batch duplicate accounting - the exact
     // copies of ALREADY-OPEN temp tabs are counted and can be SKIPPED by an
     // explicit user choice (the default opens all copies - nothing is
@@ -2357,13 +2373,36 @@ function buildApplyPlan(preset, opts = {}) {
     if (opts.skipDupSnaps) {
         toOpenSnaps = toOpenSnaps.filter((it) => !findSnapshotDuplicates(it.graph).exact);
     }
+    // v123: the active-tab focus survives only when the active item is part
+    // of the selection (focusing an unselected - about-to-close - tab would
+    // fight the apply itself)
+    const focusActive = only === null ||
+        (p_activePathSelected(preset, selItems) || p_activeItemSelected(preset, selItems));
     return {
         preset, keep, close, toOpenPaths, toOpenSnaps,
         reopenClosed: toOpenPaths.filter((it) => openPaths.has(canonWfRel(it.path))),
-        missing: missingPathsOf(preset),
+        missing: missingPathsOfItems(selItems),
         keepUnsaved,
         dupCount,
+        only: only ? [...only] : null,
+        focusActive,
+        selCount: selItems.length,
     };
+}
+
+// v123 helpers behind buildApplyPlan's focusActive - the preset's active
+// tab (activePath / activeItemId) must be among the SELECTED items for the
+// apply to focus it afterwards.
+function p_activePathSelected(preset, selItems) {
+    const ap = preset?.activePath;
+    if (!ap) return false;
+    const c = canonWfRel(ap);
+    return !!c && selItems.some((it) => it.kind === "path" && canonWfRel(it.path) === c);
+}
+function p_activeItemSelected(preset, selItems) {
+    const aid = preset?.activeItemId;
+    if (!aid) return false;
+    return selItems.some((it) => it.itemId === aid);
 }
 
 /** v112 (plan 3.1): SNAPSHOT-BASED UNDO. Before a destructive apply the
@@ -2521,16 +2560,21 @@ async function applyPlan(plan) {
     }
     // 3) activate the preset's active tab - v112 stage 3 (plan 7.3): the
     // active item may be a SNAPSHOT (activeItemId); the snapshot's temp tab
-    // opened above is the LAST matching snapshot - activate by name
-    if (p.activePath) {
-        const t = getOpenWorkflows().find((x) => x.path && sameWfPath(x.path, p.activePath));
-        if (t) await activateWorkflow(t);
-    } else if (p.activeItemId) {
-        const it = (p.items || []).find((x) => x.itemId === p.activeItemId);
-        if (it?.kind === "snapshot") {
-            const t = [...getOpenWorkflows()].reverse()
-                .find((x) => !x.path && x.name === (it.name || it.sourceName));
+    // opened above is the LAST matching snapshot - activate by name.
+    // v123: SKIPPED when the active item is not part of the selection
+    // (plan.focusActive = false) - focusing a tab the apply is about to
+    // close would fight the switch itself.
+    if (plan.focusActive !== false) {
+        if (p.activePath) {
+            const t = getOpenWorkflows().find((x) => x.path && sameWfPath(x.path, p.activePath));
             if (t) await activateWorkflow(t);
+        } else if (p.activeItemId) {
+            const it = (p.items || []).find((x) => x.itemId === p.activeItemId);
+            if (it?.kind === "snapshot") {
+                const t = [...getOpenWorkflows()].reverse()
+                    .find((x) => !x.path && x.name === (it.name || it.sourceName));
+                if (t) await activateWorkflow(t);
+            }
         }
     }
     // remember which keys the apply ADDED - the undo retires exactly these
@@ -3270,7 +3314,7 @@ function presetCardHtml(p) {
         `<div class="hub-wf-card-items">${rows}${more}</div>` +
         `<div class="hub-wf-card-actions">` +
         `<button type="button" class="hub-wf-act" data-act="switch" data-pid="${esc(p.id)}" title="Close the other tabs and open exactly this preset (a plan preview first)">▶ Switch</button>` +
-        `<button type="button" class="hub-wf-act" data-act="add" data-pid="${esc(p.id)}" title="Open the missing tabs of this preset, keep everything else">＋ Add</button>` +
+        `<button type="button" class="hub-wf-act" data-act="add" data-pid="${esc(p.id)}" title="Open selected tabs of this preset (a picker first), keep everything else">＋ Add</button>` +
         `<button type="button" class="hub-wf-act" data-act="update" data-pid="${esc(p.id)}" title="Update the preset from the currently open tabs (overwrite / merge)">↻ Update</button>` +
         `</div></div>`;
 }
@@ -4288,7 +4332,9 @@ async function onBodyClick(e) {
         }
         case "add": {
             const p = presets.find((x) => x.id === btn.dataset.pid);
-            if (p) void addPresetItems(p);
+            // v123: the PICKER first - the owner checks which tabs to open
+            // (all were forced before); nothing is ever closed here
+            if (p) openAddPop(p, btn);
             return;
         }
         case "update": {
@@ -4902,10 +4948,19 @@ async function commitFormSave(mode, targetPid) {
     }
 }
 
-async function addPresetItems(p) {
+/** v123: `onlyIdx` (indices into p.items, absent = all) opens only the
+ *  SELECTED items - the ＋ Add picker passes the checked checkboxes; the
+ *  already-open path items keep their old skip (never reload). */
+async function addPresetItems(p, onlyIdx) {
     if (!p) return;
+    const allItems = Array.isArray(p.items) ? p.items : [];
+    const sel = Array.isArray(onlyIdx) && onlyIdx.length < allItems.length
+        ? new Set(onlyIdx.filter((i) => Number.isInteger(i) && i >= 0 && i < allItems.length))
+        : null;
     let opened = 0, failed = 0, missing = 0;
-    for (const it of (p.items || [])) {
+    for (let idx = 0; idx < allItems.length; idx++) {
+        if (sel && !sel.has(idx)) continue;
+        const it = allItems[idx];
         if (it.kind === "path") {
             if (openHasPath(it.path)) continue; // already there - never reload
             const r = await openWorkflowByPath(it.path);
@@ -4981,32 +5036,73 @@ function onPlanPopKey(e) {
 function openPlanPop(preset, anchorEl) {
     if (planPop) { closePlanPop(); return; }
     const plan = buildApplyPlan(preset);
-    const names = (arr, cap = 8) => arr.slice(0, cap).map((x) => esc(x.name || x.path || "?")).join(", ") +
-        (arr.length > cap ? " …+" + (arr.length - cap) : "");
+    // v123 (owner request): the TAB CHECKLIST - uncheck what should NOT be
+    // opened; the Will close/open preview below recomputes live. With a
+    // single item the list is noise (unchecking it = plain Cancel), so the
+    // checklist renders for 2+ items only.
+    const items = Array.isArray(preset.items) ? preset.items : [];
+    const showItems = items.length > 1;
     const pop = document.createElement("div");
     pop.className = "hub-menu hub-wf-planpop";
     pop.innerHTML =
         `<div class="hub-menu-title">Apply '${esc(preset.name || "preset")}'</div>` +
         (queueRunning && getPref().warnOnQueue
             ? `<div class="hub-wf-planwarn" title="Closing tabs while ComfyUI renders can interrupt the workflow UI state">⚠ A generation is running - applying a preset will switch tabs under it.</div>` : "") +
-        `<div class="hub-wf-planrow"><span class="hub-wf-plan-cap hub-wf-plan-close">Will close: ${plan.close.length}</span>` +
-        `<span class="hub-wf-plan-names">${plan.close.length ? names(plan.close) : "—"}</span></div>` +
-        `<div class="hub-wf-planrow"><span class="hub-wf-plan-cap hub-wf-plan-keep">Stays: ${plan.keep.length}</span>` +
-        `<span class="hub-wf-plan-names">${plan.keep.length ? names(plan.keep) + " (already open / unsaved / 📌)" : "—"}</span></div>` +
-        `<div class="hub-wf-planrow"><span class="hub-wf-plan-cap hub-wf-plan-open">Will open: ${plan.toOpenPaths.length + plan.toOpenSnaps.length}</span>` +
-        `<span class="hub-wf-plan-names">${names([...plan.toOpenPaths, ...plan.toOpenSnaps]) || "—"}` +
-        (plan.missing.length ? ` <span class="hub-wf-missing">⚠ ${plan.missing.length} missing</span>` : "") +
-        `</span></div>` +
+        (showItems
+            ? `<div class="hub-wf-planitems-tools">` +
+              `<span class="hub-wf-planitems-cap" title="Uncheck the tabs you do NOT need - the switch opens only the checked ones">Tabs of the preset:</span>` +
+              `<button type="button" class="hub-wf-cbtn" data-wf-btn="planitemstoggle">Deselect all</button>` +
+              `</div>` +
+              `<div class="hub-wf-planitems">${planItemChecklistHtml(items, {})}</div>`
+            : "") +
+        `<div class="hub-wf-plan-dyn"></div>` +
         `<label class="hub-wf-plankeep"><input type="checkbox" data-wf="plankeep"${plan.keepUnsaved ? " checked" : ""}> Keep unsaved open</label>` +
-        (plan.toOpenSnaps.length ? `<label class="hub-wf-plankeep"><input type="checkbox" data-wf="planskipsnaps"> Skip exact copies of already-open tabs${plan.dupCount ? " (" + plan.dupCount + " exact copy)" : ""}</label>` : "") +
+        (items.some((it) => it.kind === "snapshot")
+            ? `<label class="hub-wf-plankeep"><input type="checkbox" data-wf="planskipsnaps"> Skip exact copies of already-open tabs</label>` : "") +
         `<div class="hub-wf-planacts">` +
         `<button type="button" class="hub-wf-act hub-wf-plan-apply" data-wf-btn="planapply">Apply</button>` +
         `<button type="button" class="hub-wf-act" data-wf-btn="plancancel">Cancel</button>` +
         `</div>` +
-        (plan.reopenClosed.length ? `<div class="hub-wf-planhint">${plan.reopenClosed.length} tab(s) are open but dirty and will be re-opened fresh from their files.</div>` : "") +
         `<div class="hub-wf-planhint">↩ Undo restores the previous set (one level).</div>`;
     document.body.appendChild(pop);
     planPop = pop;
+    // v123: the live preview - the Will close / Stays / Will open rows (plus
+    // the reopen hint) recompute on every checklist / option toggle. The
+    // option checkboxes and the checklist themselves are NOT re-rendered.
+    const dyn = pop.querySelector(".hub-wf-plan-dyn");
+    const readSel = () => [...pop.querySelectorAll("[data-wf-planidx]")]
+        .filter((c) => c.checked)
+        .map((c) => parseInt(c.dataset.wfPlanidx, 10));
+    const itemsToggleBtn = () => pop.querySelector('[data-wf-btn="planitemstoggle"]');
+    const syncItemsToggle = () => {
+        const btn = itemsToggleBtn();
+        if (!btn) return;
+        const boxes = [...pop.querySelectorAll("[data-wf-planidx]")];
+        const all = boxes.length && boxes.every((c) => c.checked);
+        btn.textContent = all ? "Deselect all" : "Select all";
+        btn.title = all ? "Uncheck every tab (the apply opens nothing)" : "Check every tab";
+    };
+    const renderDyn = () => {
+        const keep = !!pop.querySelector('[data-wf="plankeep"]')?.checked;
+        const skipSnaps = !!pop.querySelector('[data-wf="planskipsnaps"]')?.checked;
+        const onlyIdx = readSel();
+        const cur = buildApplyPlan(preset, {
+            keepUnsaved: keep, skipDupSnaps: skipSnaps,
+            onlyIdx: onlyIdx.length === items.length ? null : onlyIdx,
+        });
+        dyn.innerHTML =
+            `<div class="hub-wf-planrow"><span class="hub-wf-plan-cap hub-wf-plan-close">Will close: ${cur.close.length}</span>` +
+            `<span class="hub-wf-plan-names">${cur.close.length ? planNameList(cur.close) : "—"}</span></div>` +
+            `<div class="hub-wf-planrow"><span class="hub-wf-plan-cap hub-wf-plan-keep">Stays: ${cur.keep.length}</span>` +
+            `<span class="hub-wf-plan-names">${cur.keep.length ? planNameList(cur.keep) + " (already open / unsaved / 📌)" : "—"}</span></div>` +
+            `<div class="hub-wf-planrow"><span class="hub-wf-plan-cap hub-wf-plan-open">Will open: ${cur.toOpenPaths.length + cur.toOpenSnaps.length}</span>` +
+            `<span class="hub-wf-plan-names">${planNameList([...cur.toOpenPaths, ...cur.toOpenSnaps]) || "—"}` +
+            (cur.missing.length ? ` <span class="hub-wf-missing">⚠ ${cur.missing.length} missing</span>` : "") +
+            `</span></div>` +
+            (cur.reopenClosed.length ? `<div class="hub-wf-planhint">${cur.reopenClosed.length} tab(s) are open but dirty and will be re-opened fresh from their files.</div>` : "");
+        syncItemsToggle();
+    };
+    renderDyn();
     // anchor near the button, viewport-clamped
     try {
         const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
@@ -5024,17 +5120,167 @@ function openPlanPop(preset, anchorEl) {
     } catch (_) {}
     window.addEventListener("mousedown", onPlanPopDown, true);
     window.addEventListener("keydown", onPlanPopKey, true);
+    pop.addEventListener("change", (e) => {
+        if (!e.target?.matches?.("[data-wf-planidx], [data-wf='plankeep'], [data-wf='planskipsnaps']")) return;
+        renderDyn();   // v123: the preview follows the checkboxes live
+    });
     pop.addEventListener("click", async (e) => {
         const b = e.target?.closest?.("[data-wf-btn]");
         if (!b) return;
         if (b.dataset.wfBtn === "plancancel") { closePlanPop(); return; }
+        if (b.dataset.wfBtn === "planitemstoggle") {
+            const boxes = [...pop.querySelectorAll("[data-wf-planidx]")];
+            const all = boxes.length && boxes.every((c) => c.checked);
+            for (const c of boxes) c.checked = !all;
+            renderDyn();
+            return;
+        }
         if (b.dataset.wfBtn === "planapply") {
             const keep = !!pop.querySelector('[data-wf="plankeep"]')?.checked;
             const skipSnaps = !!pop.querySelector('[data-wf="planskipsnaps"]')?.checked;
             setPref({ keepUnsaved: keep });
-            const fresh = buildApplyPlan(preset, { keepUnsaved: keep, skipDupSnaps: skipSnaps });
+            const onlyIdx = readSel();
+            const fresh = buildApplyPlan(preset, {
+                keepUnsaved: keep, skipDupSnaps: skipSnaps,
+                onlyIdx: onlyIdx.length === items.length ? null : onlyIdx,
+            });
             closePlanPop();
             await applyPlan(fresh);
+        }
+    });
+}
+
+/** v123: the shared TAB CHECKLIST of the preset items - one checkbox per
+ * item (path items carry the ● open-now badge, snapshots the (snapshot)
+ * tag). Used by the ▶ Switch plan popover (unchecked = not opened, its open
+ * tab retires) and the ＋ Add picker (already-open items disabled). */
+function planNameList(arr, cap = 8) {
+    return (arr || []).slice(0, cap).map((x) => esc(x.name || x.path || "?")).join(", ") +
+        ((arr || []).length > cap ? " …+" + (arr.length - cap) : "");
+}
+
+function planItemChecklistHtml(items, opts = {}) {
+    const openPaths = new Set(getOpenWorkflows().filter((t) => t.path)
+        .map((t) => canonWfRel(t.path)).filter(Boolean));
+    return (items || []).map((it, i) => {
+        const isPath = it.kind === "path";
+        const name = isPath ? (it.name || baseName(it.path)) : (it.name || "snapshot");
+        const openNow = isPath && openPaths.has(canonWfRel(it.path));
+        const off = opts.disableOpen && openNow;
+        const badge = openNow ? `<span class="hub-wf-dot" title="Open now">●</span>` : "";
+        const snap = !isPath ? ` <span class="hub-wf-snap">(snapshot)</span>` : "";
+        return `<label class="hub-wf-planitem${off ? " hub-wf-planitem-off" : ""}" title="${esc(isPath ? it.path : "Embedded snapshot of a temporary tab")}">` +
+            `<input type="checkbox" data-wf-planidx="${i}"${opts.checked === false && !off ? "" : " checked"}${off ? " disabled" : ""}>` +
+            `<span class="hub-wf-planitem-name">${isPath ? "🗃" : "📄"} ${esc(name)}${badge}${snap}</span>` +
+            `</label>`;
+    }).join("");
+}
+
+// ---------------------------------------------------------------------------
+// v123: the ＋ Add picker - open only the CHECKED tabs of a preset without
+// touching the workspace (nothing is ever closed here)
+// ---------------------------------------------------------------------------
+
+let addPop = null;
+
+function closeAddPop() {
+    try { addPop?.remove(); } catch (_) {}
+    addPop = null;
+    try { window.removeEventListener("mousedown", onAddPopDown, true); } catch (_) {}
+    try { window.removeEventListener("keydown", onAddPopKey, true); } catch (_) {}
+}
+function onAddPopDown(e) {
+    if (!addPop || addPop.contains(e.target)) return;
+    closeAddPop();
+}
+function onAddPopKey(e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeAddPop(); }
+}
+
+function openAddPop(preset, anchorEl) {
+    if (addPop) { closeAddPop(); return; }
+    const items = Array.isArray(preset.items) ? preset.items : [];
+    const showItems = items.length > 1;
+    const pop = document.createElement("div");
+    pop.className = "hub-menu hub-wf-addpop";
+    pop.innerHTML =
+        `<div class="hub-menu-title">＋ Add from '${esc(preset.name || "preset")}'</div>` +
+        `<div class="hub-wf-planhint">Open only the checked tabs - the rest of the workspace stays untouched (nothing is closed).</div>` +
+        (showItems
+            ? `<div class="hub-wf-planitems-tools">` +
+              `<span class="hub-wf-planitems-cap">Tabs of the preset:</span>` +
+              `<button type="button" class="hub-wf-cbtn" data-wf-btn="additemstoggle">Deselect all</button>` +
+              `</div>` +
+              `<div class="hub-wf-planitems">${planItemChecklistHtml(items, { disableOpen: true })}</div>`
+            : "") +
+        `<div class="hub-wf-plan-dyn"></div>` +
+        `<div class="hub-wf-planacts">` +
+        `<button type="button" class="hub-wf-act hub-wf-plan-apply" data-wf-btn="addapply">＋ Add checked</button>` +
+        `<button type="button" class="hub-wf-act" data-wf-btn="addcancel">Cancel</button>` +
+        `</div>`;
+    document.body.appendChild(pop);
+    addPop = pop;
+    const dyn = pop.querySelector(".hub-wf-plan-dyn");
+    const readSel = () => [...pop.querySelectorAll("[data-wf-planidx]")]
+        .filter((c) => c.checked && !c.disabled)
+        .map((c) => parseInt(c.dataset.wfPlanidx, 10));
+    const syncToggle = () => {
+        const btn = pop.querySelector('[data-wf-btn="additemstoggle"]');
+        if (!btn) return;
+        const boxes = [...pop.querySelectorAll("[data-wf-planidx]")].filter((c) => !c.disabled);
+        const all = boxes.length && boxes.every((c) => c.checked);
+        btn.textContent = all ? "Deselect all" : "Select all";
+        btn.title = all ? "Uncheck every tab (nothing opens)" : "Check every tab";
+    };
+    const renderDyn = () => {
+        const onlyIdx = readSel();
+        const cur = buildApplyPlan(preset, { onlyIdx: onlyIdx.length === items.length ? null : onlyIdx });
+        // the ADD semantics: nothing closes - report what will OPEN
+        const willOpen = [...cur.toOpenPaths, ...cur.toOpenSnaps];
+        dyn.innerHTML =
+            `<div class="hub-wf-planrow"><span class="hub-wf-plan-cap hub-wf-plan-open">Will open: ${willOpen.length}</span>` +
+            `<span class="hub-wf-plan-names">${planNameList(willOpen) || "—"}` +
+            (cur.missing.length ? ` <span class="hub-wf-missing">⚠ ${cur.missing.length} missing</span>` : "") +
+            `</span></div>` +
+            `<div class="hub-wf-planhint">Everything already open stays as is.</div>`;
+        syncToggle();
+    };
+    renderDyn();
+    try {
+        const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+        pop.style.maxHeight = Math.max(200, vh - 16) + "px";
+        const r = anchorEl?.getBoundingClientRect?.();
+        if (r && (r.width || r.height)) {
+            const x = Math.min(Math.max(8, r.left), Math.max(8, vw - (pop.offsetWidth || 320) - 8));
+            const y = Math.min(Math.max(8, r.bottom + 6), Math.max(8, vh - (pop.offsetHeight || 200) - 8));
+            pop.style.left = x + "px";
+            pop.style.top = y + "px";
+        } else {
+            pop.style.left = "16px";
+            pop.style.top = "16px";
+        }
+    } catch (_) {}
+    window.addEventListener("mousedown", onAddPopDown, true);
+    window.addEventListener("keydown", onAddPopKey, true);
+    pop.addEventListener("change", (e) => {
+        if (!e.target?.matches?.("[data-wf-planidx]")) return;
+        renderDyn();   // the Will-open line follows the checkboxes live
+    });
+    pop.addEventListener("click", async (e) => {
+        const b = e.target?.closest?.("[data-wf-btn]");
+        if (!b) return;
+        if (b.dataset.wfBtn === "addcancel") { closeAddPop(); return; }
+        if (b.dataset.wfBtn === "additemstoggle") {
+            const boxes = [...pop.querySelectorAll("[data-wf-planidx]")].filter((c) => !c.disabled);
+            const all = boxes.length && boxes.every((c) => c.checked);
+            for (const c of boxes) c.checked = !all;
+            renderDyn();
+            return;
+        }
+        if (b.dataset.wfBtn === "addapply") {
+            const onlyIdx = readSel();
+            closeAddPop();
+            await addPresetItems(preset, onlyIdx.length === items.length ? null : onlyIdx);
         }
     });
 }
@@ -7301,7 +7547,7 @@ export function __workflowsTestHooks() {
         closeSavedTabs: (keep) => closeSavedTabs(keep),
         closeEmptyTempTabs: () => closeEmptyTempTabs(),
         saveAllModified: () => saveAllModified(),
-        addPresetItems: (pid) => addPresetItems(presets.find((x) => x.id === pid)),
+        addPresetItems: (pid, onlyIdx) => addPresetItems(presets.find((x) => x.id === pid), onlyIdx),
         pref: getPref,
         setPref,
         recent: () => recent.slice(),
@@ -7323,6 +7569,13 @@ export function __workflowsTestHooks() {
         },
         planPop: () => planPop,
         closePlanPop,
+        // v123: the ＋ Add picker hooks (the tab checklist popover)
+        openAddPop: (pid, anchor) => {
+            const p = presets.find((x) => x.id === pid);
+            if (p) openAddPop(p, anchor || null);
+        },
+        addPop: () => addPop,
+        closeAddPop,
         openWfSettingsPop: () => openWfSettingsPop(),
         wfPop: () => wfPop,
         closeWfPop,

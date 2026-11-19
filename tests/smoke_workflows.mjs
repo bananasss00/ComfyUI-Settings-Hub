@@ -1595,6 +1595,146 @@ check("append: the missing file opened", wfStore.openWorkflows.some((t) => t.pat
 check("append: the snapshot opened", wfStore.openWorkflows.some((t) => t.__snapshotGraph));
 
 // ===========================================================================
+phase("WD2 v123 partial apply: open only the SELECTED tabs of a preset");
+
+// the same WD scene: a.json open+clean (preset item idx 0), b.json open+clean
+// (NOT a preset item), a modified temp WIP (protected), a locked tab
+wfStore.openWorkflows = [
+    makeTab({ path: "workflows/a.json" }),
+    makeTab({ path: "workflows/b.json" }),
+    makeTab({ name: "WIP", isTemporary: true, isPersisted: false, isModified: true, nodes: [1] }),
+    makeTab({ path: "workflows/locked.json" }),
+];
+wfStore.activeWorkflow = wfStore.openWorkflows[0];
+await hooks.refreshOpen(true);
+await hooks.refreshPresets();
+const pid2 = fakeApi.__presets()[0].id;
+
+// unit: the plan honors onlyIdx (the preset items: 0=a.json, 1=d.json, 2=Sketch)
+const pOnlyD = hooks.buildApplyPlan(pid2, { onlyIdx: [1] });
+check("onlyIdx [d]: opens ONLY d.json", pOnlyD.toOpenPaths.length === 1 &&
+    pOnlyD.toOpenPaths[0].path === "workflows/d.json", JSON.stringify(pOnlyD.toOpenPaths));
+check("onlyIdx [d]: NO snapshot opens", pOnlyD.toOpenSnaps.length === 0);
+check("onlyIdx [d]: the unselected a.json retires (it is open)",
+    pOnlyD.close.some((t) => t.path === "workflows/a.json"), JSON.stringify(pOnlyD.close.map((t) => t.path)));
+check("onlyIdx [d]: b.json still retires",
+    pOnlyD.close.some((t) => t.path === "workflows/b.json"));
+check("onlyIdx [d]: the WIP temp stays protected",
+    pOnlyD.keep.some((t) => t.name === "WIP"));
+check("onlyIdx [d]: the locked tab stays",
+    pOnlyD.keep.some((t) => t.path === "workflows/locked.json"));
+check("onlyIdx [d]: the active focus is SKIPPED (a.json unselected)",
+    pOnlyD.focusActive === false);
+check("onlyIdx [d]: missing counts follow the selection",
+    pOnlyD.missing.length === 0, JSON.stringify(pOnlyD.missing));
+
+const pOnlyA = hooks.buildApplyPlan(pid2, { onlyIdx: [0] });
+check("onlyIdx [a]: a.json is open+selected -> nothing to open",
+    pOnlyA.toOpenPaths.length === 0 && pOnlyA.toOpenSnaps.length === 0);
+check("onlyIdx [a]: a.json is KEPT (selected and open)",
+    pOnlyA.keep.some((t) => t.path === "workflows/a.json"));
+check("onlyIdx [a]: the active focus SURVIVES (a.json is the activePath)",
+    pOnlyA.focusActive === true);
+
+const pAll = hooks.buildApplyPlan(pid2, { onlyIdx: [0, 1, 2] });
+check("onlyIdx = every item == the full preset plan (snapshot opens)",
+    pAll.toOpenSnaps.length === 1 && pAll.focusActive === true && pAll.only === null,
+    JSON.stringify({ only: pAll.only, focus: pAll.focusActive, snaps: pAll.toOpenSnaps.length }));
+
+const pNone = hooks.buildApplyPlan(pid2, { onlyIdx: [] });
+check("onlyIdx []: opens nothing, closes everything unprotected",
+    pNone.toOpenPaths.length === 0 && pNone.toOpenSnaps.length === 0 &&
+    pNone.close.length === 2 && pNone.keep.length === 2,
+    JSON.stringify({ open: pNone.toOpenPaths.length, close: pNone.close.length, keep: pNone.keep.length }));
+
+// DOM: the plan popover carries the checklist + the live preview
+hooks.openPlanPop(pid2, null);
+await settle();
+const pop2 = hooks.planPop ? hooks.planPop() : document.querySelector(".hub-wf-planpop");
+check("the v123 plan popover is on screen", !!pop2 && pop2.className.includes("hub-wf-planpop"));
+const boxes2 = [...pop2.querySelectorAll("[data-wf-planidx]")];
+check("the checklist shows every preset item (3 boxes, all checked)",
+    boxes2.length === 3 && boxes2.every((c) => c.checked), String(boxes2.map((c) => c.checked)));
+check("the initial preview says Will close: 1 (all checked)",
+    pop2.querySelector(".hub-wf-plan-dyn").textContent.includes("Will close: 1"));
+// uncheck a.json -> the preview REBUILDS LIVE: a retires, d + Sketch open
+boxes2[0].checked = false;
+boxes2[0].dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+await settle();
+check("the live preview follows the uncheck (Will close: 2)",
+    pop2.querySelector(".hub-wf-plan-dyn").textContent.includes("Will close: 2"),
+    pop2.querySelector(".hub-wf-plan-dyn").textContent.slice(0, 120));
+check("the live preview opens the checked two (Will open: 2)",
+    pop2.querySelector(".hub-wf-plan-dyn").textContent.includes("Will open: 2"));
+check("the toggle button flipped to Select all",
+    pop2.querySelector('[data-wf-btn="planitemstoggle"]').textContent.trim() === "Select all");
+// Apply the partial selection
+await pop2.querySelector('[data-wf-btn="planapply"]').click();
+await settle(40);
+check("partial apply: the unselected a.json was CLOSED",
+    !wfStore.openWorkflows.some((t) => t.path === "workflows/a.json"),
+    JSON.stringify(wfStore.openWorkflows.map((t) => t.path)));
+check("partial apply: b.json closed too", !wfStore.openWorkflows.some((t) => t.path === "workflows/b.json"));
+check("partial apply: the checked d.json opened", wfStore.openWorkflows.some((t) => t.path === "workflows/d.json"));
+check("partial apply: the checked Sketch snapshot opened",
+    wfStore.openWorkflows.some((t) => t.name === "Sketch" && t.__snapshotGraph));
+check("partial apply: the WIP temp survived", wfStore.openWorkflows.some((t) => t.name === "WIP"));
+check("partial apply: the locked tab survived", wfStore.openWorkflows.some((t) => t.path === "workflows/locked.json"));
+check("partial apply: the active tab is NOT the unselected a.json (focus skipped)",
+    wfStore.activeWorkflow?.path !== "workflows/a.json",
+    String(wfStore.activeWorkflow?.path));
+check("the undo toast is on screen", !!document.querySelector(".hub-wf-toast .hub-wf-toast-act"));
+
+// Undo restores the pre-apply set (the server snapshot path)
+await document.querySelector(".hub-wf-toast .hub-wf-toast-act").click();
+await settle(40);
+check("partial undo: a.json is back", wfStore.openWorkflows.some((t) => t.path === "workflows/a.json"));
+check("partial undo: b.json is back", wfStore.openWorkflows.some((t) => t.path === "workflows/b.json"));
+check("partial undo: d.json (opened by the apply) is closed again",
+    !wfStore.openWorkflows.some((t) => t.path === "workflows/d.json"));
+check("partial undo: the Sketch snapshot tab is gone",
+    !wfStore.openWorkflows.some((t) => t.__snapshotGraph));
+check("partial undo: WIP + locked survive", wfStore.openWorkflows.some((t) => t.name === "WIP") &&
+    wfStore.openWorkflows.some((t) => t.path === "workflows/locked.json"));
+
+// the ＋ Add PICKER: open only the checked tabs, nothing ever closes
+wfStore.openWorkflows = [makeTab({ path: "workflows/a.json" })];
+wfStore.activeWorkflow = wfStore.openWorkflows[0];
+await hooks.refreshOpen(true);
+hooks.openAddPop(pid2, null);
+await settle();
+const apop = hooks.addPop ? hooks.addPop() : document.querySelector(".hub-wf-addpop");
+check("the add picker is on screen", !!apop && apop.className.includes("hub-wf-addpop"));
+const aboxes = [...apop.querySelectorAll("[data-wf-planidx]")];
+check("the add checklist shows 3 items", aboxes.length === 3, String(aboxes.length));
+check("the already-open a.json checkbox is DISABLED (nothing to open)",
+    aboxes[0].disabled && aboxes[0].checked);
+check("the add preview counts only the real opens (Will open: 2)",
+    apop.querySelector(".hub-wf-plan-dyn").textContent.includes("Will open: 2"),
+    apop.querySelector(".hub-wf-plan-dyn").textContent.slice(0, 120));
+// uncheck d.json -> only the Sketch snapshot remains to open
+aboxes[1].checked = false;
+aboxes[1].dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+await settle();
+check("the add preview follows (Will open: 1)",
+    apop.querySelector(".hub-wf-plan-dyn").textContent.includes("Will open: 1"));
+const addCallsBefore = wfStore.calls.length;
+await apop.querySelector('[data-wf-btn="addapply"]').click();
+await settle(30);
+check("partial add: the UNCHECKED d.json never opened",
+    !wfStore.calls.slice(addCallsBefore).some((c) => c.op === "open" && c.path === "workflows/d.json"));
+check("partial add: the checked Sketch snapshot opened",
+    wfStore.openWorkflows.some((t) => t.name === "Sketch" && t.__snapshotGraph));
+check("partial add: the workspace was not touched otherwise (no close ops)",
+    !wfStore.calls.slice(addCallsBefore).some((c) => c.op === "close"));
+// unit: addPresetItems(pid, [0]) = only the already-open a.json -> no opens at all
+const addCalls2 = wfStore.calls.length;
+await hooks.addPresetItems(pid2, [0]);
+await settle(20);
+check("partial add unit: onlyIdx [open item] = nothing happens",
+    wfStore.calls.length - addCalls2 === 0, JSON.stringify(wfStore.calls.slice(addCalls2)));
+
+// ===========================================================================
 phase("WE Files & Recent: reopen, multi-word search, selection");
 
 hooks.setTab("files");
@@ -1755,21 +1895,21 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v122", /"workflows":\s*"v122"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v123", /"workflows":\s*"v123"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v122 (the checkpoint overwrite release)",
-    ENTRY_SRC.includes("web build: v122 - THE CHECKPOINT OVERWRITE") &&
+check("the entry banner names v123 (the partial preset open release)",
+    ENTRY_SRC.includes("web build: v123 - OPEN ONLY THE SELECTED TABS OF A PRESET") &&
     ENTRY_SRC.includes("THE WORKFLOW MANAGER ROADMAP"));
-check("styles.css?v=122", ENTRY_SRC.includes("styles.css?v=122"));
-check("the module self-reports v122",
+check("styles.css?v=123", ENTRY_SRC.includes("styles.css?v=123"));
+check("the module self-reports v123",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v122"'));
-check("the web stamp literal is v122",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v123"'));
+check("the web stamp literal is v123",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v122"'));
-check("py stamp bumps together (v122)",
+        .includes('const WF_WEB_VERSION = "v123"'));
+check("py stamp bumps together (v123)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v122"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v123"'));
 check("v121 py: the union-find clustering + the seeds + the honest non-json accounting exist",
     (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
         return src.includes('def _name_stem') && src.includes('SIM_RARE_SLACK')
@@ -2366,7 +2506,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v123"); // ahead of the pack (v122) - a stale web file
+    fakeApi.__setHealthVersion("v124"); // ahead of the pack (v123) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
