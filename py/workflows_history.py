@@ -918,6 +918,110 @@ def set_revision_note(rid, note):
         return {"ok": True, "revisionId": rid}
 
 
+def overwrite_revision(rid, data, note=None, title=None):
+    """v122 (owner request): OVERWRITE one existing checkpoint's content
+    with the CURRENT workflow state, optionally renaming it. The revision
+    keeps its identity - revisionId, processId, the place in the parent
+    chain, createdAt and the stable flag all survive; only the stored
+    bytes, the derived hashes and (optionally) the title/note change.
+
+    `note`/`title` semantics: None = keep the current value untouched,
+    a string (even an empty one) = set it. A rename with UNCHANGED bytes
+    is a legitimate call - it updates the manifest + the notes index and
+    reports {ok, renamed: True}; identical bytes AND identical names
+    report {ok, duplicate: True} (nothing was written).
+
+    Crash order mirrors create_revision: the object storage first, then
+    the shared git commit (when the bytes changed - a rename-only call
+    follows the set_revision_note precedent and does NOT commit), then
+    the durable catalog manifest."""
+    if not isinstance(data, (bytes, bytearray)):
+        return {"ok": False, "error": "payload must be bytes"}
+    data = bytes(data)
+    if len(data) > MAX_REVISION_BYTES:
+        return {"ok": False, "error": "payload too large (%d bytes)" % len(data)}
+    with _lock:
+        rec = _read_revision(rid)
+        if not rec:
+            return {"ok": False, "error": "no such revision"}
+        pid = rec.get("processId")
+        proc = _read_process(pid) if pid else None
+        if not proc:
+            return {"ok": False, "error": "the revision's process is gone"}
+        raw_hash = _sha256(data)
+        analysis = None
+        if _wf_index is not None:
+            analysis, _err = _wf_index.analyze_workflow_bytes(data)
+        new_title = _sanitize_name(title, MAX_PROCESS_NAME_CHARS) \
+            if isinstance(title, str) else None
+        new_note = _sanitize_name(note, MAX_NOTE_CHARS) \
+            if isinstance(note, str) else None
+        renamed = ((new_title is not None and new_title != rec.get("title")) or
+                   (new_note is not None and new_note != rec.get("note")))
+        bytes_changed = raw_hash != rec.get("rawHash")
+        if not bytes_changed and not renamed:
+            return {"ok": True, "duplicate": True, "revisionId": rid}
+        if bytes_changed:
+            backend, oid = _store_bytes(data)
+            if not backend:
+                return {"ok": False, "error": "the history store refused the write"}
+            rec["rawHash"] = raw_hash
+            rec["canonicalHash"] = analysis.get("canonical_hash") if analysis else None
+            rec["workflowHash"] = analysis.get("workflow_hash") if analysis else None
+            rec["presentationHash"] = analysis.get("presentation_hash") if analysis else None
+            rec["extensionHash"] = analysis.get("extension_hash") if analysis else None
+            rec["normalizationProfileVersion"] = (
+                analysis.get("normalization_profile_version") if analysis else None
+            ) or (_wf_index.NORMALIZATION_PROFILE_VERSION if _wf_index else "nprof1")
+            rec["size"] = len(data)
+            rec["storage"] = {"backend": backend, "blob": oid}
+            if backend == "git":
+                parent = _git_head()
+                entries = [("100644", oid, "revision-%s.json" % rid)]
+                cur = proc.get("currentRevisionId")
+                if cur == rid:
+                    entries.append(("100644", oid, "current-%s.json" % pid))
+                else:
+                    cur_rec = _read_revision(cur) if isinstance(cur, str) else None
+                    cur_blob = ((cur_rec.get("storage") or {}).get("blob")
+                                if cur_rec else None)
+                    if isinstance(cur_blob, str) and cur_blob:
+                        entries.append(("100644", cur_blob,
+                                        "current-%s.json" % pid))
+                tree = _git_write_tree(entries)
+                if not tree:
+                    return {"ok": False, "error": "git tree write failed"}
+                commit = _git_commit_tree(
+                    tree, parent, "overwrite %s (%s)" % (rid, (pid or "")[:6]))
+                if not commit:
+                    return {"ok": False, "error": "git commit failed"}
+                if not _git_update_ref(commit):
+                    return {"ok": False, "error": "git ref update failed"}
+                rec["storage"]["commit"] = commit
+        # the rename - even without new bytes - is recorded durably
+        if new_title is not None:
+            rec["title"] = new_title
+        if new_note is not None:
+            rec["note"] = new_note
+        rec["overwrittenAt"] = _now()
+        _atomic_write_json(_revision_file(rid), rec)
+        _rev_cache_put_locked(rec)
+        proc["updatedAt"] = _now()
+        _atomic_write_json(_process_file(pid), proc)
+        _cache_put_locked(proc)
+        # v122: the renamed/new notes stay searchable (same best-effort
+        # contract as create_revision/set_revision_note)
+        if _wf_index is not None and (rec.get("note") or rec.get("title")):
+            try:
+                _wf_index.notes_upsert("revision", pid, rid, rec.get("title"),
+                                       rec.get("note"), rec.get("overwrittenAt"))
+            except Exception:
+                pass
+        out = {"ok": True, "duplicate": False, "renamed": renamed,
+               "revisionId": rid, "revision": rec}
+        return out
+
+
 def _delete_revision_locked(rid):
     """The shared deletion core of delete_revision/delete_revisions (the
     caller HOLDS _lock). One protection contract for every entry point:
@@ -1678,6 +1782,22 @@ def resolve_path_process(rel_path, scope="default"):
         reconcile_processes(scope)
         _cache_load_locked()
         pid = (_proc_cache["by_path"].get(scope) or {}).get(rel_path)
+        if pid:
+            return _proc_cache["by_pid"].get(pid)
+        return None
+
+
+def find_process_by_uuid(workflow_id, scope="default"):
+    """v122: the process bound to ONE ComfyUI workflow UUID (the Open-tab
+    history entry asks: a TEMPORARY tab has no file path yet, but its
+    serialized graph carries the top-level "id" - the same UUID the
+    processes are discovered by). O(1) over the same scope-partitioned
+    uuid map the checkpoints bind with; a no-UUID query answers None."""
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return None
+    with _lock:
+        _cache_load_locked()
+        pid = (_proc_cache["by_uuid"].get(scope) or {}).get(workflow_id.strip())
         if pid:
             return _proc_cache["by_pid"].get(pid)
         return None

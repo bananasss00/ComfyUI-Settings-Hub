@@ -27,6 +27,12 @@ Covers the plan's mandatory acceptance items:
     multiple locations; different UUID -> different processes; no-UUID
     files never auto-bind;
   * notes are optional and durable.
+  * v122: overwrite_revision - an existing checkpoint's CONTENT is replaced
+    with the current state (with an optional title/note rename): the
+    revision keeps its id/parent chain/createdAt/stable flag; identical
+    bytes+names answer duplicate; a rename-only call writes no new blob;
+    the same contract under the CAS backend; find_process_by_uuid (the
+    Open-tab entry for a temporary tab).
 
 Run: python3 tests/py_test_workflows_history.py   (exit 0 = all good)
 """
@@ -1005,6 +1011,203 @@ check("v117 preview: an empty selection answers an empty plan",
       _pv3.get("ok") and _pv3.get("files") == [] and
       _pv3.get("totals", {}).get("selected") == 0,
       json.dumps(_pv3))
+
+# ---------------------------------------------------------------------------
+# v122 (owner request): OVERWRITE an existing checkpoint with the current
+# workflow state (with an optional rename). The version keeps its identity:
+# revisionId, processId, the parent chain, createdAt and the stable flag
+# survive; only the bytes/hashes and (optionally) title/note change. A
+# rename with unchanged bytes is legal (no new commit - the set_revision_note
+# precedent); identical bytes + identical names = honest duplicate.
+# ---------------------------------------------------------------------------
+OVU = "9999aaaa-1111-2222-3333-444455556666"
+_ov1 = hist.record_checkpoint_for_path("workflows/ov.json",
+                                       wf_bytes(OVU, seed="s1"),
+                                       note="first", source="checkpoint")
+_ov2 = hist.record_checkpoint_for_path("workflows/ov.json",
+                                       wf_bytes(OVU, seed="s2"),
+                                       note="second", source="checkpoint")
+_ov3 = hist.record_checkpoint_for_path("workflows/ov.json",
+                                       wf_bytes(OVU, seed="s3"),
+                                       note="third", source="checkpoint")
+check("v122 setup: three revisions exist",
+      all(_r.get("ok") for _r in (_ov1, _ov2, _ov3)) and
+      len(hist.list_revisions(_ov1["processId"])) == 3,
+      json.dumps({k: _r.get("error") for k, _r in
+                  (("1", _ov1), ("2", _ov2), ("3", _ov3))}))
+_ov_pid = _ov1["processId"]
+# value SNAPSHOTS - _read_revision returns the cached dict by reference and
+# overwrite_revision mutates it in place
+_ov_rev1 = dict(hist._read_revision(_ov1["revisionId"]))
+_ov_rev2 = dict(hist._read_revision(_ov2["revisionId"]))
+_ov_rev3 = dict(hist._read_revision(_ov3["revisionId"]))
+check("v122 setup: the linear lineage s1 -> s2 -> s3",
+      _ov_rev1.get("parentRevisionId") is None and
+      _ov_rev2.get("parentRevisionId") == _ov1["revisionId"] and
+      _ov_rev3.get("parentRevisionId") == _ov2["revisionId"],
+      json.dumps([_ov_rev1.get("parentRevisionId"),
+                  _ov_rev2.get("parentRevisionId"),
+                  _ov_rev3.get("parentRevisionId")]))
+
+# (a) the CURRENT revision is overwritten with new bytes (note=None = keep)
+_ov3_created = _ov_rev3.get("createdAt")
+_ov_a = hist.overwrite_revision(_ov3["revisionId"],
+                                wf_bytes(OVU, seed="s3-new"))
+_ov_a_rec = dict(hist._read_revision(_ov3["revisionId"]))
+check("v122 overwrite-current: ok, not a duplicate, not renamed",
+      _ov_a.get("ok") and not _ov_a.get("duplicate") and
+      not _ov_a.get("renamed"), json.dumps(_ov_a))
+check("v122 overwrite-current: the note is untouched when None",
+      _ov_a_rec.get("note") == "third", json.dumps(_ov_a_rec.get("note")))
+check("v122 overwrite-current: the bytes read back EXACTLY",
+      hist.read_revision_bytes(_ov3["revisionId"]) == wf_bytes(OVU, seed="s3-new"),
+      json.dumps({"rawHash": _ov_a_rec.get("rawHash")}))
+check("v122 overwrite-current: the identity survives (id/place/date)",
+      _ov_a_rec.get("revisionId") == _ov3["revisionId"] and
+      _ov_a_rec.get("parentRevisionId") == _ov2["revisionId"] and
+      _ov_a_rec.get("createdAt") == _ov3_created and
+      isinstance(_ov_a_rec.get("overwrittenAt"), (int, float)),
+      json.dumps({k: _ov_a_rec.get(k) for k in
+                  ("parentRevisionId", "createdAt", "overwrittenAt")}))
+check("v122 overwrite-current: the derived hashes moved with the bytes",
+      _ov_a_rec.get("rawHash") != _ov_rev3.get("rawHash") and
+      _ov_a_rec.get("workflowHash") != _ov_rev3.get("workflowHash"),
+      json.dumps({"old": _ov_rev3.get("rawHash"),
+                  "new": _ov_a_rec.get("rawHash")}))
+check("v122 overwrite-current: the list stays 3 revisions, newest first",
+      [r["revisionId"] for r in hist.list_revisions(_ov_pid)] ==
+      [_ov3["revisionId"], _ov2["revisionId"], _ov1["revisionId"]],
+      json.dumps([r["revisionId"] for r in hist.list_revisions(_ov_pid)]))
+check("v122 overwrite-current: the git store stays fsck-clean",
+      hist.verify_store().get("ok") is True,
+      json.dumps(hist.verify_store()))
+
+# (b) a MIDDLE (non-current) revision is overwritten - the chain stays linear
+_ov_b = hist.overwrite_revision(_ov1["revisionId"],
+                                wf_bytes(OVU, seed="s1-new"),
+                                note="first (rewritten)")
+_ov_b_rec = dict(hist._read_revision(_ov1["revisionId"]))
+check("v122 overwrite-middle: the bytes replaced",
+      _ov_b.get("ok") and
+      hist.read_revision_bytes(_ov1["revisionId"]) == wf_bytes(OVU, seed="s1-new"),
+      json.dumps({k: _ov_b.get(k) for k in ("ok", "error")}))
+check("v122 overwrite-middle: the parent links are untouched",
+      _ov_b_rec.get("parentRevisionId") is None and
+      hist._read_revision(_ov2["revisionId"]).get("parentRevisionId") == _ov1["revisionId"],
+      json.dumps({"p1": _ov_b_rec.get("parentRevisionId")}))
+check("v122 overwrite-middle: the order and the current pointer are intact",
+      [r["revisionId"] for r in hist.list_revisions(_ov_pid)] ==
+      [_ov3["revisionId"], _ov2["revisionId"], _ov1["revisionId"]] and
+      hist._read_process(_ov_pid).get("currentRevisionId") == _ov3["revisionId"],
+      json.dumps({"cur": hist._read_process(_ov_pid).get("currentRevisionId")}))
+
+# (c) the dedupe: identical bytes + identical names -> nothing is written
+_ov_c = hist.overwrite_revision(_ov1["revisionId"],
+                                wf_bytes(OVU, seed="s1-new"),
+                                note="first (rewritten)")
+check("v122 overwrite-dedupe: identical bytes+names answer duplicate",
+      _ov_c.get("ok") and _ov_c.get("duplicate") is True and
+      _ov_c.get("renamed") is not True, json.dumps(_ov_c))
+
+# (d) the rename-only call: same bytes, new note - no new blob, no new commit
+_blob_before = _ov_b_rec.get("storage", {}).get("blob")
+_ov_d = hist.overwrite_revision(_ov1["revisionId"],
+                                wf_bytes(OVU, seed="s1-new"),
+                                note="the safe starting point")
+_ov_d_rec = dict(hist._read_revision(_ov1["revisionId"]))
+check("v122 rename-only: ok, renamed, NOT a duplicate",
+      _ov_d.get("ok") and _ov_d.get("renamed") is True and
+      not _ov_d.get("duplicate"), json.dumps(_ov_d))
+check("v122 rename-only: the note changed, the bytes/blob did not",
+      _ov_d_rec.get("note") == "the safe starting point" and
+      _ov_d_rec.get("rawHash") == _ov_b_rec.get("rawHash") and
+      _ov_d_rec.get("storage", {}).get("blob") == _blob_before,
+      json.dumps({"note": _ov_d_rec.get("note"), "blob": _ov_d_rec.get("storage", {}).get("blob")}))
+
+# (e) the TITLE rename - the owner's "смена имени чекпоинта"
+_ov_e = hist.overwrite_revision(_ov2["revisionId"],
+                                wf_bytes(OVU, seed="s2"),
+                                note="renamed note", title="Step 2 - final")
+_ov_e_rec = dict(hist._read_revision(_ov2["revisionId"]))
+check("v122 title rename: ok, renamed, the title lands in the manifest",
+      _ov_e.get("ok") and _ov_e.get("renamed") is True and
+      _ov_e_rec.get("title") == "Step 2 - final" and
+      _ov_e_rec.get("note") == "renamed note", json.dumps(_ov_e))
+# the searchable notes index carries the new name (same table the
+# /index/notes route reads)
+import sqlite3 as _sq
+_db_notes = None
+try:
+    _conn = _sq.connect(os.path.join(TMP, "settings_hub", "workflows_manager",
+                                     "index", "workflow_index.db"))
+    _db_notes = _conn.execute(
+        "SELECT title, note FROM history_notes WHERE pid=? AND rid=? AND kind='revision'",
+        (_ov_pid, _ov2["revisionId"])).fetchone()
+    _conn.close()
+except Exception:
+    _db_notes = None
+check("v122 title rename: the notes index carries the new name",
+      _db_notes is not None and _db_notes[0] == "Step 2 - final" and
+      _db_notes[1] == "renamed note", json.dumps(_db_notes))
+
+# (f) the stable flag survives an overwrite; an unknown rid refuses
+hist.mark_stable(_ov2["revisionId"], True)
+_ov_f = hist.overwrite_revision(_ov2["revisionId"],
+                                wf_bytes(OVU, seed="s2-new"))
+_ov_f_rec = dict(hist._read_revision(_ov2["revisionId"]))
+check("v122 overwrite-stable: allowed explicitly, the flag survives",
+      _ov_f.get("ok") and _ov_f_rec.get("isStable") is True and
+      hist.read_revision_bytes(_ov2["revisionId"]) == wf_bytes(OVU, seed="s2-new"),
+      json.dumps({"ok": _ov_f.get("ok"), "stable": _ov_f_rec.get("isStable")}))
+_ov_bad = hist.overwrite_revision("no-such-rid", wf_bytes(OVU, seed="x"))
+check("v122 overwrite-unknown: refuses honestly",
+      _ov_bad.get("ok") is False and "no such revision" in str(_ov_bad.get("error")),
+      json.dumps(_ov_bad))
+_ov_big = hist.overwrite_revision(_ov3["revisionId"], b"x" * (hist.MAX_REVISION_BYTES + 1))
+check("v122 overwrite-too-large: refuses honestly",
+      _ov_big.get("ok") is False, json.dumps({k: _ov_big.get(k) for k in ("ok", "error")}))
+
+# (g) v122: the process discovery by UUID - the Open-tab (temp) entry asks
+# "which process does THIS open tab belong to?" (the graph's top-level id)
+_ov_found = hist.find_process_by_uuid(OVU, "default")
+check("v122 find-by-uuid: the checkpointed UUID resolves to the process",
+      _ov_found is not None and _ov_found.get("processId") == _ov_pid,
+      json.dumps({"found": bool(_ov_found)}))
+check("v122 find-by-uuid: an unknown UUID answers None",
+      hist.find_process_by_uuid("00000000-dead-beef-0000-000000000000",
+                                "default") is None, "not None")
+check("v122 find-by-uuid: an empty/garbage query answers None",
+      hist.find_process_by_uuid("", "default") is None and
+      hist.find_process_by_uuid(None, "default") is None, "not None")
+
+# (h) the CAS backend delivers the SAME overwrite contract (forced fallback)
+h122 = load_mod("shub_hist_v122_cas", "py/workflows_history.py")
+h122.set_base_dir(os.path.join(TMP, "settings_hub", "workflows_manager",
+                               "v122casstore"))
+h122._backend_cache["resolved"] = None
+h122._git_available = lambda: False
+_r1c = h122.record_checkpoint_for_path("workflows/casov.json",
+                                       wf_bytes(OVU, seed="c1"),
+                                       note="c1", source="checkpoint")
+_r2c = h122.record_checkpoint_for_path("workflows/casov.json",
+                                       wf_bytes(OVU, seed="c2"),
+                                       note="c2", source="checkpoint")
+_ovc = h122.overwrite_revision(_r1c["revisionId"],
+                               wf_bytes(OVU, seed="c1-over"),
+                               note="c1 rewritten")
+check("v122 cas overwrite: the bytes replaced under the CAS backend",
+      _ovc.get("ok") and
+      h122.read_revision_bytes(_r1c["revisionId"]) == wf_bytes(OVU, seed="c1-over"),
+      json.dumps({k: _ovc.get(k) for k in ("ok", "error")}))
+check("v122 cas overwrite: the chain stays linear",
+      [r["revisionId"] for r in h122.list_revisions(_r1c["processId"])] ==
+      [_r2c["revisionId"], _r1c["revisionId"]],
+      json.dumps([r["revisionId"] for r in h122.list_revisions(_r1c["processId"])]))
+_ovc2 = h122.overwrite_revision(_r2c["revisionId"],
+                                wf_bytes(OVU, seed="c2"),
+                                note="c2")
+check("v122 cas overwrite-dedupe: identical bytes+names answer duplicate",
+      _ovc2.get("ok") and _ovc2.get("duplicate") is True, json.dumps(_ovc2))
 
 # ---------------------------------------------------------------------------
 shutil.rmtree(TMP, ignore_errors=True)

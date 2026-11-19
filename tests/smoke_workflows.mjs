@@ -190,6 +190,8 @@ function makeFakeApi() {
     let badgesMode = "ok";           // "ok" | "stale" (an old py: the route 404s)
     // v115: the whole-process delete stub control ("ok" | "stale")
     let procDelMode = "ok";
+    // v122: the overwrite route stub control ("ok" | "stale" = an old py)
+    let histOverwriteMode = "ok";
     // v112 stage 4: the preset version archives (pid -> {versions, seq})
     const pverStore = new Map();
     const pverArchive = (pid, changedBy) => {
@@ -820,6 +822,63 @@ function makeFakeApi() {
                 }
                 return jsonResp({ ok: true, revisionId: rec.revisionId, isStable: rec.isStable });
             }
+            // v122: OVERWRITE one revision with the CURRENT state (with an
+            // optional rename) - the fake mirrors the real contract: the
+            // bytes/hashes move, the id/parent/createdAt/stable survive, an
+            // identical content+name answers duplicate, a rename with the
+            // same bytes writes no new blob (rawHash/storage stay).
+            const mHistOverwrite = p.match(/^\/settings_hub\/workflows\/history\/revision\/([^/]+)\/overwrite$/);
+            if (mHistOverwrite && method === "POST") {
+                if (histOverwriteMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                let body2 = {};
+                try { body2 = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                if (!body2.graph && !body2.path) return jsonResp({ ok: false, error: "a graph or a path is required" }, 400);
+                const rec = histStore.revisions.get(decodeURIComponent(mHistOverwrite[1]));
+                if (!rec) return jsonResp({ ok: false, error: "no such revision" }, 404);
+                let rawHash;
+                if (body2.graph) {
+                    const data = JSON.stringify(body2.graph);
+                    rawHash = "hash-g" + data.length + "-" + data.slice(0, 32);
+                } else {
+                    const row = idxFiles.find((f) => f.path === body2.path);
+                    rawHash = (row && row.rawHash) || ("hash-disk-" + body2.path);
+                }
+                const newTitle = typeof body2.title === "string" ? body2.title : rec.title;
+                const newNote = typeof body2.note === "string" ? body2.note : rec.note;
+                const renamed = (newTitle !== rec.title) || (newNote !== rec.note);
+                if (rawHash === rec.rawHash && !renamed) {
+                    return jsonResp({ ok: true, duplicate: true, revisionId: rec.revisionId });
+                }
+                rec.overwriteCalls = (rec.overwriteCalls || 0) + 1;
+                if (rawHash !== rec.rawHash) {
+                    rec.rawHash = rawHash;
+                    if (body2.graph) {
+                        rec.__graph = body2.graph;
+                        const g2 = { ...body2.graph };
+                        rec.workflowHash = "wf-" + JSON.stringify({ n: (g2.nodes || []).map((x) => x && { id: x.id, type: x.type, w: x.widgets_values }), l: g2.links });
+                        rec.presentationHash = "pres-" + JSON.stringify({ ds: g2.extra?.ds, pos: (g2.nodes || []).map((x) => x && x.pos) });
+                    }
+                    rec.storage = { backend: "stub", blob: rec.revisionId + "-ov" + rec.overwriteCalls };
+                    rec.overwrittenAt = Math.floor(Date.now() / 1000);
+                }
+                rec.title = newTitle;
+                rec.note = newNote;
+                const proc = histStore.processes.get(rec.processId);
+                if (proc) proc.updatedAt = Math.floor(Date.now() / 1000);
+                return jsonResp({ ok: true, duplicate: false, renamed,
+                    revisionId: rec.revisionId, revision: { ...rec, __graph: undefined } });
+            }
+            // v122: the process lookup by the workflow UUID - the Open-tab
+            // entry for a TEMPORARY tab (no path; the graph's top-level id)
+            if (p === "/settings_hub/workflows/history/resolve_uuid" && method === "GET") {
+                const uuid = (u.split("?")[1] || "").match(/uuid=([^&]+)/)?.[1] || "";
+                const decoded = decodeURIComponent(uuid);
+                if (!decoded) return jsonResp({ ok: false, error: "bad uuid" }, 400);
+                const proc = [...histStore.processes.values()].find((pr) => pr.workflowId === decoded);
+                if (!proc) return jsonResp({ ok: true, bound: false });
+                return jsonResp({ ok: true, bound: true,
+                    process: { ...proc, revisions: histRevList(proc.processId) } });
+            }
             // v114: the version INDICATOR (GET /history/badges) + the BATCH
             // deletion (POST /history/revision/delete) - the fake mirrors the
             // real protection contract (stable + current survive, the parent
@@ -1085,6 +1144,8 @@ function makeFakeApi() {
         __setBadgesMode: (m) => { badgesMode = m; },
         // v115: the whole-process delete stub control
         __setProcDelMode: (m) => { procDelMode = m; },
+        // v122: the overwrite route stub control
+        __setHistOverwriteMode: (m) => { histOverwriteMode = m; },
         // v108: the Files listing + the favorites controls
         __setWfFiles: (v) => { wfFiles = v; },
         __wfFavs: () => wfFavs.slice(),
@@ -1694,21 +1755,21 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v121", /"workflows":\s*"v121"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v122", /"workflows":\s*"v122"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v121 (the connected similarity clusters release)",
-    ENTRY_SRC.includes("web build: v121 - THE CONNECTED SIMILARITY CLUSTERS") &&
+check("the entry banner names v122 (the checkpoint overwrite release)",
+    ENTRY_SRC.includes("web build: v122 - THE CHECKPOINT OVERWRITE") &&
     ENTRY_SRC.includes("THE WORKFLOW MANAGER ROADMAP"));
-check("styles.css?v=121", ENTRY_SRC.includes("styles.css?v=121"));
-check("the module self-reports v121",
+check("styles.css?v=122", ENTRY_SRC.includes("styles.css?v=122"));
+check("the module self-reports v122",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v121"'));
-check("the web stamp literal is v121",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v122"'));
+check("the web stamp literal is v122",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v121"'));
-check("py stamp bumps together (v121)",
+        .includes('const WF_WEB_VERSION = "v122"'));
+check("py stamp bumps together (v122)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v121"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v122"'));
 check("v121 py: the union-find clustering + the seeds + the honest non-json accounting exist",
     (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
         return src.includes('def _name_stem') && src.includes('SIM_RARE_SLACK')
@@ -2305,7 +2366,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v122"); // ahead of the pack (v121) - a stale web file
+    fakeApi.__setHealthVersion("v123"); // ahead of the pack (v122) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -5014,6 +5075,280 @@ phase("AC v118: the groups BUSY state - a soft note + an automatic retry, never 
         hooks.groupsBusy() === false, String(hooks.groupsBusy()));
     hooks.setGroupsRetryMs(3000);
     fakeApi.__setGroupsMode("ok");
+    fakeApi.__setIdxFiles([]);
+    hooks.setTab("open");
+    await settle();
+}
+
+// ===========================================================================
+phase("AD v122: the checkpoint OVERWRITE (with rename), the Open-tab 🕘 entry, the save-first answer");
+{
+    const pnlAd = () => hooks.panelEl();
+    const bodyAd = () => pnlAd().querySelector(".hub-wf-body");
+    fakeApi.__setHistOverwriteMode("ok");
+    fakeApi.__setIdxFiles([
+        { path: "workflows/ad_hist.json", name: "ad_hist.json", size: 10, mtime: 100,
+          workflowId: "wuuid-ad-1", rawHash: "hash-ad-1" },
+    ]);
+    hooks.setIdxReady(true);
+
+    // the OPEN TABS: one persisted + one temporary (its graph carries the UUID)
+    wfStore.openWorkflows.length = 0;
+    wfStore.activeWorkflow = null;
+    const adSaved = makeTab({ path: "workflows/ad_hist.json", nodes: [1, 2] });
+    const adTemp = makeTab({ name: "AD unsaved draft", isTemporary: true,
+        isPersisted: false, nodes: [7] });
+    adTemp.activeState = { id: "wuuid-ad-temp-1",
+        nodes: [{ id: 7, type: "KSampler", widgets_values: ["draft"] }],
+        links: [], extra: {} };
+    wfStore.openWorkflows.push(adSaved, adTemp);
+    wfStore.activeWorkflow = adSaved;
+    await hooks.refreshOpen(true);
+    hooks.setTab("open");
+    hooks.renderAll();
+    await settle();
+
+    // ---- (3) the Open-tab rows carry the 🕘 Checkpoint entry ----
+    const adRowSaved = [...bodyAd().querySelectorAll(".hub-wf-row")]
+        .find((r) => r.textContent.includes("ad_hist.json"));
+    const adRowTemp = [...bodyAd().querySelectorAll(".hub-wf-row")]
+        .find((r) => r.textContent.includes("AD unsaved draft"));
+    const tabhistSaved = adRowSaved?.querySelector('[data-act="tabhist"]');
+    const tabhistTemp = adRowTemp?.querySelector('[data-act="tabhist"]');
+    check("AD: every Open row carries the 🕘 history/checkpoint entry",
+        !!tabhistSaved && !!tabhistTemp,
+        JSON.stringify({ saved: !!tabhistSaved, temp: !!tabhistTemp }));
+    check("AD: the persisted row's entry carries the path (for the badge patch)",
+        tabhistSaved?.dataset?.path === "workflows/ad_hist.json",
+        String(tabhistSaved?.dataset?.path));
+    check("AD: the temp row's entry has NO path (tab mode, no badge)",
+        tabhistTemp && tabhistTemp.dataset.path == null &&
+        !tabhistTemp.querySelector(".hub-wf-hbadge"),
+        String(tabhistTemp?.dataset?.path || ""));
+
+    // ---- (3a) a persisted tab opens the panel BY PATH ----
+    await tabhistSaved.click();
+    await settle(30);
+    let st = hooks.histState();
+    check("AD: the persisted tab's panel resolves by path",
+        !!hooks.histPopEl() && st && st.path === "workflows/ad_hist.json" && !st.loading,
+        JSON.stringify({ path: st?.path, err: st?.error }));
+    // ---- (2) the save-first question: the panel KNOWS the tab is open ----
+    check("AD: the panel marks the open tab (st.openTab) - it never did before v122",
+        st.openTab === true, String(st?.openTab));
+    check("AD: the hint answers 'saving first is not required'",
+        hooks.histPopEl().textContent.includes("Saving the file first is not required"),
+        hooks.histPopEl().querySelector(".hub-wf-planhint")?.textContent || "");
+
+    // the first checkpoint captures the IN-MEMORY tab (the graph payload)
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(30);
+    st = hooks.histState();
+    check("AD: the checkpoint bound the process and created ONE revision",
+        st.revs.length === 1 && !!st.pid,
+        JSON.stringify({ revs: st.revs.length, pid: st.pid, err: st.error }));
+    const adCpCall = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/history/checkpoint").at(-1);
+    check("AD: the checkpoint POST carried the in-memory graph (no save needed)",
+        adCpCall && !!JSON.parse(adCpCall.body).graph &&
+        JSON.parse(adCpCall.body).path === "workflows/ad_hist.json",
+        JSON.stringify(adCpCall && !!JSON.parse(adCpCall.body).graph));
+
+    // the second checkpoint: the tab changed (still open, still unsaved)
+    adSaved.activeState = { nodes: [{ id: 1 }, { id: 2 }, { id: 3 }], extra: {} };
+    await hooks.refreshOpen(true);
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(30);
+    st = hooks.histState();
+    check("AD: the second checkpoint added a revision",
+        st.revs.length === 2, String(st.revs.length));
+
+    // ---- (1) the OVERWRITE flow on the OLDER revision (with a rename) ----
+    const adOlder = st.revs[1];
+    let adOverBtn = [...hooks.histPopEl().querySelectorAll('[data-act="histoverwrite"]')]
+        .find((b) => b.dataset.rid === adOlder.revisionId);
+    check("AD: every version row carries the ⤒ overwrite action", !!adOverBtn,
+        String(hooks.histPopEl().querySelectorAll('[data-act="histoverwrite"]').length));
+    await adOverBtn.click();
+    await settle();
+    st = hooks.histState();
+    check("AD: the row click selects the version and opens the strip (not armed)",
+        st.overwriteRid === adOlder.revisionId && st.overwriteArmed === false,
+        JSON.stringify({ rid: st.overwriteRid, armed: st.overwriteArmed }));
+    const adOvTitle = hooks.histPopEl().querySelector('[data-wf="hovtitle"]');
+    const adOvNote = hooks.histPopEl().querySelector('[data-wf="hovnote"]');
+    check("AD: the strip carries the WYSIWYG name + note fields",
+        !!adOvTitle && !!adOvNote, "missing fields");
+    check("AD: the fields are prefilled with the version's current name/note",
+        adOvNote.value === (adOlder.note || "") && adOvTitle.value === (adOlder.title || ""),
+        JSON.stringify({ note: adOvNote?.value, title: adOvTitle?.value }));
+    // the owner renames the checkpoint while overwriting it
+    adOvTitle.value = "the safe base";
+    adOvTitle.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    adOvNote.value = "kept for rollback";
+    adOvNote.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await settle();
+    let adOvYes = hooks.histPopEl().querySelector('[data-act="histoveryes"]');
+    check("AD: the strip button starts NOT armed",
+        !(adOvYes.textContent || "").includes("Click AGAIN"), adOvYes?.textContent);
+    await adOvYes.click();
+    await settle();
+    check("AD: the first strip click ARMS (the second-click confirm)",
+        hooks.histState().overwriteArmed === true, String(hooks.histState().overwriteArmed));
+    adOvYes = hooks.histPopEl().querySelector('[data-act="histoveryes"]');
+    check("AD: the armed button reads 'Click AGAIN to overwrite'",
+        (adOvYes.textContent || "").includes("Click AGAIN"), adOvYes?.textContent);
+    await adOvYes.click();
+    await settle(30);
+    st = hooks.histState();
+    check("AD: the overwrite executed - the strip closed, the count unchanged",
+        st.overwriteRid === null && st.overwriteArmed === false && st.revs.length === 2,
+        JSON.stringify({ rid: st.overwriteRid, revs: st.revs.length }));
+    const adOvRec = st.revs.find((r) => r.revisionId === adOlder.revisionId);
+    check("AD: the version carries the NEW name + note and the overwrittenAt mark",
+        adOvRec.title === "the safe base" && adOvRec.note === "kept for rollback" &&
+        typeof adOvRec.overwrittenAt === "number",
+        JSON.stringify({ t: adOvRec.title, n: adOvRec.note, ov: adOvRec.overwrittenAt }));
+    check("AD: the overwritten row wears the ⤒ badge",
+        !!hooks.histPopEl().querySelector(`[data-hrev="${adOlder.revisionId}"] .hub-wf-mod`),
+        "no badge");
+    const adOvCall = fakeApi.__calls().filter((c) => c.url.includes("/overwrite")).at(-1);
+    const adOvBody = adOvCall ? JSON.parse(adOvCall.body) : {};
+    check("AD: the overwrite POST carried the in-memory graph + the rename",
+        !!adOvBody.graph && adOvBody.title === "the safe base" &&
+        adOvBody.note === "kept for rollback" &&
+        adOvBody.path === "workflows/ad_hist.json",
+        JSON.stringify({ graph: !!adOvBody.graph, t: adOvBody.title }));
+    check("AD: the identity survived - still 2 revisions, the parent chain intact",
+        fakeApi.__histStore().revisions.size >= 2 &&
+        fakeApi.__histStore().revisions.get(adOlder.revisionId).parentRevisionId ===
+        fakeApi.__histStore().revisions.get(st.revs[1].revisionId)?.parentRevisionId,
+        "chain broken");
+
+    // the no-change overwrite answers duplicate honestly (no second blob)
+    adOverBtn = [...hooks.histPopEl().querySelectorAll('[data-act="histoverwrite"]')]
+        .find((b) => b.dataset.rid === adOlder.revisionId);
+    await adOverBtn.click();
+    await settle();
+    adOvYes = hooks.histPopEl().querySelector('[data-act="histoveryes"]');
+    await adOvYes.click();   // arm
+    await settle();
+    adOvYes = hooks.histPopEl().querySelector('[data-act="histoveryes"]');
+    await adOvYes.click();   // confirm
+    await settle(30);
+    st = hooks.histState();
+    check("AD: the identical overwrite answered duplicate (the strip closed)",
+        st.overwriteRid === null &&
+        fakeApi.__histStore().revisions.get(adOlder.revisionId).overwriteCalls === 1,
+        String(fakeApi.__histStore().revisions.get(adOlder.revisionId).overwriteCalls));
+
+    // Cancel clears the strip without touching anything
+    adOverBtn = [...hooks.histPopEl().querySelectorAll('[data-act="histoverwrite"]')][0];
+    await adOverBtn.click();
+    await settle();
+    const adCancel = hooks.histPopEl().querySelector('[data-act="histovercancel"]');
+    await adCancel.click();
+    await settle();
+    check("AD: Cancel clears the selection",
+        hooks.histState().overwriteRid === null, "still set");
+
+    // the badge chip lands on the persisted Open row (the same badge cache)
+    hooks.closeHistPop();
+    hooks.renderAll();
+    await settle(20);
+    const adBadge = [...bodyAd().querySelectorAll('[data-act="tabhist"]')]
+        .find((b) => b.dataset.path === "workflows/ad_hist.json")
+        ?.querySelector(".hub-wf-hbadge");
+    check("AD: the persisted Open row wears the version-count chip",
+        adBadge && adBadge.textContent === "2",
+        adBadge?.textContent || "none");
+
+    // ---- (3b) the TEMPORARY tab opens the panel in TAB MODE ----
+    // (renderAll rebuilt the rows - re-query the fresh button)
+    const tabhistTemp2 = [...bodyAd().querySelectorAll('[data-act="tabhist"]')]
+        .find((b) => !b.dataset.path && b.dataset.key);
+    check("AD: the temp row's fresh button exists after the re-render", !!tabhistTemp2);
+    await tabhistTemp2.click();
+    await settle(30);
+    st = hooks.histState();
+    check("AD: the temp tab's panel opens in tab mode (tabKey, no path, openTab)",
+        !!hooks.histPopEl() && st.tabKey === adTemp.id && st.path === null &&
+        st.openTab === true,
+        JSON.stringify({ tabKey: st?.tabKey, path: st?.path, err: st?.error }));
+    check("AD: the tab-mode header names the tab",
+        hooks.histPopEl().textContent.includes("AD unsaved draft"),
+        hooks.histPopEl().querySelector(".hub-wf-planhint")?.textContent || "");
+    check("AD: tab mode: no Import-disk button (there is no file yet)",
+        !hooks.histPopEl().querySelector('[data-act="histimport"]'), "import present");
+    check("AD: the unbound temp tab shows the honest empty state",
+        st.revs.length === 0 && !st.error && !!st.tabKey,
+        JSON.stringify({ revs: st.revs.length, err: st.error }));
+
+    // the FIRST checkpoint of the temp tab: the process binds by the UUID
+    await hooks.histCreateCheckpoint("checkpoint");
+    await settle(30);
+    st = hooks.histState();
+    check("AD: the temp checkpoint created the process bound by the graph UUID",
+        st.revs.length === 1 && !!st.pid &&
+        st.proc?.workflowId === "wuuid-ad-temp-1",
+        JSON.stringify({ revs: st.revs.length, pid: st.pid, wf: st.proc?.workflowId }));
+    const adTempCp = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/history/checkpoint").at(-1);
+    const adTempCpBody = adTempCp ? JSON.parse(adTempCp.body) : {};
+    check("AD: the temp checkpoint sent NO path (the UUID binds)",
+        !adTempCpBody.path && !!adTempCpBody.graph, JSON.stringify({ path: adTempCpBody.path }));
+    check("AD: the temp checkpoint named the new process after the tab",
+        adTempCpBody.title === "AD unsaved draft", String(adTempCpBody.title));
+
+    // the REOPEN of the tab-mode panel resolves the process via the UUID
+    hooks.closeHistPop();
+    await settle();
+    await tabhistTemp2.click();
+    await settle(30);
+    st = hooks.histState();
+    check("AD: the reopen resolves the temp process via resolve_uuid (bound)",
+        st.pid && st.revs.length === 1, JSON.stringify({ pid: st.pid, revs: st.revs.length }));
+
+    // the restore of a process WITHOUT a file location: the copy-open only
+    // (the exact same graph is already open -> the duplicate prompt is the
+    // legitimate copy-open outcome; the point is: the replace is NEVER armed)
+    const adRestoreCalls0 = fakeApi.__calls().filter((c) => c.url.includes("/restore/")).length;
+    const adRevRow = hooks.histPopEl().querySelector('[data-act="histrestore"]');
+    await adRevRow.click();
+    await settle(30);
+    check("AD: a no-file process restore never arms the replace (no /restore/ POST)",
+        fakeApi.__calls().filter((c) => c.url.includes("/restore/")).length === adRestoreCalls0 &&
+        hooks.histState().armedRestore == null,
+        JSON.stringify({ posts: fakeApi.__calls().filter((c) => c.url.includes("/restore/")).length - adRestoreCalls0,
+            armed: hooks.histState().armedRestore }));
+    hooks.closeHistPop();
+
+    // the OLD-PY overwrite route: the strip stays open, the error is named
+    fakeApi.__setHistOverwriteMode("stale");
+    const tabhistSaved2 = [...bodyAd().querySelectorAll('[data-act="tabhist"]')]
+        .find((b) => b.dataset.path === "workflows/ad_hist.json");
+    await tabhistSaved2.click();
+    await settle(30);
+    adOverBtn = [...hooks.histPopEl().querySelectorAll('[data-act="histoverwrite"]')][0];
+    await adOverBtn.click();
+    await settle();
+    adOvYes = hooks.histPopEl().querySelector('[data-act="histoveryes"]');
+    await adOvYes.click();   // arm
+    await settle();
+    adOvYes = hooks.histPopEl().querySelector('[data-act="histoveryes"]');
+    await adOvYes.click();   // confirm -> 404
+    await settle(30);
+    st = hooks.histState();
+    check("AD: an old py (404 overwrite) degrades honestly - the strip stays, the toast names it",
+        st.overwriteRid != null && st.cpBusy === false &&
+        [...document.querySelectorAll(".hub-sh-note")].some((t) =>
+            (t.textContent || "").includes("Overwrite failed")),
+        JSON.stringify({ rid: st.overwriteRid, busy: st.cpBusy,
+            toasts: [...document.querySelectorAll(".hub-sh-note")].map((t) => t.textContent) }));
+    await adCancel.click();
+    await settle();
+    hooks.closeHistPop();
+    fakeApi.__setHistOverwriteMode("ok");
+
+    // cleanup for the later phases
     fakeApi.__setIdxFiles([]);
     hooks.setTab("open");
     await settle();

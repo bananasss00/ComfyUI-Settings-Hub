@@ -227,9 +227,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v121";
+const WF_WEB_VERSION = "v122";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v121";
+globalThis.__SettingsHubLoaded["workflows"] = "v122";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -3187,10 +3187,19 @@ function openTabHtml() {
         const saveMark = saveState.get(t.key);
         const saveBtn = `<button type="button" class="hub-wf-lockbtn${saveMark === "saved" ? " hub-wf-locked" : ""}" data-act="savetab" data-key="${esc(t.key)}" ` +
             `title="${t.isPersisted ? (t.isModified ? "Save this tab to its file" : "Save this tab (no changes yet)") : "Save As... (hands the tab to ComfyUI's own Save-As flow)"}">${saveMark === "saving" ? "…" : (saveMark === "saved" ? "✓" : "💾")}</button>`;
+        // v122 (owner request): a CHECKPOINT entry on every Open-tab row.
+        // A persisted tab opens the process-history panel (the badge chip
+        // mirrors the Files rows); a TEMPORARY tab opens the same panel in
+        // tab mode - the process binds by the workflow UUID, the checkpoint
+        // captures the in-memory graph (the file does not exist yet).
+        const hrevN = t.path ? histBadgeCount(t.path) : 0;
+        const histBtn = `<button type="button" class="hub-wf-lockbtn" data-act="tabhist" data-key="${esc(t.key)}"${t.path ? ` data-path="${esc(t.path)}"` : ""} ` +
+            `title="Process history of this tab: 📌 Checkpoint the CURRENT state (the in-memory graph incl. unsaved edits - saving first is not required), then Compare / Restore / Overwrite versions">${hrevN > 0 ? `<span class="hub-wf-hbadge">${hrevN > 99 ? "99+" : String(hrevN)}</span>` : ""}🕘</button>`;
         return `<div class="hub-wf-row${t.isActive ? " hub-wf-row-active" : ""}${locked ? " hub-wf-row-locked" : ""}" data-key="${esc(t.key)}">` +
             `<button type="button" class="hub-wf-name" data-act="activate" data-key="${esc(t.key)}" title="${esc(t.path || "temporary tab")}">${esc(t.name)}${t.isModified ? " *" : ""}</button>` +
             `<span class="hub-wf-marks">${marks}</span>` +
             saveBtn +
+            histBtn +
             `<button type="button" class="hub-wf-lockbtn${locked ? " hub-wf-locked" : ""}" data-act="lock" data-key="${esc(t.key)}" title="${locked ? "Unlock - allow mass close" : "Lock - protect from mass close (📌)"}">📌</button>` +
             `<button type="button" class="hub-wf-closebtn${armedClose?.key === t.key ? " hub-wf-armed" : ""}" data-act="close" data-key="${esc(t.key)}" title="${(t.isModified || t.isTemporary) ? (armedClose?.key === t.key ? "Click AGAIN to confirm closing the UNSAVED tab" : "Close (unsaved - click twice)") : "Close this tab"}">✕</button>` +
             `</div>`;
@@ -4151,6 +4160,16 @@ async function onBodyClick(e) {
         // v112 stage 2.5: the process-history panel of one file
         case "filehist": {
             if (btn.dataset.path) void openHistPop(btn.dataset.path, btn);
+            return;
+        }
+        // v122 (owner request): the CHECKPOINT entry on the Open-tab rows -
+        // a persisted tab opens the panel by path, a temporary tab opens it
+        // in tab mode (the process binds by the workflow UUID)
+        case "tabhist": {
+            const t = byKey(btn.dataset.key);
+            if (!t) return;
+            if (t.path) void openHistPop(t.path, btn);
+            else void openHistPop(null, btn, { tabKey: t.key, tabName: t.name });
             return;
         }
         // v112 stage 2 (plan 4.7): copy the ComfyUI UUID of a workflow file
@@ -5818,7 +5837,9 @@ function histBadgeDups(path) {
 
 function applyHistBadges() {
     try {
-        document.querySelectorAll('[data-act="filehist"][data-path]').forEach((btn) => {
+        // v122: the Open-tab rows carry the same badge (data-act="tabhist"
+        // with data-path when the tab has a file; temp rows stay unbadged)
+        document.querySelectorAll('[data-act="filehist"][data-path], [data-act="tabhist"][data-path]').forEach((btn) => {
             const n = histBadgeCount(btn.dataset.path);
             const ex = btn.querySelector(".hub-wf-hbadge");
             if (n > 0) {
@@ -5876,7 +5897,7 @@ function refreshHistBadges(force) {
     })();
 }
 
-async function openHistPop(path, anchorBtn) {
+async function openHistPop(path, anchorBtn, opts = {}) {
     if (histPop) { closeHistPop(); return; }
     // v114: manage - the version-cleanup mode (checkboxes + Select all /
     // Deselect all + an armed Delete selected); delSel holds the chosen
@@ -5884,10 +5905,18 @@ async function openHistPop(path, anchorBtn) {
     // v115: armedProc - the WHOLE-PROCESS delete confirm (the owner's "кнопка
     // удалять сами процессы со всеми хвостами"); procDelBusy locks the strip
     // while the POST is in flight.
-    histState = { path, pid: null, proc: null, revs: [], loading: true,
+    // v122: the Open-tab entry - opts {tabKey, tabName} opens the panel for
+    // an OPEN TAB instead of a library file: a persisted tab still resolves
+    // by path, a TEMPORARY tab has no path and binds by the workflow UUID
+    // (resolve_uuid; the first checkpoint creates the process).
+    histState = { path: path || null, tabKey: opts.tabKey || null,
+        tabName: opts.tabName || null,
+        pid: null, proc: null, revs: [], loading: true,
         error: null, cpBusy: false, armedRestore: null, compare: null,
         manage: false, delSel: new Set(), armedDel: false,
         armedProc: false, procDelBusy: false,
+        overwriteRid: null, overwriteArmed: false,
+        ovTitleDraft: null, ovNoteDraft: null,
         // v116 (plan 4.6): the notes search inside the history panel - the
         // process notes + revision titles/notes from the SQLite index
         notesQ: "", notes: null, notesBusy: false,
@@ -5911,6 +5940,15 @@ async function openHistPop(path, anchorBtn) {
         if (!el) return;
         if (el.matches('[data-wf="histnote"]') && histState) {
             histState.noteDraft = el.value || "";
+        }
+        // v122: the overwrite strip's name/note drafts (WYSIWYG - the strip
+        // renders the CURRENT title/note; what stays in the box is kept,
+        // what the user types replaces it, an emptied box clears it)
+        if (el.matches('[data-wf="hovtitle"]') && histState) {
+            histState.ovTitleDraft = el.value || "";
+        }
+        if (el.matches('[data-wf="hovnote"]') && histState) {
+            histState.ovNoteDraft = el.value || "";
         }
         // v116 (plan 4.6): the debounced notes search (FTS server-side)
         if (el.matches('[data-wf="histsearch"]') && histState) {
@@ -5976,7 +6014,8 @@ async function histSearchNotes() {
 
 /** v116: a notes-result click loads THAT process into the panel (the
  *  primary location becomes the reference path; every action - Checkpoint,
- *  Restore, Manage versions - keeps working on it). */
+ *  Restore, Manage versions - keeps working on it). v122: the loading is
+ *  the shared histLoadProcess (the tab-mode panel shares the same ladder). */
 async function histOpenProcess(pid) {
     const st = histState;
     if (!st || !pid) return;
@@ -5985,21 +6024,34 @@ async function histOpenProcess(pid) {
     st.notes = null;
     st.notesQ = "";
     renderHistPop();
-    const pr = await jfetch("/settings_hub/workflows/history/process/" + encodeURIComponent(pid));
+    await histLoadProcess(pid);
+    st.loading = false;
+    renderHistPop();
+}
+
+/** v122: ONE loader for "this panel now shows THIS process" - the tab-mode
+ *  resolve, the notes-result click and every mutation refresh share it. */
+async function histLoadProcess(pid) {
+    const st = histState;
+    if (!st || !pid) return false;
+    const pr = await jfetch("/settings_hub/workflows/history/process/" +
+        encodeURIComponent(pid));
     if (pr.json?.ok && pr.json.process) {
         st.pid = pid;
         st.proc = pr.json.process;
         st.revs = Array.isArray(pr.json.process.revisions) ? pr.json.process.revisions : [];
         const prim = (pr.json.process.locations || []).find((l) => l.isPrimary) ||
             (pr.json.process.locations || [])[0] || null;
-        st.path = prim?.path || (st.proc.workflowId ? st.proc.displayName : st.path);
+        // a tab-mode panel adopts the primary location once the process has
+        // one (the file was saved after the first checkpoint) - restore/
+        // overwrite then work on the real file like a path-opened panel
+        if (!st.path && prim?.path) st.path = prim.path;
         st.changeStatus = null;
         st.changesSince = false;
-    } else {
-        st.error = (pr.json && pr.json.error) || ("HTTP " + pr.status);
+        return true;
     }
-    st.loading = false;
-    renderHistPop();
+    st.error = (pr.json && pr.json.error) || ("HTTP " + pr.status);
+    return false;
 }
 
 async function refreshHistState() {
@@ -6007,18 +6059,44 @@ async function refreshHistState() {
     histState.loading = true;
     histState.error = null;
     renderHistPop();
+    const st = histState;
+    // v122: the TEMPORARY-tab mode - no path exists, the process binds by
+    // the workflow UUID (the serialized graph's top-level "id"). A known
+    // pid (a checkpoint just created) reloads directly; otherwise one
+    // resolve_uuid probe finds the existing process; no UUID / not bound =
+    // an honest empty list (the first Checkpoint will create the process).
+    if (st.tabKey && !st.path) {
+        st.openTab = true;
+        if (st.pid) {
+            await histLoadProcess(st.pid);
+        } else {
+            const tab = getOpenWorkflows().find((t) => t.key === st.tabKey);
+            const g = tab ? graphJsonOfOpenTab(tab) : null;
+            const uuid = g && typeof g.id === "string" && g.id ? g.id : null;
+            let bound = null;
+            if (uuid) {
+                const ru = await jfetch("/settings_hub/workflows/history/resolve_uuid?uuid=" +
+                    encodeURIComponent(uuid));
+                if (ru.json?.ok && ru.json.bound && ru.json.process?.processId) {
+                    bound = ru.json.process.processId;
+                }
+            }
+            if (bound) await histLoadProcess(bound);
+            else { st.pid = null; st.proc = null; st.revs = []; }
+        }
+        st.loading = false;
+        renderHistPop();
+        return;
+    }
     const res = await jfetch("/settings_hub/workflows/history/resolve?path=" +
         encodeURIComponent(histState.path));
     if (res.json?.ok && res.json.bound && res.json.process) {
         histState.pid = res.json.process.processId;
-        const pr = await jfetch("/settings_hub/workflows/history/process/" +
-            encodeURIComponent(res.json.process.processId));
-        if (pr.json?.ok && pr.json.process) {
-            histState.proc = pr.json.process;
-            histState.revs = Array.isArray(pr.json.process.revisions)
-                ? pr.json.process.revisions : [];
-        } else {
-            histState.error = (pr.json && pr.json.error) || ("HTTP " + pr.status);
+        const ok = await histLoadProcess(histState.pid);
+        if (!ok) {
+            // histLoadProcess wrote st.error already; keep the panel alive
+            histState.proc = null;
+            histState.revs = [];
         }
         // v116 (plan 4.2): the layered 5-state status (the v112 rawHash
         // compare showed a workflow change for a canvas move)
@@ -6034,6 +6112,12 @@ async function refreshHistState() {
     } else {
         histState.error = (res.json && res.json.error) || ("HTTP " + res.status);
     }
+    // v122 (the owner's question "нужно ли перед этим сохранить основной
+    // процесс?"): the panel KNOWS when the workflow's tab is open and says
+    // so - the checkpoint captures the in-memory graph incl. unsaved edits,
+    // saving first is never required (the disk file only matters when the
+    // tab is closed).
+    histState.openTab = openHasPath(histState.path);
     histState.loading = false;
     renderHistPop();
 }
@@ -6067,9 +6151,13 @@ function histRevRowHtml(r, i) {
         `title="Open this version as an independent COPY (the source file is never touched)">` +
         `${esc(lbl.title || ("Checkpoint " + (histState.revs.length - i)))}</button>` +
         `${stable ? `<span class="hub-wf-dot" title="Marked stable - never cleaned up">★</span>` : ""}` +
+        (r.overwrittenAt ? `<span class="hub-wf-mod" title="This version was overwritten with a newer state on ${esc(fmtDateTime(r.overwrittenAt))}">⤒</span>` : "") +
         `<span class="hub-wf-filesub">${esc(lbl.d)} · ${esc(lbl.src)}${r.note && r.title ? " · " + esc(r.note) : ""}</span>` +
         `<button type="button" class="hub-wf-cbtn" data-act="histstable" data-rid="${esc(r.revisionId)}" ` +
         `title="${stable ? "Unmark stable" : "Mark stable - protects this version from cleanup"}">★</button>` +
+        // v122: overwrite THIS version with the CURRENT state (with rename)
+        `<button type="button" class="hub-wf-cbtn${histState.overwriteRid === r.revisionId ? " hub-wf-locked" : ""}" data-act="histoverwrite" data-rid="${esc(r.revisionId)}" ` +
+        `title="Overwrite this version with the CURRENT state of the workflow (its name and note can be changed too; the version keeps its place in the list)">⤒</button>` +
         `<button type="button" class="hub-wf-cbtn" data-act="histrestore" data-rid="${esc(r.revisionId)}" ` +
         `title="Restore: opens a COPY first; overwriting the file needs a second confirm">↺</button>` +
         `</div>`;
@@ -6084,7 +6172,7 @@ function renderHistPop() {
     } else if (st.error) {
         body = `<div class="hub-wf-planwarn">⚠ ${esc(st.error)}</div>`;
     } else {
-        const procName = st.proc?.displayName || baseName(st.path);
+        const procName = st.proc?.displayName || st.tabName || baseName(st.path) || "(no name yet)";
         const uuid = st.proc?.workflowId ? ` · <span class="hub-wf-snap" title="${esc(st.proc.workflowId)}">⧉ ${esc(String(st.proc.workflowId).slice(0, 8))}…</span>` : "";
         const head = `<div class="hub-wf-planrow"><span class="hub-wf-plan-cap">Process</span>` +
             `<span class="hub-wf-plan-names">${esc(procName)}${uuid}</span></div>` +
@@ -6097,12 +6185,16 @@ function renderHistPop() {
                     : st.changesSince
                         ? `<div class="hub-wf-planwarn" title="The current disk file (or the open tab) differs from the last Checkpoint">⇅ ${esc(st.statusLabel || "Changes since the last checkpoint")} - a Checkpoint saves the current state.</div>`
                         : "");
+        // v122 (the owner's checkpoint question): the hint now ANSWERS it -
+        // saving the file first is NOT required, the in-memory graph (with
+        // every unsaved edit) is what the checkpoint captures; and the
+        // disk-import button makes no sense for a tab with no file yet.
         const cp = `<div class="hub-wf-planacts">` +
             `<input type="text" class="hub-cs-in" data-wf="histnote" placeholder="What changed? (optional)" value="${esc(st.noteDraft || "")}" spellcheck="false">` +
-            `<button type="button" class="hub-wf-act" data-act="histcheckpoint" title="Capture the CURRENT state into the history${st.openTab ? " (the in-memory tab incl. unsaved edits)" : " (the disk file)"}">📌 Checkpoint</button>` +
-            `<button type="button" class="hub-wf-act" data-act="histimport" title="Add the CURRENT DISK file into the history as an imported version">⤓ Import disk file</button>` +
+            `<button type="button" class="hub-wf-act" data-act="histcheckpoint" title="Capture the CURRENT state into the history${st.openTab ? " (the in-memory tab incl. unsaved edits - saving first is not required)" : " (the disk file)"}">📌 Checkpoint</button>` +
+            (st.path ? `<button type="button" class="hub-wf-act" data-act="histimport" title="Add the CURRENT DISK file into the history as an imported version">⤓ Import disk file</button>` : "") +
             `</div>` +
-            (st.openTab ? `<div class="hub-wf-planhint">The tab is open - the Checkpoint captures the in-memory graph, including unsaved edits.</div>` : "");
+            (st.openTab ? `<div class="hub-wf-planhint">The tab is open - the Checkpoint captures the in-memory graph, including unsaved edits. Saving the file first is not required.</div>` : "");
         const revs = st.revs.length
             ? st.revs.map(histRevRowHtml).join("")
             : `<div class="hub-wf-emptylist">No checkpoints yet - the ordinary ComfyUI Save does not create history; press 📌 Checkpoint to fix the current state.</div>`;
@@ -6186,9 +6278,36 @@ function renderHistPop() {
                 `<button type="button" class="hub-wf-act hub-wf-armed" data-act="histrestoreconfirm">Click AGAIN to replace the file</button> ` +
                 `<span class="hub-wf-snap">(a safety snapshot is taken first; undoable)</span></div>`;
         }
+        // v122: the OVERWRITE confirm strip - the owner's "rewrite an
+        // existing checkpoint with the current state (with rename)". Two
+        // WYSIWYG fields (title/note) prefilled from the version; the armed
+        // second click executes; Cancel clears. The version keeps its id,
+        // its place in the list and its date.
+        if (st.overwriteRid) {
+            const ovRev = st.revs.find((r) => r.revisionId === st.overwriteRid);
+            if (ovRev) {
+                const ovLbl = histRevLabel(ovRev);
+                if (st.ovTitleDraft === null) st.ovTitleDraft = ovRev.title || "";
+                if (st.ovNoteDraft === null) st.ovNoteDraft = ovRev.note || "";
+                body += `<div class="hub-wf-planwarn">⚠ Overwrite <b>${esc(ovLbl.title || "Checkpoint")}</b> with the CURRENT state of the workflow?` +
+                    `<div class="hub-wf-filesub" style="margin:3px 0">The version keeps its place in the list and its date; the old content is replaced${ovRev.isStable ? " - it is marked ★ stable" : ""}.</div>` +
+                    `<div class="hub-wf-planacts" style="margin-top:4px">` +
+                    `<input type="text" class="hub-cs-in" data-wf="hovtitle" placeholder="Version name (optional)" value="${esc(st.ovTitleDraft)}" spellcheck="false">` +
+                    `<input type="text" class="hub-cs-in" data-wf="hovnote" placeholder="Note - what is this state?" value="${esc(st.ovNoteDraft)}" spellcheck="false">` +
+                    `</div>` +
+                    `<div class="hub-wf-planacts hub-wf-planacts-end" style="margin-top:4px">` +
+                    `<button type="button" class="hub-wf-act${st.overwriteArmed ? " hub-wf-armed" : ""}${st.cpBusy ? " hub-wf-dim" : ""}" data-act="histoveryes" ` +
+                    `title="Replace this version's content with the CURRENT state (the open tab's in-memory graph incl. unsaved edits, or the disk file)">${st.cpBusy ? "…" : (st.overwriteArmed ? "⚠ Click AGAIN to overwrite" : "Overwrite with the current state")}</button>` +
+                    `<button type="button" class="hub-wf-act" data-act="histovercancel" title="Do not overwrite anything">✕ Cancel</button>` +
+                    `</div></div>`;
+            } else {
+                st.overwriteRid = null;
+                st.overwriteArmed = false;
+            }
+        }
     }
     histPop.innerHTML = `<div class="hub-menu-title">🕘 Process history</div>` +
-        `<div class="hub-wf-planhint">${esc(histState.path || "")}</div>` + body;
+        `<div class="hub-wf-planhint">${esc(histState.path || (histState.tabKey ? "Open tab: " + (histState.tabName || "temporary") : ""))}</div>` + body;
     // v113: the content size changed (loading -> data) - re-clamp + re-place
     placeHubPop(histPop, histState.anchor, { maxW: 520 });
 }
@@ -6325,20 +6444,39 @@ async function runHistCompare() {
     renderHistPop();
 }
 
+/** v122: the OPEN TAB the history panel is bound to - by the tab key (the
+ *  Open-tab entry for a temporary tab) or by the canonical path. */
+function histFindTab() {
+    const st = histState;
+    if (!st) return null;
+    if (st.tabKey) return getOpenWorkflows().find((t) => t.key === st.tabKey) || null;
+    if (!st.path) return null;
+    return getOpenWorkflows().find((t) => t.path && sameWfPath(t.path, st.path)) || null;
+}
+
 /** The Checkpoint action: the OPEN tab's in-memory graph wins over the disk
- * (plan 5.7.2) - a disk checkpoint only when the workflow is not open. */
+ * (plan 5.7.2) - a disk checkpoint only when the workflow is not open.
+ * v122: the Open-tab entry (tab mode) captures by the tab key - a temporary
+ * tab sends NO path, the process binds by the graph's own UUID. */
 async function histCreateCheckpoint(source) {
     const st = histState;
     if (!st || st.cpBusy) return;
     st.cpBusy = true;
     renderHistPop();
     try {
-        const payload = { path: st.path, source: source || "checkpoint",
+        const payload = { path: st.path || undefined, source: source || "checkpoint",
             note: st.noteDraft || undefined, title: undefined };
+        // v122: the FIRST checkpoint of a TEMPORARY tab names the brand-new
+        // process after the tab (there is no file basename to fall back to);
+        // later checkpoints of the same process stay note-driven
+        if (!st.path && st.tabKey && !st.pid && st.tabName) {
+            payload.title = st.tabName;
+        }
         if (!source || source === "checkpoint") {
-            const tab = getOpenWorkflows().find((t) => t.path && sameWfPath(t.path, st.path));
+            const tab = histFindTab();
             const graph = tab ? graphJsonOfOpenTab(tab) : null;
             if (graph) payload.graph = graph;
+            else if (!st.path) { st.cpBusy = false; renderHistPop(); return; }
             else payload.source = "disk";
         }
         const res = await jfetch("/settings_hub/workflows/history/checkpoint", {
@@ -6348,6 +6486,9 @@ async function histCreateCheckpoint(source) {
         });
         if (res.json?.ok) {
             st.noteDraft = "";
+            // v122: the first checkpoint of a TEMP tab has just created the
+            // process - remember it so the refresh loads it directly
+            if (!st.pid && res.json.processId) st.pid = res.json.processId;
             await refreshHistState();
             refreshHistBadges(true);   // v114: the row count chip changes
             if (res.json.duplicate) {
@@ -6376,6 +6517,59 @@ async function histCreateCheckpoint(source) {
         localToast("Checkpoint failed: " + String((e && e.message) || e), 4200);
     }
     st.cpBusy = false;
+}
+
+/** v122 (owner request): OVERWRITE one existing checkpoint with the CURRENT
+ *  workflow state, with an optional rename. The capture ladder matches the
+ *  checkpoint: the open tab's in-memory graph wins, the disk file is the
+ *  fallback (and the only source when the workflow is not open). The
+ *  WYSIWYG name/note fields go along as-is (an emptied field clears the
+ *  value; the strip was prefilled with the version's current values). */
+async function histOverwriteRevision() {
+    const st = histState;
+    const rid = st?.overwriteRid;
+    if (!st || !rid || st.cpBusy) return;
+    st.cpBusy = true;
+    renderHistPop();
+    try {
+        const payload = { note: st.ovNoteDraft ?? "", title: st.ovTitleDraft ?? "" };
+        const tab = histFindTab();
+        const graph = tab ? graphJsonOfOpenTab(tab) : null;
+        if (graph) payload.graph = graph;
+        if (st.path) payload.path = st.path;
+        if (!graph && !st.path) {
+            localToast("Nothing to capture - the tab is gone and the file is not on disk", 4200);
+            st.cpBusy = false;
+            renderHistPop();
+            return;
+        }
+        const res = await jfetch("/settings_hub/workflows/history/revision/" +
+            encodeURIComponent(rid) + "/overwrite", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (res.json?.ok) {
+            st.overwriteRid = null;
+            st.overwriteArmed = false;
+            st.ovTitleDraft = null;
+            st.ovNoteDraft = null;
+            await refreshHistState();
+            refreshHistBadges(true);
+            if (res.json.duplicate) {
+                localToast("No changes - the content and the name are identical");
+            } else {
+                localToast("Version overwritten" + (res.json.renamed ? " (renamed)" : "") +
+                    (payload.graph ? " - the in-memory state" : " - the disk file"));
+            }
+        } else {
+            localToast("Overwrite failed: " + ((res.json && res.json.error) || ("HTTP " + res.status)), 4200);
+        }
+    } catch (e) {
+        localToast("Overwrite failed: " + String((e && e.message) || e), 4200);
+    }
+    st.cpBusy = false;
+    renderHistPop();
 }
 
 async function histRestore(rid, confirmReplace) {
@@ -6524,6 +6718,37 @@ function histPopClick(act, btn) {
         case "histcheckpoint": void histCreateCheckpoint("checkpoint"); return;
         case "histimport": void histCreateCheckpoint("import"); return;
         case "histopen": void histRestore(rid, false); return;
+        // v122: the overwrite flow - the row button selects the version and
+        // opens the confirm strip; the strip's button arms (the first click)
+        // and executes (the second click); Cancel clears everything.
+        case "histoverwrite": {
+            if (!rid) return;
+            if (st.overwriteRid === rid) {
+                st.overwriteRid = null;
+                st.overwriteArmed = false;
+            } else {
+                st.overwriteRid = rid;
+                st.overwriteArmed = false;
+                st.ovTitleDraft = null;
+                st.ovNoteDraft = null;
+            }
+            renderHistPop();
+            return;
+        }
+        case "histoveryes": {
+            if (!st.overwriteRid) return;
+            if (!st.overwriteArmed) { st.overwriteArmed = true; renderHistPop(); return; }
+            void histOverwriteRevision();
+            return;
+        }
+        case "histovercancel": {
+            st.overwriteRid = null;
+            st.overwriteArmed = false;
+            st.ovTitleDraft = null;
+            st.ovNoteDraft = null;
+            renderHistPop();
+            return;
+        }
         case "histstable": {
             const rev = st.revs.find((r) => r.revisionId === rid);
             void (async () => {
@@ -6541,6 +6766,13 @@ function histPopClick(act, btn) {
         case "histrestore": {
             // the plan contract: Restore DEFAULTS to opening a COPY; the
             // file-replace is a SEPARATE confirmed action (the second click)
+            // v122: a TEMP-tab process may have no file location yet - there
+            // is nothing to overwrite, the copy open stays the only mode
+            if (!st.path) {
+                void histRestore(rid, false);
+                localToast("This process has no file on disk yet - the version opens as a copy.");
+                return;
+            }
             if (st.armedRestore === rid) {
                 st.pendingRestore = rid;
                 renderHistPop();
@@ -7181,13 +7413,17 @@ export function __workflowsTestHooks() {
         wfStoreSaveAsCandidate,
         setSaveFormRows: (rows) => { if (saveForm) saveForm.rows = rows; },
         // v112 stage 2.5: the history panel hooks
-        openHistPop: (p) => openHistPop(p),
+        openHistPop: (p, anchor, opts) => openHistPop(p, anchor, opts),
         closeHistPop,
         histState: () => histState
             ? JSON.parse(JSON.stringify({ ...histState, delSel: [...(histState.delSel || [])] }))
             : null,
         histPopEl: () => histPop,
         histCreateCheckpoint: (src) => histCreateCheckpoint(src),
+        // v122: the overwrite flow + the Open-tab (tabhist) entry hooks
+        histOverwriteRevision: () => histOverwriteRevision(),
+        histFindTab: () => histFindTab(),
+        histLoadProcess: (pid) => histLoadProcess(pid),
         histRestore: (rid, confirmReplace) => histRestore(rid, confirmReplace),
         runHistCompare: () => runHistCompare(),
         refreshHistState: () => refreshHistState(),

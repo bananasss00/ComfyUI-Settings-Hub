@@ -1615,7 +1615,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v121"
+WORKFLOWS_SERVER_VERSION = "v122"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -3380,6 +3380,25 @@ async def workflows_history_resolve(request):
     })
 
 
+@PromptServer.instance.routes.get("/settings_hub/workflows/history/resolve_uuid")
+async def workflows_history_resolve_uuid(request):
+    """v122: the process bound to ONE ComfyUI workflow UUID - the Open-tab
+    history entry for a TEMPORARY tab (no file path yet; the serialized
+    graph's top-level "id" is the UUID the processes bind with). Same
+    answer shape as /history/process/{pid}: {ok, bound, process?}."""
+    if _wf_hist is None:
+        return web.json_response({"ok": False, "error": "history module unavailable"},
+                                 status=404)
+    uuid = (request.query.get("uuid") or "").strip()
+    if not uuid:
+        return web.json_response({"ok": False, "error": "bad uuid"}, status=400)
+    p = _wf_hist.find_process_by_uuid(uuid, _request_user_scope(request))
+    if not p:
+        return web.json_response({"ok": True, "bound": False})
+    return web.json_response({"ok": True, "bound": True,
+                              "process": _wf_hist.get_process(p["processId"])})
+
+
 @PromptServer.instance.routes.get("/settings_hub/workflows/history/revision/{rid}/raw")
 async def workflows_history_revision_raw(request):
     """The EXACT original bytes of one revision (integrity-checked)."""
@@ -3423,6 +3442,56 @@ async def workflows_history_revision_note(request):
         return web.json_response({"ok": False, "error": "bad json"}, status=400)
     note = body.get("note") if isinstance(body, dict) else None
     return web.json_response(_wf_hist.set_revision_note(rid, note))
+
+
+@PromptServer.instance.routes.post("/settings_hub/workflows/history/revision/{rid}/overwrite")
+async def workflows_history_revision_overwrite(request):
+    """v122 (owner request): OVERWRITE one existing checkpoint with the
+    CURRENT state of the workflow, optionally renaming it. Body:
+    {graph?|path?, note?, title?} - the capture ladder is the SAME as the
+    checkpoint route (the in-memory graph of the open tab wins over the
+    disk file; without a graph the path's disk bytes are used). The
+    revision keeps its id, its place in the parent chain and createdAt;
+    `note`/`title` are applied only when the key is present in the body
+    (absent = keep the current value)."""
+    if _wf_hist is None:
+        return web.json_response({"ok": False, "error": "history module unavailable"},
+                                 status=404)
+    rid = request.match_info.get("rid", "")
+    if not rid:
+        return web.json_response({"ok": False, "error": "bad revision"}, status=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"ok": False, "error": "bad body"}, status=400)
+    rel_path = _resolve_rel_path_from_request(body.get("path"))
+    if isinstance(body.get("graph"), dict):
+        try:
+            data = json.dumps(body["graph"], ensure_ascii=False).encode("utf-8")
+        except (TypeError, ValueError):
+            return web.json_response({"ok": False,
+                                      "error": "the tab graph is not serializable"}, status=400)
+    elif rel_path:
+        data = None
+        phys, _wroot = _resolve_library_file(request, rel_path)
+        if phys and os.path.isfile(phys):
+            try:
+                with open(phys, "rb") as fh:
+                    data = fh.read()
+            except OSError:
+                data = None
+        if data is None:
+            return web.json_response({"ok": False, "error": "the file is gone"},
+                                     status=404)
+    else:
+        return web.json_response(
+            {"ok": False, "error": "a graph or a path is required"}, status=400)
+    note = body["note"] if isinstance(body.get("note"), str) else None
+    title = body["title"] if isinstance(body.get("title"), str) else None
+    r = _wf_hist.overwrite_revision(rid, data, note=note, title=title)
+    return web.json_response(r, status=200 if r.get("ok") else 404)
 
 
 @PromptServer.instance.routes.post("/settings_hub/workflows/history/revision/delete")
