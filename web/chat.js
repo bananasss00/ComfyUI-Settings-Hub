@@ -1827,7 +1827,7 @@ function openGpuPop() {
         `<label class="hub-cs-row" title="Before every request (chat AND one-shot): unload ComfyUI's own models (only when any are still loaded) so the LLM gets the VRAM. The result shows as a note on the live bubble.">` +
         `<span>Free ComfyUI models before request</span>` +
         `<input type="checkbox" class="hub-cs-chk" data-gpu="freec"></label>` +
-        `<label class="hub-cs-row" title="When a ComfyUI queue starts (execution_start), the LLM engine is unloaded so its VRAM goes back to ComfyUI for the generation - but ONLY when the engine actually holds a loaded model (the status is checked first: an unused chat never touches the queue, and a dead engine never toasts a failure). The next chat message or run wakes the model again (may take minutes).">` +
+        `<label class="hub-cs-row" title="When a ComfyUI queue starts (execution_start), the LLM engine is unloaded so its VRAM goes back to ComfyUI for the generation - but ONLY when the engine actually holds a loaded model AND that model is the one the hub chat loaded or used itself in this ComfyUI session (the status is checked first: an unused chat never touches the queue, a dead engine never toasts a failure, and a model loaded outside the hub - an agent, poly_manager, Jan - is never evicted). The next chat message or run wakes the model again (may take minutes).">` +
         `<span>Unload the chat model when a ComfyUI queue starts</span>` +
         `<input type="checkbox" class="hub-cs-chk" data-gpu="unq"></label>` +
         `<div class="hub-cs-hint">While a reserve is set, EVERY chat message re-applies it before ` +

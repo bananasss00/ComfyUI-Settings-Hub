@@ -827,7 +827,9 @@ check("v111 auto unload skipped on a dead engine",
       not any(q[1] == UPSTREAM + "/unload" for q in FakeClientSession.requests), j)
 
 # a LOADED engine: the auto unload runs the FULL chain (status pre-check,
-# /unload, the release, the refetch)
+# /unload, the release, the refetch) - but only when the hub chat LOADED/USED
+# that very model in this session (_HUB_MODEL - smart scoping below)
+chat._HUB_MODEL["id"] = "test-model"
 FakeClientSession.script = [
     FakeUpstream(200, STATUS_JSON),   # GET /status (the v111 pre-check)
     FakeUpstream(200, "{}"),          # POST /unload
@@ -841,6 +843,32 @@ check("v111 auto unload runs the full chain on a loaded engine",
       j["ok"] is True and not j.get("skipped") and
       any(q[0] == "POST" and q[1] == UPSTREAM + "/unload" for q in FakeClientSession.requests),
       FakeClientSession.requests[:4])
+
+# SMARTER: the hub chat has not loaded/used anything in this session -> the
+# queue-start auto unload never touches the engine (its model belongs to an
+# outside client - an agent, poly_manager, Jan)
+chat._HUB_MODEL["id"] = None
+FakeClientSession.script = [FakeUpstream(200, STATUS_JSON)]   # status pre-check only
+FakeClientSession.requests = []
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "unload", "auto": True})))
+j = resp_json(r)
+check("auto unload skipped when the hub never touched the engine",
+      j["ok"] is True and j.get("skipped") is True and
+      any("hub chat has not loaded" in n for n in j["notes"]) and
+      not any(q[1] == UPSTREAM + "/unload" for q in FakeClientSession.requests), j)
+
+# SMARTER: the engine holds ANOTHER model than the hub used - loaded outside
+# the hub after the hub last spoke; the hub must not evict it
+chat._HUB_MODEL["id"] = "another-model"
+FakeClientSession.script = [FakeUpstream(200, STATUS_JSON)]
+FakeClientSession.requests = []
+r = run(chat.chat_gpu_post(FakeRequest(json_body={"action": "unload", "auto": True})))
+j = resp_json(r)
+check("auto unload skipped when the engine holds a model loaded outside the hub",
+      j["ok"] is True and j.get("skipped") is True and
+      any("outside the hub" in n for n in j["notes"]) and
+      not any(q[1] == UPSTREAM + "/unload" for q in FakeClientSession.requests), j)
+chat._HUB_MODEL["id"] = None
 
 # the MANUAL button keeps the FORCE behavior even on an unloaded engine
 FakeClientSession.script = [

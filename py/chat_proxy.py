@@ -280,6 +280,12 @@ DEFAULT_CONFIG = {
                                # status FIRST and SKIPS the unload when no
                                # model is loaded (an unused chat never
                                # touches the queue). Off by default.
+                               # SMARTER (2026-11-23): scoped to _HUB_MODEL -
+                               # only the model the hub chat loaded/used itself
+                               # in this session is evicted; if the engine now
+                               # holds a model loaded outside the hub (agent
+                               # outside Comfy, poly_manager, Jan) the auto
+                               # unload skips, the manual button stays force.
     "oneshot_preset": "",      # v93: the ONE-SHOT mode's own catalog preset
                                # (.txt relative path) - SAME resolution rules
                                # as prompt_preset (wins over oneshot_system,
@@ -1293,22 +1299,39 @@ def _comfy_free_if_loaded():
     return "auto-free before the request: " + _comfy_free_memory()
 
 
+_HUB_MODEL: dict = {"id": None}   # id последней модели, которую хаб сам грузил/использовал
+
+
+def _note_hub_model(model):
+    """Queue-start smart unload: запомнить модель, которую хаб-чат сам загрузил или
+    через которую говорил. Авто-выгрузка на старте очереди трогает только её; если
+    на сервере сейчас ДРУГАЯ модель (её загрузили извне: агент вне Comfy,
+    poly_manager, Jan) - чужое не выгружаем, жмёт только manual Unload."""
+    m = str(model or "").strip()
+    if m:
+        _HUB_MODEL["id"] = m
+
+
 async def _ensure_llm_ready(cfg, model):
     """v92 (owner #1 + #2): the model loads ONLY when a request needs it.
     A PolyStrata registry server reports per-model statuses - when the target
     is not loaded yet it is switched exactly the nodes' way (POST
     /api/models/load; may take minutes), an already-loading target is waited
     for. Plain OpenAI-style servers keep the name in the payload (nothing to
-    wake). Returns (ok, note|None); note is a short human status for the UI."""
+    wake). Returns (ok, note|None); note is a short human status for the UI.
+    Every hub chat through here RECORDS the model as hub-touched (_HUB_MODEL -
+    the queue-start auto unload is scoped to it)."""
     if aiohttp is None or not cfg.get("url") or not model:
         return True, None
     mm = await _upstream_models_full(cfg)
     if not mm.get("ok") or mm.get("source") != "registry":
+        _note_hub_model(model)
         return True, None
     entry = next((m for m in (mm.get("models") or [])
                   if m.get("id") == model), None)
     status = (entry or {}).get("status") or ""
     if status == "loaded":
+        _note_hub_model(model)
         return True, None
     if status == "loading":
         # someone (the nodes / a previous send) is loading it right now -
@@ -1324,12 +1347,14 @@ async def _ensure_llm_ready(cfg, model):
                         if m.get("id") == model), None)
             st2s = (st2 or {}).get("status") or ""
             if st2s == "loaded":
+                _note_hub_model(model)
                 return True, "model %s finished loading" % model
             if st2s not in ("loading", ""):
                 break
     ok, code, txt, via = await _upstream_switch(cfg, model)
     if not ok:
         return False, "model %s load failed: %s" % (model, txt or code or via or "?")
+    _note_hub_model(model)
     return True, "model %s loaded (on request)" % model
 
 
@@ -1956,6 +1981,29 @@ async def chat_gpu_post(request):
                 "upstream": snap0,
                 "reserve_mib": int(cfg.get("vram_reserve_mib") or 0),
             })
+        # smart unload part 2: the queue-start hook unloads ONLY the model the
+        # hub itself loaded/used in this ComfyUI session (_HUB_MODEL). If the
+        # engine now holds another model - loaded outside the hub (an agent,
+        # poly_manager, Jan, another ComfyUI) - the hub must not evict it:
+        # "I didn't load or use it through the hub chat - hands off". The
+        # manual Unload button (no auto flag) stays force and unchanged.
+        cur = str((st0 or {}).get("model") or "")
+        if not _HUB_MODEL["id"]:
+            reason = ("the hub chat has not loaded or used a model in this "
+                      "ComfyUI session")
+        elif cur and cur.lower() != str(_HUB_MODEL["id"]).lower():
+            reason = ("the engine holds a model loaded outside the hub (%s, "
+                      "hub used %s)" % (cur, _HUB_MODEL["id"]))
+        else:
+            reason = ""
+        if reason:
+            notes.append("auto unload skipped: " + reason + " - not the hub's model")
+            return web.json_response({
+                "ok": True, "action": action, "skipped": True,
+                "reason": reason, "notes": notes,
+                "upstream": snap0,
+                "reserve_mib": int(cfg.get("vram_reserve_mib") or 0),
+            })
 
     if not cfg.get("url"):
         return _jerr("no LLM server configured - set the URL in the chat settings first")
@@ -1967,6 +2015,8 @@ async def chat_gpu_post(request):
         ok, status, txt, via = await _upstream_switch(cfg, model)
         if via == "error":
             return _jerr("load failed: %s" % txt, 502)
+        if ok:
+            _note_hub_model(model)   # the hub loaded it - the queue-start auto unload may evict it
         notes.append("load %s (%s): %s" % (model, via, txt or ("HTTP %s" % status)))
         return web.json_response({"ok": ok, "action": action, "notes": notes})
 
@@ -2011,6 +2061,10 @@ async def chat_gpu_post(request):
         notes.append("model unloaded - all of its VRAM is back"
                      if ok else "UNLOAD FAILED: %s" % (err or "?"))
         if ok:
+            # the hub no longer owns any model - whatever the engine loads
+            # next (auto_load, an agent outside Comfy) is untouched by the
+            # queue-start auto unload until the hub chat uses it again
+            _HUB_MODEL["id"] = None
             await _gpu_release(cfg, notes)  # the reservation returns too
         st = await _upstream_status(cfg)
         return web.json_response({
