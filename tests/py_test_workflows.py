@@ -2051,6 +2051,65 @@ r = loop(HIMPORT(FakeRequest(json_body={"processId": _imppid,
 check("v126 import: a traversal path refuses (400)",
       r.status == 400, json.dumps({"status": r.status}))
 
+# ===========================================================================
+# v127: the FILE-DIALOG import source - the client reads ANY file the user
+# picked through the browser's own dialog (any folder, any disk) and posts
+# its RAW text as `content`; the bytes must be stored VERBATIM (byte-for-
+# byte, so a future Restore gives back the exact file).
+# ===========================================================================
+_content_text = json.dumps(
+    {"workflow_id": "dddd7777-7777-7777-7777-777777777777",
+     "nodes": [{"id": 7, "type": "KSampler"}],
+     "extra": {"keep": "every byte"}},
+    indent=2, ensure_ascii=False) + "\n"
+r = loop(HIMPORT(FakeRequest(json_body={
+    "processId": _imppid, "content": _content_text,
+    "title": "from the dialog", "note": "any place"})))
+_cij = r.json()
+check("v127 content import: the route accepts the raw text as a version",
+      r.status == 200 and _cij.get("ok") and not _cij.get("duplicate"),
+      json.dumps(_cij))
+_crec = wf_store._wf_hist._read_revision(_cij.get("revisionId", ""))
+check("v127 content import: the revision carries source import, NO sourcePath, the given title",
+      _crec and _crec.get("source") == "import" and
+      _crec.get("sourcePath") is None and _crec.get("title") == "from the dialog" and
+      _crec.get("note") == "any place",
+      json.dumps({k: (_crec or {}).get(k) for k in ("source", "sourcePath", "title", "note")}))
+_raw = None
+try:
+    _raw = wf_store._wf_hist.read_revision_bytes(_cij.get("revisionId", ""))
+except Exception:
+    _raw = None
+check("v127 content import: the stored bytes are VERBATIM (byte-for-byte, formatting kept)",
+      isinstance(_raw, (bytes, bytearray)) and bytes(_raw) == _content_text.encode("utf-8"),
+      "bytes match: %s" % (isinstance(_raw, (bytes, bytearray)) and
+                           bytes(_raw) == _content_text.encode("utf-8")))
+check("v127 content import: the process binding still never moved",
+      wf_store._wf_hist._read_process(_imppid).get("workflowId") ==
+      "iuuuuuuu-1111-1111-1111-111111111111",
+      json.dumps(wf_store._wf_hist._read_process(_imppid).get("workflowId")))
+r = loop(HIMPORT(FakeRequest(json_body={
+    "processId": _imppid, "content": _content_text, "title": "same"})))
+check("v127 content import: the identical content answers duplicate",
+      r.json().get("ok") and r.json().get("duplicate") is True, json.dumps(r.json()))
+r = loop(HIMPORT(FakeRequest(json_body={"processId": _imppid,
+                                        "content": "definitely not json {{{"})))
+check("v127 content import: broken JSON refuses (400, honest error)",
+      r.status == 400 and "not valid JSON" in (r.json().get("error") or ""),
+      json.dumps({"status": r.status, "j": r.json()}))
+r = loop(HIMPORT(FakeRequest(json_body={"processId": _imppid,
+                                        "content": json.dumps([1, 2, 3])})))
+check("v127 content import: a JSON ARRAY refuses (a workflow must be an object)",
+      r.status == 400 and "workflow JSON object" in (r.json().get("error") or ""),
+      json.dumps({"status": r.status, "j": r.json()}))
+r = loop(HIMPORT(FakeRequest(json_body={"processId": _imppid,
+                                        "content": json.dumps("just a string")})) )
+check("v127 content import: a JSON STRING refuses too",
+      r.status == 400, json.dumps({"status": r.status, "j": r.json()}))
+_impcount2 = len(wf_store._wf_hist.list_revisions(_imppid))
+check("v127 content import: the count is 4 (disk + foreign file + tab graph + one content import)",
+      _impcount2 == 4, str(_impcount2))
+
 reset_state()
 # ===========================================================================
 

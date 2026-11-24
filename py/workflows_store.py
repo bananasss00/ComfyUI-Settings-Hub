@@ -1615,7 +1615,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v126"
+WORKFLOWS_SERVER_VERSION = "v127"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -3400,15 +3400,20 @@ async def workflows_history_checkpoint(request):
 
 @PromptServer.instance.routes.post("/settings_hub/workflows/history/import_version")
 async def workflows_history_import_version(request):
-    """v126 (owner request): the Process-history panel's Import - attach ANY
-    workflow as ONE MORE version of the panel's process. Body:
-    {processId, sourcePath?|graph?, note?, title?}:
-    - `sourcePath` (a library OR external-namespace rel path - the picker
-      lists every workflow the manager knows) wins: the server reads the
-      file bytes itself through the hardened locator, the client never
-      uploads a foreign file's content;
+    """v127/v126 (owner request): the Process-history panel's Import - attach
+    ANY workflow as ONE MORE version of the panel's process. Body:
+    {processId, graph?|content?|sourcePath?, note?, title?} (the FIRST
+    present source wins):
     - `graph` (the currently OPEN tab's in-memory state incl. unsaved
-      edits) when no sourcePath is given.
+      edits);
+    - `content` (v127, the FILE-DIALOG import): the RAW text of ANY file the
+      user picked through the browser's own dialog - any folder, any disk,
+      no manager registration required. The bytes are stored VERBATIM (only
+      validated as a JSON workflow object first) - a future Restore gives
+      back the exact file, byte for byte;
+    - `sourcePath` (a library OR external-namespace rel path): the server
+      reads the file bytes itself through the hardened locator (kept for
+      the old clients + the API tests, the v127 panel no longer sends it).
     The revision lands on the GIVEN process and NOTHING else moves: no
     location attach/detach, no uuid re-binding - importing a foreign-UUID
     workflow must never re-bind the process to that foreign UUID (that is
@@ -3435,11 +3440,27 @@ async def workflows_history_import_version(request):
             return web.json_response({"ok": False,
                                       "error": "the tab graph is not serializable"}, status=400)
         src_path = None
+    elif isinstance(body.get("content"), str) and body["content"]:
+        # v127 (owner request): the FILE-DIALOG import - the client reads the
+        # picked file's raw text and posts it here; the bytes are stored
+        # VERBATIM (a re-serialization would break the byte-identity the
+        # restore path promises). Validation: it must parse as a JSON
+        # workflow OBJECT - not an array, not a scalar, not broken JSON.
+        try:
+            parsed = json.loads(body["content"])
+        except ValueError:
+            return web.json_response({"ok": False,
+                                      "error": "content is not valid JSON"}, status=400)
+        if not isinstance(parsed, dict):
+            return web.json_response({"ok": False,
+                                      "error": "content must be a workflow JSON object"}, status=400)
+        data = body["content"].encode("utf-8")
+        src_path = None
     else:
         rel_path = _resolve_rel_path_from_request(body.get("sourcePath"))
         if not rel_path:
             return web.json_response(
-                {"ok": False, "error": "sourcePath (a workflows/... path) or a graph is required"},
+                {"ok": False, "error": "sourcePath (a workflows/... path), content or a graph is required"},
                 status=400)
         # the ONE hardened locator - library files AND the v124 external
         # namespace (workflows/.settings_hub_ext/<id>/<rel>) both resolve

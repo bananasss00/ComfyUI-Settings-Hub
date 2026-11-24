@@ -852,20 +852,33 @@ function makeFakeApi() {
             }
             // v126: the Import route - ONE MORE version of an EXISTING
             // process from an outside source (a picked file's disk bytes or
-            // the open tab's graph). The BINDING contract: the process's
-            // locations + workflowId NEVER move.
+            // the open tab's graph, or the v127 FILE-DIALOG content - the
+            // raw text of ANY picked file, stored byte-verbatim). The
+            // BINDING contract: the process's locations + workflowId NEVER
+            // move.
             if (p === "/settings_hub/workflows/history/import_version" && method === "POST") {
                 if (histImportMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
                 let body2 = {};
                 try { body2 = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
                 const proc = histStore.processes.get(body2.processId);
                 if (!proc) return jsonResp({ ok: false, error: "no such process" }, 404);
-                if (!body2.graph && !body2.sourcePath)
-                    return jsonResp({ ok: false, error: "sourcePath (a workflows/... path) or a graph is required" }, 400);
-                let rawHash, srcPath = null;
+                if (!body2.graph && !body2.sourcePath && !body2.content)
+                    return jsonResp({ ok: false, error: "sourcePath (a workflows/... path), content or a graph is required" }, 400);
+                let rawHash, srcPath = null, graph = body2.graph || null;
                 if (body2.graph) {
                     const data = JSON.stringify(body2.graph);
                     rawHash = "hash-g" + data.length + "-" + data.slice(0, 32);
+                } else if (body2.content) {
+                    // v127: the raw text - validated as a JSON object, the
+                    // bytes ride verbatim (the fake parses them for the
+                    // later raw-read, the hash covers the EXACT string)
+                    let parsed2;
+                    try { parsed2 = JSON.parse(body2.content); } catch (_) { parsed2 = undefined; }
+                    if (parsed2 === undefined || parsed2 === null ||
+                        typeof parsed2 !== "object" || Array.isArray(parsed2))
+                        return jsonResp({ ok: false, error: "content must be a workflow JSON object" }, 400);
+                    graph = parsed2;
+                    rawHash = "hash-c" + body2.content.length + "-" + body2.content.slice(0, 32);
                 } else {
                     srcPath = body2.sourcePath;
                     const row = idxFiles.find((f) => f.path === srcPath);
@@ -887,7 +900,7 @@ function makeFakeApi() {
                     rawHash, workflowHash: null, presentationHash: null,
                     normalizationProfileVersion: "nprof1",
                     storage: { backend: "stub", blob: rid },
-                    isStable: false, __graph: body2.graph || null,
+                    isStable: false, __graph: graph,
                 });
                 proc.currentRevisionId = rid;
                 return jsonResp({ ok: true, duplicate: false, revisionId: rid,
@@ -2120,22 +2133,22 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v126", /"workflows":\s*"v126"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v127", /"workflows":\s*"v127"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v126 (the process-history import on top of the v125 save-flow fixes + the v124 external folders)",
-    ENTRY_SRC.includes("web build: v126 - THE PROCESS-HISTORY IMPORT") &&
+check("the entry banner names v127 (the import file-dialog + commit name on top of the v126 import, the v125 save-flow fixes + the v124 external folders)",
+    ENTRY_SRC.includes("web build: v127 - THE IMPORT FILE DIALOG + THE COMMIT NAME") &&
     ENTRY_SRC.includes("THE BINDING CONTRACT") &&
-    ENTRY_SRC.includes("TWO sources and ONE target"));
-check("styles.css?v=126", ENTRY_SRC.includes("styles.css?v=126"));
-check("the module self-reports v126",
+    ENTRY_SRC.includes("rides into EVERY import"));
+check("styles.css?v=127", ENTRY_SRC.includes("styles.css?v=127"));
+check("the module self-reports v127",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v126"'));
-check("the web stamp literal is v126",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v127"'));
+check("the web stamp literal is v127",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v126"'));
-check("py stamp bumps together (v126)",
+        .includes('const WF_WEB_VERSION = "v127"'));
+check("py stamp bumps together (v127)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v126"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v127"'));
 check("v121 py: the union-find clustering + the seeds + the honest non-json accounting exist",
     (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
         return src.includes('def _name_stem') && src.includes('SIM_RARE_SLACK')
@@ -2732,7 +2745,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v127"); // ahead of the pack (v126) - a stale web file
+    fakeApi.__setHealthVersion("v128"); // ahead of the pack (v127) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -5721,7 +5734,8 @@ phase("AD v122: the checkpoint OVERWRITE (with rename), the Open-tab 🕘 entry,
 }
 
 // ===========================================================================
-phase("AE v126: the IMPORT - a picked file or the open tab lands as ONE MORE version; the binding never moves");
+// ===========================================================================
+phase("AE v127: the IMPORT - the FILE DIALOG (any file, any place) or the open tab lands as ONE MORE version, with an OPTIONAL commit name; the binding never moves");
 {
     const bodyAd = () => hooks.panelEl().querySelector(".hub-wf-body");
     // the fixture: the panel's own file + a FOREIGN file (a different UUID)
@@ -5742,6 +5756,29 @@ phase("AE v126: the IMPORT - a picked file or the open tab lands as ONE MORE ver
     hooks.renderAll();
     await settle();
 
+    // the v127 file-dialog driver: histImportPickFile() creates a hidden
+    // <input type=file> in document.body and clicks it (jsdom opens nothing,
+    // so the test feeds the File and dispatches change itself)
+    const hiddenFileInput = () => document.body.querySelector('input[type="file"]');
+    const feedFile = async (name, text) => {
+        const el = hiddenFileInput();
+        check("AE: the strip created exactly one hidden file input",
+            !!el && el.accept === ".json,application/json",
+            JSON.stringify({ el: !!el, accept: el?.accept }));
+        const f = new window.File([text], name, { type: "application/json" });
+        Object.defineProperty(el, "files", { value: [f], configurable: true });
+        el.dispatchEvent(new window.Event("change", { bubbles: true }));
+        await settle(40);
+    };
+    // the "any place" content - a foreign-UUID workflow, PRETTY-PRINTED with
+    // a trailing newline: the verbatim contract keeps every byte
+    const foreignText1 = JSON.stringify(
+        { workflow_id: "wuuid-foreign-9", nodes: [{ id: 9, type: "KSampler" }] }, null, 2) + "\n";
+    const foreignText2 = JSON.stringify(
+        { workflow_id: "wuuid-foreign-7", nodes: [{ id: 7, type: "CheckpointLoader" }] }, null, 2) + "\n";
+    const impPosts = () => fakeApi.__calls()
+        .filter((c) => c.url === "/settings_hub/workflows/history/import_version");
+
     const aeRow = [...bodyAd().querySelectorAll(".hub-wf-row")]
         .find((r) => r.textContent.includes("ad_hist.json"));
     await aeRow?.querySelector('[data-act="tabhist"]')?.click();
@@ -5752,39 +5789,43 @@ phase("AE v126: the IMPORT - a picked file or the open tab lands as ONE MORE ver
         !!hooks.histPopEl().querySelector('[data-act="histimport"]'),
         JSON.stringify({ revs: st.revs.length, pid: st.pid }));
 
-    // ---- 1) the strip opens with BOTH sources ----
+    // ---- 1) the strip opens with the commit name + BOTH sources ----
     await hooks.histPopEl().querySelector('[data-act="histimport"]').click();
     await settle();
     let strip = hooks.histPopEl();
     const tabBtn = strip.querySelector('[data-act="histimporttab"]');
     const pickBtn = strip.querySelector('[data-act="histimportpick"]');
+    const nameIn = strip.querySelector('[data-wf="importtitle"]');
     check("AE: the strip names the ACTIVE tab as source one",
         !!tabBtn && tabBtn.textContent.includes("ad_hist.json"), tabBtn?.textContent || "none");
-    check("AE: the strip offers the file picker as source two", !!pickBtn, "");
+    check("AE: the strip offers the FILE DIALOG as source two (no picker list anymore)",
+        !!pickBtn && pickBtn.textContent.includes("From a file") &&
+        !strip.querySelector('[data-act="histimportfile"]'), pickBtn?.textContent || "none");
+    check("AE: the strip carries the OPTIONAL commit-name input",
+        !!nameIn && (nameIn.placeholder || "").includes("Commit name"),
+        nameIn?.placeholder || "none");
 
-    // ---- 2) the picker lists the index files (own + foreign) ----
-    await pickBtn.click();
-    await settle(30);
-    let rows = [...strip.querySelectorAll('[data-act="histimportfile"]')];
-    check("AE: the picker lists the index files",
-        rows.length === 2 && rows.some((b) => b.dataset.path === "workflows/ad_foreign.json"),
-        JSON.stringify(rows.map((b) => b.dataset.path)));
-
-    // ---- 3) the FOREIGN file import - the version lands, the binding stays ----
+    // ---- 2) the file-dialog import WITH a commit name - the verbatim ----
+    //      bytes land as a version, the binding never moves
     const procBefore = JSON.parse(JSON.stringify(fakeApi.__histStore().processes.get(st.pid)));
-    const importPost0 = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/history/import_version").length;
-    await rows.find((b) => b.dataset.path === "workflows/ad_foreign.json").click();
-    await settle(30);
+    nameIn.value = "my foreign commit";
+    nameIn.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await settle(2);
+    await pickBtn.click();
+    await settle(2);
+    await feedFile("picked_from_anywhere.json", foreignText1);
     st = hooks.histState();
-    const importPosts = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/history/import_version");
-    const lastBody = importPosts.length ? JSON.parse(importPosts.at(-1).body) : {};
-    check("AE: the import POST carried processId + sourcePath (the server reads the bytes itself)",
-        importPosts.length === importPost0 + 1 && lastBody.processId === st.pid &&
-        lastBody.sourcePath === "workflows/ad_foreign.json" && !lastBody.graph,
-        JSON.stringify(lastBody));
-    check("AE: the import created the third revision (source import, the file name is the title)",
+    const post1 = impPosts().at(-1);
+    const body1 = post1 ? JSON.parse(post1.body) : {};
+    check("AE: the file-dialog import posted processId + content (the RAW text) + the commit name",
+        !!post1 && body1.processId === st.pid &&
+        body1.content === foreignText1 && body1.title === "my foreign commit" &&
+        !body1.sourcePath && !body1.graph,
+        JSON.stringify({ url: post1?.url, pid: body1.processId,
+            contentSame: body1.content === foreignText1, title: body1.title }));
+    check("AE: the import created the third revision (source import, the commit name is the title)",
         st.revs.length === 3 && st.revs[0].source === "import" &&
-        st.revs[0].sourcePath === "workflows/ad_foreign.json" && st.revs[0].title === "ad_foreign.json",
+        !st.revs[0].sourcePath && st.revs[0].title === "my foreign commit",
         JSON.stringify({ n: st.revs.length, r0: st.revs[0] }));
     const procAfter = fakeApi.__histStore().processes.get(st.pid);
     check("AE: the binding never moved - same workflowId, same locations, no foreign process born",
@@ -5792,66 +5833,105 @@ phase("AE v126: the IMPORT - a picked file or the open tab lands as ONE MORE ver
         JSON.stringify(procAfter.locations) === JSON.stringify(procBefore.locations) &&
         ![...fakeApi.__histStore().processes.values()].some((p) => p.workflowId === "wuuid-foreign-9"),
         JSON.stringify({ wf: procAfter.workflowId, loc: procAfter.locations }));
-    check("AE: the imported row reads 'Imported · ad_foreign.json'",
-        strip.textContent.includes("Imported · ad_foreign.json"),
-        strip.textContent.slice(0, 160));
+    check("AE: the hidden file input cleaned itself up after the change",
+        !hiddenFileInput(), "");
+    check("AE: the success closed the strip and cleared the commit name",
+        st.importOpen === false && st.importTitle === "",
+        JSON.stringify({ open: st.importOpen, title: st.importTitle }));
+
+    // ---- 3) the file-dialog import WITHOUT a name - the file name wins ----
+    await hooks.histPopEl().querySelector('[data-act="histimport"]').click();
+    await settle();
+    strip = hooks.histPopEl();
+    check("AE: the reopened strip's commit name starts EMPTY",
+        strip.querySelector('[data-wf="importtitle"]')?.value === "", "");
+    await strip.querySelector('[data-act="histimportpick"]').click();
+    await settle(2);
+    await feedFile("another_place.json", foreignText2);
+    st = hooks.histState();
+    const body2 = impPosts().at(-1) ? JSON.parse(impPosts().at(-1).body) : {};
+    check("AE: the no-name import falls back to the file's name",
+        st.revs.length === 4 && st.revs[0].title === "another_place.json" &&
+        body2.title === "another_place.json" && body2.content === foreignText2,
+        JSON.stringify({ n: st.revs.length, title: st.revs[0].title }));
 
     // ---- 3b) the identical import answers duplicate (no second blob) ----
-    await strip.querySelector('[data-act="histimport"]').click();   // the import closed the strip
+    await hooks.histPopEl().querySelector('[data-act="histimport"]').click();
     await settle();
-    await strip.querySelector('[data-act="histimportpick"]').click();
-    await settle(30);
-    await [...strip.querySelectorAll('[data-act="histimportfile"]')]
-        .find((b) => b.dataset.path === "workflows/ad_foreign.json").click();
-    await settle(30);
+    await hooks.histPopEl().querySelector('[data-act="histimportpick"]').click();
+    await settle(2);
+    await feedFile("another_place.json", foreignText2);
     st = hooks.histState();
     check("AE: the identical import answers duplicate honestly",
-        st.revs.length === 3 &&
+        st.revs.length === 4 &&
         [...document.querySelectorAll(".hub-sh-note")].some((t) =>
             (t.textContent || "").includes("No new version - the content is identical")),
         JSON.stringify({ n: st.revs.length,
             toasts: [...document.querySelectorAll(".hub-sh-note")].map((t) => t.textContent) }));
 
-    // ---- 4) the picker filter narrows the list ----
-    await strip.querySelector('[data-act="histimport"]').click();
+    // ---- 3c) a non-workflow file refuses BEFORE any POST ----
+    const postsBeforeBad = impPosts().length;
+    await hooks.histPopEl().querySelector('[data-act="histimport"]').click();
     await settle();
-    await strip.querySelector('[data-act="histimportpick"]').click();
-    await settle(30);
-    const filterIn = strip.querySelector('[data-wf="importq"]');
-    check("AE: the strip reopened with the filter input", !!filterIn, "");
-    filterIn.value = "foreign";
-    filterIn.dispatchEvent(new window.Event("input", { bubbles: true }));
-    await settle(300);   // the 250ms debounce
-    rows = [...strip.querySelectorAll('[data-act="histimportfile"]')];
-    check("AE: the filter narrows the picker to the matching file",
-        rows.length === 1 && rows[0].dataset.path === "workflows/ad_foreign.json",
-        JSON.stringify(rows.map((b) => b.dataset.path)));
+    await hooks.histPopEl().querySelector('[data-act="histimportpick"]').click();
+    await settle(2);
+    await feedFile("garbage.json", "this is not json at all {{{");
+    // the change handler removes its hidden input, so the next pick needs a
+    // FRESH dialog - a real browser behaves the same way
+    await hooks.histPopEl().querySelector('[data-act="histimportpick"]').click();
+    await settle(2);
+    await feedFile("array.json", JSON.stringify([1, 2, 3]));
+    st = hooks.histState();
+    check("AE: broken JSON and a JSON array both refuse with the honest toast, no POST fired",
+        st.revs.length === 4 && impPosts().length === postsBeforeBad &&
+        [...document.querySelectorAll(".hub-sh-note")].filter((t) =>
+            (t.textContent || "").includes("Not a workflow JSON")).length === 2,
+        JSON.stringify({ n: st.revs.length, posts: impPosts().length,
+            toasts: [...document.querySelectorAll(".hub-sh-note")].map((t) => t.textContent) }));
 
-    // ---- 5) Cancel closes the strip without touching anything ----
-    const postsBeforeCancel = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/history/import_version").length;
+    // ---- 4) Cancel closes the strip without touching anything ----
     await strip.querySelector('[data-act="histimportcancel"]').click();
     await settle();
     check("AE: Cancel closes the strip, no import POST fired",
         hooks.histState().importOpen === false &&
-        fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/history/import_version").length === postsBeforeCancel, "");
+        impPosts().length === postsBeforeBad, "");
 
-    // ---- 6) the OPEN TAB import - the active tab's in-memory graph ----
+    // ---- 5) the OPEN TAB import - the commit name + the tab's name ----
+    await hooks.histPopEl().querySelector('[data-act="histimport"]').click();
+    await settle();
+    strip = hooks.histPopEl();
+    const tabNameIn = strip.querySelector('[data-wf="importtitle"]');
+    tabNameIn.value = "tab commit name";
+    tabNameIn.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await settle(2);
+    await strip.querySelector('[data-act="histimporttab"]').click();
+    await settle(30);
+    st = hooks.histState();
+    const tabBody1 = JSON.parse(impPosts().at(-1).body);
+    check("AE: the open-tab import sent the in-memory graph + the commit name",
+        !!tabBody1.graph && !tabBody1.sourcePath && !tabBody1.content &&
+        tabBody1.processId === st.pid && tabBody1.title === "tab commit name",
+        JSON.stringify({ graph: !!tabBody1.graph, title: tabBody1.title }));
+    check("AE: the named tab import landed as version 5",
+        st.revs.length === 5 && st.revs[0].source === "import" && !st.revs[0].sourcePath &&
+        st.revs[0].title === "tab commit name",
+        JSON.stringify({ n: st.revs.length, r0: st.revs[0] }));
+
+    // ---- 5b) the tab import WITHOUT a name keeps the tab's name ----
+    // (the graph CHANGES first - an identical import would honestly answer
+    // duplicate and never show the fallback naming)
+    aeSaved.activeState = { nodes: [{ id: 1 }, { id: 2 }, { id: 3 }] };
     await hooks.histPopEl().querySelector('[data-act="histimport"]').click();
     await settle();
     await hooks.histPopEl().querySelector('[data-act="histimporttab"]').click();
     await settle(30);
     st = hooks.histState();
-    const tabImportBody = JSON.parse(fakeApi.__calls()
-        .filter((c) => c.url === "/settings_hub/workflows/history/import_version").at(-1).body);
-    check("AE: the open-tab import sent the in-memory graph (no sourcePath)",
-        !!tabImportBody.graph && !tabImportBody.sourcePath && tabImportBody.processId === st.pid,
-        JSON.stringify({ graph: !!tabImportBody.graph, sp: tabImportBody.sourcePath }));
-    check("AE: the open-tab import landed as version 4 (source import, the tab's name)",
-        st.revs.length === 4 && st.revs[0].source === "import" && !st.revs[0].sourcePath &&
-        st.revs[0].title === "ad_hist.json",
+    check("AE: the unnamed tab import falls back to the tab's name (version 6)",
+        st.revs.length === 6 && st.revs[0].title === "ad_hist.json" &&
+        st.revs[0].source === "import",
         JSON.stringify({ n: st.revs.length, r0: st.revs[0] }));
 
-    // ---- 7) an old py (404) degrades honestly ----
+    // ---- 6) an old py (404) degrades honestly ----
     fakeApi.__setHistImportMode("stale");
     const revsBefore404 = st.revs.length;
     await hooks.histPopEl().querySelector('[data-act="histimport"]').click();

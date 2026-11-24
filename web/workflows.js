@@ -1,6 +1,24 @@
 // ============================================================================
 // SettingsHub - WORKFLOWS MANAGER (v110)
 // ----------------------------------------------------------------------------
+// v127 (owner request 2026-11-25, the Import FILE DIALOG + the commit name):
+//   "из файла надо чтобы диалог выбора файла открывался и любой процесс так
+//    заимпортить можно было бы и из любого места, а не то что сейчас.
+//    при любом импорте важно возможность указать имя коммита и опционально":
+//   1. "… from a file" opens the BROWSER'S OWN file dialog (a hidden
+//      <input type=file accept=".json">) - ANY workflow .json from ANY
+//      folder or ANY disk, not only the files the manager has indexed. The
+//      picked file's RAW text is validated client-side (must be a workflow
+//      JSON object) and posted as `content` - py v127 stores the bytes
+//      VERBATIM (byte-identity survives a future Restore). The old index
+//      picker list (importq / histImportList) is gone - the dialog is the
+//      whole story.
+//   2. The strip carries an OPTIONAL "Commit name" field that rides into
+//      EVERY import (the open tab AND the picked file): filled -> it is the
+//      version's title; empty -> the old defaults (the tab's name / the
+//      file's name). The "What changed?" note keeps riding along too.
+//   The binding contract of v126 is untouched: the revision lands on the
+//   GIVEN processId and NOTHING ELSE moves.
 // v126 (owner request 2026-11-25, the Process-history IMPORT):
 //   "кнопка в истории версий import disk file должна импортировать выбранный
 //    любой процесс как версия этого процесса, а не просто с диска текущий
@@ -332,9 +350,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v126";
+const WF_WEB_VERSION = "v127";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v126";
+globalThis.__SettingsHubLoaded["workflows"] = "v127";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -7042,10 +7060,11 @@ async function openHistPop(path, anchorBtn, opts = {}) {
         // v116 (plan 4.6): the notes search inside the history panel - the
         // process notes + revision titles/notes from the SQLite index
         notesQ: "", notes: null, notesBusy: false,
-        // v126 (owner request): the Import strip - a version from OUTSIDE
-        // the process: the currently open tab, or any picked workflow file
-        importOpen: false, importPick: false, importQ: "",
-        importFiles: null, importBusy: false, importErr: null, importT: null,
+        // v127 (owner request): the Import strip - a version from OUTSIDE
+        // the process: the currently open tab, or ANY file through the
+        // browser's own dialog; the commit name is optional (empty -> the
+        // tab/file default naming)
+        importOpen: false, importTitle: "",
         anchor: popAnchorRect(anchorBtn) };
     histPop = document.createElement("div");
     histPop.className = "hub-menu hub-wf-histpop";
@@ -7082,11 +7101,10 @@ async function openHistPop(path, anchorBtn, opts = {}) {
             clearTimeout(histState.notesT);
             histState.notesT = setTimeout(() => void histSearchNotes(), 250);
         }
-        // v126: the import picker's filter - the same debounced pattern
-        if (el.matches('[data-wf="importq"]') && histState) {
-            histState.importQ = el.value || "";
-            clearTimeout(histState.importT);
-            histState.importT = setTimeout(() => void histImportList(histState.importQ), 250);
+        // v127: the optional commit name - rides into ANY import (the open
+        // tab or the picked file); empty -> the tab/file default naming
+        if (el.matches('[data-wf="importtitle"]') && histState) {
+            histState.importTitle = el.value || "";
         }
     });
     histPop.addEventListener("change", (e) => {
@@ -7340,29 +7358,20 @@ function renderHistPop() {
             : null;
         let importUi = "";
         if (st.importOpen && st.pid) {
+            // v127 (owner request): the OPTIONAL commit name rides into
+            // EVERY import; "… from a file" opens the BROWSER'S OWN file
+            // dialog (any folder, any disk - not only the indexed files)
             importUi = `<div class="hub-wf-planwarn">⤓ Import a version into <b>${esc(procName)}</b>` +
                 `<div class="hub-wf-planacts" style="margin-top:4px">` +
+                `<input type="text" class="hub-cs-in" data-wf="importtitle" placeholder="Commit name (optional)" ` +
+                `value="${esc(st.importTitle || "")}" spellcheck="false" ` +
+                `title="The new version's name - empty is fine, the tab's or the file's name is used then">` +
                 (actTab ? `<button type="button" class="hub-wf-act" data-act="histimporttab" ` +
                     `title="Capture the ACTIVE tab's current state (in-memory, incl. unsaved edits) as a version of this process">⤓ Open tab: ${esc(actTab.name || "Unnamed")}</button>` : "") +
-                `<button type="button" class="hub-wf-act${st.importPick ? " hub-wf-locked" : ""}" data-act="histimportpick" ` +
-                `title="Pick any workflow the manager knows (the library + the external folders) - its content becomes a version of this process">… from a file</button>` +
+                `<button type="button" class="hub-wf-act" data-act="histimportpick" ` +
+                `title="Open the file dialog - pick ANY workflow .json from ANY folder or disk; its bytes become a version of this process (the file itself is never touched)">📁 From a file…</button>` +
                 `<button type="button" class="hub-wf-act" data-act="histimportcancel" title="Close the import strip">✕</button>` +
-                `</div>` +
-                (st.importPick
-                    ? `<input type="text" class="hub-cs-in" data-wf="importq" placeholder="🔍 Filter the workflows…" value="${esc(st.importQ || "")}" spellcheck="false">` +
-                      (st.importBusy ? `<div class="hub-wf-emptylist">Listing…</div>` : "") +
-                      (st.importErr ? `<div class="hub-wf-filesub">⚠ ${esc(st.importErr)}</div>` : "") +
-                      (st.importFiles && st.importFiles.length
-                          ? `<div class="hub-wf-list hub-wf-implist">` + st.importFiles.map((f) =>
-                              `<div class="hub-wf-item">` +
-                              `<button type="button" class="hub-wf-name" data-act="histimportfile" data-path="${esc(f.path)}" ` +
-                              `title="Import THIS file's content as a version of the process (the file itself is never touched)">${esc(f.name || baseName(f.path))}</button>` +
-                              `<span class="hub-wf-filesub">${esc(f.path)}</span>` +
-                              `</div>`).join("") + `</div>`
-                          : (!st.importBusy && !st.importErr
-                              ? `<div class="hub-wf-emptylist">No workflows match '${esc(st.importQ || "")}'</div>` : ""))
-                    : "") +
-                `</div>`;
+                `</div></div>`;
         }
         const revs = st.revs.length
             ? st.revs.map(histRevRowHtml).join("")
@@ -7688,52 +7697,62 @@ async function histCreateCheckpoint(source) {
     st.cpBusy = false;
 }
 
-/** v126: the import picker's file list - the index search (the library AND
- *  the external folders, one flat list of name + rel path). A build without
- *  the index falls back to the local saved-files walk (library only). The
- *  rows feed histImportVersion({kind:"file"}) - the server reads the bytes
- *  itself, the client never uploads a file's content. */
-async function histImportList(q) {
+/** v127 (owner request): the FILE-DIALOG import - a hidden <input type=file>
+ *  opens the BROWSER'S OWN picker (any folder, any disk - the manager's
+ *  indexed list is no longer the limit, the old importq picker is gone).
+ *  The picked file's RAW text is validated client-side (a workflow JSON
+ *  object) and posted to histImportVersion as `content` - py v127 stores
+ *  the bytes VERBATIM, so a future Restore gives back the exact file. The
+ *  hidden input cleans itself up (change -> remove; a cancelled dialog
+ *  removes on the focus return). */
+function histImportPickFile() {
     const st = histState;
-    if (!st) return;
-    st.importBusy = true;
-    renderHistPop();
-    const query = (q || "").trim();
-    try {
-        if (idxMode()) {
-            const params = new URLSearchParams({ q: query, limit: "40" });
-            const res = await jfetch("/settings_hub/workflows/index/search?" + params.toString());
-            st.importFiles = res.json?.ok && Array.isArray(res.json.files)
-                ? res.json.files.map((f) => ({ path: f.path, name: f.name || baseName(f.path) }))
-                : null;
-            st.importErr = (res.json?.ok || res.status === 200) ? null
-                : ((res.json && res.json.error) || ("HTTP " + res.status));
-        } else {
-            const ql = query.toLowerCase();
-            st.importFiles = savedFiles
-                .filter((f) => !ql || (f.path || "").toLowerCase().includes(ql))
-                .slice(0, 40)
-                .map((f) => ({ path: f.path, name: f.name || baseName(f.path) }));
-            st.importErr = savedFilesLoaded ? null : "the file list is not loaded yet";
-        }
-    } catch (e) {
-        st.importFiles = null;
-        st.importErr = String((e && e.message) || e);
-    }
-    st.importBusy = false;
-    renderHistPop();
+    if (!st || !st.pid || st.cpBusy) return;
+    const inp = document.createElement("input");
+    inp.type = "file";
+    inp.accept = ".json,application/json";
+    inp.style.display = "none";
+    const cleanup = () => { try { inp.remove(); } catch (_) {} };
+    inp.addEventListener("change", () => {
+        cleanup();
+        const f = inp.files && inp.files[0];
+        if (!f) return;                       // the dialog was cancelled
+        Promise.resolve(f.text ? f.text() : new Promise((res, rej) => {
+            const rd = new FileReader();      // the ancient-engine fallback
+            rd.onload = () => res(String(rd.result || ""));
+            rd.onerror = () => rej(rd.error || new Error("the file could not be read"));
+            rd.readAsText(f);
+        })).then((text) => {
+            let parsed;
+            try { parsed = JSON.parse(text); } catch (_) { parsed = undefined; }
+            if (parsed === undefined || parsed === null ||
+                typeof parsed !== "object" || Array.isArray(parsed)) {
+                localToast("Not a workflow JSON - pick a file that contains a workflow object", 4200);
+                return undefined;
+            }
+            return histImportVersion({ kind: "upload", name: f.name, content: text });
+        }).catch((e) => {
+            localToast("Could not read the file: " + String((e && e.message) || e), 4200);
+        });
+    });
+    window.addEventListener("focus", cleanup, { once: true });
+    document.body.appendChild(inp);
+    inp.click();
 }
 
-/** v126 (owner request): Import - ONE MORE version of THIS process from an
- *  outside source. {kind:"tab"} captures the ACTIVE tab's in-memory graph
+/** v127 (owner request): Import - ONE MORE version of THIS process from an
+ *  outside source, with an OPTIONAL commit name (empty -> the tab/file
+ *  default naming). {kind:"tab"} captures the ACTIVE tab's in-memory graph
  *  (incl. unsaved edits - the workflow may be a completely different one);
- *  {kind:"file"} names a workflows/... path the SERVER reads itself (the
- *  library + the external folders). The process binding never moves - a
- *  foreign-UUID import must not re-bind the process (the server contract). */
+ *  {kind:"upload"} posts the RAW text of ANY file picked through the
+ *  browser's own file dialog (any folder, any disk). The process binding
+ *  never moves - a foreign-UUID import must not re-bind the process (the
+ *  server contract). */
 async function histImportVersion(src) {
     const st = histState;
     if (!st || !st.pid || st.cpBusy) return;
     const payload = { processId: st.pid, note: st.noteDraft || undefined };
+    const commitName = (st.importTitle || "").trim();
     let label = "";
     if (src && src.kind === "tab") {
         const tab = getOpenWorkflows().find((t) => t.isActive) || histFindTab();
@@ -7743,11 +7762,13 @@ async function histImportVersion(src) {
             return;
         }
         payload.graph = graph;
-        payload.title = tab.name || undefined;
+        payload.title = commitName || tab.name || undefined;
         label = "the open tab";
-    } else if (src && src.kind === "file" && src.path) {
-        payload.sourcePath = src.path;
-        label = baseName(src.path);
+    } else if (src && src.kind === "upload" &&
+               typeof src.content === "string" && src.content) {
+        payload.content = src.content;
+        payload.title = commitName || src.name || undefined;
+        label = src.name || "the picked file";
     } else {
         return;
     }
@@ -7761,7 +7782,7 @@ async function histImportVersion(src) {
         });
         if (res.json?.ok) {
             st.importOpen = false;
-            st.importPick = false;
+            st.importTitle = "";
             st.noteDraft = "";
             await refreshHistState();
             refreshHistBadges(true);
@@ -7977,31 +7998,19 @@ function histPopClick(act, btn) {
             return;
         }
         case "histcheckpoint": void histCreateCheckpoint("checkpoint"); return;
-        // v126: the Import strip - the button toggles it, the strip's own
-        // buttons pick the source (the active tab / a picked file)
+        // v127: the Import strip - the button toggles it, the strip's own
+        // buttons pick the source (the active tab / the BROWSER file dialog)
         case "histimport": {
             st.importOpen = !st.importOpen;
-            st.importPick = false;
-            st.importErr = null;
-            if (st.importOpen && !st.importFiles) void histImportList(st.importQ || "");
             renderHistPop();
             return;
         }
         case "histimporttab": void histImportVersion({ kind: "tab" }); return;
-        case "histimportpick": {
-            st.importPick = !st.importPick;
-            if (st.importPick && !st.importFiles) void histImportList(st.importQ || "");
-            renderHistPop();
-            return;
-        }
-        case "histimportfile": {
-            if (btn.dataset.path) void histImportVersion({ kind: "file", path: btn.dataset.path });
-            return;
-        }
+        // v127: "📁 From a file…" opens the browser's own file dialog -
+        // ANY workflow .json from ANY folder or disk
+        case "histimportpick": void histImportPickFile(); return;
         case "histimportcancel": {
             st.importOpen = false;
-            st.importPick = false;
-            st.importErr = null;
             renderHistPop();
             return;
         }
@@ -8740,8 +8749,9 @@ export function __workflowsTestHooks() {
             : null,
         histPopEl: () => histPop,
         histCreateCheckpoint: (src) => histCreateCheckpoint(src),
-        // v126: the Import strip hooks (the open tab / the picked file)
-        histImportList: (q) => histImportList(q),
+        // v127: the Import strip hooks (the open tab / the file dialog);
+        // the pick hook lets the smoke test drive the hidden file input
+        histImportPickFile: () => histImportPickFile(),
         histImportVersion: (src) => histImportVersion(src),
         // v122: the overwrite flow + the Open-tab (tabhist) entry hooks
         histOverwriteRevision: () => histOverwriteRevision(),
