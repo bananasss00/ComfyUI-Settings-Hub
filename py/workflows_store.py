@@ -1615,7 +1615,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v125"
+WORKFLOWS_SERVER_VERSION = "v126"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -3395,6 +3395,76 @@ async def workflows_history_checkpoint(request):
     if not r.get("ok"):
         return web.json_response(r, status=500)
     # the Files index stays in sync after a history mutation
+    return web.json_response(r)
+
+
+@PromptServer.instance.routes.post("/settings_hub/workflows/history/import_version")
+async def workflows_history_import_version(request):
+    """v126 (owner request): the Process-history panel's Import - attach ANY
+    workflow as ONE MORE version of the panel's process. Body:
+    {processId, sourcePath?|graph?, note?, title?}:
+    - `sourcePath` (a library OR external-namespace rel path - the picker
+      lists every workflow the manager knows) wins: the server reads the
+      file bytes itself through the hardened locator, the client never
+      uploads a foreign file's content;
+    - `graph` (the currently OPEN tab's in-memory state incl. unsaved
+      edits) when no sourcePath is given.
+    The revision lands on the GIVEN process and NOTHING else moves: no
+    location attach/detach, no uuid re-binding - importing a foreign-UUID
+    workflow must never re-bind the process to that foreign UUID (that is
+    the checkpoint ladder's behavior and it is deliberately NOT reused)."""
+    if _wf_hist is None:
+        return web.json_response({"ok": False, "error": "history module unavailable"},
+                                 status=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"ok": False, "error": "bad body"}, status=400)
+    pid = body.get("processId")
+    if not isinstance(pid, str) or not pid:
+        return web.json_response(
+            {"ok": False, "error": "processId is required"}, status=400)
+    note = body.get("note") if isinstance(body.get("note"), str) else None
+    title = body.get("title") if isinstance(body.get("title"), str) else None
+    if isinstance(body.get("graph"), dict):
+        try:
+            data = json.dumps(body["graph"], ensure_ascii=False).encode("utf-8")
+        except (TypeError, ValueError):
+            return web.json_response({"ok": False,
+                                      "error": "the tab graph is not serializable"}, status=400)
+        src_path = None
+    else:
+        rel_path = _resolve_rel_path_from_request(body.get("sourcePath"))
+        if not rel_path:
+            return web.json_response(
+                {"ok": False, "error": "sourcePath (a workflows/... path) or a graph is required"},
+                status=400)
+        # the ONE hardened locator - library files AND the v124 external
+        # namespace (workflows/.settings_hub_ext/<id>/<rel>) both resolve
+        # here, with the same symlink/traversal guarantees
+        data = None
+        phys, _wroot = _resolve_library_file(request, rel_path)
+        if phys and os.path.isfile(phys):
+            try:
+                with open(phys, "rb") as fh:
+                    data = fh.read()
+            except OSError:
+                data = None
+        if data is None:
+            return web.json_response({"ok": False, "error": "the file is gone"},
+                                     status=404)
+        src_path = rel_path
+        if not title:
+            # the imported version names its origin: the source file's
+            # basename (the panel's "What changed?" note rides along)
+            title = rel_path.rsplit("/", 1)[-1]
+    r = _wf_hist.import_revision_for_process(pid, data, note=note, title=title,
+                                             source_path=src_path,
+                                             scope=_request_user_scope(request))
+    if not r.get("ok"):
+        return web.json_response(r, status=404 if "no such process" in (r.get("error") or "") else 500)
     return web.json_response(r)
 
 

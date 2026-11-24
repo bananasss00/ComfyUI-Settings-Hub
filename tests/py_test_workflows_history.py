@@ -1210,6 +1210,69 @@ check("v122 cas overwrite-dedupe: identical bytes+names answer duplicate",
       _ovc2.get("ok") and _ovc2.get("duplicate") is True, json.dumps(_ovc2))
 
 # ---------------------------------------------------------------------------
+print()
+print("== v126: the Import - ANY workflow lands as ONE MORE version; the binding never moves ==")
+# A FRESH controlled process (uuid 6666.., one location) keeps the
+# assertions exact - the earlier sections share pid1 across concurrency
+# and dedupe phases. The owner's contract: the panel's Import attaches a
+# FOREIGN file's bytes (or the open tab's graph) as ONE MORE version of
+# THIS process - and unlike the checkpoint ladder it never touches the
+# location bindings or the uuid map (a foreign-UUID import must not
+# re-bind the process).
+_i1 = hist.record_checkpoint_for_path(
+    "workflows/p6.json", wf_bytes("66666666-6666-6666-6666-666666666666", seed="i1"),
+    note="base", source="checkpoint")
+_ipid = _i1["processId"]
+_imp_before = hist._read_process(_ipid)
+_imp = hist.import_revision_for_process(
+    _ipid, wf_bytes("77777777-7777-7777-7777-777777777777", seed="z"),
+    note="imported variant", title="foreign.json",
+    source_path="workflows/foreign.json", scope="default")
+check("v126 import: ok, a NEW revision (not a duplicate)",
+      _imp.get("ok") and not _imp.get("duplicate") and _imp.get("revisionId"),
+      json.dumps({k: _imp.get(k) for k in ("ok", "duplicate", "error")}))
+_imp_revs = hist.list_revisions(_ipid)
+check("v126 import: the revision count grew by ONE (1 -> 2)",
+      len(_imp_revs) == 2, json.dumps([r["revisionId"][:6] for r in _imp_revs]))
+check("v126 import: the newest revision carries source import + the source path",
+      _imp_revs[0]["source"] == "import" and
+      _imp_revs[0]["sourcePath"] == "workflows/foreign.json" and
+      _imp_revs[0]["title"] == "foreign.json",
+      json.dumps({k: _imp_revs[0].get(k) for k in ("source", "sourcePath", "title")}))
+check("v126 import: the bytes round-trip exactly (the foreign content)",
+      hist.read_revision_bytes(_imp_revs[0]["revisionId"]) ==
+      wf_bytes("77777777-7777-7777-7777-777777777777", seed="z"))
+_imp_after = hist._read_process(_ipid)
+check("v126 import: the process binding NEVER moved (uuid + locations intact)",
+      _imp_after.get("workflowId") == _imp_before.get("workflowId") and
+      {l["path"] for l in _imp_after.get("locations") or []} ==
+      {l["path"] for l in _imp_before.get("locations") or []},
+      json.dumps({"wf": _imp_after.get("workflowId"),
+                  "loc": _imp_after.get("locations")}))
+check("v126 import: no foreign process was born for the imported UUID",
+      all(p.get("workflowId") != "77777777-7777-7777-7777-777777777777"
+          for p in hist.list_processes()),
+      json.dumps(sorted({p.get("workflowId") for p in hist.list_processes()})))
+check("v126 import: the process still resolves by its own path",
+      (hist.resolve_path_process("workflows/p6.json", "default") or {})
+      .get("processId") == _ipid)
+_imp_d = hist.import_revision_for_process(
+    _ipid, wf_bytes("77777777-7777-7777-7777-777777777777", seed="z"),
+    source_path="workflows/foreign.json", scope="default")
+check("v126 import-dedupe: identical bytes to the LAST revision answer duplicate",
+      _imp_d.get("ok") and _imp_d.get("duplicate") is True and
+      len(hist.list_revisions(_ipid)) == 2, json.dumps(_imp_d))
+_imp_x = hist.import_revision_for_process(
+    _ipid, wf_bytes(OVU, seed="zz"), scope="alice")
+check("v126 import-scope: another user's scope refuses (no cross-user writes)",
+      not _imp_x.get("ok") and len(hist.list_revisions(_ipid)) == 2,
+      json.dumps(_imp_x))
+_imp_u = hist.import_revision_for_process("nonexistent0000", b"{}", scope="default")
+check("v126 import-pid: an unknown process refuses",
+      not _imp_u.get("ok") and "no such process" in (_imp_u.get("error") or ""),
+      json.dumps(_imp_u))
+
+# ---------------------------------------------------------------------------
 shutil.rmtree(TMP, ignore_errors=True)
 print()
 print("PASS: %d  FAIL: %d" % (PASS, FAIL))

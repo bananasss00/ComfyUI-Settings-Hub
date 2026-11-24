@@ -1859,6 +1859,56 @@ def record_checkpoint_for_path(rel_path, data, note=None, source="checkpoint",
     return r
 
 
+def import_revision_for_process(pid, data, note=None, title=None,
+                                source_path=None, scope="default"):
+    """v126 (owner request): attach ANY workflow's bytes as ONE MORE version
+    of an EXISTING process - the Process-history panel's Import (a foreign
+    file picked in the browser, or the currently open tab's in-memory graph
+    dropped into this process's history).
+
+    The contract differs from record_checkpoint_for_path ON PURPOSE: the
+    revision lands on the GIVEN processId and NOTHING ELSE moves - the
+    location bindings, the uuid map and the process's own workflowId are
+    never touched. Importing a foreign-UUID workflow must NOT re-bind the
+    process to that foreign UUID (the checkpoint ladder's detach/attach
+    logic does exactly that and is deliberately NOT reused here). The
+    imported content's own workflow UUID (when the bytes carry one) is kept
+    in the revision manifest as `importedWorkflowId` for provenance only.
+
+    Dedupe follows create_revision (identical raw bytes to the LAST revision
+    -> no new revision)."""
+    if not isinstance(data, (bytes, bytearray)):
+        return {"ok": False, "error": "payload must be bytes"}
+    with _lock:
+        reconcile_processes(scope if isinstance(scope, str) and scope else "default")
+        proc = _read_process(pid)
+        if not proc:
+            return {"ok": False, "error": "no such process"}
+        if _manifest_scope(proc) != (scope if isinstance(scope, str) and scope else "default"):
+            return {"ok": False, "error": "the process belongs to another user scope"}
+    analysis = None
+    if _wf_index is not None:
+        analysis, _err = _wf_index.analyze_workflow_bytes(data)
+    meta = {
+        "source": "import",
+        "sourcePath": source_path if isinstance(source_path, str) and source_path else None,
+        "note": note,
+        "title": title,
+        "canonicalHash": analysis.get("canonical_hash") if analysis else None,
+        "workflowHash": analysis.get("workflow_hash") if analysis else None,
+        "presentationHash": analysis.get("presentation_hash") if analysis else None,
+        "extensionHash": analysis.get("extension_hash") if analysis else None,
+        "normalizationProfileVersion": (_wf_index.NORMALIZATION_PROFILE_VERSION
+                                        if _wf_index else "nprof1"),
+    }
+    r = create_revision(pid, bytes(data), meta)
+    if r.get("ok") and not r.get("duplicate") and analysis:
+        # provenance only - the process binding is NEVER re-pointed
+        r["importedWorkflowId"] = analysis.get("workflow_id") or None
+    r["processId"] = pid
+    return r
+
+
 # ---------------------------------------------------------------------------
 # Transaction safety snapshots (plan 5.7: before EVERY destructive action)
 # ---------------------------------------------------------------------------

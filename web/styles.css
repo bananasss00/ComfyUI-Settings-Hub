@@ -6749,6 +6749,20 @@ body.sh-modal-open .hub-sh-note {
 }
 .hub-wf-planhint { color: #7a86ad; font-size: calc(var(--sh-fs, 1) * 9px); line-height: 1.4; }
 
+/* v126: the Import picker's file list inside the Process-history panel -
+   scrolls INSIDE its box (a 2000-file library must not stretch the pop). */
+.hub-wf-implist {
+    max-height: 180px;
+    overflow-y: auto;
+    margin-top: 4px;
+    padding-right: 2px;
+    scrollbar-width: thin;
+    scrollbar-color: #33335a transparent;
+}
+.hub-wf-implist::-webkit-scrollbar { width: 8px; }
+.hub-wf-implist::-webkit-scrollbar-thumb { background: #33335a; border-radius: 4px; }
+.hub-wf-implist::-webkit-scrollbar-track { background: transparent; }
+
 /* v123: the TAB CHECKLIST of the apply-plan / add popovers - the owner opens
    only the SELECTED tabs of a preset (uncheck = not opened). The list
    scrolls INSIDE its box (a 10-tab preset must not stretch the popover). */

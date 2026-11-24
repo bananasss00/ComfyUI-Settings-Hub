@@ -285,8 +285,8 @@ phase("PA build v95 + version manifest");
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat v98 + renderer v94",
         entrySrc.includes('"chat": "v111"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the current release (the v125 save-flow field fixes; the v124 external folders + group selection, the roadmap + unload kept in the prose)",
-        entrySrc.includes("web build: v125 - THE FIELD FIXES FOR THE v124 SAVE FLOW") &&
+    check("PA the banner names the current release (the v126 process-history import; the v125 save-flow fixes, the v124 external folders + group selection, the roadmap + unload kept in the prose)",
+        entrySrc.includes("web build: v126 - THE PROCESS-HISTORY IMPORT") &&
         entrySrc.includes("THE WORKFLOW MANAGER ROADMAP") &&
         entrySrc.includes("THE SMART QUEUE-START UNLOAD"));
 }

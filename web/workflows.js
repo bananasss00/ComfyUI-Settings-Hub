@@ -1,6 +1,32 @@
 // ============================================================================
 // SettingsHub - WORKFLOWS MANAGER (v110)
 // ----------------------------------------------------------------------------
+// v126 (owner request 2026-11-25, the Process-history IMPORT):
+//   "кнопка в истории версий import disk file должна импортировать выбранный
+//    любой процесс как версия этого процесса, а не просто с диска текущий
+//    процесс. и эту кнопку надо сделать просто Import которая позволяет
+//    сделать два действия: импорт любого процесса выбранного или текущей
+//    открытой вкладки в нужный процесс как версия":
+//   the panel's "⤓ Import disk file" (THIS file's own bytes - useful only
+//   for external-edit grabs) becomes "⤓ Import" - TWO sources, ONE target:
+//     * the ACTIVE OPEN TAB - the in-memory graph incl. unsaved edits (the
+//       workflow may be a completely different one);
+//     * ANY workflow file picked from the browser list (the library + the
+//       external folders; the picker reuses the index search with a
+//       debounced filter; a build without the index falls back to the local
+//       saved-files walk).
+//   Either lands as ONE MORE version of the panel's process (source
+//   "import"; the row spells out "Imported · <file>", the tab import
+//   carries the tab's name; the shared "What changed?" note rides along).
+//   The BINDING CONTRACT (py v126, import_revision_for_process + the
+//   /history/import_version route): the revision lands on the GIVEN
+//   processId and NOTHING ELSE moves - no location attach/detach, no uuid
+//   re-binding (importing a foreign-UUID workflow must never re-bind the
+//   process - that is the checkpoint ladder's behavior and it is
+//   deliberately NOT reused). Dedupe follows create_revision (identical
+//   bytes to the last revision -> an honest duplicate answer). The button
+//   needs a PROCESS to attach to: a panel that has not created one yet
+//   shows Checkpoint first (the empty-state hint already says so).
 // v125 (owner bug report 2026-11-25, TWO field failures of the v124 build):
 //   1. "когда жму сохранить на вкладке Open то пишет 'this ComfyUI build
 //      exposes no Save-As API to extensions'":
@@ -306,9 +332,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v125";
+const WF_WEB_VERSION = "v126";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v125";
+globalThis.__SettingsHubLoaded["workflows"] = "v126";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -6818,7 +6844,11 @@ function onHistKey(e) {
 
 function histRevLabel(r) {
     const d = r.createdAt ? fmtDateTime(r.createdAt) : "";
-    const src = r.source === "disk" ? "Disk file" : (r.source || "Checkpoint");
+    // v126: the import source is spelled out - the file's name rides along
+    const SRC = { disk: "Disk file", import: "Imported", restore: "Restored",
+        checkpoint: "Checkpoint" };
+    let src = SRC[r.source] || r.source || "Checkpoint";
+    if (r.source === "import" && r.sourcePath) src += " · " + baseName(r.sourcePath);
     const title = r.title || r.note || "";
     return { d, src, title };
 }
@@ -7012,6 +7042,10 @@ async function openHistPop(path, anchorBtn, opts = {}) {
         // v116 (plan 4.6): the notes search inside the history panel - the
         // process notes + revision titles/notes from the SQLite index
         notesQ: "", notes: null, notesBusy: false,
+        // v126 (owner request): the Import strip - a version from OUTSIDE
+        // the process: the currently open tab, or any picked workflow file
+        importOpen: false, importPick: false, importQ: "",
+        importFiles: null, importBusy: false, importErr: null, importT: null,
         anchor: popAnchorRect(anchorBtn) };
     histPop = document.createElement("div");
     histPop.className = "hub-menu hub-wf-histpop";
@@ -7047,6 +7081,12 @@ async function openHistPop(path, anchorBtn, opts = {}) {
             histState.notesQ = el.value || "";
             clearTimeout(histState.notesT);
             histState.notesT = setTimeout(() => void histSearchNotes(), 250);
+        }
+        // v126: the import picker's filter - the same debounced pattern
+        if (el.matches('[data-wf="importq"]') && histState) {
+            histState.importQ = el.value || "";
+            clearTimeout(histState.importT);
+            histState.importT = setTimeout(() => void histImportList(histState.importQ), 250);
         }
     });
     histPop.addEventListener("change", (e) => {
@@ -7279,14 +7319,51 @@ function renderHistPop() {
                         : "");
         // v122 (the owner's checkpoint question): the hint now ANSWERS it -
         // saving the file first is NOT required, the in-memory graph (with
-        // every unsaved edit) is what the checkpoint captures; and the
-        // disk-import button makes no sense for a tab with no file yet.
+        // every unsaved edit) is what the checkpoint captures. v126: the
+        // Import button needs a PROCESS to attach the version to.
         const cp = `<div class="hub-wf-planacts">` +
             `<input type="text" class="hub-cs-in" data-wf="histnote" placeholder="What changed? (optional)" value="${esc(st.noteDraft || "")}" spellcheck="false">` +
             `<button type="button" class="hub-wf-act" data-act="histcheckpoint" title="Capture the CURRENT state into the history${st.openTab ? " (the in-memory tab incl. unsaved edits - saving first is not required)" : " (the disk file)"}">📌 Checkpoint</button>` +
-            (st.path ? `<button type="button" class="hub-wf-act" data-act="histimport" title="Add the CURRENT DISK file into the history as an imported version">⤓ Import disk file</button>` : "") +
+            (st.pid ? `<button type="button" class="hub-wf-act${st.importOpen ? " hub-wf-locked" : ""}" data-act="histimport" title="Import a version from OUTSIDE this process: the currently open tab, or any workflow file picked from the browser">⤓ Import</button>` : "") +
             `</div>` +
             (st.openTab ? `<div class="hub-wf-planhint">The tab is open - the Checkpoint captures the in-memory graph, including unsaved edits. Saving the file first is not required.</div>` : "");
+        // v126 (owner request): the OLD "Import disk file" (this file's own
+        // bytes) becomes "Import" - TWO sources, one target: the ACTIVE
+        // open tab (in-memory graph incl. unsaved edits) or ANY workflow
+        // file picked from the browser list (library + external folders) -
+        // each lands as ONE MORE version of THIS process; the process
+        // binding never moves. Needs a process to attach to: a panel that
+        // has not created one yet shows Checkpoint first (the empty-state
+        // hint already says so).
+        const actTab = st.importOpen
+            ? (getOpenWorkflows().find((t) => t.isActive) || histFindTab() || null)
+            : null;
+        let importUi = "";
+        if (st.importOpen && st.pid) {
+            importUi = `<div class="hub-wf-planwarn">⤓ Import a version into <b>${esc(procName)}</b>` +
+                `<div class="hub-wf-planacts" style="margin-top:4px">` +
+                (actTab ? `<button type="button" class="hub-wf-act" data-act="histimporttab" ` +
+                    `title="Capture the ACTIVE tab's current state (in-memory, incl. unsaved edits) as a version of this process">⤓ Open tab: ${esc(actTab.name || "Unnamed")}</button>` : "") +
+                `<button type="button" class="hub-wf-act${st.importPick ? " hub-wf-locked" : ""}" data-act="histimportpick" ` +
+                `title="Pick any workflow the manager knows (the library + the external folders) - its content becomes a version of this process">… from a file</button>` +
+                `<button type="button" class="hub-wf-act" data-act="histimportcancel" title="Close the import strip">✕</button>` +
+                `</div>` +
+                (st.importPick
+                    ? `<input type="text" class="hub-cs-in" data-wf="importq" placeholder="🔍 Filter the workflows…" value="${esc(st.importQ || "")}" spellcheck="false">` +
+                      (st.importBusy ? `<div class="hub-wf-emptylist">Listing…</div>` : "") +
+                      (st.importErr ? `<div class="hub-wf-filesub">⚠ ${esc(st.importErr)}</div>` : "") +
+                      (st.importFiles && st.importFiles.length
+                          ? `<div class="hub-wf-list hub-wf-implist">` + st.importFiles.map((f) =>
+                              `<div class="hub-wf-item">` +
+                              `<button type="button" class="hub-wf-name" data-act="histimportfile" data-path="${esc(f.path)}" ` +
+                              `title="Import THIS file's content as a version of the process (the file itself is never touched)">${esc(f.name || baseName(f.path))}</button>` +
+                              `<span class="hub-wf-filesub">${esc(f.path)}</span>` +
+                              `</div>`).join("") + `</div>`
+                          : (!st.importBusy && !st.importErr
+                              ? `<div class="hub-wf-emptylist">No workflows match '${esc(st.importQ || "")}'</div>` : ""))
+                    : "") +
+                `</div>`;
+        }
         const revs = st.revs.length
             ? st.revs.map(histRevRowHtml).join("")
             : `<div class="hub-wf-emptylist">No checkpoints yet - the ordinary ComfyUI Save does not create history; press 📌 Checkpoint to fix the current state.</div>`;
@@ -7354,7 +7431,7 @@ function renderHistPop() {
                     `title="Open this process in the panel">${n.kind === "revision" ? "🕘" : "📄"} ${esc(n.title || n.note || "(no title)")}</button>` +
                     `<span class="hub-wf-filesub">${n.kind === "revision" ? "version" : "process"}${n.note && n.title ? " · " + esc(n.note.slice(0, 60)) : ""}</span>` +
                     `</div>`).join("") + `</div>` : "");
-        body = head + cp + notesUi + sectHead +
+        body = head + cp + importUi + notesUi + sectHead +
             `<div class="hub-wf-list">${revs}</div>` +
             compareBox +
             procDelUi +
@@ -7611,6 +7688,98 @@ async function histCreateCheckpoint(source) {
     st.cpBusy = false;
 }
 
+/** v126: the import picker's file list - the index search (the library AND
+ *  the external folders, one flat list of name + rel path). A build without
+ *  the index falls back to the local saved-files walk (library only). The
+ *  rows feed histImportVersion({kind:"file"}) - the server reads the bytes
+ *  itself, the client never uploads a file's content. */
+async function histImportList(q) {
+    const st = histState;
+    if (!st) return;
+    st.importBusy = true;
+    renderHistPop();
+    const query = (q || "").trim();
+    try {
+        if (idxMode()) {
+            const params = new URLSearchParams({ q: query, limit: "40" });
+            const res = await jfetch("/settings_hub/workflows/index/search?" + params.toString());
+            st.importFiles = res.json?.ok && Array.isArray(res.json.files)
+                ? res.json.files.map((f) => ({ path: f.path, name: f.name || baseName(f.path) }))
+                : null;
+            st.importErr = (res.json?.ok || res.status === 200) ? null
+                : ((res.json && res.json.error) || ("HTTP " + res.status));
+        } else {
+            const ql = query.toLowerCase();
+            st.importFiles = savedFiles
+                .filter((f) => !ql || (f.path || "").toLowerCase().includes(ql))
+                .slice(0, 40)
+                .map((f) => ({ path: f.path, name: f.name || baseName(f.path) }));
+            st.importErr = savedFilesLoaded ? null : "the file list is not loaded yet";
+        }
+    } catch (e) {
+        st.importFiles = null;
+        st.importErr = String((e && e.message) || e);
+    }
+    st.importBusy = false;
+    renderHistPop();
+}
+
+/** v126 (owner request): Import - ONE MORE version of THIS process from an
+ *  outside source. {kind:"tab"} captures the ACTIVE tab's in-memory graph
+ *  (incl. unsaved edits - the workflow may be a completely different one);
+ *  {kind:"file"} names a workflows/... path the SERVER reads itself (the
+ *  library + the external folders). The process binding never moves - a
+ *  foreign-UUID import must not re-bind the process (the server contract). */
+async function histImportVersion(src) {
+    const st = histState;
+    if (!st || !st.pid || st.cpBusy) return;
+    const payload = { processId: st.pid, note: st.noteDraft || undefined };
+    let label = "";
+    if (src && src.kind === "tab") {
+        const tab = getOpenWorkflows().find((t) => t.isActive) || histFindTab();
+        const graph = tab ? graphJsonOfOpenTab(tab) : null;
+        if (!graph) {
+            localToast("The active tab has no graph to capture", 3600);
+            return;
+        }
+        payload.graph = graph;
+        payload.title = tab.name || undefined;
+        label = "the open tab";
+    } else if (src && src.kind === "file" && src.path) {
+        payload.sourcePath = src.path;
+        label = baseName(src.path);
+    } else {
+        return;
+    }
+    st.cpBusy = true;
+    renderHistPop();
+    try {
+        const res = await jfetch("/settings_hub/workflows/history/import_version", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        if (res.json?.ok) {
+            st.importOpen = false;
+            st.importPick = false;
+            st.noteDraft = "";
+            await refreshHistState();
+            refreshHistBadges(true);
+            localToast(res.json.duplicate
+                ? "No new version - the content is identical"
+                : "Imported as a version (from " + label + ")");
+        } else {
+            localToast(res.status === 404
+                ? "The import route is missing (an old py) - update the FULL pack."
+                : "Import failed: " + ((res.json && res.json.error) || ("HTTP " + res.status)), 4200);
+        }
+    } catch (e) {
+        localToast("Import failed: " + String((e && e.message) || e), 4200);
+    }
+    st.cpBusy = false;
+    renderHistPop();
+}
+
 /** v122 (owner request): OVERWRITE one existing checkpoint with the CURRENT
  *  workflow state, with an optional rename. The capture ladder matches the
  *  checkpoint: the open tab's in-memory graph wins, the disk file is the
@@ -7808,7 +7977,34 @@ function histPopClick(act, btn) {
             return;
         }
         case "histcheckpoint": void histCreateCheckpoint("checkpoint"); return;
-        case "histimport": void histCreateCheckpoint("import"); return;
+        // v126: the Import strip - the button toggles it, the strip's own
+        // buttons pick the source (the active tab / a picked file)
+        case "histimport": {
+            st.importOpen = !st.importOpen;
+            st.importPick = false;
+            st.importErr = null;
+            if (st.importOpen && !st.importFiles) void histImportList(st.importQ || "");
+            renderHistPop();
+            return;
+        }
+        case "histimporttab": void histImportVersion({ kind: "tab" }); return;
+        case "histimportpick": {
+            st.importPick = !st.importPick;
+            if (st.importPick && !st.importFiles) void histImportList(st.importQ || "");
+            renderHistPop();
+            return;
+        }
+        case "histimportfile": {
+            if (btn.dataset.path) void histImportVersion({ kind: "file", path: btn.dataset.path });
+            return;
+        }
+        case "histimportcancel": {
+            st.importOpen = false;
+            st.importPick = false;
+            st.importErr = null;
+            renderHistPop();
+            return;
+        }
         case "histopen": void histRestore(rid, false); return;
         // v122: the overwrite flow - the row button selects the version and
         // opens the confirm strip; the strip's button arms (the first click)
@@ -8544,6 +8740,9 @@ export function __workflowsTestHooks() {
             : null,
         histPopEl: () => histPop,
         histCreateCheckpoint: (src) => histCreateCheckpoint(src),
+        // v126: the Import strip hooks (the open tab / the picked file)
+        histImportList: (q) => histImportList(q),
+        histImportVersion: (src) => histImportVersion(src),
         // v122: the overwrite flow + the Open-tab (tabhist) entry hooks
         histOverwriteRevision: () => histOverwriteRevision(),
         histFindTab: () => histFindTab(),

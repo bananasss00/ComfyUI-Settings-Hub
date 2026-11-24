@@ -1971,6 +1971,88 @@ check("v117 groups: ANY re-index invalidates the cached answer",
 
 reset_state()
 # ===========================================================================
+# v126: the Process-history Import route - ANY workflow lands as ONE MORE
+# version of the GIVEN process; the location bindings + the uuid map never
+# move (a foreign-UUID import must not re-bind the process).
+# ===========================================================================
+HIMPORT = H[("POST", "/settings_hub/workflows/history/import_version")]
+
+lib_write("i_main.json", wf_v116("iuuuuuuu-1111-1111-1111-111111111111", seed="m1"))
+lib_write("i_foreign.json", wf_v116("ffff9999-9999-9999-9999-999999999999", seed="f1"))
+r = loop(HIST(FakeRequest(json_body={"path": "workflows/i_main.json",
+                                     "source": "disk"})))
+check("v126 import setup: the checkpoint lands",
+      r.json().get("ok"), json.dumps(r.json()))
+_imppid = r.json()["processId"]
+_imploc0 = json.loads(json.dumps(
+    wf_store._wf_hist._read_process(_imppid).get("locations")))
+
+r = loop(HIMPORT(FakeRequest(json_body={
+    "processId": _imppid, "sourcePath": "workflows/i_foreign.json",
+    "note": "variant"})))
+_ij = r.json()
+check("v126 import: the route imports the FOREIGN file as a version",
+      r.status == 200 and _ij.get("ok") and not _ij.get("duplicate") and
+      _ij.get("processId") == _imppid, json.dumps(_ij))
+_imprec = wf_store._wf_hist._read_revision(_ij.get("revisionId", ""))
+check("v126 import: the revision carries source import + the source path + the origin title",
+      _imprec and _imprec.get("source") == "import" and
+      _imprec.get("sourcePath") == "workflows/i_foreign.json" and
+      _imprec.get("title") == "i_foreign.json" and _imprec.get("note") == "variant",
+      json.dumps({k: (_imprec or {}).get(k) for k in ("source", "sourcePath", "title", "note")}))
+check("v126 import: the imported UUID rides along for provenance only",
+      _ij.get("importedWorkflowId") == "ffff9999-9999-9999-9999-999999999999",
+      json.dumps(_ij.get("importedWorkflowId")))
+_imploc1 = wf_store._wf_hist._read_process(_imppid).get("locations")
+check("v126 import: the process binding never moved (same uuid + locations)",
+      wf_store._wf_hist._read_process(_imppid).get("workflowId") ==
+      "iuuuuuuu-1111-1111-1111-111111111111" and
+      {l["path"] for l in _imploc1} == {l["path"] for l in _imploc0},
+      json.dumps(_imploc1))
+check("v126 import: no foreign process born",
+      all(p.get("workflowId") != "ffff9999-9999-9999-9999-999999999999"
+          for p in wf_store._wf_hist.list_processes()),
+      json.dumps(sorted({p.get("workflowId") for p in wf_store._wf_hist.list_processes()})))
+r = loop(HRESOLVE(FakeRequest(method="GET",
+                              query={"path": "workflows/i_main.json"})))
+check("v126 import: the panel still resolves the process by its own path",
+      r.json().get("bound") and r.json().get("process", {}).get("processId") == _imppid,
+      json.dumps(r.json()))
+r = loop(HIMPORT(FakeRequest(json_body={
+    "processId": _imppid, "sourcePath": "workflows/i_foreign.json"})))
+check("v126 import: the identical import answers duplicate",
+      r.json().get("ok") and r.json().get("duplicate") is True, json.dumps(r.json()))
+r = loop(HIMPORT(FakeRequest(json_body={
+    "processId": _imppid,
+    "graph": wf_v116("eeee8888-8888-8888-8888-888888888888", seed="tab")})))
+_tabij = r.json()
+check("v126 import: the OPEN TAB graph lands as a version (no sourcePath)",
+      r.status == 200 and _tabij.get("ok") and not _tabij.get("duplicate") and
+      _tabij.get("processId") == _imppid, json.dumps(_tabij))
+_impcount = len(wf_store._wf_hist.list_revisions(_imppid))
+check("v126 import: the count is 3 (disk checkpoint + foreign file + tab graph)",
+      _impcount == 3, str(_impcount))
+r = loop(HIMPORT(FakeRequest(json_body={"sourcePath": "workflows/i_foreign.json"})))
+check("v126 import: a missing processId refuses (400)",
+      r.status == 400, json.dumps({"status": r.status}))
+r = loop(HIMPORT(FakeRequest(json_body={"processId": "no-such-pid",
+                                        "sourcePath": "workflows/i_foreign.json"})))
+check("v126 import: an unknown process refuses (404)",
+      r.status == 404, json.dumps({"status": r.status, "j": r.json()}))
+r = loop(HIMPORT(FakeRequest(json_body={"processId": _imppid})))
+check("v126 import: neither graph nor sourcePath refuses (400)",
+      r.status == 400, json.dumps({"status": r.status}))
+r = loop(HIMPORT(FakeRequest(json_body={"processId": _imppid,
+                                        "sourcePath": "workflows/GONE.json"})))
+check("v126 import: a missing source file refuses (404)",
+      r.status == 404, json.dumps({"status": r.status}))
+r = loop(HIMPORT(FakeRequest(json_body={"processId": _imppid,
+                                        "sourcePath": "../../../etc/passwd"})))
+check("v126 import: a traversal path refuses (400)",
+      r.status == 400, json.dumps({"status": r.status}))
+
+reset_state()
+# ===========================================================================
 
 print()
 print("PASS: %d  FAIL: %d" % (PASS, FAIL))

@@ -237,6 +237,7 @@ function makeFakeApi() {
     let procDelMode = "ok";
     // v122: the overwrite route stub control ("ok" | "stale" = an old py)
     let histOverwriteMode = "ok";
+    let histImportMode = "ok";   // v126: the Import route stub control
     // v112 stage 4: the preset version archives (pid -> {versions, seq})
     const pverStore = new Map();
     const pverArchive = (pid, changedBy) => {
@@ -849,6 +850,49 @@ function makeFakeApi() {
                 return jsonResp({ ok: true, duplicate: false, revisionId: rid,
                     processId: proc.processId });
             }
+            // v126: the Import route - ONE MORE version of an EXISTING
+            // process from an outside source (a picked file's disk bytes or
+            // the open tab's graph). The BINDING contract: the process's
+            // locations + workflowId NEVER move.
+            if (p === "/settings_hub/workflows/history/import_version" && method === "POST") {
+                if (histImportMode === "stale") return jsonResp({ ok: false, error: "404" }, 404);
+                let body2 = {};
+                try { body2 = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                const proc = histStore.processes.get(body2.processId);
+                if (!proc) return jsonResp({ ok: false, error: "no such process" }, 404);
+                if (!body2.graph && !body2.sourcePath)
+                    return jsonResp({ ok: false, error: "sourcePath (a workflows/... path) or a graph is required" }, 400);
+                let rawHash, srcPath = null;
+                if (body2.graph) {
+                    const data = JSON.stringify(body2.graph);
+                    rawHash = "hash-g" + data.length + "-" + data.slice(0, 32);
+                } else {
+                    srcPath = body2.sourcePath;
+                    const row = idxFiles.find((f) => f.path === srcPath);
+                    rawHash = (row && row.rawHash) || ("hash-disk-" + srcPath);
+                }
+                const last = histRevList(proc.processId)[0];
+                if (last && last.rawHash === rawHash) {
+                    return jsonResp({ ok: true, duplicate: true, revisionId: last.revisionId,
+                        processId: proc.processId });
+                }
+                const rid = "r" + (++histStore.seq).toString(16).padStart(15, "0");
+                histStore.revisions.set(rid, {
+                    revisionId: rid, processId: proc.processId,
+                    parentRevisionId: proc.currentRevisionId,
+                    source: "import", sourcePath: srcPath,
+                    createdAt: Math.floor(Date.now() / 1000) + histStore.seq,
+                    title: body2.title || (srcPath ? srcPath.split("/").pop() : null),
+                    note: body2.note || null,
+                    rawHash, workflowHash: null, presentationHash: null,
+                    normalizationProfileVersion: "nprof1",
+                    storage: { backend: "stub", blob: rid },
+                    isStable: false, __graph: body2.graph || null,
+                });
+                proc.currentRevisionId = rid;
+                return jsonResp({ ok: true, duplicate: false, revisionId: rid,
+                    processId: proc.processId });
+            }
             const mHistRaw = p.match(/^\/settings_hub\/workflows\/history\/revision\/([^/]+)\/raw$/);
             if (mHistRaw && method === "GET") {
                 const rec = histStore.revisions.get(decodeURIComponent(mHistRaw[1]));
@@ -1311,6 +1355,8 @@ function makeFakeApi() {
         __setProcDelMode: (m) => { procDelMode = m; },
         // v122: the overwrite route stub control
         __setHistOverwriteMode: (m) => { histOverwriteMode = m; },
+        // v126: the import route stub control
+        __setHistImportMode: (m) => { histImportMode = m; },
         // v108: the Files listing + the favorites controls
         __setWfFiles: (v) => { wfFiles = v; },
         __wfFavs: () => wfFavs.slice(),
@@ -2074,22 +2120,22 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v125", /"workflows":\s*"v125"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v126", /"workflows":\s*"v126"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v125 (the v124 save-flow field fixes on top of the external folders + group selection release)",
-    ENTRY_SRC.includes("web build: v125 - THE FIELD FIXES FOR THE v124 SAVE FLOW") &&
-    ENTRY_SRC.includes("THE REAL-PATH SAVE") &&
-    ENTRY_SRC.includes("DYNAMIC selection buttons"));
-check("styles.css?v=125", ENTRY_SRC.includes("styles.css?v=125"));
-check("the module self-reports v125",
+check("the entry banner names v126 (the process-history import on top of the v125 save-flow fixes + the v124 external folders)",
+    ENTRY_SRC.includes("web build: v126 - THE PROCESS-HISTORY IMPORT") &&
+    ENTRY_SRC.includes("THE BINDING CONTRACT") &&
+    ENTRY_SRC.includes("TWO sources and ONE target"));
+check("styles.css?v=126", ENTRY_SRC.includes("styles.css?v=126"));
+check("the module self-reports v126",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v125"'));
-check("the web stamp literal is v125",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v126"'));
+check("the web stamp literal is v126",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v125"'));
-check("py stamp bumps together (v125)",
+        .includes('const WF_WEB_VERSION = "v126"'));
+check("py stamp bumps together (v126)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v125"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v126"'));
 check("v121 py: the union-find clustering + the seeds + the honest non-json accounting exist",
     (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
         return src.includes('def _name_stem') && src.includes('SIM_RARE_SLACK')
@@ -2686,7 +2732,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v126"); // ahead of the pack (v125) - a stale web file
+    fakeApi.__setHealthVersion("v127"); // ahead of the pack (v126) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -5597,7 +5643,7 @@ phase("AD v122: the checkpoint OVERWRITE (with rename), the Open-tab 🕘 entry,
     check("AD: the tab-mode header names the tab",
         hooks.histPopEl().textContent.includes("AD unsaved draft"),
         hooks.histPopEl().querySelector(".hub-wf-planhint")?.textContent || "");
-    check("AD: tab mode: no Import-disk button (there is no file yet)",
+    check("AD: tab mode: no Import button (no process yet - nothing to attach a version to)",
         !hooks.histPopEl().querySelector('[data-act="histimport"]'), "import present");
     check("AD: the unbound temp tab shows the honest empty state",
         st.revs.length === 0 && !st.error && !!st.tabKey,
@@ -5669,6 +5715,158 @@ phase("AD v122: the checkpoint OVERWRITE (with rename), the Open-tab 🕘 entry,
     fakeApi.__setHistOverwriteMode("ok");
 
     // cleanup for the later phases
+    fakeApi.__setIdxFiles([]);
+    hooks.setTab("open");
+    await settle();
+}
+
+// ===========================================================================
+phase("AE v126: the IMPORT - a picked file or the open tab lands as ONE MORE version; the binding never moves");
+{
+    const bodyAd = () => hooks.panelEl().querySelector(".hub-wf-body");
+    // the fixture: the panel's own file + a FOREIGN file (a different UUID)
+    fakeApi.__setIdxFiles([
+        { path: "workflows/ad_hist.json", name: "ad_hist.json", size: 10, mtime: 100,
+          workflowId: "wuuid-ad-1", rawHash: "hash-ad-1" },
+        { path: "workflows/ad_foreign.json", name: "ad_foreign.json", size: 22, mtime: 200,
+          workflowId: "wuuid-foreign-9", rawHash: "hash-foreign-9" },
+    ]);
+    hooks.setIdxReady(true);
+    wfStore.openWorkflows.length = 0;
+    wfStore.activeWorkflow = null;
+    const aeSaved = makeTab({ path: "workflows/ad_hist.json", nodes: [1, 2] });
+    wfStore.openWorkflows.push(aeSaved);
+    wfStore.activeWorkflow = aeSaved;
+    await hooks.refreshOpen(true);
+    hooks.setTab("open");
+    hooks.renderAll();
+    await settle();
+
+    const aeRow = [...bodyAd().querySelectorAll(".hub-wf-row")]
+        .find((r) => r.textContent.includes("ad_hist.json"));
+    await aeRow?.querySelector('[data-act="tabhist"]')?.click();
+    await settle(30);
+    let st = hooks.histState();
+    check("AE: the panel opens with the earlier process (2 revisions, the Import button present)",
+        st.revs.length === 2 && !!st.pid &&
+        !!hooks.histPopEl().querySelector('[data-act="histimport"]'),
+        JSON.stringify({ revs: st.revs.length, pid: st.pid }));
+
+    // ---- 1) the strip opens with BOTH sources ----
+    await hooks.histPopEl().querySelector('[data-act="histimport"]').click();
+    await settle();
+    let strip = hooks.histPopEl();
+    const tabBtn = strip.querySelector('[data-act="histimporttab"]');
+    const pickBtn = strip.querySelector('[data-act="histimportpick"]');
+    check("AE: the strip names the ACTIVE tab as source one",
+        !!tabBtn && tabBtn.textContent.includes("ad_hist.json"), tabBtn?.textContent || "none");
+    check("AE: the strip offers the file picker as source two", !!pickBtn, "");
+
+    // ---- 2) the picker lists the index files (own + foreign) ----
+    await pickBtn.click();
+    await settle(30);
+    let rows = [...strip.querySelectorAll('[data-act="histimportfile"]')];
+    check("AE: the picker lists the index files",
+        rows.length === 2 && rows.some((b) => b.dataset.path === "workflows/ad_foreign.json"),
+        JSON.stringify(rows.map((b) => b.dataset.path)));
+
+    // ---- 3) the FOREIGN file import - the version lands, the binding stays ----
+    const procBefore = JSON.parse(JSON.stringify(fakeApi.__histStore().processes.get(st.pid)));
+    const importPost0 = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/history/import_version").length;
+    await rows.find((b) => b.dataset.path === "workflows/ad_foreign.json").click();
+    await settle(30);
+    st = hooks.histState();
+    const importPosts = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/history/import_version");
+    const lastBody = importPosts.length ? JSON.parse(importPosts.at(-1).body) : {};
+    check("AE: the import POST carried processId + sourcePath (the server reads the bytes itself)",
+        importPosts.length === importPost0 + 1 && lastBody.processId === st.pid &&
+        lastBody.sourcePath === "workflows/ad_foreign.json" && !lastBody.graph,
+        JSON.stringify(lastBody));
+    check("AE: the import created the third revision (source import, the file name is the title)",
+        st.revs.length === 3 && st.revs[0].source === "import" &&
+        st.revs[0].sourcePath === "workflows/ad_foreign.json" && st.revs[0].title === "ad_foreign.json",
+        JSON.stringify({ n: st.revs.length, r0: st.revs[0] }));
+    const procAfter = fakeApi.__histStore().processes.get(st.pid);
+    check("AE: the binding never moved - same workflowId, same locations, no foreign process born",
+        procAfter.workflowId === procBefore.workflowId &&
+        JSON.stringify(procAfter.locations) === JSON.stringify(procBefore.locations) &&
+        ![...fakeApi.__histStore().processes.values()].some((p) => p.workflowId === "wuuid-foreign-9"),
+        JSON.stringify({ wf: procAfter.workflowId, loc: procAfter.locations }));
+    check("AE: the imported row reads 'Imported · ad_foreign.json'",
+        strip.textContent.includes("Imported · ad_foreign.json"),
+        strip.textContent.slice(0, 160));
+
+    // ---- 3b) the identical import answers duplicate (no second blob) ----
+    await strip.querySelector('[data-act="histimport"]').click();   // the import closed the strip
+    await settle();
+    await strip.querySelector('[data-act="histimportpick"]').click();
+    await settle(30);
+    await [...strip.querySelectorAll('[data-act="histimportfile"]')]
+        .find((b) => b.dataset.path === "workflows/ad_foreign.json").click();
+    await settle(30);
+    st = hooks.histState();
+    check("AE: the identical import answers duplicate honestly",
+        st.revs.length === 3 &&
+        [...document.querySelectorAll(".hub-sh-note")].some((t) =>
+            (t.textContent || "").includes("No new version - the content is identical")),
+        JSON.stringify({ n: st.revs.length,
+            toasts: [...document.querySelectorAll(".hub-sh-note")].map((t) => t.textContent) }));
+
+    // ---- 4) the picker filter narrows the list ----
+    await strip.querySelector('[data-act="histimport"]').click();
+    await settle();
+    await strip.querySelector('[data-act="histimportpick"]').click();
+    await settle(30);
+    const filterIn = strip.querySelector('[data-wf="importq"]');
+    check("AE: the strip reopened with the filter input", !!filterIn, "");
+    filterIn.value = "foreign";
+    filterIn.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await settle(300);   // the 250ms debounce
+    rows = [...strip.querySelectorAll('[data-act="histimportfile"]')];
+    check("AE: the filter narrows the picker to the matching file",
+        rows.length === 1 && rows[0].dataset.path === "workflows/ad_foreign.json",
+        JSON.stringify(rows.map((b) => b.dataset.path)));
+
+    // ---- 5) Cancel closes the strip without touching anything ----
+    const postsBeforeCancel = fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/history/import_version").length;
+    await strip.querySelector('[data-act="histimportcancel"]').click();
+    await settle();
+    check("AE: Cancel closes the strip, no import POST fired",
+        hooks.histState().importOpen === false &&
+        fakeApi.__calls().filter((c) => c.url === "/settings_hub/workflows/history/import_version").length === postsBeforeCancel, "");
+
+    // ---- 6) the OPEN TAB import - the active tab's in-memory graph ----
+    await hooks.histPopEl().querySelector('[data-act="histimport"]').click();
+    await settle();
+    await hooks.histPopEl().querySelector('[data-act="histimporttab"]').click();
+    await settle(30);
+    st = hooks.histState();
+    const tabImportBody = JSON.parse(fakeApi.__calls()
+        .filter((c) => c.url === "/settings_hub/workflows/history/import_version").at(-1).body);
+    check("AE: the open-tab import sent the in-memory graph (no sourcePath)",
+        !!tabImportBody.graph && !tabImportBody.sourcePath && tabImportBody.processId === st.pid,
+        JSON.stringify({ graph: !!tabImportBody.graph, sp: tabImportBody.sourcePath }));
+    check("AE: the open-tab import landed as version 4 (source import, the tab's name)",
+        st.revs.length === 4 && st.revs[0].source === "import" && !st.revs[0].sourcePath &&
+        st.revs[0].title === "ad_hist.json",
+        JSON.stringify({ n: st.revs.length, r0: st.revs[0] }));
+
+    // ---- 7) an old py (404) degrades honestly ----
+    fakeApi.__setHistImportMode("stale");
+    const revsBefore404 = st.revs.length;
+    await hooks.histPopEl().querySelector('[data-act="histimport"]').click();
+    await settle();
+    await hooks.histPopEl().querySelector('[data-act="histimporttab"]').click();
+    await settle(30);
+    check("AE: an old py (404 import) degrades honestly - the toast names the update",
+        hooks.histState().revs.length === revsBefore404 &&
+        [...document.querySelectorAll(".hub-sh-note")].some((t) =>
+            (t.textContent || "").includes("The import route is missing")),
+        [...document.querySelectorAll(".hub-sh-note")].map((t) => t.textContent).join(" | "));
+    fakeApi.__setHistImportMode("ok");
+
+    // cleanup for the later phases
+    hooks.closeHistPop();
     fakeApi.__setIdxFiles([]);
     hooks.setTab("open");
     await settle();
