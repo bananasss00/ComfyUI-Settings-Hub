@@ -4,6 +4,7 @@ from .py import stack_store  # noqa: F401  v70: registers /settings_hub/stack* r
 from .py import clipboard_helper  # noqa: F401  v71: registers /settings_hub/clipboard (OS-clipboard read for the stack, loopback + custom header)
 from .py import chat_proxy  # noqa: F401  v87: registers /settings_hub/chat* routes (LLM Chat: sessions, blobs, upstream proxy, /chat/gpu memory)
 from .py import workflows_store  # noqa: F401  v101: registers /settings_hub/workflows* routes (Workflow presets storage - Workflows Manager)
+from .py import workflows_ext  # noqa: F401  v124: registers /settings_hub/workflows/ext* routes (EXTERNAL workflow folders: the registry, the picker, the /userdata mirrors)
 
 NODE_CLASS_MAPPINGS = {
     "SettingsHub": SettingsHubNode,

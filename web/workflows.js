@@ -1,6 +1,49 @@
 // ============================================================================
 // SettingsHub - WORKFLOWS MANAGER (v110)
 // ----------------------------------------------------------------------------
+// v124 (owner request 2026-11-24, TWO features):
+//   1. EXTERNAL WORKFLOW FOLDERS (+ THE REAL-PATH SAVE):
+//      "надо для менеджера рабочих процессов добавить возможность добавлять
+//      другие каталоги с рабочими процессами (вне среды комфи, в том числе
+//      на других дисках). и важно чтобы когда я сохраняю рабочий процесс
+//      через сам комфи (или средствами моего SettingsHub) процесс сохранялся
+//      по реальному пути процесса, а не создавался новый в официальном
+//      каталоге процессов":
+//      * the ⚙ popup grew an "External workflow folders" section: add
+//        (a server-backed FOLDER PICKER lists the drives - "other disks" are
+//        two clicks away - or paste any absolute path), rename the display
+//        name, detach (the files are NEVER touched);
+//      * every registered folder joins the library under a STABLE VIRTUAL
+//        path (workflows/.settings_hub_ext/<id>/<rel>) - the Files tab, the
+//        search, the index, the favorites, the groups, the history, the
+//        inspector, the delete+undo all treat the rows EXACTLY like the
+//        ordinary ones (py v124: the registry + the /userdata-mirror routes
+//        + the ext branch in _resolve_library_file + the prefixed index
+//        roots);
+//      * THE SAVE LANDS AT THE REAL PATH: this module installs ONE fetchApi
+//        hook at import time - the frontend's own UserFile I/O (Save =
+//        POST /userdata/..., load = GET, rename = move, delete = DELETE,
+//        the store listing = GET /userdata?dir=workflows...) targeting the
+//        virtual namespace is re-pointed to the py mirrors, which write the
+//        REAL file on the real disk (atomic tmp+replace, the native response
+//        contracts). ComfyUI's own Ctrl+S / Workflow > Save on such a tab
+//        therefore writes the SAME file it was opened from - no new copy
+//        ever appears in the official userdata workflows/ folder. The hook
+//        is idempotent, passes EVERYTHING else through untouched, and a
+//        dead ext backend degrades to the native behavior (the routes 404).
+//   2. THE GROUP SELECTION BUTTONS:
+//      "когда фильтрую процессы по группам: схожие и другие. надо чтобы
+//      была возможность выделить всю группу ну или снять выделение,
+//      динамическая кнопка как в других частях settingshub":
+//      * EVERY group header (Same UUID / Exact copies / Similar / Outside
+//        the groups) carries the v103-style DYNAMIC toggle - unchecked rows
+//        exist => "☑ Select all", else "☐ Deselect all" - one click checks
+//        or clears the whole group in the existing fileSel (the selection
+//        toolbar, Open selected, Save selected as preset, Delete selected
+//        all read it);
+//      * the Files toolbar grew the same dynamic chip over EVERYTHING
+//        currently shown (the grouped data, the server page or the filtered
+//        local list): "☑ Select shown" ⇄ "☐ Deselect shown".
 // v110 (owner bug report: "где фильтры из плана? вижу только сортировки и
 // туглер для переключения древовидной структуры папок" + "когда включена
 // древовидная структура в files надо чтобы не было пустых папок при поиске"):
@@ -227,9 +270,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v123";
+const WF_WEB_VERSION = "v124";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v123";
+globalThis.__SettingsHubLoaded["workflows"] = "v124";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -281,6 +324,295 @@ const SHOW_MORE_STEP = 150;
 // and the search always runs over the FULL open set.
 const DEF_W = 320;
 const DEF_H = 430;
+
+// ---------------------------------------------------------------------------
+// v124: THE EXTERNAL WORKFLOW FOLDERS - the client half
+// ---------------------------------------------------------------------------
+// The virtual namespace the py registry assigns to every registered folder:
+//   workflows/.settings_hub_ext/<dirId>/<rel>.json
+// The whole panel speaks ONE path shape (the files listing, the index rows,
+// the groups, the favorites, the presets) - only the DISPLAY rewrites the
+// virtual folder into the registered name (extPretty).
+
+const EXT_NS = ".settings_hub_ext";
+const EXT_PREFIX = "workflows/" + EXT_NS + "/";
+
+/** The dirId of a virtual path ("" when the path is not virtual). */
+function extDirIdOf(p) {
+    const s = normWfPath(p);
+    if (!s.startsWith(EXT_PREFIX)) return "";
+    const rest = s.slice(EXT_PREFIX.length);
+    return rest.split("/", 1)[0] || "";
+}
+
+function isExtVirtPath(p) {
+    return !!extDirIdOf(p);
+}
+
+/** The virtual path of a file inside a registered dir (the py contract). */
+function extVirtPathOf(dirId, rel) {
+    return EXT_PREFIX + dirId + "/" + String(rel || "").replace(/\\/g, "/")
+        .replace(/^\/+/, "");
+}
+
+// The registered folders (the ⚙ registry answer): [{id,name,path,exists,
+// writable}]. Refreshed on the panel mount and after every add/remove.
+let extDirs = [];
+let extDirsLoaded = false;
+// v124: the ⚙ "External workflow folders" section state (the registry list
+// <-> the folder picker live in ONE container) + the cached ext file count
+let extPickState = { mode: "list", cur: "", parent: null, dirs: [],
+    roots: [], rootsMode: false, err: "" };
+let extExtFileCount = -1;
+
+async function refreshExtDirs() {
+    try {
+        const res = await jfetch("/settings_hub/workflows/ext/dirs");
+        if (res.json?.ok && Array.isArray(res.json.dirs)) {
+            extDirs = res.json.dirs;
+            extDirsLoaded = true;
+        } else if (res.status === 404) {
+            extDirs = [];           // an old py - the feature stays hidden
+            extDirsLoaded = true;
+        }
+    } catch (_) { /* an unreachable server - the last list is kept */ }
+    return extDirs;
+}
+
+function extDirById(id) {
+    return extDirs.find((d) => d.id === id) || null;
+}
+
+/** v124: join a browse current path + a child name with the right separator
+ *  (the server keeps the native form: backslashes on Windows). */
+function extJoinPath(cur, child) {
+    const sep = /[\\/]$/.test(cur) ? "" : (cur.includes("\\") ? "\\" : "/");
+    return cur + sep + child;
+}
+
+/** v124: the total .json count over every registered folder (the ⚙ info
+ *  line; -1 = unknown). A transient failure just keeps the old number. */
+async function extCountFiles() {
+    try {
+        const res = await jfetch("/settings_hub/workflows/ext/list?all=1");
+        if (res.json?.ok && Array.isArray(res.json.files)) {
+            extExtFileCount = res.json.files.length;
+        }
+    } catch (_) { /* the info line keeps whatever it has */ }
+    return extExtFileCount;
+}
+
+function extDirLabel(id) {
+    const d = extDirById(id);
+    return d ? ("⬡ " + (d.name || d.path)) : "";
+}
+
+/** The display path: the virtual folder ".settings_hub_ext/<id>" rewrites
+ *  into the registered folder's name (the raw path stays in the tooltips). */
+function extPretty(p) {
+    const s = normWfPath(p);
+    const id = extDirIdOf(s);
+    if (!id) return s;
+    const rest = s.slice(EXT_PREFIX.length + id.length + 1);
+    return (extDirLabel(id) || "⬡ external") + "/" + rest;
+}
+
+/** v124: the display form of a FOLDER path (the tree rows, the folder
+ *  filter options, the breadcrumbs): ".settings_hub_ext/<id>/sub" -> "⬡
+ *  <name>/sub". Non-ext paths pass through unchanged. */
+function extPrettyFolder(folderPath) {
+    const s = normWfPath(folderPath);
+    if (!s.startsWith(EXT_NS + "/")) return s;
+    const rest = s.slice(EXT_NS.length + 1);
+    const id = rest.split("/", 1)[0] || "";
+    const sub = id ? rest.slice(id.length + 1) : rest;
+    return (extDirLabel(id) || "⬡ external") + (sub ? "/" + sub : "");
+}
+
+/** v124: the SHORT folder label (the last segment of the pretty form) -
+ *  the folder filter <option>s keep the depth indent. */
+function extFolderLabel(d) {
+    const pretty = extPrettyFolder(d);
+    return pretty.split("/").pop() || pretty;
+}
+
+/** v124: the REAL location of a virtual file (the tooltips + the delete
+ *  confirm strip): "<registered path>/<rel>". */
+function extRealPathHint(p) {
+    const s = normWfPath(p);
+    const id = extDirIdOf(s);
+    if (!id) return s;
+    const d = extDirById(id);
+    const rest = s.slice(EXT_PREFIX.length + id.length + 1);
+    if (!d) return s;
+    return d.path + ((/[/\\]$/).test(d.path) ? "" : "/") + rest;
+}
+
+// ---------------------------------------------------------------------------
+// v124: THE fetchApi HOOK - the real-path save lives here.
+// The modern frontend (Comfy-Org/ComfyUI_frontend 1.59.x, shipped with
+// ComfyUI 0.46.x) does ALL its workflow file I/O through api.fetchApi:
+//   load   GET    /userdata/<file>
+//   save   POST   /userdata/<file>?overwrite=&full_info=   (UserFile.save)
+//   delete DELETE  /userdata/<file>
+//   rename POST   /userdata/<src>/move/<dest>?overwrite=
+//   list   GET    /userdata?dir=workflows&recurse=true&split=false&full_info=true
+// For paths inside the virtual EXTERNAL namespace the hook re-points the
+// request to the py mirrors (/settings_hub/workflows/ext/...), which read/
+// write the REAL file. The responses keep the native contracts, so the
+// frontend code paths run unmodified: a workflow opened from an external
+// folder saves THROUGH ComfyUI's own UI to its real file - no new copy in
+// the official userdata workflows folder.
+// Everything else passes through the original fetchApi untouched. The hook
+// is installed at MODULE IMPORT time (before any panel mount / toggle) and
+// is idempotent.
+// ---------------------------------------------------------------------------
+
+let extHookInstalled = false;
+let extHookStats = { store: 0, read: 0, move: 0, del: 0, listMerge: 0 };
+
+function extUserdataFile(route) {
+    /** "/userdata/<enc(file)>?query" -> {file, query} when the route targets
+     *  a virtual-namespace file, else null. The frontend URL-encodes the
+     *  file segment; the match runs on the DECODED path. */
+    try {
+        const m = /^\/(?:api\/)?userdata\/([^/?]+)(?:\?(.*))?$/.exec(route);
+        if (!m) return null;
+        const file = decodeURIComponent(m[1]);
+        if (!isExtVirtPath(file)) return null;
+        return { file, query: m[2] || "" };
+    } catch (_) { return null; }
+}
+
+function extUserdataMove(route) {
+    /** "/userdata/<enc(src)>/move/<enc(dest)?query" -> {src, dest, query}
+     *  when BOTH endpoints sit in the virtual namespace, else null. */
+    try {
+        const m = /^\/(?:api\/)?userdata\/([^/?]+)\/move\/([^/?]+)(?:\?(.*))?$/
+            .exec(route);
+        if (!m) return null;
+        const src = decodeURIComponent(m[1]);
+        const dest = decodeURIComponent(m[2]);
+        if (!isExtVirtPath(src) || !isExtVirtPath(dest)) return null;
+        return { src, dest, query: m[3] || "" };
+    } catch (_) { return null; }
+}
+
+function extWorkflowsListQuery(route) {
+    /** GET /userdata?dir=workflows&recurse=true&split=false&full_info=true -
+     *  the store-sync listing that decides WHICH persisted workflows exist.
+     *  Only the recursed full-info workflows listing merges (the answer
+     *  items are the dir-relative paths, exactly what syncEntities joins
+     *  onto 'workflows/'). */
+    try {
+        if (!/^\/(?:api\/)?userdata\?/.test(route)) return null;
+        const q = new URLSearchParams(route.slice(route.indexOf("?") + 1));
+        if (q.get("dir") !== "workflows" && q.get("dir") !== "workflows/") return null;
+        if (q.get("recurse") !== "true" || q.get("full_info") !== "true") return null;
+        return q;
+    } catch (_) { return null; }
+}
+
+function extListItemFor(virtPath, size, mtimeSec) {
+    /** The merged listing item - the shape of the native full_info answer
+     *  (path RELATIVE to the dir; syncEntities prefixes 'workflows/'). */
+    const rel = normWfPath(virtPath).slice("workflows/".length);
+    return {
+        path: rel,
+        size: Number(size) || 0,
+        modified: (Number(mtimeSec) || 0) * 1000,
+        created: (Number(mtimeSec) || 0) * 1000,
+    };
+}
+
+function installExtFetchHook() {
+    if (extHookInstalled) return;
+    const api = app?.api;
+    if (!api || typeof api.fetchApi !== "function") return;
+    const orig = api.fetchApi.bind(api);
+    extHookInstalled = true;
+    api.fetchApi = function (route, options) {
+        try {
+            if (typeof route === "string" && route.includes("userdata")) {
+                // 1) rename/move INSIDE the virtual namespace
+                const mv = extUserdataMove(route);
+                if (mv) {
+                    extHookStats.move++;
+                    const q = new URLSearchParams(mv.query);
+                    const to = "/settings_hub/workflows/ext/move?path=" +
+                        encodeURIComponent(mv.src) + "&to=" +
+                        encodeURIComponent(mv.dest) +
+                        (q.toString() ? "&" + q.toString() : "");
+                    return orig(to, options);
+                }
+                // 2) the store / load / delete of a virtual file
+                const uf = extUserdataFile(route);
+                if (uf) {
+                    const q = uf.query ? new URLSearchParams(uf.query) : new URLSearchParams();
+                    const method = String((options && options.method) || "GET").toUpperCase();
+                    const qp = "path=" + encodeURIComponent(uf.file) +
+                        (q.toString() ? "&" + q.toString() : "");
+                    if (method === "POST") {
+                        extHookStats.store++;
+                        return orig("/settings_hub/workflows/ext/store?" + qp, options);
+                    }
+                    if (method === "DELETE") {
+                        extHookStats.del++;
+                        return orig("/settings_hub/workflows/ext/delete?" + qp, options);
+                    }
+                    extHookStats.read++;
+                    return orig("/settings_hub/workflows/ext/read?" + qp, options);
+                }
+                // 3) the store-sync listing - the ORIGINAL answer merges the
+                //    ext rows, so the workflow store registers the virtual
+                //    paths as first-class persisted workflows (the tab strip,
+                //    the sidebar browser, getWorkflowByPath all work).
+                const lq = extWorkflowsListQuery(route);
+                if (lq) {
+                    extHookStats.listMerge++;
+                    return (async () => {
+                        let base = null;
+                        let ext = [];
+                        try { base = await orig(route, options); } catch (_) { base = null; }
+                        try {
+                            const r = await orig("/settings_hub/workflows/ext/list?all=1",
+                                { method: "GET" });
+                            if (r && r.ok) {
+                                const j = await r.json();
+                                if (j?.ok && Array.isArray(j.files)) ext = j.files;
+                            }
+                        } catch (_) { /* the merge degrades to the base */ }
+                        let baseItems = [];
+                        if (base && base.ok) {
+                            try {
+                                const bj = await base.json();
+                                baseItems = Array.isArray(bj) ? bj
+                                    : (Array.isArray(bj?.items) ? bj.items : []);
+                            } catch (_) { baseItems = []; }
+                        }
+                        const known = new Set(baseItems.map((it) =>
+                            String(typeof it === "object" ? it?.path : it)));
+                        for (const f of ext) {
+                            const item = extListItemFor(f.path, f.size, f.mtime);
+                            if (known.has(item.path)) continue;
+                            baseItems.push(item);
+                        }
+                        return new Response(JSON.stringify(baseItems),
+                            { status: 200, headers: { "Content-Type": "application/json" } });
+                    })();
+                }
+            }
+        } catch (_) { /* the hook never breaks a request - fall through */ }
+        return orig(route, options);
+    };
+}
+
+// v124: installed at import time - BEFORE any extension setup callback and
+// independent of the panel's on/off state (a workflow opened from an
+// external folder must save to the real path even when the panel is hidden).
+try { installExtFetchHook(); } catch (e) {
+    console.warn("[SettingsHub] the ext fetchApi hook did not install:", e);
+}
 
 function esc(s) {
     return String(s ?? "")
@@ -1979,11 +2311,16 @@ function deepCountIn(dir) {
 }
 
 function folderRowHtml(full, label, depth, open, count) {
+    // v124: the virtual EXTERNAL namespace renders under the registered
+    // folder's name (the raw segments stay in the navigation data)
+    const disp = full === EXT_NS ? "⬡ external folders"
+        : (full.startsWith(EXT_NS + "/") && !full.slice(EXT_NS.length + 1).includes("/"))
+            ? (extDirLabel(full.slice(EXT_NS.length + 1)) || label) : label;
     return `<div class="hub-wf-row hub-wf-trow">` +
         `<button type="button" class="hub-wf-caret" data-act="treefold" data-folder="${esc(full)}" ` +
         `title="${open ? "Collapse" : "Expand"} this folder (any depth)">${open ? "▾" : "▸"}</button>` +
         `<button type="button" class="hub-wf-tname" data-act="treeenter" data-folder="${esc(full)}" ` +
-        `title="Enter ${esc(full)}" style="padding-left:${depth * 10}px">${esc(label)}/</button>` +
+        `title="Enter ${esc(extPrettyFolder(full))}" style="padding-left:${depth * 10}px">${esc(disp)}/</button>` +
         `<span class="hub-wf-tcount">${count}</span>` +
         `</div>`;
 }
@@ -3240,7 +3577,9 @@ function openTabHtml() {
         const histBtn = `<button type="button" class="hub-wf-lockbtn" data-act="tabhist" data-key="${esc(t.key)}"${t.path ? ` data-path="${esc(t.path)}"` : ""} ` +
             `title="Process history of this tab: 📌 Checkpoint the CURRENT state (the in-memory graph incl. unsaved edits - saving first is not required), then Compare / Restore / Overwrite versions">${hrevN > 0 ? `<span class="hub-wf-hbadge">${hrevN > 99 ? "99+" : String(hrevN)}</span>` : ""}🕘</button>`;
         return `<div class="hub-wf-row${t.isActive ? " hub-wf-row-active" : ""}${locked ? " hub-wf-row-locked" : ""}" data-key="${esc(t.key)}">` +
-            `<button type="button" class="hub-wf-name" data-act="activate" data-key="${esc(t.key)}" title="${esc(t.path || "temporary tab")}">${esc(t.name)}${t.isModified ? " *" : ""}</button>` +
+            // v124: an EXTERNAL tab's tooltip names the REAL file (the tab
+            // itself keeps the name; the saves go to the real path)
+            `<button type="button" class="hub-wf-name" data-act="activate" data-key="${esc(t.key)}" title="${esc(t.path ? extRealPathHint(t.path) : "temporary tab")}${t.path && isExtVirtPath(t.path) ? " · ⬡ external folder" : ""}">${esc(t.name)}${t.isModified ? " *" : ""}</button>` +
             `<span class="hub-wf-marks">${marks}</span>` +
             saveBtn +
             histBtn +
@@ -3489,7 +3828,7 @@ function filesTabHtml() {
               `<option value=""${!filesFolder ? " selected" : ""}>folder: all</option>` +
               filesFolderList().map((d) => {
                   const depth = d.split("/").length - 1;
-                  const label = "\u00a0".repeat(depth * 2) + d.split("/").pop();
+                  const label = "\u00a0".repeat(depth * 2) + extFolderLabel(d);
                   return `<option value="${esc(d)}"${filesFolder === d ? " selected" : ""}>${esc(label)}</option>`;
               }).join("") + `</select>`
             : `<span class="hub-wf-flabel" title="In tree mode the navigation below filters the folders">folder: tree nav</span>`) +
@@ -3610,6 +3949,20 @@ function filesTabHtml() {
                     }
                     if (hiddenCount > 0)
                         out.push(`<div class="hub-wf-emptylist">ℹ ${hiddenCount} file(s) live in ${esc(hiddenLabels.join(" / "))} groups - hidden by this filter (All groups shows them)</div>`);
+                    // v124: the DYNAMIC group toggle (the v103 save-form
+                    // contract: unchecked rows exist => "Select all", else
+                    // "Deselect all"). One click checks/clears the whole
+                    // group in fileSel - the selection toolbar (Open/Save/
+                    // Delete selected) reads the same set.
+                    const groupSelBtn = (key, rows) => {
+                        const norm = (rows || []).map((f) => normWfPath(f.path)).filter(Boolean);
+                        const all = norm.length > 0 && norm.every((p) => fileSel.has(p));
+                        const label = all ? "☐ Deselect all" : "☑ Select all";
+                        const title = all
+                            ? "Clear the selection of this group (" + norm.length + " file(s))"
+                            : "Select the WHOLE group (" + norm.length + " file(s)) - Open selected / Save selected as preset / Delete selected all read it";
+                        return `<button type="button" class="hub-wf-act hub-wf-fchip" data-act="groupselall" data-key="${esc(key)}" title="${esc(title)}">${label}</button>`;
+                    };
                     for (const g of shownGroups) {
                         const collapsed = !!groupsState.collapsed[g.key];
                         const scoreTxt = g.kind === "similar" &&
@@ -3622,13 +3975,15 @@ function filesTabHtml() {
                         out.push(`<div class="hub-wf-sect hub-wf-sect-row">` +
                             `<button type="button" class="hub-wf-act" data-act="groupfold" data-key="${esc(g.key)}" ` +
                             `title="${collapsed ? "Expand the group" : "Collapse the group"}">${collapsed ? "▸" : "▾"} ${kindIcon[g.kind] || ""} ${esc(g.label)} · ${g.count} file(s)${scoreTxt}</button>` +
+                            groupSelBtn(g.key, g.files) +
                             `<span class="hub-wf-snap" title="A visual grouping only - nothing is merged, moved or deleted automatically">${g.kind === "same_uuid" ? "one workflow id" : g.kind === "exact" ? "100%" : "estimate ≥ " + groupsState.threshold + "%"}${ctxBadge}</span></div>`);
                         if (!collapsed) {
                             for (const f of (g.files || []))
                                 out.push(savedFileRowHtml(f, 1));
                         }
                     }
-                    out.push(`<div class="hub-wf-sect">Outside the groups (${gd.ungroupedTotal || 0}${(gd.totalFiles || 0) > (gd.ungroupedTotal || 0) ? " of " + gd.totalFiles + " indexed" : ""})</div>`);
+                    out.push(`<div class="hub-wf-sect hub-wf-sect-row">Outside the groups (${gd.ungroupedTotal || 0}${(gd.totalFiles || 0) > (gd.ungroupedTotal || 0) ? " of " + gd.totalFiles + " indexed" : ""})` +
+                        groupSelBtn("__ungrouped__", gd.ungrouped) + `</div>`);
                     for (const f of (gd.ungrouped || []))
                         out.push(savedFileRowHtml(f, 0));
                     if ((gd.ungroupedTotal || 0) > (gd.ungrouped || []).length)
@@ -3730,6 +4085,16 @@ function filesTabHtml() {
         // default OFF, the flat list stays exactly as it is today
         `<button type="button" class="hub-wf-act hub-wf-fchip${groupsState.on ? " hub-wf-fchip-on" : ""}" data-act="grouptoggle" ` +
         `title="Group similar workflows: files with the same UUID, exact graph copies and structurally similar workflows render as collapsible groups (built SERVER-side over the whole index - nothing is merged, moved or deleted)">◫ Group</button>` +
+        // v124: the DYNAMIC selection chip over EVERYTHING currently shown -
+        // the same v103 contract as the group toggles and the save form
+        (filesSelShownPaths().length
+            ? `<button type="button" class="hub-wf-act hub-wf-fchip" data-act="fileselall" ` +
+              `title="${filesSelShownAll() ? "Clear the selection of every shown file (" + filesSelShownPaths().length + ")" : "Select EVERY shown file (" + filesSelShownPaths().length + ") - the selection toolbar (Open / Save as preset / Delete selected) reads it"}">${filesSelShownAll() ? "☐ Deselect shown" : "☑ Select shown"}</button>`
+            : "") +
+        // v124: the EXTERNAL folders shortcut - opens the ⚙ popup straight
+        // at the registry section (add / rename / detach)
+        `<button type="button" class="hub-wf-act hub-wf-fchip" data-act="extdirs" ` +
+        `title="External workflow folders: register ANY folder (other disks included) - its workflows join the library and save AT their real paths (ComfyUI's own Ctrl+S writes the same file)">${extDirs.length ? "⬡ Ext " + extDirs.length : "⬡ Ext folders"}</button>` +
         quickChip("today", "Today") +
         quickChip("7d", "7d") +
         quickChip("30d", "30d") +
@@ -3758,7 +4123,7 @@ function filesTabHtml() {
               `title="${recentClearArmed ? "Click AGAIN to clear THIS browser's Recently closed list (the workflow files, Presets, Favorites and Process history stay untouched)" : "Clear this browser's Recently closed list - other browser sessions keep their own lists; the workflow files, Presets, Favorites and Process history are never touched"}">${recentClearArmed ? "⚠ Click AGAIN to clear" : "✕ Clear"}</button></div>` +
               `<div class="hub-wf-list hub-wf-list-recent">${rec || `<div class="hub-wf-emptylist">Nothing closed yet</div>`}</div>` +
               `<div class="hub-wf-sect">All saved workflows</div>`
-            : `<div class="hub-wf-sect">${filesTreeFolder ? "📁 " + esc(filesTreeFolder) : "📁 Folder tree"}</div>` + crumbs) +
+            : `<div class="hub-wf-sect">${filesTreeFolder ? "📁 " + esc(extPrettyFolder(filesTreeFolder)) : "📁 Folder tree"}</div>` + crumbs) +
         `<div class="hub-wf-list">${rows || `<div class="hub-wf-emptylist">${emptyMsg}</div>`}${more}</div>` +
         `</div>` +
         `<div class="hub-wf-status">${idxMode() && filesView === "list"
@@ -3784,8 +4149,13 @@ function crumbsHtml() {
     let acc = "";
     for (const p of parts) {
         acc = acc ? acc + "/" + p : p;
+        // v124: the virtual EXTERNAL segments display under the registered
+        // names (the navigation data stays virtual)
+        const lbl = acc === EXT_NS ? "⬡ external folders"
+            : (acc.startsWith(EXT_NS + "/") && !acc.slice(EXT_NS.length + 1).includes("/"))
+                ? (extDirLabel(acc.slice(EXT_NS.length + 1)) || p) : p;
         crumbs.push(`<span class="hub-wf-crumbs-sep">›</span>` +
-            `<button type="button" class="hub-wf-crumb${acc === filesTreeFolder ? " hub-wf-crumb-on" : ""}" data-act="treecrumb" data-folder="${esc(acc)}" title="Back to ${esc(acc)}">${esc(p)}</button>`);
+            `<button type="button" class="hub-wf-crumb${acc === filesTreeFolder ? " hub-wf-crumb-on" : ""}" data-act="treecrumb" data-folder="${esc(acc)}" title="Back to ${esc(extPrettyFolder(acc))}">${esc(lbl)}</button>`);
     }
     return `<div class="hub-wf-crumbs">${crumbs.join("")}</div>`;
 }
@@ -3798,6 +4168,65 @@ function filesSelOutsideCount() {
     let n = 0;
     for (const p of fileSel) if (!visible.has(p)) n++;
     return n;
+}
+
+// ---------------------------------------------------------------------------
+// v124: the SHOWN-files selection (the "☑ Select shown / ☐ Deselect shown"
+// chip + the per-group toggles all read/modify fileSel through these)
+// ---------------------------------------------------------------------------
+
+/** Every path the Files tab currently SHOWS - grouped data first (the
+ *  groups answer carries the rows), then the server page, then the local
+ *  filtered list. */
+function filesSelShownPaths() {
+    if (idxMode() && filesView === "list" && groupsState.on && groupsState.data) {
+        const gd = groupsState.data;
+        const out = [];
+        for (const g of (gd.groups || []))
+            for (const f of (g.files || [])) out.push(f.path);
+        for (const f of (gd.ungrouped || [])) out.push(f.path);
+        return out;
+    }
+    return filesListRows().map((f) => f.path);
+}
+
+/** TRUE when every shown file is already in fileSel (the dynamic chip's
+ *  flip state - the v103 save-form contract). */
+function filesSelShownAll() {
+    const norm = filesSelShownPaths().map(normWfPath).filter(Boolean);
+    return norm.length > 0 && norm.every((p) => fileSel.has(p));
+}
+
+/** v124: toggle EVERY shown file (the "fileselall" action). */
+function filesSelToggleShown() {
+    const norm = filesSelShownPaths().map(normWfPath).filter(Boolean);
+    const all = norm.length > 0 && norm.every((p) => fileSel.has(p));
+    for (const p of norm) {
+        if (all) fileSel.delete(p);
+        else fileSel.add(p);
+    }
+    renderAll();
+}
+
+/** v124: toggle one GROUP (or the "__ungrouped__" tail) - the group header
+ *  buttons. The files come from the loaded groups answer. */
+function filesSelToggleGroup(key) {
+    const gd = groupsState.data;
+    if (!gd) return;
+    let rows = [];
+    if (key === "__ungrouped__") rows = gd.ungrouped || [];
+    else {
+        const g = (gd.groups || []).find((x) => x.key === key);
+        rows = g ? (g.files || []) : [];
+    }
+    const norm = rows.map((f) => normWfPath(f.path)).filter(Boolean);
+    if (!norm.length) return;
+    const all = norm.every((p) => fileSel.has(p));
+    for (const p of norm) {
+        if (all) fileSel.delete(p);
+        else fileSel.add(p);
+    }
+    renderAll();
 }
 
 /** v117 (the owner's plan section 2): the confirm-strip HTML built from the
@@ -4017,6 +4446,12 @@ async function selectUuidFiles(uuid) {
 function savedFileRowHtml(f, depth = 0) {
     const norm = normWfPath(f.path);
     const rel = relWfPath(norm);
+    // v124: an EXTERNAL-folder row shows its registered name instead of the
+    // virtual ".settings_hub_ext/<id>" segments (the tooltip carries the
+    // REAL disk location)
+    const isExt = isExtVirtPath(norm);
+    const dispRel = isExt ? extPretty(norm) : rel;
+    const titleRel = isExt ? extRealPathHint(norm) : rel;
     const openNow = openHasPath(f.path);
     const fav = filesFav.has(norm);
     const ind = depth ? ` style="padding-left:${depth * 10 + 5}px"` : "";
@@ -4046,8 +4481,8 @@ function savedFileRowHtml(f, depth = 0) {
     return `<div class="hub-wf-row${openNow ? " hub-wf-row-active" : ""}" data-fpath="${esc(f.path)}"${ind}>` +
         `<input type="checkbox" class="hub-wf-fcheck" data-fcheck="${esc(f.path)}"${fileSel.has(norm) ? " checked" : ""} title="Select for Open selected / Save selected as preset">` +
         `<span class="hub-wf-filecol">` +
-        `<button type="button" class="hub-wf-name" data-act="openfile" data-path="${esc(f.path)}" title="${esc(rel)}${uuid ? " · UUID " + uuid : ""}">${esc(f.name)}${openNow ? " ●" : ""}${badMark}</button>` +
-        `<span class="hub-wf-filesub" title="${esc(rel)}">${esc(shortPath(rel))}${meta ? " · " + esc(meta) : ""}</span>` +
+        `<button type="button" class="hub-wf-name" data-act="openfile" data-path="${esc(f.path)}" title="${esc(titleRel)}${uuid ? " · UUID " + uuid : ""}${isExt ? " · ⬡ external folder (the saves write THIS file)" : ""}">${esc(f.name)}${openNow ? " ●" : ""}${badMark}</button>` +
+        `<span class="hub-wf-filesub" title="${esc(titleRel)}">${esc(shortPath(dispRel))}${meta ? " · " + esc(meta) : ""}</span>` +
         `</span>` +
         uuidChip +
         (idxReady === false ? "" : `<button type="button" class="hub-wf-cbtn" data-act="fileinspect" data-path="${esc(f.path)}" ` +
@@ -4309,6 +4744,22 @@ async function onBodyClick(e) {
         }
         case "grouprefetch": {
             void runGroups(true);
+            return;
+        }
+        // v124: the GROUP selection toggles (the group headers) + the
+        // shown-files chip - one dynamic flip each (the v103 contract)
+        case "groupselall": {
+            filesSelToggleGroup(btn.dataset.key || "");
+            return;
+        }
+        case "fileselall": {
+            filesSelToggleShown();
+            return;
+        }
+        // v124: the External workflow folders shortcut (the Files toolbar
+        // chip) - the ⚙ popup opens and scrolls to the registry section
+        case "extdirs": {
+            openWfSettingsPop({ scrollToExt: true });
             return;
         }
         case "treefold": {
@@ -5501,7 +5952,7 @@ function onWfPopKey(e) {
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeWfPop(); }
 }
 
-function openWfSettingsPop() {
+function openWfSettingsPop(opts = {}) {
     if (wfPop) { closeWfPop(); return; }
     const pref = getPref();
     // v90: font-scale options = quick picks ∪ current (a custom value keeps
@@ -5561,6 +6012,12 @@ function openWfSettingsPop() {
         `The presets/ and temp/ housekeeping NEVER mixes into the Files list.<br>` +
         `🗑 on a preset card deletes it (click twice). Hidden panel: the mini panel (🗂) or ComfyUI Settings → SettingsHub → 'Mini panel'.` +
         `</div></details>` +
+        // v124: the EXTERNAL WORKFLOW FOLDERS - the registry UI + the folder
+        // picker (the picker expands INSIDE this section - no stacked popups)
+        `<div class="hub-cs-sect" data-wf="extsect">External workflow folders</div>` +
+        `<div class="hub-cs-info" data-wf="extinfo">Reading the registered folders…</div>` +
+        `<div data-wf="extbox"></div>` +
+        `<div class="hub-cs-hint">The workflows of these folders join the Files tab and open/save AT their real paths - ComfyUI's own Ctrl+S (or any save) writes the SAME file. Nothing is copied or moved; detaching a folder never touches its files.</div>` +
         // v116 (plan 5.4/10.4): the STORAGE DASHBOARD - the measured physical
         // bytes of every manager component next to the logical payload sum;
         // Analyze refreshes, Compact runs the verified history rebuild (an
@@ -5632,6 +6089,195 @@ function openWfSettingsPop() {
         rootIn.value = "";
         void rootApply();
     });
+
+    // v124: the EXTERNAL WORKFLOW FOLDERS section - the registry rows, the
+    // add flow (the server-backed folder picker expands right here), the
+    // per-row rename/detach. The whole section re-renders through ONE
+    // renderer driven by extPickState (mode "list" | "browse").
+    const extBox = pop.querySelector('[data-wf="extbox"]');
+    const extInfo = pop.querySelector('[data-wf="extinfo"]');
+    const extAfterChange = async () => {
+        // the library views follow the registry: the Files listing (the ext
+        // rows ride in the same answers), the index (a scan prunes the
+        // detached namespace / indexes the new one), the groups
+        await refreshFilesFull();
+        if (groupsState.on) void runGroups(true);
+        renderAll();
+    };
+    const renderExtSection = () => {
+        if (!extBox.isConnected) return;
+        if (extPickState.mode === "browse") {
+            const crumbs = extPickState.rootsMode
+                ? `<div class="hub-wf-dirpath">Disks and roots:</div>`
+                : `<div class="hub-wf-dirpath" title="${esc(extPickState.cur || "")}">${esc(extPickState.cur || "")}</div>`;
+            const rows = [];
+            if (extPickState.rootsMode) {
+                for (const r of (extPickState.roots || []))
+                    rows.push(`<button type="button" class="hub-wf-dirrow hub-wf-act" data-extact="nav" data-path="${esc(r)}" title="Browse ${esc(r)}">💾 ${esc(r)}</button>`);
+                if (!rows.length) rows.push(`<div class="hub-wf-emptylist">No drives found</div>`);
+            } else {
+                for (const d of (extPickState.dirs || []))
+                    rows.push(`<button type="button" class="hub-wf-dirrow hub-wf-act" data-extact="nav" data-path="${esc(extJoinPath(extPickState.cur, d))}" title="Browse ${esc(d)}">📁 ${esc(d)}</button>`);
+                if (!rows.length) rows.push(`<div class="hub-wf-emptylist">No subfolders here</div>`);
+            }
+            extBox.innerHTML =
+                crumbs +
+                `<div class="hub-wf-dirlist">` + rows.join("") + `</div>` +
+                `<div class="hub-cs-row" style="gap:6px;flex-wrap:wrap">` +
+                (extPickState.rootsMode
+                    ? `<button type="button" class="hub-cs-chip" data-extact="back">← Back to the folders</button>`
+                    : `<button type="button" class="hub-cs-chip" data-extact="up" title="One level up">⬆ Up</button>` +
+                      `<button type="button" class="hub-cs-chip" data-extact="roots" title="Disks and roots">💾 Disks</button>`) +
+                (extPickState.cur ? `<button type="button" class="hub-cs-chip hub-wf-dirpick" data-extact="pick" title="Register ${esc(extPickState.cur)}">✓ Add this folder</button>` : "") +
+                `<button type="button" class="hub-cs-chip" data-extact="back">← Back</button>` +
+                `</div>` +
+                `<div class="hub-cs-row"><span class="hub-cs-box">` +
+                `<input type="text" class="hub-cs-in hub-cs-path" data-ext="path" placeholder="…or paste an absolute path (D:\\datasets\\workflows)" spellcheck="false" autocomplete="off">` +
+                `<button type="button" class="hub-cs-chip" data-extact="addpath">Add path</button></span></div>` +
+                (extPickState.err ? `<div class="hub-cs-info hub-cs-err">${esc(extPickState.err)}</div>` : "");
+            const inp = extBox.querySelector('[data-ext="path"]');
+            inp?.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); extAct("addpath"); }
+                else if (e.key === "Escape") e.stopPropagation();
+            });
+            containPopTextKeys(extBox);
+            extInfo.textContent = "Pick a folder to register - or paste an absolute path.";
+            return;
+        }
+        // mode "list": the registered rows
+        const rows = extDirs.map((d) =>
+            `<div class="hub-wf-dirrow" data-dirid="${esc(d.id)}">` +
+            `<span class="hub-wf-dirname" title="${esc(d.path)}">⬡ ${esc(d.name || d.path)}${d.exists === false ? ' <span class="hub-wf-missing" title="The folder is missing on the disk">⚠</span>' : (d.writable === false ? ' <span class="hub-wf-snap" title="The folder is NOT writable - the workflows open read-only">🔒</span>' : "")}</span>` +
+            `<span class="hub-wf-dirpath" title="${esc(d.path)}">${esc(d.path)}</span>` +
+            `<span class="hub-wf-diracts">` +
+            `<button type="button" class="hub-wf-act" data-extact="rename" data-dirid="${esc(d.id)}" title="Rename this folder's display name (the real folder is never touched)">✎</button>` +
+            `<button type="button" class="hub-wf-act${d._armed ? " hub-wf-armed" : ""}" data-extact="detach" data-dirid="${esc(d.id)}" ` +
+            `title="${d._armed ? "Click AGAIN to DETACH this folder (the files on the disk stay untouched)" : "Detach the folder - its workflows leave the Files tab; the FILES THEMSELVES ARE NEVER TOUCHED"}">${d._armed ? "⚠ AGAIN" : "✕"}</button>` +
+            `</span></div>`).join("");
+        extBox.innerHTML =
+            (rows || `<div class="hub-wf-emptylist">No external folders registered yet</div>`) +
+            `<div class="hub-cs-row" style="gap:6px">` +
+            `<button type="button" class="hub-cs-chip" data-extact="browse">⬡ Add folder…</button>` +
+            `</div>`;
+        extInfo.textContent = extDirsLoaded
+            ? (extDirs.length
+                ? extDirs.length + " folder(s) registered" + (extExtFileCount >= 0 ? " · " + extExtFileCount + " workflow file(s)" : "")
+                : "Register ANY folder with workflows - other disks included.")
+            : "Reading the registered folders…";
+    };
+    const extBrowseTo = async (path) => {
+        extPickState.err = "";
+        try {
+            const res = await jfetch("/settings_hub/workflows/ext/browse?path=" +
+                encodeURIComponent(path || ""));
+            const j = res.json || {};
+            if (!j.ok) { extPickState.err = j.error || ("HTTP " + (res.status || "?")); renderExtSection(); return; }
+            extPickState.mode = "browse";
+            extPickState.rootsMode = !!j.roots;
+            extPickState.cur = j.current || "";
+            extPickState.parent = j.parent;
+            extPickState.dirs = j.dirs || [];
+            extPickState.roots = j.roots_list || [];
+        } catch (e) {
+            extPickState.err = String((e && e.message) || e);
+        }
+        renderExtSection();
+    };
+    const extAddDir = async (path, name) => {
+        extPickState.err = "";
+        try {
+            const res = await jfetch("/settings_hub/workflows/ext/dirs", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path, name }),
+            });
+            const j = res.json || {};
+            if (!j.ok) { extPickState.err = j.error || ("HTTP " + (res.status || "?")); renderExtSection(); return; }
+            await refreshExtDirs();
+            extPickState.mode = "list";
+            extPickState.cur = "";
+            localToast("Folder registered: " + (j.dir?.name || path) +
+                (j.existing ? " (already registered)" : "") +
+                (j.dir?.writable === false ? " · ⚠ NOT writable (read-only)" : ""), 4200);
+            renderExtSection();
+            void extCountFiles();
+            void extAfterChange();
+        } catch (e) {
+            extPickState.err = String((e && e.message) || e);
+            renderExtSection();
+        }
+    };
+    const extAct = (act, el) => {
+        const dirid = el?.dataset?.dirid || "";
+        if (act === "browse") { extBrowseTo(""); return; }
+        if (act === "nav") { extBrowseTo(el.dataset.path || ""); return; }
+        if (act === "up") { extBrowseTo(extPickState.parent || ""); return; }
+        if (act === "roots") { extBrowseTo(""); return; }
+        if (act === "back") { extPickState.mode = "list"; extPickState.err = ""; renderExtSection(); return; }
+        if (act === "pick") { if (extPickState.cur) void extAddDir(extPickState.cur); return; }
+        if (act === "addpath") {
+            const inp = extBox.querySelector('[data-ext="path"]');
+            const v = (inp?.value || "").trim();
+            if (v) void extAddDir(v);
+            return;
+        }
+        if (act === "rename") {
+            const d = extDirById(dirid);
+            if (!d) return;
+            openNamePrompt("Rename the folder (display only)", d.name || d.path, async (name) => {
+                try {
+                    const res = await jfetch("/settings_hub/workflows/ext/dirs/" + encodeURIComponent(dirid), {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name }),
+                    });
+                    if (res.json?.ok) { await refreshExtDirs(); renderExtSection(); renderAll(); }
+                    else localToast("Rename failed: " + (res.json?.error || "?"), 3600);
+                } catch (e) { localToast("Rename failed: " + String((e && e.message) || e), 3600); }
+            });
+            return;
+        }
+        if (act === "detach") {
+            const d = extDirById(dirid);
+            if (!d) return;
+            if (!d._armed) {
+                d._armed = true;
+                setTimeout(() => { d._armed = false; renderExtSection(); }, ARM_MS);
+                renderExtSection();
+                return;
+            }
+            d._armed = false;
+            void (async () => {
+                try {
+                    const res = await jfetch("/settings_hub/workflows/ext/dirs/" + encodeURIComponent(dirid), {
+                        method: "DELETE",
+                    });
+                    if (res.json?.ok) {
+                        localToast("Folder detached - the files on the disk stay untouched", 4200);
+                        await refreshExtDirs();
+                        extExtFileCount = -1;
+                        renderExtSection();
+                        void extAfterChange();
+                    } else localToast("Detach failed: " + (res.json?.error || "?"), 3600);
+                } catch (e) { localToast("Detach failed: " + String((e && e.message) || e), 3600); }
+            })();
+            return;
+        }
+    };
+    extBox.addEventListener("click", (e) => {
+        const b = e.target?.closest?.("[data-extact]");
+        if (b) { e.preventDefault(); extAct(b.dataset.extact, b); }
+    });
+    extBox.addEventListener("keydown", (e) => {
+        const b = e.target?.closest?.("[data-extact]");
+        if (b && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); extAct(b.dataset.extact, b); }
+    });
+    renderExtSection();
+    void (async () => {
+        await refreshExtDirs();
+        renderExtSection();
+        void extCountFiles();
+    })();
 
     // v116 (plan 5.4/10.4): the storage dashboard - the real measured bytes
     const storeInfo = pop.querySelector('[data-wf="storeinfo"]');
@@ -5721,6 +6367,15 @@ function openWfSettingsPop() {
     } catch (_) {}
     window.addEventListener("mousedown", onWfPopDown, true);
     window.addEventListener("keydown", onWfPopKey, true);
+    // v124: the ⬡ Ext folders chip lands the user straight at the registry
+    if (opts.scrollToExt) {
+        try {
+            const sect = pop.querySelector('[data-wf="extsect"]');
+            sect?.scrollIntoView?.({ block: "nearest" });
+            sect?.classList?.add("hub-wf-sect-flash");
+            setTimeout(() => sect?.classList?.remove("hub-wf-sect-flash"), 1600);
+        } catch (_) {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5895,6 +6550,13 @@ export function initWorkflows() {
     void (async () => {
         await loadServerState();
         if (seq !== initSeq) return;
+        // v124: the EXTERNAL folders registry loads with the first data
+        // (the Files chip label + the row display names read it)
+        void (async () => {
+            await refreshExtDirs();
+            void extCountFiles();
+            if (seq === initSeq && mounted) renderAll();
+        })();
         // v112 (plan 3.6): adopt the server-side recent manifest (or migrate
         // the localStorage ring up) right after the first healthy probe
         await loadRecentFromServer();
@@ -7576,7 +8238,27 @@ export function __workflowsTestHooks() {
         },
         addPop: () => addPop,
         closeAddPop,
-        openWfSettingsPop: () => openWfSettingsPop(),
+        openWfSettingsPop: (opts) => openWfSettingsPop(opts || {}),
+        // v124: the EXTERNAL folders hooks (the registry, the fetchApi
+        // interception, the display mapping) + the SHOWN/group selection
+        extState: () => ({
+            installed: extHookInstalled, stats: { ...extHookStats },
+            dirs: JSON.parse(JSON.stringify(extDirs)),
+            loaded: extDirsLoaded, fileCount: extExtFileCount,
+        }),
+        refreshExtDirs: () => refreshExtDirs(),
+        extDirById,
+        extPretty,
+        extPrettyFolder,
+        extRealPathHint,
+        isExtVirtPath,
+        extVirtPathOf,
+        filesSelShownPaths,
+        filesSelShownAll,
+        filesSelToggleShown: () => filesSelToggleShown(),
+        filesSelToggleGroup: (k) => filesSelToggleGroup(k),
+        filesSelSet: () => [...fileSel],
+        installExtFetchHook,
         wfPop: () => wfPop,
         closeWfPop,
         // v117: the owner's plan features (the groups, the Recently-closed

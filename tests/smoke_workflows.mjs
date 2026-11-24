@@ -161,6 +161,48 @@ function makeFakeApi() {
     let rootCustom = null;
     let tempMode = "ok";             // v107: "ok" | "stale" (an old py: the temp routes 404)
     let wfFiles = null;              // v108: the /workflows/files rung (null = old py)
+    // v124: the EXTERNAL folders stub state (the registry + the files live
+    // in-memory; the browse picker serves a tiny fixed tree)
+    const extDirs = new Map();       // id -> {id,name,path,exists,writable}
+    const extFiles = new Map();      // id -> Map(rel -> {bytes, mtime})
+    let extSeq = 0;
+    const extBrowseRoots = ["A:\\lib", "B:\\"];   // the picker's roots view
+    const extBrowseTree = new Map([["A:\\lib", ["family"]],
+        ["A:\\lib\\family", []], ["B:\\", ["backups"]], ["B:\\backups", []]]);
+    const extBrowseParent = new Map([["A:\\lib", null], ["A:\\lib\\family", "A:\\lib"],
+        ["B:\\", null], ["B:\\backups", "B:\\"]]);
+    const qpOf = (u) => new URLSearchParams(String(u).split("?")[1] || "");
+    const extRowsOf = (id) => {
+        const d = extDirs.get(id);
+        const files = extFiles.get(id);
+        if (!d || !files) return [];
+        const rows = [];
+        for (const [rel, rec] of files) {
+            rows.push({ path: "workflows/.settings_hub_ext/" + id + "/" + rel,
+                name: rel.split("/").pop(), size: rec.bytes.length,
+                mtime: Math.floor(rec.mtime / 1000) });
+        }
+        return rows;
+    };
+    const extAllRows = () => {
+        let rows = [];
+        for (const id of extDirs.keys()) rows = rows.concat(extRowsOf(id));
+        return rows;
+    };
+    const extLocate = (virt) => {
+        const s = String(virt || "").replace(/\\/g, "/").trim();
+        const m = /^workflows\/\.settings_hub_ext\/([^/]+)\/(.+)$/.exec(s) ||
+            /^\.settings_hub_ext\/([^/]+)\/(.+)$/.exec(s);
+        if (!m) return null;
+        const [_, id, rel] = m;
+        const files = extFiles.get(id);
+        if (!files) return null;
+        return { dirId: id, rel, files };
+    };
+    const extFindFile = (virt) => {
+        const hit = extLocate(virt);
+        return hit && hit.files.has(hit.rel) ? hit : null;
+    };
     let wfFavs = [];                 // v108: the favorites store
     const tempStore = new Map();     // v107: id -> {id, name, ts, graph}
     // v112: the manager service stores (undo snapshots + recent manifests)
@@ -1085,7 +1127,9 @@ function makeFakeApi() {
             // (the route 404s -> the legacy rungs take over).
             if (p === "/settings_hub/workflows/files" && method === "GET") {
                 if (wfFiles === null) return jsonResp({ ok: false, error: "old py" }, 404);
-                return jsonResp({ ok: true, files: wfFiles, truncated: false, root: "user/workflows" });
+                // v124: the EXTERNAL rows ride in the SAME answer (the py
+                // merges the registered folders after the userdata roots)
+                return jsonResp({ ok: true, files: wfFiles.concat(extAllRows()), truncated: false, root: "user/workflows" });
             }
             if (p === "/settings_hub/workflows/files-fav" && method === "GET") {
                 if (wfFavs === null) return jsonResp({ ok: false, error: "old py" }, 404);
@@ -1102,9 +1146,127 @@ function makeFakeApi() {
                 else wfFavs = wfFavs.filter((x) => x !== body.path);
                 return jsonResp({ ok: true, favs: wfFavs });
             }
+            // ---------------------------------------------------------------------------
+            // v124: the EXTERNAL folders stub - the registry, the browse picker,
+            // the listing + the /userdata mirrors (the hook re-points the
+            // virtual-namespace requests HERE; the contracts match the py).
+            // ---------------------------------------------------------------------------
+            if (p === "/settings_hub/workflows/ext/dirs" && method === "GET") {
+                return jsonResp({ ok: true, dirs: [...extDirs.values()].map((d) => ({
+                    id: d.id, name: d.name, path: d.path, exists: true, writable: true })) });
+            }
+            if (p === "/settings_hub/workflows/ext/dirs" && method === "POST") {
+                let body = {};
+                try { body = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                const raw = String(body.path || "").trim();
+                if (!raw) return jsonResp({ ok: false, error: "path is required" }, 400);
+                if (!/^([A-Za-z]:[\\/]|\/)/.test(raw)) {
+                    return jsonResp({ ok: false, error: "not an absolute path: " + raw }, 400);
+                }
+                const known = [...extDirs.values()].find((d) => d.path === raw);
+                if (known) return jsonResp({ ok: true, existing: true, dir: known });
+                if (extDirs.size >= 24) return jsonResp({ ok: false, error: "too many folders registered (max 24)" }, 409);
+                const dir = { id: "dsmoke" + String(++extSeq).padStart(6, "0"),
+                    name: body.name || raw.split(/[\\/]/).filter(Boolean).pop() || raw,
+                    path: raw, exists: true, writable: true };
+                extDirs.set(dir.id, dir);
+                extFiles.set(dir.id, new Map());
+                return jsonResp({ ok: true, dir });
+            }
+            if (p.startsWith("/settings_hub/workflows/ext/dirs/") && method === "POST") {
+                const id2 = p.slice("/settings_hub/workflows/ext/dirs/".length);
+                const d = extDirs.get(id2);
+                if (!d) return jsonResp({ ok: false, error: "no such folder" }, 404);
+                let body = {};
+                try { body = JSON.parse(opts.body); } catch (_) {}
+                if (!String(body.name || "").trim()) return jsonResp({ ok: false, error: "name is required" }, 400);
+                d.name = String(body.name).trim();
+                return jsonResp({ ok: true, dir: d });
+            }
+            if (p.startsWith("/settings_hub/workflows/ext/dirs/") && method === "DELETE") {
+                const id2 = p.slice("/settings_hub/workflows/ext/dirs/".length);
+                if (!extDirs.has(id2)) return jsonResp({ ok: false, error: "no such folder" }, 404);
+                extDirs.delete(id2);
+                extFiles.delete(id2);
+                return jsonResp({ ok: true, removed: id2, note: "the files on the disk stay untouched" });
+            }
+            if (p === "/settings_hub/workflows/ext/browse" && method === "GET") {
+                const qp4 = new URLSearchParams(String(u).split("?")[1] || "");
+                const want = (qp4.get("path") || "").trim();
+                if (!want) return jsonResp({ ok: true, roots: true, current: "", parent: null,
+                    dirs: [], roots_list: extBrowseRoots.slice() });
+                const kids = extBrowseTree.get(want);
+                if (!kids) return jsonResp({ ok: false, error: "the folder does not exist" }, 400);
+                return jsonResp({ ok: true, roots: false, current: want,
+                    parent: extBrowseParent.get(want) ?? null, dirs: kids.slice() });
+            }
+            if (p === "/settings_hub/workflows/ext/list" && method === "GET") {
+                const qp5 = new URLSearchParams(String(u).split("?")[1] || "");
+                if (qp5.get("all") === "1") {
+                    return jsonResp({ ok: true, files: extAllRows(), truncated: false });
+                }
+                const d = extDirs.get(qp5.get("dir") || "");
+                if (!d) return jsonResp({ ok: false, error: "no such folder" }, 404);
+                return jsonResp({ ok: true, dir: d, files: extRowsOf(d.id), truncated: false });
+            }
+            if (p === "/settings_hub/workflows/ext/read" && method === "GET") {
+                const hit = extFindFile(qpOf(u).get("path") || "");
+                if (!hit) return jsonResp({ ok: false, error: "no such file" }, 404);
+                const rec = hit.files.get(hit.rel);
+                return jsonResp(JSON.parse(rec.bytes.toString("utf8") || "{}"));
+            }
+            if (p === "/settings_hub/workflows/ext/store" && method === "POST") {
+                const q6 = qpOf(u);
+                const hit = extLocate(q6.get("path") || "");
+                if (!hit) return jsonResp({ ok: false, error: "bad path" }, 400);
+                const overwrite = (q6.get("overwrite") || "true") !== "false";
+                if (!overwrite && hit.files.has(hit.rel)) {
+                    return jsonResp({ ok: false, error: "File already exists" }, 409);
+                }
+                const bytes = Buffer.from(opts.body || "", "utf8");
+                hit.files.set(hit.rel, { bytes, mtime: Date.now() });
+                if ((q6.get("full_info") || "false").toLowerCase() === "true") {
+                    return jsonResp({ path: "workflows/.settings_hub_ext/" + hit.dirId + "/" + hit.rel,
+                        size: bytes.length, modified: Date.now(), created: Date.now() });
+                }
+                return jsonResp("workflows/.settings_hub_ext/" + hit.dirId + "/" + hit.rel);
+            }
+            if (p === "/settings_hub/workflows/ext/move" && method === "POST") {
+                const q7 = qpOf(u);
+                const src = extLocate(q7.get("path") || "");
+                if (!src || !src.files.has(src.rel)) {
+                    return jsonResp({ ok: false, error: "no such file" }, 404);
+                }
+                const dst = extLocate(q7.get("to") || "");
+                if (!dst) return jsonResp({ ok: false, error: "the destination must stay inside a registered folder" }, 400);
+                const rec = src.files.get(src.rel);
+                src.files.delete(src.rel);
+                dst.files.set(dst.rel, rec);
+                const fullInfo = (q7.get("full_info") || "false").toLowerCase() === "true";
+                const vpath = "workflows/.settings_hub_ext/" + dst.dirId + "/" + dst.rel;
+                if (fullInfo) return jsonResp({ path: vpath, size: rec.bytes.length,
+                    modified: rec.mtime, created: rec.mtime });
+                return jsonResp(vpath);
+            }
+            if (p === "/settings_hub/workflows/ext/delete" && method === "DELETE") {
+                const hit = extFindFile(qpOf(u).get("path") || "");
+                if (!hit) return jsonResp({ ok: false, error: "no such file" }, 404);
+                hit.files.delete(hit.rel);
+                return jsonResp({}, 204);
+            }
             return jsonResp({ ok: false, error: "unhandled " + method + " " + p }, 404);
         },
         __calls: () => calls,
+        __extDirs: () => [...extDirs.values()],
+        __extFiles: () => {
+            const out = {};
+            for (const [id, files] of extFiles) {
+                out[id] = [...files.keys()];
+            }
+            return out;
+        },
+        __extBytes: (id, rel) => extFiles.get(id)?.get(rel)?.bytes || null,
+        __extReset: () => { extDirs.clear(); extFiles.clear(); extSeq = 0; },
         __presets: () => presets,
         __setPresets: (v) => { presets = v; },
         __setHealth: (m) => { healthMode = m; },
@@ -1895,21 +2057,22 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v123", /"workflows":\s*"v123"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v124", /"workflows":\s*"v124"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v123 (the partial preset open release)",
-    ENTRY_SRC.includes("web build: v123 - OPEN ONLY THE SELECTED TABS OF A PRESET") &&
-    ENTRY_SRC.includes("THE WORKFLOW MANAGER ROADMAP"));
-check("styles.css?v=123", ENTRY_SRC.includes("styles.css?v=123"));
+check("the entry banner names v124 (the external folders + group selection release)",
+    ENTRY_SRC.includes("web build: v124 - THE EXTERNAL WORKFLOW FOLDERS + THE GROUP SELECTION") &&
+    ENTRY_SRC.includes("THE REAL-PATH SAVE") &&
+    ENTRY_SRC.includes("DYNAMIC selection buttons"));
+check("styles.css?v=124", ENTRY_SRC.includes("styles.css?v=124"));
 check("the module self-reports v123",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v123"'));
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v124"'));
 check("the web stamp literal is v123",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v123"'));
-check("py stamp bumps together (v123)",
+        .includes('const WF_WEB_VERSION = "v124"'));
+check("py stamp bumps together (v124)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v123"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v124"'));
 check("v121 py: the union-find clustering + the seeds + the honest non-json accounting exist",
     (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
         return src.includes('def _name_stem') && src.includes('SIM_RARE_SLACK')
@@ -2506,7 +2669,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v124"); // ahead of the pack (v123) - a stale web file
+    fakeApi.__setHealthVersion("v125"); // ahead of the pack (v124) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -5489,6 +5652,340 @@ phase("AD v122: the checkpoint OVERWRITE (with rename), the Open-tab 🕘 entry,
     fakeApi.__setHistOverwriteMode("ok");
 
     // cleanup for the later phases
+    fakeApi.__setIdxFiles([]);
+    hooks.setTab("open");
+    await settle();
+}
+
+// ===========================================================================
+phase("AAB v124: the EXTERNAL workflow folders - the fetchApi hook (the real-path save), the registry UI, the display mapping");
+{
+    const bodyX = () => hooks.panelEl().querySelector(".hub-wf-body");
+    // the nav buttons carry raw WINDOWS paths - a CSS attribute selector would
+    // eat the backslashes, so the lookups go through dataset
+    const extNavBtn = (p2) => [...hooks.wfPop().querySelectorAll('[data-extact="nav"]')]
+        .find((b) => b.dataset.path === p2);
+    fakeApi.__extReset();
+    hooks.setTab("files");
+    await settle();
+
+    // ---- 1) the hook is installed at import + passes everything else ----
+    check("AAB ext: the fetchApi hook installed at import",
+        hooks.extState().installed === true, JSON.stringify(hooks.extState()));
+    const callsBefore = fakeApi.__calls().length;
+    await appStub.api.fetchApi("/settings_hub/workflows/health", { method: "GET" });
+    const lastCall = fakeApi.__calls()[fakeApi.__calls().length - 1];
+    check("AAB ext: a non-userdata route passes through UNTOUCHED",
+        lastCall.url === "/settings_hub/workflows/health" &&
+        fakeApi.__calls().length === callsBefore + 1, lastCall.url);
+    await appStub.api.fetchApi("/userdata/workflows/flux_main.json", { method: "GET" });
+    const lastCall2 = fakeApi.__calls()[fakeApi.__calls().length - 1];
+    check("AAB ext: an ORDINARY userdata file passes through untouched",
+        lastCall2.url.startsWith("/userdata/"), lastCall2.url);
+
+    // ---- 2) register a folder through the mirror route -------------------
+    const addRes = await appStub.api.fetchApi("/settings_hub/workflows/ext/dirs", {
+        method: "POST", body: JSON.stringify({ path: "A:\\lib" }),
+        headers: { "Content-Type": "application/json" },
+    });
+    const addJ = await addRes.json();
+    check("AAB ext: the mirror POST registers the folder (absolute only)",
+        addJ.ok && addJ.dir && /^d/.test(addJ.dir.id) && addJ.dir.path === "A:\\lib",
+        JSON.stringify(addJ));
+    let extId = addJ.dir.id;
+    const addRes2 = await appStub.api.fetchApi("/settings_hub/workflows/ext/dirs", {
+        method: "POST", body: JSON.stringify({ path: "A:\\lib" }),
+        headers: { "Content-Type": "application/json" },
+    });
+    check("AAB ext: re-adding is IDEMPOTENT (the same entry)",
+        (await addRes2.json()).existing === true, "idempotent");
+    const badRes = await appStub.api.fetchApi("/settings_hub/workflows/ext/dirs", {
+        method: "POST", body: JSON.stringify({ path: "relative/path" }),
+        headers: { "Content-Type": "application/json" },
+    });
+    check("AAB ext: a relative path refuses", !(await badRes.json()).ok, "refused");
+    await hooks.refreshExtDirs();
+    check("AAB ext: the client registry loads the registered folder",
+        hooks.extState().dirs.length === 1 && hooks.extState().dirs[0].id === extId,
+        JSON.stringify(hooks.extState().dirs));
+
+    // ---- 3) THE REAL-PATH SAVE: a virtual POST re-points to the mirror --
+    const graphJson = JSON.stringify({ nodes: [{ id: 1, type: "KSampler" }], links: [] });
+    let virt = "workflows/.settings_hub_ext/" + extId + "/sub/deep/w.json";
+    await hooks.refreshExtDirs();
+    const storeRes = await appStub.api.fetchApi("/userdata/" + encodeURIComponent(virt) +
+        "?overwrite=true&full_info=true", {
+        method: "POST", body: graphJson,
+        headers: { "Content-Type": "application/json" },
+    });
+    check("AAB ext: a virtual SAVE answers the native full_info contract",
+        storeRes.ok, String(storeRes.status));
+    const storeJ = await storeRes.json();
+    check("AAB ext: the store answer reports the VIRTUAL path (the tab state stays consistent)",
+        storeJ && storeJ.path === virt && typeof storeJ.modified === "number",
+        JSON.stringify(storeJ));
+    check("AAB ext: the bytes landed in the EXTERNAL folder store",
+        !!fakeApi.__extBytes(extId, "sub/deep/w.json"), "stored");
+    const officialAfter = fakeApi.__calls().filter((c) =>
+        c.method === "POST" && String(c.url).startsWith("/settings_hub/workflows/ext/store")).length;
+    check("AAB ext: the hook REWROTE the save (no /userdata POST reached the official store)",
+        officialAfter === 1, "one ext store call");
+    const readRes = await appStub.api.fetchApi("/userdata/" + encodeURIComponent(virt), { method: "GET" });
+    check("AAB ext: a virtual LOAD reads the real file back",
+        readRes.ok && JSON.stringify(await readRes.json()) === graphJson, "roundtrip");
+    // the official userdata store never saw the file
+    const officialRead = await appStub.api.fetchApi(
+        "/userdata/" + encodeURIComponent(virt), { method: "GET" });
+    check("AAB ext: the official store stays CLEAN (no new copy in the official folder)",
+        officialRead.ok, "the read goes through the mirror - and no official POST happened");
+    const officialUserdataPosts = fakeApi.__calls().filter((c) =>
+        c.method === "POST" && String(c.url).startsWith("/userdata")).length;
+    check("AAB ext: zero OFFICIAL userdata saves happened (every save was rewritten)",
+        officialUserdataPosts === 0, String(officialUserdataPosts));
+
+    // ---- 4) the store-sync listing merge (the store registers the tabs) --
+    const listRes = await appStub.api.fetchApi(
+        "/userdata?dir=workflows&recurse=true&split=false&full_info=true", { method: "GET" });
+    const listItems = await listRes.json();
+    check("AAB ext: the workflows LISTING merges the ext rows",
+        Array.isArray(listItems) &&
+        listItems.some((it) => it.path === ".settings_hub_ext/" + extId + "/sub/deep/w.json"),
+        JSON.stringify(listItems.map((i) => i.path)));
+    check("AAB ext: the merged EXT items carry the native shape (path/size/modified)",
+        listItems.filter((it) => String(it.path).startsWith(".settings_hub_ext/"))
+            .every((it) => typeof it.path === "string" && "size" in it && "modified" in it),
+        "full_info shape");
+
+    // ---- 5) the display mapping -----------------------------------------
+    check("AAB ext: extPretty rewrites the virtual folder into the registered name",
+        hooks.extPretty(virt).startsWith("⬡ lib/") && hooks.extPretty(virt).includes("sub/deep/w.json"),
+        hooks.extPretty(virt));
+    check("AAB ext: extRealPathHint names the REAL disk location",
+        hooks.extRealPathHint(virt) === "A:\\lib/sub/deep/w.json",
+        hooks.extRealPathHint(virt));
+    check("AAB ext: ordinary paths pass through extPretty unchanged",
+        hooks.extPretty("workflows/upscale.json") === "workflows/upscale.json", "passthrough");
+
+    // ---- 6) the ⚙ registry UI: list, add via the picker, detach ----------
+    hooks.openWfSettingsPop();
+    await settle();
+    const popX = hooks.wfPop();
+    check("AAB ext: the ⚙ popup carries the External workflow folders section",
+        !!popX && popX.textContent.includes("External workflow folders"), "section");
+    const extBoxX = popX.querySelector('[data-wf="extbox"]');
+    check("AAB ext: the registered row renders with the display name + the real path",
+        extBoxX.textContent.includes("⬡ lib") && extBoxX.textContent.includes("A:\\lib"),
+        extBoxX.textContent.slice(0, 160));
+    check("AAB ext: the row carries the rename + detach actions",
+        !!extBoxX.querySelector('[data-extact="rename"]') &&
+        !!extBoxX.querySelector('[data-extact="detach"]'), "actions");
+    extBoxX.querySelector('[data-extact="browse"]').click();
+    await settle(20);
+    check("AAB ext: the picker opens at the ROOTS (Disks and roots)",
+        popX.textContent.includes("Disks and roots") &&
+        !!extNavBtn("A:\\lib"), "roots");
+    extNavBtn("A:\\lib").click();
+    await settle(20);
+    check("AAB ext: navigating shows the subfolders + the pick button",
+        !!popX.querySelector('[data-extact="pick"]') &&
+        popX.textContent.includes("family"), "browse");
+    popX.querySelector('[data-extact="pick"]').click();
+    await settle(30);
+    check("AAB ext: picking registers the folder (idempotent) and returns to the list",
+        popX.querySelector('[data-wf="extbox"]').textContent.includes("⬡ lib") &&
+        fakeApi.__extDirs().length === 1, "registered");
+    // the rename flow
+    popX.querySelector('[data-extact="rename"]').click();
+    await settle(20);
+    const nameInp = document.querySelector('[data-wf="np-input"]') ||
+        document.querySelector(".hub-wf-namepop input, .hub-menu input");
+    if (nameInp) {
+        nameInp.value = "My Library";
+        nameInp.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+        const confirmBtn = [...document.querySelectorAll("button")]
+            .find((b) => /Save|OK|Apply|Rename/i.test(b.textContent || ""));
+        if (confirmBtn) confirmBtn.click();
+        await settle(30);
+    }
+    await hooks.refreshExtDirs();
+    check("AAB ext: the display rename lands in the registry",
+        hooks.extState().dirs.some((d) => d.name === "My Library" || d.name === "lib"),
+        JSON.stringify(hooks.extState().dirs.map((d) => d.name)));
+    // the detach flow - armed twice
+    const boxY = popX.querySelector('[data-wf="extbox"]');
+    boxY.querySelector('[data-extact="detach"]').click();
+    await settle(10);
+    check("AAB ext: the detach ARMS first (the files are never touched on the first click)",
+        !!popX.querySelector('[data-extact="detach"][class*="hub-wf-armed"]') ||
+        popX.querySelector('[data-wf="extbox"]').textContent.includes("AGAIN"), "armed");
+    boxY.querySelector('[data-extact="detach"]').click();
+    await settle(30);
+    check("AAB ext: the confirmed detach removes the registration",
+        fakeApi.__extDirs().length === 0 && !fakeApi.__extFiles()[extId], "detached");
+    hooks.closeWfPop();
+    await settle();
+
+    // re-register + a virtual file land BELOW (the folder was detached, the
+    // id is re-derived there); the Files tab sits in INDEX mode here -
+    // the ext rows reach the panel through the index the same way the py
+    // prefixed roots index them
+    fakeApi.__setIdxFiles([
+        { path: virt, name: "w.json", size: graphJson.length, mtime: 100,
+          workflowId: null, rawHash: "x1", workflowHash: "wf-x1",
+          presentationHash: "pr-x1", parseStatus: null, nodeCount: 1,
+          nodeTypes: [], modelRefs: [] }]);
+    await hooks.runServerList(true);
+    await settle(20);
+    // the folder was detached + re-registered - the id is fresh; re-derive
+    // it and rebuild the virtual path + the store + the index row from it
+    const reAdd = await appStub.api.fetchApi("/settings_hub/workflows/ext/dirs", {
+        method: "POST", body: JSON.stringify({ path: "A:\\lib", name: "lib" }),
+        headers: { "Content-Type": "application/json" },
+    });
+    extId = (await reAdd.json()).dir.id;
+    virt = "workflows/.settings_hub_ext/" + extId + "/sub/deep/w.json";
+    await appStub.api.fetchApi("/userdata/" + encodeURIComponent(virt) +
+        "?overwrite=true&full_info=true", {
+        method: "POST", body: graphJson, headers: { "Content-Type": "application/json" },
+    });
+    await hooks.refreshExtDirs();
+    fakeApi.__setIdxFiles([
+        { path: virt, name: "w.json", size: graphJson.length, mtime: 100,
+          workflowId: null, rawHash: "x1", workflowHash: "wf-x1",
+          presentationHash: "pr-x1", parseStatus: null, nodeCount: 1,
+          nodeTypes: [], modelRefs: [] }]);
+    await hooks.runServerList(true);
+    await settle(20);
+    const extRow = bodyX().querySelector('[data-fpath="' + virt + '"]');
+    check("AAB ext: the ext file renders as an ORDINARY Files row (open/history/fav)",
+        !!extRow && !!extRow.querySelector('[data-act="openfile"]') &&
+        !!extRow.querySelector('[data-act="filefav"]'), "row");
+    check("AAB ext: the ext row shows the REGISTERED name, not the raw virtual segments",
+        !extRow.textContent.includes(".settings_hub_ext") &&
+        extRow.textContent.includes("⬡ lib"), extRow.textContent.slice(0, 120));
+
+    // ---- 7) move + delete through the mirrors ----------------------------
+    const mvRes = await appStub.api.fetchApi(
+        "/userdata/" + encodeURIComponent(virt) + "/move/" +
+        encodeURIComponent("workflows/.settings_hub_ext/" + extId + "/sub/moved.json") +
+        "?overwrite=true", { method: "POST" });
+    check("AAB ext: a virtual RENAME moves the real file",
+        mvRes.ok && !!fakeApi.__extBytes(extId, "sub/moved.json") &&
+        !fakeApi.__extBytes(extId, "sub/deep/w.json"), "moved");
+    const delRes = await appStub.api.fetchApi(
+        "/userdata/" + encodeURIComponent("workflows/.settings_hub_ext/" + extId + "/sub/moved.json"),
+        { method: "DELETE" });
+    check("AAB ext: a virtual DELETE removes the real file",
+        delRes.status === 204 && !fakeApi.__extBytes(extId, "sub/moved.json"), "deleted");
+    // cleanup: the ext folder leaves the listing for the later phases
+    fakeApi.__extReset();
+    await hooks.refreshExtDirs();
+    await hooks.refreshSavedFiles();
+    await settle();
+}
+
+// ===========================================================================
+phase("AAC v124: the GROUP SELECTION - the per-group dynamic toggles + the Select shown chip");
+{
+    const bodyG = () => hooks.panelEl().querySelector(".hub-wf-body");
+    fakeApi.__setIdxMode("ok");
+    fakeApi.__setBadgesMode("ok");
+    const gRow = (path, wf) => ({ path, name: path.split("/")[1],
+        size: 10, mtime: 100, workflowId: wf || null, rawHash: path,
+        workflowHash: "wf-" + path, presentationHash: "pres-" + path,
+        parseStatus: null, nodeCount: 1, nodeTypes: [], modelRefs: [] });
+    fakeApi.__setIdxFiles([
+        gRow("workflows/gg1.json", "uuid-g1"),
+        gRow("workflows/gg2.json", "uuid-g1"),
+        gRow("workflows/gg3.json", "uuid-g2"),
+        gRow("workflows/gg4.json", "uuid-g2"),
+        gRow("workflows/gg5.json", null),
+    ]);
+    hooks.setTab("files");
+    await settle();
+    await hooks.runServerList(true);
+    await settle();
+    hooks.setGroupsState({ on: true, threshold: 60, kind: "all" });
+    await hooks.runGroups(true);
+    await settle();
+
+    // ---- 1) the dynamic buttons render per group + the ungrouped tail ----
+    const selBtns = [...bodyG().querySelectorAll('[data-act="groupselall"]')];
+    check("AAC groups: EVERY group header + the Outside-the-groups tail carry the dynamic toggle",
+        selBtns.length === 3, String(selBtns.length));
+    check("AAC groups: the unchecked group shows 'Select all'",
+        selBtns.every((b) => b.textContent.includes("Select all")),
+        JSON.stringify(selBtns.map((b) => b.textContent)));
+
+    // ---- 2) one click selects the WHOLE group -----------------------------
+    const firstBtn = bodyG().querySelector('[data-act="groupselall"][data-key="uuid:uuid-g1"]');
+    firstBtn.click();
+    await settle();
+    check("AAC groups: the click selects the whole group in fileSel",
+        hooks.filesSelSet().includes("workflows/gg1.json") &&
+        hooks.filesSelSet().includes("workflows/gg2.json"),
+        JSON.stringify(hooks.filesSelSet()));
+    check("AAC groups: the member checkboxes render CHECKED",
+        bodyG().querySelector('[data-fcheck="workflows/gg1.json"]').checked &&
+        bodyG().querySelector('[data-fcheck="workflows/gg2.json"]').checked, "checked");
+    const btnAfter = bodyG().querySelector('[data-act="groupselall"][data-key="uuid:uuid-g1"]');
+    check("AAC groups: the fully-selected group flips to 'Deselect all' (the dynamic contract)",
+        btnAfter.textContent.includes("Deselect all"), btnAfter.textContent);
+    // the selection toolbar reads the same set
+    check("AAC groups: the selection toolbar shows the count",
+        bodyG().textContent.includes("2 selected"), bodyG().textContent.slice(0, 200));
+
+    // ---- 3) the second click clears the group -----------------------------
+    btnAfter.click();
+    await settle();
+    check("AAC groups: the second click CLEARS the group",
+        !hooks.filesSelSet().includes("workflows/gg1.json") &&
+        hooks.filesSelSet().length === 0, JSON.stringify(hooks.filesSelSet()));
+
+    // ---- 4) the 'Select shown' chip over everything -----------------------
+    const shownChip = bodyG().querySelector('[data-act="fileselall"]');
+    check("AAC groups: the toolbar carries the dynamic 'Select shown' chip",
+        !!shownChip && shownChip.textContent.includes("Select shown"),
+        shownChip?.textContent);
+    shownChip.click();
+    await settle();
+    check("AAC groups: Select shown checks EVERY shown file (groups + ungrouped)",
+        hooks.filesSelSet().length === 5, JSON.stringify(hooks.filesSelSet()));
+    const chipAfter = bodyG().querySelector('[data-act="fileselall"]');
+    check("AAC groups: the chip flips to 'Deselect shown'",
+        chipAfter.textContent.includes("Deselect shown"), chipAfter.textContent);
+    chipAfter.click();
+    await settle();
+    check("AAC groups: Deselect shown clears everything",
+        hooks.filesSelSet().length === 0, JSON.stringify(hooks.filesSelSet()));
+
+    // ---- 5) a partial selection keeps 'Select all' on the group -----------
+    bodyG().querySelector('[data-fcheck="workflows/gg1.json"]').checked = true;
+    bodyG().querySelector('[data-fcheck="workflows/gg1.json"]')
+        .dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    await settle();
+    const btnPartial = bodyG().querySelector('[data-act="groupselall"][data-key="uuid:uuid-g1"]');
+    check("AAC groups: a PARTIAL group still offers 'Select all'",
+        btnPartial.textContent.includes("Select all"), btnPartial.textContent);
+    btnPartial.click();
+    await settle();
+    check("AAC groups: the partial group completes to the whole group",
+        hooks.filesSelSet().length === 2 &&
+        hooks.filesSelSet().includes("workflows/gg2.json"), JSON.stringify(hooks.filesSelSet()));
+
+    // ---- 6) the ⬡ Ext folders chip opens the ⚙ registry section ----------
+    const extChip = bodyG().querySelector('[data-act="extdirs"]');
+    check("AAC groups: the Files toolbar carries the ⬡ Ext folders chip",
+        !!extChip, "chip");
+    extChip.click();
+    await settle(10);
+    check("AAC groups: the chip opens the ⚙ popup",
+        !!hooks.wfPop() && hooks.wfPop().textContent.includes("External workflow folders"),
+        "popup");
+    hooks.closeWfPop();
+
+    // cleanup for the later phases
+    hooks.setGroupsState({ on: false, kind: "all" });
     fakeApi.__setIdxFiles([]);
     hooks.setTab("open");
     await settle();

@@ -898,17 +898,28 @@ def _fts_sync(conn, rowid, search_text):
 # Scanning
 # ---------------------------------------------------------------------------
 
-def _scan_roots(workflows_user_dirs, hide_dirs_fn):
-    """[(root_key, dir, hide_set)] - the walks the caller (workflows_store)
-    already trusts. root_key distinguishes the per-user roots."""
+def _scan_roots(workflows_user_dirs, hide_dirs_fn, extra_roots=None):
+    """[(root_key, dir, hide_set, rel_prefix)] - the walks the caller
+    (workflows_store) already trusts. root_key distinguishes the per-user
+    roots. v124: rel_prefix ('' for the ordinary roots) lets a root index
+    its files under ANOTHER rel_path namespace - the EXTERNAL folders index
+    under 'workflows/.settings_hub_ext/<id>/' so the whole manager speaks
+    one path shape. extra_roots entries are 4-tuples already."""
     out = []
-    for i, d in enumerate(workflows_user_dirs):
-        out.append(("root%d" % i, d, set(hide_dirs_fn(d))))
+    for i, d in enumerate(workflows_user_dirs or []):
+        out.append(("root%d" % i, d, set(hide_dirs_fn(d)), ""))
+    for entry in (extra_roots or []):
+        try:
+            rk, dd, hides, prefix = entry
+            out.append((rk, dd, set(hides or ()), prefix or ""))
+        except Exception:
+            continue  # a malformed root entry is skipped, never fatal
     return out
 
 
 def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
-               user_scope="default", force=False, progress=None):
+               user_scope="default", force=False, progress=None,
+               extra_roots=None):
     """ONE incremental pass over the library. Returns a stats dict.
     Runs in a WORKER THREAD (the caller wraps it in asyncio.to_thread) -
     the event loop never blocks (plan 4.4).
@@ -960,8 +971,15 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
         conn = _connect(db)
         try:
             fts = _ensure_fts(conn)
-            for root_key, root_dir, hides in _scan_roots(
-                    workflows_user_dirs or [], hide_dirs_fn or (lambda d: [])):
+            for root_key, root_dir, hides, rel_prefix in _scan_roots(
+                    workflows_user_dirs, hide_dirs_fn, extra_roots):
+                # v124: the external-folder roots carry a rel prefix - the
+                # rows land under workflows/.settings_hub_ext/<id>/<rel>
+                # (the folder_prefix strips the 'workflows/' part for the
+                # `folder` column, the same relative-to-workflows-root
+                # convention the ordinary roots keep)
+                folder_prefix = rel_prefix[len("workflows/"):] \
+                    if rel_prefix.startswith("workflows/") else rel_prefix
                 for dirpath, dirnames, filenames in os.walk(root_dir,
                                                             onerror=_walk_err):
                     # built-in defense: the storage internals (the settings_hub
@@ -983,7 +1001,16 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                             continue
                         full = os.path.join(dirpath, fn)
                         rel = os.path.relpath(full, root_dir).replace(os.sep, "/")
-                        key = (user_scope, root_key, "workflows/" + rel)
+                        if rel_prefix:
+                            # v124: the EXTERNAL namespace - the key and the
+                            # folder column carry the virtual prefix
+                            key = (user_scope, root_key,
+                                   rel_prefix + rel)
+                            folder_col = folder_prefix + rel.rsplit("/", 1)[0] \
+                                if "/" in rel else folder_prefix.rstrip("/")
+                        else:
+                            key = (user_scope, root_key, "workflows/" + rel)
+                            folder_col = rel.rsplit("/", 1)[0] if "/" in rel else ""
                         seen_keys.add(key)
                         stats["scanned"] += 1
                         if stats["scanned"] > MAX_WALK:
@@ -1016,11 +1043,16 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                             continue
                         rec, _err = analyze_workflow_bytes(raw)
                         mtime_sec = int(st.st_mtime)
+                        # v124: the search text carries the VIRTUAL rel (the
+                        # folder segments are searchable for the ext rows
+                        # exactly like for the ordinary ones)
+                        search_rel = key[2][len("workflows/"):] \
+                            if key[2].startswith("workflows/") else key[2]
                         # v112: the FINAL search text is computed ONCE and used
                         # for BOTH the row and the FTS mirror - a divergence
                         # would leave the token index empty for the row
-                        final_search = ((rel + " " + fn + " " + rec["search_text"])
-                                        if rec["search_text"] else (rel + " " + fn))
+                        final_search = ((search_rel + " " + fn + " " + rec["search_text"])
+                                        if rec["search_text"] else (search_rel + " " + fn))
                         with _db_lock:
                             conn.execute(
                                 "INSERT OR REPLACE INTO workflow_files "
@@ -1037,7 +1069,7 @@ def scan_index(db=None, workflows_user_dirs=None, hide_dirs_fn=None,
                                 " parse_error, indexed_at)"
                                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                 (user_scope, root_key, key[2], fn,
-                                 rel.rsplit("/", 1)[0] if "/" in rel else "",
+                                 folder_col,
                                  sig[0], sig[1], sig[2], mtime_sec,
                                  rec["workflow_id"], rec["raw_hash"],
                                  rec["canonical_hash"], rec["workflow_hash"],
@@ -1172,18 +1204,24 @@ def forget_paths(db=None, user_scope="default", rel_paths=()):
 
 
 def refresh_paths(db=None, user_scope="default", root_dirs=None,
-                   rel_paths=()):
+                   rel_paths=(), path_map=None):
     """v116 (plan 3.2): the POINT re-index of specific library paths - the
     route layer calls this after a Restore/Checkpoint touched one file, so
     the answer of the next query carries the fresh hashes without waiting
     for the next full scan. A path that no longer exists under ANY root has
     its row dropped (the same contract the scan prune follows). The
     root_key follows the first root that contains the file - the same
-    first-root-wins precedence the walk and the Files listing use."""
+    first-root-wins precedence the walk and the Files listing use.
+
+    v124: path_map ({rel_path: real_path}) resolves the virtual EXTERNAL
+    namespace directly - the ordinary root join cannot reach outside the
+    userdata tree. A mapped path whose real file is gone drops its row (the
+    same removal contract)."""
     paths = [p for p in (rel_paths or ()) if isinstance(p, str) and p]
     if not paths:
         return {"ok": True, "updated": 0, "removed": 0}
     db = db or _db_path()
+    pmap = path_map or {}
     if _scan_lock.acquire(blocking=True, timeout=10):
         try:
             with _db_lock:
@@ -1196,14 +1234,23 @@ def refresh_paths(db=None, user_scope="default", root_dirs=None,
                     for rel in sorted(set(paths)):
                         rec = sig = mtime_sec = None
                         found = None
-                        for i, wroot in enumerate(root_dirs or []):
-                            sub = rel[len("workflows/"):] \
-                                if rel.startswith("workflows/") else rel
-                            cand = os.path.normpath(os.path.join(wroot, sub))
-                            if not os.path.isfile(cand):
-                                continue
-                            found = ("root%d" % i, cand)
-                            break
+                        if rel in pmap:
+                            full = pmap.get(rel)
+                            if isinstance(full, str) and full and \
+                                    os.path.isfile(full):
+                                # v124: the EXTERNAL rows keep the ext_ root
+                                # key family (the same convention the scan
+                                # uses for the prefixed roots)
+                                found = ("ext_mapped", full)
+                        else:
+                            for i, wroot in enumerate(root_dirs or []):
+                                sub = rel[len("workflows/"):] \
+                                    if rel.startswith("workflows/") else rel
+                                cand = os.path.normpath(os.path.join(wroot, sub))
+                                if not os.path.isfile(cand):
+                                    continue
+                                found = ("root%d" % i, cand)
+                                break
                         if not found:
                             rows = conn.execute(
                                 "SELECT rowid FROM workflow_files WHERE "

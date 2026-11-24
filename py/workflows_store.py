@@ -1615,7 +1615,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v123"
+WORKFLOWS_SERVER_VERSION = "v124"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -2154,7 +2154,11 @@ async def workflows_files_list(request):
     the FIRST root wins on a relative-path clash (deduped, no stacked
     duplicates). The storage-root housekeeping (presets/, temp/) never
     appears here. Bounded by MAX_FILES_LISTED (truncated: true on a hit) -
-    a huge library cannot stall the panel."""
+    a huge library cannot stall the panel.
+
+    v124: the EXTERNAL folders' files ride in the SAME answer under their
+    virtual paths (workflows/.settings_hub_ext/<id>/<rel>) - one listing,
+    one Files tab, the ordinary rows + actions for every folder."""
     roots = _workflows_user_dirs(request)
     out = []
     seen_rel = set()
@@ -2194,6 +2198,18 @@ async def workflows_files_list(request):
                     break
         except Exception:
             pass  # a missing/unreadable workflows folder answers an empty list
+    # v124: the registered EXTERNAL folders merge after the userdata roots
+    # (their virtual paths can never clash with the 'workflows/<rel>' keys).
+    # The same total budget bounds the whole answer.
+    wfx = _ext_module()
+    if wfx is not None and not truncated:
+        try:
+            ext_files, ext_trunc = wfx.list_all_ext_files(
+                limit=MAX_FILES_LISTED - len(out))
+            out.extend(ext_files)
+            truncated = truncated or bool(ext_trunc)
+        except Exception:
+            pass  # a broken registry must never blank the ordinary listing
     return web.json_response({
         "ok": True,
         "files": out,
@@ -2606,7 +2622,8 @@ async def workflows_files_undo(request):
             try:
                 _wf_index.refresh_paths(user_scope=_request_user_scope(request),
                                         root_dirs=_workflows_user_dirs(request),
-                                        rel_paths=restored)
+                                        rel_paths=restored,
+                                        path_map=_ext_refresh_map(restored))
             except Exception:
                 pass
         if _wf_hist is not None:
@@ -2910,17 +2927,58 @@ def _request_user_scope(request):
     return "default"
 
 
+def _ext_module():
+    """v124: the EXTERNAL folders module, resolved lazily (the import order
+    must not depend on the pack layout). None = an old/partial py - the ext
+    namespace simply resolves to nothing."""
+    try:
+        from . import workflows_ext as _wfx
+        return _wfx
+    except Exception:
+        try:
+            import workflows_ext as _wfx
+            return _wfx
+        except Exception:
+            return None
+
+
+def _ext_refresh_map(paths):
+    """v124: {virtual_rel: real_path} for refresh_paths - the point
+    re-index of external-folder files (the ordinary root join cannot resolve
+    the virtual namespace). An old/partial py answers an empty map."""
+    wfx = _ext_module()
+    if wfx is None:
+        return {}
+    try:
+        return wfx.ext_refresh_map(paths)
+    except Exception:
+        return {}
+
+
 def _resolve_library_file(request, rel):
     """v116 (plan 3.6): the ONE hardened locator of a library file. The
     client-supplied 'workflows/<rel>' path is normalized, bound to a REAL
     walk root, and SYMLINK-CHECKED: the resolved real path must still sit
     inside the resolved root - a link pointing outside the library can
     never be read, written or deleted through the manager routes. Returns
-    (physical_path, root_dir) or (None, None)."""
+    (physical_path, root_dir) or (None, None).
+
+    v124: the virtual EXTERNAL namespace (workflows/.settings_hub_ext/<id>/
+    <rel>) resolves FIRST - through the registered-folder resolver, with the
+    same traversal/symlink guarantees. Every route that locates a library
+    file (delete + undo, history checkpoint/overwrite/restore/import,
+    inspect) therefore works on external-folder workflows unchanged."""
     if not isinstance(rel, str) or not rel:
         return None, None
     sub = rel[len("workflows/"):] if rel.startswith("workflows/") else rel
     if not sub or sub.startswith("/") or "\\" in sub:
+        return None, None
+    if sub.startswith(".settings_hub_ext/"):
+        wfx = _ext_module()
+        if wfx is not None:
+            phys, _d, _err = wfx.resolve_ext(rel)
+            if phys:
+                return phys, _d["path"]
         return None, None
     for wroot in _workflows_user_dirs(request):
         cand = os.path.normpath(os.path.join(wroot, sub))
@@ -3023,12 +3081,21 @@ async def workflows_index_scan(request):
         force = False
     roots = _workflows_user_dirs(request)
     hide_fn = _files_hide_dirs
+    # v124: the EXTERNAL folders join the scan under their virtual rel
+    # prefix - the index, the groups and the search speak ONE path shape.
+    extra_roots = []
+    wfx = _ext_module()
+    if wfx is not None:
+        try:
+            extra_roots = wfx.ext_scan_roots()
+        except Exception:
+            extra_roots = []
     loop_ = asyncio.get_event_loop()
     try:
         stats = await loop_.run_in_executor(
             None, lambda: _wf_index.scan_index(
                 workflows_user_dirs=roots, hide_dirs_fn=hide_fn,
-                user_scope=scope, force=force))
+                user_scope=scope, force=force, extra_roots=extra_roots))
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)[:200]}, status=500)
     return web.json_response(stats)
@@ -3814,7 +3881,8 @@ async def workflows_history_restore(request):
         try:
             fr = _wf_index.refresh_paths(
                 user_scope=_request_user_scope(request),
-                root_dirs=_workflows_user_dirs(request), rel_paths=[rel])
+                root_dirs=_workflows_user_dirs(request), rel_paths=[rel],
+                path_map=_ext_refresh_map([rel]))
             refreshed = int(fr.get("updated") or 0)
         except Exception:
             refreshed = 0
