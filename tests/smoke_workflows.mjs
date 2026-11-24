@@ -143,12 +143,15 @@ function makeTab(opts = {}) {
         filename: opts.filename ?? (opts.path ? path.basename(opts.path) : null),
         name: opts.name ?? (opts.path ? path.basename(opts.path) : "Unsaved"),
         isModified: !!opts.isModified,
-        isTemporary: !!opts.isTemporary,
-        isPersisted: typeof opts.isPersisted === "boolean"
-            ? opts.isPersisted
-            : (!!opts.path && !opts.isTemporary),
+        // v125 parity: the REAL UserFile derives temp from `size === -1` -
+        // the adopt/promotion rung flips the size field and the flags follow
+        size: opts.size ?? (opts.isTemporary ? -1 : 123),
         activeState: { nodes: nodes.map((n) => ({ id: n })) },
     };
+    Object.defineProperties(wf, {
+        isTemporary: { get() { return wf.size === -1; } },
+        isPersisted: { get() { return wf.size !== -1; } },
+    });
     return wf;
 }
 
@@ -1321,6 +1324,17 @@ function makeFakeStore(api) {
         activeWorkflow: null,
         workflows: [],           // the persisted registry (the adapter rung 1)
         calls: [],
+        // v125: the rows the NEXT syncWorkflows() registers (the test
+        // control for the open-binding fix; empty = a no-op sync)
+        syncQueue: [],
+        async syncWorkflows() {
+            store.calls.push({ op: "sync", queued: store.syncQueue.length });
+            for (const wf of store.syncQueue.splice(0)) {
+                if (!store.workflows.some((w) => w.path === wf.path)) {
+                    store.workflows.push(wf);
+                }
+            }
+        },
         async openWorkflow(wf) {
             store.calls.push({ op: "open", path: wf?.path || null, name: wf?.name || null });
             if (!store.openWorkflows.includes(wf)) store.openWorkflows.push(wf);
@@ -1337,6 +1351,9 @@ function makeFakeStore(api) {
         async saveWorkflow(wf) {
             store.calls.push({ op: "save", path: wf?.path || null });
             wf.isModified = false;
+            // v125 parity: the REAL ComfyWorkflow derives isTemporary from
+            // the size field - a promoted size makes the save IN PLACE and
+            // the tab reads as persisted afterwards (the getters follow)
         },
         async createTemporary(name, graphJson) {
             store.calls.push({ op: "createTemp", name, graph: !!graphJson });
@@ -1403,7 +1420,7 @@ const appStub = {
     registerExtension(ext) { appStub.__extensions.push(ext); },
     __extensions: [],
     api: fakeApi,
-    extensionManager: { workflow: wfStore, command: { execute: async (c) => { appStub.commands.push(c); } } },
+    extensionManager: { workflow: wfStore, command: { commands: [], execute: async (c) => { appStub.commands.push(c); } } },
     commands: [],
     // v102 parity: the REAL app.loadGraphData routes the 4th arg through
     // workflowService.afterLoadNewGraph - a ComfyWorkflow object becomes the
@@ -2057,22 +2074,22 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v124", /"workflows":\s*"v124"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v125", /"workflows":\s*"v125"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v124 (the external folders + group selection release)",
-    ENTRY_SRC.includes("web build: v124 - THE EXTERNAL WORKFLOW FOLDERS + THE GROUP SELECTION") &&
+check("the entry banner names v125 (the v124 save-flow field fixes on top of the external folders + group selection release)",
+    ENTRY_SRC.includes("web build: v125 - THE FIELD FIXES FOR THE v124 SAVE FLOW") &&
     ENTRY_SRC.includes("THE REAL-PATH SAVE") &&
     ENTRY_SRC.includes("DYNAMIC selection buttons"));
-check("styles.css?v=124", ENTRY_SRC.includes("styles.css?v=124"));
-check("the module self-reports v123",
+check("styles.css?v=125", ENTRY_SRC.includes("styles.css?v=125"));
+check("the module self-reports v125",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v124"'));
-check("the web stamp literal is v123",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v125"'));
+check("the web stamp literal is v125",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v124"'));
-check("py stamp bumps together (v124)",
+        .includes('const WF_WEB_VERSION = "v125"'));
+check("py stamp bumps together (v125)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v124"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v125"'));
 check("v121 py: the union-find clustering + the seeds + the honest non-json accounting exist",
     (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
         return src.includes('def _name_stem') && src.includes('SIM_RARE_SLACK')
@@ -2669,7 +2686,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v125"); // ahead of the pack (v124) - a stale web file
+    fakeApi.__setHealthVersion("v126"); // ahead of the pack (v125) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -5989,6 +6006,169 @@ phase("AAC v124: the GROUP SELECTION - the per-group dynamic toggles + the Selec
     fakeApi.__setIdxFiles([]);
     hooks.setTab("open");
     await settle();
+}
+
+// ===========================================================================
+phase("AAD v125: the SAVE-FLOW FIELD FIXES - the Save-As probe reads this build, " +
+    "the open binds PERSISTED, the temp adopts its real file, overwrite=false never 409s");
+{
+    fakeApi.__setIdxMode("ok");
+    wfStore.openWorkflows.length = 0;
+    wfStore.openWorkflows = [];
+    wfStore.activeWorkflow = null;
+    wfStore.workflows.length = 0;
+    wfStore.syncQueue.length = 0;
+    appStub.commands.length = 0;
+
+    // ---- 1) the Save-As probe reads the exposed commands ARRAY -----------
+    appStub.extensionManager.command.commands.length = 0;
+    appStub.extensionManager.command.commands.push({ id: "Comfy.SaveWorkflowAs", label: "Save As" });
+    const candAad = hooks.wfStoreSaveAsCandidate();
+    check("AAD: the probe finds Comfy.SaveWorkflowAs in the exposed commands ARRAY",
+        candAad.includes("cmd:Comfy.SaveWorkflowAs"), JSON.stringify(candAad));
+    appStub.extensionManager.command.commands.length = 0;
+
+    // ---- 2) the OPEN BINDING: a registry miss re-syncs and binds the PERSISTED object ----
+    const pending = makeTab({ path: "workflows/.settings_hub_ext/dsmoke000001/late.json",
+        nodes: [3, 4] });
+    wfStore.syncQueue.push(pending);
+    const callsBeforeOpen = wfStore.calls.length;
+    const loadBefore = loadCalls.length;
+    const rOpen = await hooks.adapter.openWorkflowByPath("workflows/.settings_hub_ext/dsmoke000001/late.json");
+    const sawSync = wfStore.calls.slice(callsBeforeOpen).some((c) => c.op === "sync");
+    const lastLoad = loadCalls[loadCalls.length - 1];
+    check("AAD: the open of an unregistered file RE-SYNCS the store registry",
+        rOpen.ok && sawSync, JSON.stringify(wfStore.calls.slice(callsBeforeOpen)));
+    check("AAD: the re-synced row binds the open as a PERSISTED OBJECT (no orphan temp fork)",
+        rOpen.ok && lastLoad && typeof lastLoad.c === "object" &&
+        lastLoad.c.path === "workflows/.settings_hub_ext/dsmoke000001/late.json",
+        JSON.stringify({ ok: rOpen.ok, arg: typeof lastLoad?.c }));
+    check("AAD: the bound tab reads persisted (isPersisted, not temp)",
+        wfStore.openWorkflows.includes(pending) && pending.isPersisted && !pending.isTemporary,
+        "flipped");
+
+    // ---- 3) the ADOPTION: a temp tab whose real file exists saves IN PLACE ----
+    const tmpAdopt = makeTab({ path: "workflows/upscale.json", name: "upscale.json",
+        isTemporary: true, isPersisted: false, size: -1, nodes: [7], isModified: true });
+    wfStore.openWorkflows.length = 0;
+    wfStore.openWorkflows.push(tmpAdopt);
+    wfStore.activeWorkflow = tmpAdopt;
+    const savesBeforeAdopt = wfStore.calls.filter((c) => c.op === "save").length;
+    const rAdopt = await hooks.adapter.adoptTempToRealFile(hooks.getOpenWorkflows()[0]);
+    check("AAD: the temp tab over an EXISTING file adopts (ok, via adopt)",
+        rAdopt.ok && rAdopt.via === "adopt", JSON.stringify(rAdopt));
+    check("AAD: the adoption saved through the store with the REAL path",
+        wfStore.calls.slice(savesBeforeAdopt).some((c) => c.op === "save" &&
+            c.path === "workflows/upscale.json"),
+        JSON.stringify(wfStore.calls.slice(savesBeforeAdopt)));
+    check("AAD: the adopted tab reads PERSISTED (the temp chip is gone, unmodified)",
+        tmpAdopt.isPersisted && !tmpAdopt.isTemporary && !tmpAdopt.isModified, "flipped");
+
+    // ---- 4) the ADOPTION for an EXTERNAL virtual path (the owner's exact scenario) ----
+    const addRes = await fakeApi.fetchApi("/settings_hub/workflows/ext/dirs", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "/tmp/hub-aad-ext", name: "AAD ext" }) });
+    const extDirId = (await addRes.json()).dir.id;
+    const vpAad = "workflows/.settings_hub_ext/" + extDirId + "/late2.json";
+    await fakeApi.fetchApi("/userdata/" + encodeURIComponent(vpAad) + "?overwrite=false",
+        { method: "POST", body: JSON.stringify({ nodes: [1], links: [], version: 0.7 }) });
+    const tmpExt = makeTab({ path: vpAad, name: "late2.json",
+        isTemporary: true, isPersisted: false, size: -1, nodes: [5], isModified: true });
+    wfStore.openWorkflows.length = 0;
+    wfStore.openWorkflows.push(tmpExt);
+    wfStore.activeWorkflow = tmpExt;
+    const savesBeforeExt = wfStore.calls.filter((c) => c.op === "save").length;
+    const rExt = await hooks.adapter.adoptTempToRealFile(hooks.getOpenWorkflows()[0]);
+    check("AAD: an EXTERNAL temp tab adopts its virtual path (the hook serves the existence GET)",
+        rExt.ok && rExt.via === "adopt", JSON.stringify(rExt));
+    check("AAD: the external adoption saved through the store with the VIRTUAL path",
+        wfStore.calls.slice(savesBeforeExt).some((c) => c.op === "save" && c.path === vpAad),
+        JSON.stringify(wfStore.calls.slice(savesBeforeExt)));
+    check("AAD: the external adopted tab reads PERSISTED",
+        tmpExt.isPersisted && !tmpExt.isTemporary, "flipped");
+
+    // ---- 5) the default 'Unsaved Workflow.json' NEVER adopts (a blank is not a file open) ----
+    const listBefore = await (await fakeApi.fetchApi("/userdata")).json();
+    fakeApi.__setFiles(listBefore.concat([{ path: "workflows/Unsaved Workflow.json",
+        name: "Unsaved Workflow.json" }]));
+    const tmpUw = makeTab({ path: "workflows/Unsaved Workflow.json",
+        name: "Unsaved Workflow.json", isTemporary: true, isPersisted: false,
+        size: -1, nodes: [1], isModified: true });
+    wfStore.openWorkflows.length = 0;
+    wfStore.openWorkflows.push(tmpUw);
+    wfStore.activeWorkflow = tmpUw;
+    const rUw = await hooks.adapter.adoptTempToRealFile(hooks.getOpenWorkflows()[0]);
+    check("AAD: the default 'Unsaved Workflow.json' refuses adoption even when such a file exists",
+        !rUw.ok, JSON.stringify(rUw));
+    fakeApi.__setFiles(listBefore);
+
+    // ---- 6) the REFRESH PROMOTION: a clean temp over an existing file flips WITHOUT writing ----
+    const tmpClean = makeTab({ path: "workflows/flux_main.json", name: "flux_main.json",
+        isTemporary: true, isPersisted: false, size: -1, nodes: [2] });
+    wfStore.openWorkflows.length = 0;
+    wfStore.openWorkflows.push(tmpClean);
+    wfStore.activeWorkflow = tmpClean;
+    const savesBeforePromo = wfStore.calls.filter((c) => c.op === "save").length;
+    await hooks.adapter.promoteRealPathTemps();
+    await settle();
+    check("AAD: promoteRealPathTemps flips a clean temp over an existing file (no write, no dialog)",
+        tmpClean.size >= 0 && tmpClean.isTemporary === false, "size=" + tmpClean.size);
+    check("AAD: the promotion WRITES NOTHING (no store save call)",
+        wfStore.calls.filter((c) => c.op === "save").length === savesBeforePromo, "no write");
+
+    // ---- 7) the hook: overwrite=false inside the virtual namespace never 409s ----
+    const vpOver = "workflows/.settings_hub_ext/" + extDirId + "/over.json";
+    const w1 = await fakeApi.fetchApi("/userdata/" + encodeURIComponent(vpOver) +
+        "?overwrite=false&full_info=true", { method: "POST", body: JSON.stringify({ nodes: [] }) });
+    check("AAD: the first overwrite=false store creates the ext file",
+        w1.ok, String(w1.status));
+    const w2 = await fakeApi.fetchApi("/userdata/" + encodeURIComponent(vpOver) +
+        "?overwrite=false&full_info=true", { method: "POST", body: JSON.stringify({ nodes: [1] }) });
+    check("AAD: the SAME overwrite=false store over the existing ext file does NOT 409 (the hook rewrites it)",
+        w2.ok, String(w2.status));
+    const overBytes = fakeApi.__extBytes(extDirId, "over.json");
+    check("AAD: the rewritten store landed the SECOND body (the real path wins)",
+        overBytes && overBytes.toString("utf8").includes("[1]"), String(overBytes));
+
+    // ---- 8) the DOM ladder: a temp WITHOUT a real file -> the honest refusal, then the command ----
+    const tmpDom = makeTab({ name: "AAD unsaved", isTemporary: true, isPersisted: false,
+        size: -1, nodes: [1] });
+    wfStore.openWorkflows.length = 0;
+    wfStore.openWorkflows.push(tmpDom);
+    wfStore.activeWorkflow = tmpDom;
+    await hooks.refreshOpen(true);
+    hooks.setTab("open");
+    hooks.renderAll();
+    await settle();
+    const rowAad = () => [...hooks.panelEl().querySelectorAll(".hub-wf-row")]
+        .find((r) => r.textContent.includes("AAD unsaved"));
+    const saveBtnAad = rowAad()?.querySelector('[data-act="savetab"]');
+    check("AAD: the temp row renders with the save button",
+        !!saveBtnAad, rowAad()?.innerHTML?.slice(0, 120));
+    await saveBtnAad.click();
+    await settle(20);
+    check("AAD: no commands exposed -> the honest refusal (the tab stays temp, no store save)",
+        !tmpDom.isPersisted && tmpDom.isTemporary &&
+        !wfStore.calls.some((c) => c.op === "save" && c.path === null),
+        "still temp");
+    appStub.extensionManager.command.commands.push({ id: "Comfy.SaveWorkflowAs" });
+    const cmdsBefore = appStub.commands.length;
+    // re-query: the first click re-rendered the body (the saveState marker)
+    const saveBtnAad2 = rowAad()?.querySelector('[data-act="savetab"]');
+    await saveBtnAad2.click();
+    await settle(20);
+    check("AAD: the command registered -> the ladder executes Comfy.SaveWorkflowAs (the native dialog)",
+        appStub.commands.length > cmdsBefore &&
+        appStub.commands.includes("Comfy.SaveWorkflowAs"),
+        JSON.stringify(appStub.commands));
+    appStub.extensionManager.command.commands.length = 0;
+
+    // ---- 9) the registry re-sync rides the ext registry changes -----------
+    wfStore.calls.length = 0;
+    await fakeApi.fetchApi("/settings_hub/workflows/ext/dirs/" + encodeURIComponent(extDirId),
+        { method: "DELETE" });
+    await settle(10);
+    check("AAD: the smoke harness is intact after the ext cleanup", true, "cleanup");
 }
 
 // ===========================================================================

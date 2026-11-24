@@ -1,6 +1,42 @@
 // ============================================================================
 // SettingsHub - WORKFLOWS MANAGER (v110)
 // ----------------------------------------------------------------------------
+// v125 (owner bug report 2026-11-25, TWO field failures of the v124 build):
+//   1. "когда жму сохранить на вкладке Open то пишет 'this ComfyUI build
+//      exposes no Save-As API to extensions'":
+//      the Save-As ladder's command probe read the WRONG shape of the
+//      exposed CommandManager (`commands` is an ARRAY of {id,...}; the old
+//      probe handled Map/plain objects, so Object.keys(array) yielded
+//      indices and the ladder concluded "no API" on the exact build that
+//      HAS Comfy.SaveWorkflowAs). The probe now reads the array - a temp
+//      tab without a real file hands itself to ComfyUI's own Save-As
+//      dialog again.
+//   2. "ctrl+s через комфи открывает диалог сохранения нового процесса...
+//      на вкладке Open он с меткой temp показывается":
+//      the ROOT is the OPEN BINDING - the frontend's store registry decides
+//      persisted-vs-temp (getWorkflowByPath miss -> createNewTemporary),
+//      and the boot listing races the extension import, so the external
+//      rows (and any file added while ComfyUI ran) were never registered:
+//      every open fell to the /userdata rung and forked an orphan TEMP tab
+//      (Ctrl+S then opens the Save-As name dialog; a same-name save even
+//      409s, because UserFile.save trusts isPersisted and sends
+//      overwrite=false). THREE layered fixes:
+//      * openWorkflowByPath: one syncWorkflows() + retry when the registry
+//        misses - the listing merge then registers the virtual paths and
+//        the open binds the PERSISTED object (Ctrl+S writes the file);
+//      * the REAL-FILE ADOPTION: a temp tab whose own path points at an
+//        existing file saves IN PLACE via 💾 (isTemporary is literally
+//        `size === -1` - promoting the size turns the same object into a
+//        persisted one and the store's saveWorkflow writes the real file,
+//        no dialog), and the refresh cycle auto-flips CLEAN temps the same
+//        way without writing;
+//      * the fetchApi hook rewrites overwrite=false -> true for stores
+//        into the virtual namespace - the real path wins, the native
+//        registry-level confirm dialogs are unaffected.
+//      Plus: the registry re-sync rides the panel mount and the ext
+//      registry changes; the dead "store save-with-name shapes" rung is
+//      removed (the store's saveWorkflow has no such signature - it
+//      silently CREATED a file instead of asking for a name).
 // v124 (owner request 2026-11-24, TWO features):
 //   1. EXTERNAL WORKFLOW FOLDERS (+ THE REAL-PATH SAVE):
 //      "надо для менеджера рабочих процессов добавить возможность добавлять
@@ -270,9 +306,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v124";
+const WF_WEB_VERSION = "v125";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v124";
+globalThis.__SettingsHubLoaded["workflows"] = "v125";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -550,12 +586,27 @@ function installExtFetchHook() {
                 if (uf) {
                     const q = uf.query ? new URLSearchParams(uf.query) : new URLSearchParams();
                     const method = String((options && options.method) || "GET").toUpperCase();
-                    const qp = "path=" + encodeURIComponent(uf.file) +
-                        (q.toString() ? "&" + q.toString() : "");
                     if (method === "POST") {
                         extHookStats.store++;
+                        // v125: a TEMP tab saving over its own file arrives
+                        // with overwrite=false (UserFile.save trusts
+                        // isPersisted) - the store registry missed the real
+                        // file (the v124 open-before-sync bug / a file added
+                        // while ComfyUI ran), so the native 409 contract
+                        // would turn Ctrl+S into an error toast even though
+                        // the user confirmed nothing. The owner's contract is
+                        // THE REAL PATH WINS: inside the virtual namespace a
+                        // store that collides with an existing file writes it
+                        // (the frontend's own conflict dialogs run on the
+                        // REGISTRY level, before the request - they are
+                        // unaffected; a genuinely new file still creates).
+                        if (q.get("overwrite") === "false") q.set("overwrite", "true");
+                        const qp = "path=" + encodeURIComponent(uf.file) +
+                            (q.toString() ? "&" + q.toString() : "");
                         return orig("/settings_hub/workflows/ext/store?" + qp, options);
                     }
+                    const qp = "path=" + encodeURIComponent(uf.file) +
+                        (q.toString() ? "&" + q.toString() : "");
                     if (method === "DELETE") {
                         extHookStats.del++;
                         return orig("/settings_hub/workflows/ext/delete?" + qp, options);
@@ -1098,6 +1149,22 @@ async function activateWorkflow(w) {
     return { ok: false, unsupported: true };
 }
 
+/** v125: ONE re-sync of the frontend's own workflow registry. The store's
+ *  listing merge (the fetchApi hook) only helps when the store actually
+ *  RE-fetches the listing - the boot sync races the extension import and
+ *  can easily land BEFORE the hook exists, so an external (or any
+ *  runtime-added) file is missing from `getWorkflowByPath` and every open
+ *  of it forks an orphan TEMP tab (Ctrl+S then shows the Save-As dialog
+ *  instead of writing the file). A re-sync re-lists THROUGH the hook, the
+ *  merged answer registers the virtual paths as first-class persisted
+ *  workflows, and the opens bind. Feature-detected - old builds / test
+ *  stubs without syncWorkflows just skip it. */
+async function syncStoreRegistry() {
+    const store = wfStoreOf();
+    if (!store || typeof store.syncWorkflows !== "function") return false;
+    try { await store.syncWorkflows(); return true; } catch (_) { return false; }
+}
+
 /** Open a workflow FILE by its relative path (already-open tabs activate
  *  instead - a re-open must never reload a live tab). */
 async function openWorkflowByPath(path) {
@@ -1114,24 +1181,32 @@ async function openWorkflowByPath(path) {
         return { ...r, alreadyOpen: true };
     }
     const store = wfStoreOf();
-    let target = null;
-    if (store && typeof store.getWorkflowByPath === "function") {
-        for (const p of [n2, withPrefix]) {
-            try {
-                // some builds expose getWorkflowByPath as async - a bare call
-                // would assign a PROMISE (truthy!) and poison the rung
-                const t = store.getWorkflowByPath(p);
-                target = (t && typeof t.then === "function") ? await t : t;
-            } catch (_) { target = null; }
-            if (target) break;
+    const findInStore = async () => {
+        if (store && typeof store.getWorkflowByPath === "function") {
+            for (const p of [n2, withPrefix]) {
+                try {
+                    // some builds expose getWorkflowByPath as async - a bare call
+                    // would assign a PROMISE (truthy!) and poison the rung
+                    const t = store.getWorkflowByPath(p);
+                    const hit = (t && typeof t.then === "function") ? await t : t;
+                    if (hit) return hit;
+                } catch (_) { /* the next shape */ }
+            }
         }
-    }
-    if (!target) {
         try {
             const list = Array.isArray(store?.workflows) ? store.workflows : [];
-            target = list.find((w) => w?.path && (normWfPath(w.path) === n2 || normWfPath(w.path) === withPrefix)) || null;
+            const hit = list.find((w) => w?.path && (normWfPath(w.path) === n2 || normWfPath(w.path) === withPrefix)) || null;
+            if (hit) return hit;
         } catch (_) {}
-    }
+        return null;
+    };
+    let target = await findInStore();
+    // v125: the registry may predate this file (the boot listing ran before
+    // the ext rows merged / the file was added while ComfyUI ran) - one
+    // re-sync, then a retry. Without it the open falls to the /userdata rung
+    // and loadGraphData(name) forks a TEMP tab that can never Ctrl+S in
+    // place. With it the open binds the PERSISTED workflow object.
+    if (!target && (await syncStoreRegistry())) target = await findInStore();
     if (target) {
         const r = await openStoreWorkflow(target);
         if (r.ok) return r;
@@ -1316,14 +1391,16 @@ async function saveWorkflowTab(w) {
 const saveState = new Map(); // key -> "saving" | "saved" (a transient marker)
 
 /** The Save As candidate ladder for TEMP tabs (plan 6: feature detection
- *  ONLY - a guessed command id is never executed). The store's own
- *  saveWorkflow(ref, {saveAs})-style API first, then a command whose id the
+ *  ONLY - a guessed command id is never executed). A command whose id the
  *  installed build actually exposes, then an honest refusal (the native
- *  ComfyUI UI stays the way back). */
+ *  ComfyUI UI stays the way back).
+ *  v125: the enumeration finally READS THIS BUILD. The exposed
+ *  CommandManager carries `commands: ComfyCommand[]` (an ARRAY of {id,
+ *  label, ...}) - the v124 probe only handled a Map/plain-object registry,
+ *  so Object.keys(array) yielded "0","1",... and the ladder concluded "no
+ *  Save-As API" on the exact build that HAS Comfy.SaveWorkflowAs. */
 function wfStoreSaveAsCandidate() {
-    const store = wfStoreOf();
     const cands = [];
-    if (store && typeof store.saveWorkflow === "function") cands.push("store");
     try {
         const cmd = app?.extensionManager?.command;
         const ids = new Set();
@@ -1332,8 +1409,9 @@ function wfStoreSaveAsCandidate() {
             if (Array.isArray(list)) for (const c of list) ids.add(String(c?.id || c));
         } catch (_) {}
         try {
-            const reg = cmd?.registry || cmd?.commands;
-            if (reg instanceof Map) for (const k of reg.keys()) ids.add(String(k));
+            const reg = cmd?.commands ?? cmd?.registry;
+            if (Array.isArray(reg)) for (const c of reg) ids.add(String(c?.id || c));
+            else if (reg instanceof Map) for (const k of reg.keys()) ids.add(String(k));
             else if (reg && typeof reg === "object") for (const k of Object.keys(reg)) ids.add(String(k));
         } catch (_) {}
         for (const want of ["Comfy.SaveWorkflowAs", "Workflow.SaveAs",
@@ -1344,19 +1422,107 @@ function wfStoreSaveAsCandidate() {
     return cands;
 }
 
+// v125: temp tabs checked for a real file behind their own path (the
+// adopt/promotion rung) - one existence GET per tab per session, never a
+// poll-spanming re-read (a promoted tab stops being temp, an unchanged
+// temp keeps its verdict).
+const adoptChecked = new Map(); // key -> true
+
+/** v125 RUNG 0 of the temp-tab save: THE REAL-FILE ADOPTION. A temp tab
+ *  whose own path points at an EXISTING file is a tab that was opened FROM
+ *  that file while the store registry missed it (the boot listing raced
+ *  the extension import / the file was added while ComfyUI ran / the v124
+ *  build's open fell to the /userdata rung). The owner's contract: such a
+ *  tab saves IN PLACE - the same file it was opened from - with NO dialog.
+ *  The trick: `isTemporary` is literally `size === -1` on the frontend's
+ *  UserFile. Promoting the size turns the SAME object into a persisted
+ *  workflow, so the store's own saveWorkflow then writes IN PLACE
+ *  (overwrite=true), resets the tracker/originalContent and clears the
+ *  draft exactly like a native save - through the fetchApi hook, i.e. the
+ *  REAL file. The tab strip flips the temp chip on the next read. */
+async function adoptTempToRealFile(w) {
+    const ref = w?.ref || null;
+    if (!ref || !w.path) return { ok: false };
+    const np = normWfPath(w.path);
+    if (!np || !/^workflows\//i.test(np)) return { ok: false };
+    // the DEFAULT temp names (blank / Unsaved Workflow (N)) are not file
+    // opens - adopting one would silently create that file on save
+    if (/^workflows\/unsaved workflow( \(\d+\))?\.json$/i.test(np)) {
+        return { ok: false };
+    }
+    const store = wfStoreOf();
+    if (!store || typeof store.saveWorkflow !== "function") return { ok: false };
+    // the tab must carry a live state (an unloaded temp cannot save)
+    try { if (!ref.activeState || typeof ref.activeState !== "object") return { ok: false }; }
+    catch (_) { return { ok: false }; }
+    // the file must exist server-side - otherwise the native Save-As
+    // dialog stays the right answer (a promotion would CREATE a file)
+    let exists = false;
+    try {
+        const r = await app.api.fetchApi("/userdata/" + encodeURIComponent(np));
+        exists = !!(r && r.ok);
+    } catch (_) { exists = false; }
+    if (!exists) return { ok: false };
+    // remember the original size - a failed save must restore the tab to
+    // EXACTLY the state it had (the demote below)
+    const prevSize = (typeof ref.size === "number") ? ref.size : -1;
+    try {
+        if (!(prevSize >= 0)) ref.size = 0;
+    } catch (_) { return { ok: false }; }
+    try {
+        await store.saveWorkflow(ref);
+        return { ok: true, via: "adopt" };
+    } catch (e) {
+        // demote - the tab must never LIE about being persisted
+        try { ref.size = prevSize; } catch (_) {}
+        return { ok: false, error: String((e && e.message) || e) };
+    }
+}
+
+/** v125: flip ALREADY-OPEN temp tabs that point at existing files into
+ *  persisted ones WITHOUT writing. A clean temp becomes byte-identical
+ *  with its file; a temp holding UNSAVED edits becomes a persisted+modified
+ *  tab - the next save (💾 or Ctrl+S) then writes THE REAL file in place
+ *  instead of forking the Save-As dialog. Runs off the refresh cycle; the
+ *  checked map keeps it at one GET per tab. */
+async function promoteRealPathTemps() {
+    for (const t of getOpenWorkflows()) {
+        if (!t.path || (!t.isTemporary && t.isPersisted)) continue;
+        if (adoptChecked.get(t.key)) continue;
+        adoptChecked.set(t.key, true);
+        const ref = t.ref;
+        if (!ref) continue;
+        try {
+            if (!ref.activeState || typeof ref.activeState !== "object") continue;
+            const np = normWfPath(t.path);
+            if (!np || !/^workflows\//i.test(np)) continue;
+            if (/^workflows\/unsaved workflow( \(\d+\))?\.json$/i.test(np)) continue;
+            const r = await app.api.fetchApi("/userdata/" + encodeURIComponent(np));
+            if (r && r.ok && typeof ref.size === "number" && ref.size < 0) {
+                ref.size = 0;   // isTemporary is `size === -1` - the flip
+            }
+        } catch (_) { /* the tab stays temp - the ladder still works */ }
+    }
+    const before = openSignature();
+    openTabs = getOpenWorkflows();
+    if (openSignature() !== before) renderAll();
+}
+
 async function saveWorkflowTabAs(w) {
     if (!w) return { ok: false, error: "no tab" };
-    const store = wfStoreOf();
-    // rung 1: the store's own save-with-name API (feature-detected shapes)
-    if (store && typeof store.saveWorkflow === "function" && w.ref) {
-        for (const shape of [{ saveAs: true }, { as: true }, { saveAsName: true }]) {
-            try {
-                const r = await store.saveWorkflow(w.ref, shape);
-                if (r !== false) return { ok: true, via: "store", shape };
-            } catch (_) { /* the next shape */ }
-        }
-    }
-    // rung 2: a command the installed build ACTUALLY exposes
+    // rung 0 (v125): the REAL-FILE ADOPTION - a temp tab opened from a file
+    // that exists saves IN PLACE (no dialog, the real path). This is the
+    // owner's original ask: a workflow opened from Files must save to the
+    // file it came from, never fork a copy in the official folder.
+    adoptChecked.set(w.key, true);
+    const ad = await adoptTempToRealFile(w);
+    if (ad.ok) return ad;
+    // rung 1 (v125): a command the installed build ACTUALLY exposes
+    // (Comfy.SaveWorkflowAs on the current frontend - the enumeration now
+    // really reads the exposed CommandManager). The OLD "store's own
+    // save-with-name shapes" rung is GONE: the store's saveWorkflow has no
+    // such signature on any build - on the current one it silently WROTE a
+    // new file at the temp's path instead of asking for a name.
     try {
         await activateWorkflow(w);
         if (!(await verifyActiveTab(w))) {
@@ -1399,7 +1565,12 @@ async function saveTabRow(t) {
     }
     renderAll();
     if (r?.ok) {
-        localToast(t.isPersisted ? "Saved \"" + (t.name || "") + "\"" : "Save As handed to ComfyUI");
+        // v125: the adopt rung saves IN PLACE - the tab just stopped being a
+        // temp one, so the toast must say the file was written (the old
+        // "Save As handed to ComfyUI" only describes the command rung).
+        localToast(r.via === "adopt"
+            ? "Saved to " + (t.name || "its file") + " (the real path)"
+            : (t.isPersisted ? "Saved \"" + (t.name || "") + "\"" : "Save As handed to ComfyUI"));
     } else if (r?.skipped) {
         localToast("No changes to save");
     } else if (r?.unsupported) {
@@ -3567,7 +3738,7 @@ function openTabHtml() {
         // place, temp = Save As ladder, clean = an explicit save (unified UX)
         const saveMark = saveState.get(t.key);
         const saveBtn = `<button type="button" class="hub-wf-lockbtn${saveMark === "saved" ? " hub-wf-locked" : ""}" data-act="savetab" data-key="${esc(t.key)}" ` +
-            `title="${t.isPersisted ? (t.isModified ? "Save this tab to its file" : "Save this tab (no changes yet)") : "Save As... (hands the tab to ComfyUI's own Save-As flow)"}">${saveMark === "saving" ? "…" : (saveMark === "saved" ? "✓" : "💾")}</button>`;
+            `title="${t.isPersisted ? (t.isModified ? "Save this tab to its file" : "Save this tab (no changes yet)") : "Save this tab (in place when the file it was opened from exists, else the native Save-As)"}">${saveMark === "saving" ? "…" : (saveMark === "saved" ? "✓" : "💾")}</button>`;
         // v122 (owner request): a CHECKPOINT entry on every Open-tab row.
         // A persisted tab opens the process-history panel (the badge chip
         // mirrors the Files rows); a TEMPORARY tab opens the same panel in
@@ -6102,6 +6273,10 @@ function openWfSettingsPop(opts = {}) {
         // detached namespace / indexes the new one), the groups
         await refreshFilesFull();
         if (groupsState.on) void runGroups(true);
+        // v125: the frontend's own workflow registry follows too - the
+        // re-sync re-lists THROUGH the hook, so the added folder's rows
+        // register (persisted opens) and the detached ones drop out.
+        void syncStoreRegistry();
         renderAll();
     };
     const renderExtSection = () => {
@@ -6390,6 +6565,10 @@ function openSignature() {
 async function refreshOpen(force = false) {
     openTabs = getOpenWorkflows();
     if (force) lastOpenSig = openSignature();
+    // v125: open temp tabs whose real file exists stop being temp (the flip
+    // is the size field - no write, no dialog). Throttled by adoptChecked;
+    // fire-and-forget - a slow GET must not stall the refresh.
+    void promoteRealPathTemps().catch(() => {});
 }
 
 /** v116 (plan 3.2): the Files REFRESH is the REAL refresh in index mode:
@@ -6555,6 +6734,11 @@ export function initWorkflows() {
         void (async () => {
             await refreshExtDirs();
             void extCountFiles();
+            // v125: the frontend's own registry re-sync - the boot listing
+            // may have raced the extension import (the hook installs at
+            // import time), leaving the ext rows unregistered; the re-sync
+            // re-lists THROUGH the hook and the opens bind persisted.
+            void syncStoreRegistry();
             if (seq === initSeq && mounted) renderAll();
         })();
         // v112 (plan 3.6): adopt the server-side recent manifest (or migrate
@@ -8299,6 +8483,11 @@ export function __workflowsTestHooks() {
             saveWorkflowTab,
             graphJsonOfOpenTab,
             getSavedWorkflows,
+            // v125: the real-file adoption/promotion + the registry re-sync
+            adoptTempToRealFile,
+            promoteRealPathTemps,
+            syncStoreRegistry,
+            saveWorkflowTabAs,
         },
         // v112 (plan 3.x): the P0 helpers the new phases drive directly
         canonWfRel,
