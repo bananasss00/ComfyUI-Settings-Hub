@@ -2133,22 +2133,22 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v127", /"workflows":\s*"v127"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v128", /"workflows":\s*"v128"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v127 (the import file-dialog + commit name on top of the v126 import, the v125 save-flow fixes + the v124 external folders)",
-    ENTRY_SRC.includes("web build: v127 - THE IMPORT FILE DIALOG + THE COMMIT NAME") &&
-    ENTRY_SRC.includes("THE BINDING CONTRACT") &&
-    ENTRY_SRC.includes("rides into EVERY import"));
-check("styles.css?v=127", ENTRY_SRC.includes("styles.css?v=127"));
-check("the module self-reports v127",
+check("the entry banner names v128 (the restore semantics on top of the v127 import file-dialog + commit name, the v126 import, the v125 save-flow fixes + the v124 external folders)",
+    ENTRY_SRC.includes("web build: v128 - THE RESTORE SEMANTICS") &&
+    ENTRY_SRC.includes("THE HISTORY STAYS EXACTLY AS IS") &&
+    ENTRY_SRC.includes("never createNewTemporary"));
+check("styles.css?v=128", ENTRY_SRC.includes("styles.css?v=128"));
+check("the module self-reports v128",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v127"'));
-check("the web stamp literal is v127",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v128"'));
+check("the web stamp literal is v128",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v127"'));
-check("py stamp bumps together (v127)",
+        .includes('const WF_WEB_VERSION = "v128"'));
+check("py stamp bumps together (v128)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v127"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v128"'));
 check("v121 py: the union-find clustering + the seeds + the honest non-json accounting exist",
     (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
         return src.includes('def _name_stem') && src.includes('SIM_RARE_SLACK')
@@ -2745,7 +2745,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v128"); // ahead of the pack (v127) - a stale web file
+    fakeApi.__setHealthVersion("v129"); // ahead of the pack (v128) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -3897,11 +3897,11 @@ phase("WU v112 stage 2.5 (plan 5.x): the Process History panel");
         hooks.histState().revs.length === 2,
         String(fakeApi.__histStore().revisions.size));
 
-    // Open version (the DEFAULT restore): a COPY into an independent tab
+    // Open version (the COMMIT-NAME click): a COPY into an independent tab
     const openCalls0 = loadCalls.length;
     await hooks.histRestore(hooks.histState().revs[0].revisionId, false);
     await settle(20);
-    check("WU: the default Restore opens a COPY (a snapshot tab), no writes",
+    check("WU: the commit-name click opens a COPY (a snapshot tab), no writes",
         loadCalls.length === openCalls0 + 1 &&
         !fakeApi.__calls().some((c) => c.url.includes("/restore/") && c.method === "POST"),
         JSON.stringify({ calls: loadCalls.length }));
@@ -3909,14 +3909,70 @@ phase("WU v112 stage 2.5 (plan 5.x): the Process History panel");
         wfStore.openWorkflows.some((t) => t.__snapshotGraph?.nodes?.length >= 0),
         JSON.stringify(wfStore.openWorkflows.map((t) => t.name)));
 
-    // the REPLACE: armed confirm -> tx snapshot on the server
+    // v128 RESTORE = the ACTIVE state: the file gets the version's bytes, the
+    // HISTORY STAYS AS IS (no revision is created or deleted); no tab was
+    // open for hist1.json at this point, so the canvas swap is skipped
+    const wuRevsBefore = hooks.histState().revs.length;
     await hooks.histRestore(hooks.histState().revs[0].revisionId, true);
     await settle(20);
-    check("WU: the confirmed replace POSTs mode=replace and records the tx snapshot",
+    check("WU: the confirmed restore POSTs mode=replace and records the tx snapshot",
         fakeApi.__calls().some((c) => c.url.includes("/restore/") && c.method === "POST" &&
             (c.body || "").includes('"mode":"replace"')) &&
         fakeApi.__txStore().size === 1,
         JSON.stringify([...fakeApi.__txStore().keys()]));
+    check("WU: the restore left the history EXACTLY as is (count + arm)",
+        hooks.histState().revs.length === wuRevsBefore &&
+        hooks.histState().armedRestore == null && hooks.histState().pendingRestore == null,
+        JSON.stringify({ revs: hooks.histState().revs.length, before: wuRevsBefore,
+            armed: hooks.histState().armedRestore }));
+
+    // v128: the FULL UI flow with an OPEN persisted tab - the first ↺ click
+    // arms only, Cancel disarms, the confirmed restore swaps the SAME tab's
+    // content in place (the ref form of loadGraphData; no temp fork)
+    const wuTabObj = makeTab({ path: "workflows/hist1.json", nodes: [1] });
+    wfStore.workflows.push(wuTabObj);
+    const wuOpened = await hooks.adapter.openWorkflowByPath("workflows/hist1.json");
+    await settle(20);
+    check("WU: hist1.json is open as a persisted tab for the restore flow",
+        !!wuOpened.ok && wfStore.openWorkflows.some((t) => t === wuTabObj),
+        JSON.stringify({ via: wuOpened.via || wuOpened.alreadyOpen, ok: !!wuOpened.ok }));
+    const wuRid = hooks.histState().revs[0].revisionId;
+    const wuRestoreBtn = () => [...hooks.histPopEl().querySelectorAll('[data-act="histrestore"]')]
+        .find((b) => b.dataset.rid === wuRid);
+    const wuPosts0 = fakeApi.__calls().filter((c) => c.url.includes("/restore/") && c.method === "POST").length;
+    const wuLoads0 = loadCalls.length;
+    const wuTabs0 = wfStore.openWorkflows.length;
+    await wuRestoreBtn().click();
+    await settle(20);
+    check("WU: the FIRST ↺ click only ARMS (no write, no copy, no tab fork)",
+        hooks.histState().armedRestore === wuRid &&
+        fakeApi.__calls().filter((c) => c.url.includes("/restore/") && c.method === "POST").length === wuPosts0 &&
+        loadCalls.length === wuLoads0 && wfStore.openWorkflows.length === wuTabs0,
+        JSON.stringify({ armed: hooks.histState().armedRestore,
+            posts: fakeApi.__calls().filter((c) => c.url.includes("/restore/") && c.method === "POST").length - wuPosts0,
+            loads: loadCalls.length - wuLoads0 }));
+    check("WU: the armed strip carries the confirm + the cancel",
+        !!hooks.histPopEl().querySelector('[data-act="histrestoreconfirm"]') &&
+        !!hooks.histPopEl().querySelector('[data-act="histrestorecancel"]'));
+    await hooks.histPopEl().querySelector('[data-act="histrestorecancel"]').click();
+    await settle(10);
+    check("WU: Cancel disarms and writes nothing",
+        hooks.histState().armedRestore == null &&
+        fakeApi.__calls().filter((c) => c.url.includes("/restore/") && c.method === "POST").length === wuPosts0);
+    await wuRestoreBtn().click();
+    await settle(10);
+    await hooks.histPopEl().querySelector('[data-act="histrestoreconfirm"]').click();
+    await settle(30);
+    const wuSwap = loadCalls.slice(wuLoads0).at(-1);
+    check("WU: the confirmed restore swapped the SAME tab in place (ref identity, one more POST)",
+        !!wuSwap && typeof wuSwap.c === "object" && wuSwap.c === wuTabObj &&
+        fakeApi.__calls().filter((c) => c.url.includes("/restore/") && c.method === "POST").length === wuPosts0 + 1 &&
+        wfStore.openWorkflows.length === wuTabs0,
+        JSON.stringify({ c: typeof (wuSwap || {}).c, sameRef: !!(wuSwap && wuSwap.c === wuTabObj),
+            tabs: wfStore.openWorkflows.length }));
+    check("WU: the arm cleared + the panel still holds BOTH revisions after the restore",
+        hooks.histState().armedRestore == null && hooks.histState().revs.length === wuRevsBefore,
+        JSON.stringify({ armed: hooks.histState().armedRestore, revs: hooks.histState().revs.length }));
 
     // Mark stable
     await hooks.histPopEl().querySelector('[data-act="histstable"]').click();
@@ -5686,18 +5742,38 @@ phase("AD v122: the checkpoint OVERWRITE (with rename), the Open-tab 🕘 entry,
     check("AD: the reopen resolves the temp process via resolve_uuid (bound)",
         st.pid && st.revs.length === 1, JSON.stringify({ pid: st.pid, revs: st.revs.length }));
 
-    // the restore of a process WITHOUT a file location: the copy-open only
-    // (the exact same graph is already open -> the duplicate prompt is the
-    // legitimate copy-open outcome; the point is: the replace is NEVER armed)
+    // v128: the restore of a process WITHOUT a file location restores the
+    // ACTIVE TAB in place (no file POST - the tab IS the active state). The
+    // first ↺ click arms ONLY (nothing opens, nothing is written); the
+    // confirmed restore swaps the SAME tab's content - never a temp fork.
     const adRestoreCalls0 = fakeApi.__calls().filter((c) => c.url.includes("/restore/")).length;
+    const adLoads0 = loadCalls.length;
+    const adTabs0 = wfStore.openWorkflows.length;
     const adRevRow = hooks.histPopEl().querySelector('[data-act="histrestore"]');
     await adRevRow.click();
     await settle(30);
-    check("AD: a no-file process restore never arms the replace (no /restore/ POST)",
+    const adArmed = hooks.histState().armedRestore;
+    check("AD: the restore click ARMS only (no write, no copy open)",
+        !!adArmed &&
         fakeApi.__calls().filter((c) => c.url.includes("/restore/")).length === adRestoreCalls0 &&
-        hooks.histState().armedRestore == null,
-        JSON.stringify({ posts: fakeApi.__calls().filter((c) => c.url.includes("/restore/")).length - adRestoreCalls0,
-            armed: hooks.histState().armedRestore }));
+        loadCalls.length === adLoads0,
+        JSON.stringify({ armed: adArmed,
+            posts: fakeApi.__calls().filter((c) => c.url.includes("/restore/")).length - adRestoreCalls0,
+            loads: loadCalls.length - adLoads0 }));
+    check("AD: the armed strip shows the confirm + the cancel",
+        !!hooks.histPopEl().querySelector('[data-act="histrestoreconfirm"]') &&
+        !!hooks.histPopEl().querySelector('[data-act="histrestorecancel"]'));
+    await hooks.histPopEl().querySelector('[data-act="histrestoreconfirm"]').click();
+    await settle(30);
+    const adSwap = loadCalls.slice(adLoads0).at(-1);
+    check("AD: the confirmed restore swapped the SAME tab in place (ref form, no file POST, no new tab)",
+        fakeApi.__calls().filter((c) => c.url.includes("/restore/")).length === adRestoreCalls0 &&
+        wfStore.openWorkflows.length === adTabs0 &&
+        !!adSwap && typeof adSwap.c === "object" && adSwap.c === adTemp,
+        JSON.stringify({ c: typeof (adSwap || {}).c, tabs: wfStore.openWorkflows.length }));
+    check("AD: the arm cleared after the confirmed restore",
+        hooks.histState().armedRestore == null &&
+        hooks.histState().pendingRestore == null);
     hooks.closeHistPop();
 
     // the OLD-PY overwrite route: the strip stays open, the error is named

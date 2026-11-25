@@ -1,6 +1,16 @@
 // ============================================================================
 // SettingsHub - WORKFLOWS MANAGER (v110)
 // ----------------------------------------------------------------------------
+// v128 (owner request 2026-11-25, THE RESTORE SEMANTICS): the Process-history
+//      ↺ Restore restores the ACTIVE state of the process - the first click only
+//      ARMS (the confirm strip + Cancel; NOTHING opens, NOTHING is written), the
+//      second click writes the version's bytes back to the real file (the hardened
+//      server replace) AND swaps the open tab's canvas IN PLACE (loadGraphData with
+//      the tab's own store ref - the same tab, never a temp fork; live tab lookup).
+//      The history stays EXACTLY as is (no revision created/deleted, the current
+//      pointer never moves - py-tested); opening a COPY remains the commit-name
+//      click (histopen). ⚠ The armed strip warns when the current state has
+//      changes not saved into the history (Checkpoint first or they are lost).
 // v127 (owner request 2026-11-25, the Import FILE DIALOG + the commit name):
 //   "из файла надо чтобы диалог выбора файла открывался и любой процесс так
 //    заимпортить можно было бы и из любого места, а не то что сейчас.
@@ -350,9 +360,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v127";
+const WF_WEB_VERSION = "v128";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v127";
+globalThis.__SettingsHubLoaded["workflows"] = "v128";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -6843,6 +6853,10 @@ function teardown() {
 // ---------------------------------------------------------------------------
 
 let histPop = null;
+// v128: armedRestore = the version the ↺ Restore button ARMED (the first
+// click only arms; the second click - or the strip's confirm - writes the
+// version back to the ACTIVE state: the file + the open tab, in place; the
+// history stays as is). The commit NAME click (histopen) is the copy open.
 let histState = null;      // {path, pid, proc, revs, loading, error, sel, cpBusy, armedRestore, compare}
 
 function closeHistPop() {
@@ -7308,8 +7322,9 @@ function histRevRowHtml(r, i) {
         // v122: overwrite THIS version with the CURRENT state (with rename)
         `<button type="button" class="hub-wf-cbtn${histState.overwriteRid === r.revisionId ? " hub-wf-locked" : ""}" data-act="histoverwrite" data-rid="${esc(r.revisionId)}" ` +
         `title="Overwrite this version with the CURRENT state of the workflow (its name and note can be changed too; the version keeps its place in the list)">⤒</button>` +
-        `<button type="button" class="hub-wf-cbtn" data-act="histrestore" data-rid="${esc(r.revisionId)}" ` +
-        `title="Restore: opens a COPY first; overwriting the file needs a second confirm">↺</button>` +
+        // v128: the ↺ button mirrors the ARMED state (the armed row highlights)
+        `<button type="button" class="hub-wf-cbtn${histState.armedRestore === r.revisionId ? " hub-wf-armed" : ""}" data-act="histrestore" data-rid="${esc(r.revisionId)}" ` +
+        `title="Restore: writes THIS version back to the active state of the process (the file + the open tab, in place); the whole history stays as is. Click twice to confirm">↺</button>` +
         `</div>`;
 }
 
@@ -7450,11 +7465,26 @@ function renderHistPop() {
             (st.pid && !st.armedProc ? `<button type="button" class="hub-wf-act" data-act="histprocarm" title="Delete this file and its versions - files with the same UUID that you did NOT select are never touched (a confirmed two-step action)">🗑 Delete process</button>` : "") +
             `<button type="button" class="hub-wf-act" data-act="histmeta" title="Rename the process / edit the shared note">✎ Process</button>` +
             `<button type="button" class="hub-wf-act" data-act="histclose" title="Close the history panel">✕ Close</button></div>`;
-        // the restore confirm strip
-        if (st.pendingRestore) {
-            body += `<div class="hub-wf-planwarn">⚠ Overwrite <b>${esc(baseName(st.path))}</b> with the selected version? ` +
-                `<button type="button" class="hub-wf-act hub-wf-armed" data-act="histrestoreconfirm">Click AGAIN to replace the file</button> ` +
-                `<span class="hub-wf-snap">(a safety snapshot is taken first; undoable)</span></div>`;
+        // v128: the restore confirm strip - keyed off the ARMED restore. The
+        // first ↺ click only arms (NOTHING opens, NOTHING is written); the
+        // strip names the target version and what the second click does: the
+        // ACTIVE state of the process (the file + the open tab, in place)
+        // gets the version's content, the history stays as is. The commit
+        // NAME click (histopen) remains the copy open.
+        if (st.armedRestore) {
+            const arRev = st.revs.find((r) => r.revisionId === st.armedRestore);
+            const arLbl = arRev ? histRevLabel(arRev) : null;
+            const arName = arLbl?.title || "the selected version";
+            const rSubj = st.path
+                ? `The file <b>${esc(baseName(st.path))}</b>${st.openTab ? " and the open tab" : ""}`
+                : "The open tab";
+            body += `<div class="hub-wf-planwarn">↺ Restore <b>${esc(arName)}</b> to the active state of <b>${esc(procName)}</b>? ` +
+                `${rSubj} get${st.path && !st.openTab ? "s" : ""} this version's content - the history stays as is.` +
+                (st.changesSince ? `<div class="hub-wf-filesub">⚠ The current state has changes NOT saved into the history - 📌 Checkpoint first, or they are overwritten.</div>` : "") +
+                `<div class="hub-wf-planacts" style="margin-top:4px">` +
+                `<button type="button" class="hub-wf-act hub-wf-armed" data-act="histrestoreconfirm">${st.cpBusy ? "… restoring" : "Click AGAIN to restore"}</button> ` +
+                `<button type="button" class="hub-wf-act" data-act="histrestorecancel" title="Do not restore anything">✕ Cancel</button>` +
+                `<span class="hub-wf-snap">(a safety snapshot is taken first; the file write is atomic)</span></div></div>`;
         }
         // v122: the OVERWRITE confirm strip - the owner's "rewrite an
         // existing checkpoint with the current state (with rename)". Two
@@ -7858,7 +7888,9 @@ async function histRestore(rid, confirmReplace) {
     const st = histState;
     if (!st) return;
     if (!confirmReplace) {
-        // the DEFAULT restore: open as an independent COPY (no writes)
+        // v128: this branch is ONLY the commit-name click (histopen) - the
+        // COPY open lives exactly there. The ↺ Restore button never lands
+        // here anymore: it arms first and then writes the ACTIVE state back.
         const res = await jfetch("/settings_hub/workflows/history/revision/" +
             encodeURIComponent(rid) + "/raw");
         let graph = null;
@@ -7870,22 +7902,101 @@ async function histRestore(rid, confirmReplace) {
         else localToast("Could not open the version - see F12", 3600);
         return;
     }
-    // the CONFIRMED replace: the server snapshots + atomically overwrites
-    const res = await jfetch("/settings_hub/workflows/history/process/" +
-        encodeURIComponent(st.pid) + "/restore/" + encodeURIComponent(rid), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "replace", path: st.path }),
-    });
-    if (res.json?.ok) {
+    // v128 (owner request): RESTORE = the ACTIVE state of the process gets
+    // this version's content. The real file (the server-side verified
+    // snapshot + atomic replace) and the OPEN tab's canvas (an in-place
+    // loadGraphData through the tab's own store ref: the SAME tab, never a
+    // temp copy). The history stays EXACTLY as is: no revision is created
+    // or deleted, the current pointer never moves - opening a COPY remains
+    // the commit-name click (histopen).
+    if (st.cpBusy) return;
+    st.cpBusy = true;
+    try {
+        // 1) the exact bytes of the version (also the canvas payload)
+        let graph = null;
+        try {
+            const raw = await jfetch("/settings_hub/workflows/history/revision/" +
+                encodeURIComponent(rid) + "/raw");
+            if (raw.json && typeof raw.json === "object") graph = raw.json;
+            else { try { graph = JSON.parse(await raw.text()); } catch (_) {} }
+        } catch (_) {}
+        if (!graph) {
+            localToast("Restore failed: the version's bytes are unreadable - nothing was changed", 4200);
+            return;
+        }
+        // 2) the file write FIRST - a failed write never touches the tab
+        //    (a location-less process skips it: the open tab IS the state)
+        let fileOk = !st.path, fileErr = null;
+        if (st.path) {
+            const res = await jfetch("/settings_hub/workflows/history/process/" +
+                encodeURIComponent(st.pid) + "/restore/" + encodeURIComponent(rid), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ mode: "replace", path: st.path }),
+            });
+            fileOk = !!res.json?.ok;
+            if (!fileOk) fileErr = (res.json && res.json.error) || ("HTTP " + res.status);
+        }
+        if (!fileOk) {
+            // the arm STAYS (the strip is the retry handle); nothing changed
+            localToast("Restore failed: " + (fileErr || "?") + " - nothing was changed", 5000);
+            await refreshHistState();
+            return;
+        }
+        // 3) the open tab: swap the restored content IN PLACE. The ref form
+        //    of loadGraphData (the 4th arg = the tab's own store object)
+        //    activates the tab and rebinds its tracker to the restored graph
+        //    - verified against the frontend's activateLoadedWorkflow: a
+        //    ComfyWorkflow value routes to workflowStore.openWorkflow(value)
+        //    (no createNewTemporary fork, unlike a null/string mismatch).
+        let tabOk = null;   // null = there was no tab to update
+        // v128: LIVE tab discovery (getOpenWorkflows, never the openTabs
+        // render cache - a tab the user just opened in the native UI must be
+        // found even before the next poll/render pass)
+        const tab = st.tabKey && !st.path
+            ? (getOpenWorkflows().find((t) => t.key === st.tabKey) || histFindTab() || null)
+            : (st.path
+                ? (getOpenWorkflows().find((t) => t.path && sameWfPath(t.path, st.path)) || null)
+                : null);
+        if (tab) {
+            try {
+                if (tab.ref && typeof app?.loadGraphData === "function") {
+                    await app.loadGraphData(graph, true, true, tab.ref, {
+                        showMissingModelsDialog: false,
+                        showMissingNodesDialog: false,
+                        checkForRerouteMigration: false,
+                    });
+                    tabOk = true;
+                } else if (st.path) {
+                    // a stale wrapper: reopen binds the tab first, the string
+                    // form then reuses the SAME active tab (same workflow id)
+                    const opened = await openWorkflowByPath(st.path);
+                    if (opened.ok && typeof app?.loadGraphData === "function") {
+                        await app.loadGraphData(graph, true, true,
+                            st.path.replace(/^workflows\//, ""), {
+                            showMissingModelsDialog: false,
+                            showMissingNodesDialog: false,
+                            checkForRerouteMigration: false,
+                        });
+                        tabOk = true;
+                    } else tabOk = false;
+                } else tabOk = false;
+            } catch (_) { tabOk = false; }
+        }
+        // 4) the arm clears only on SUCCESS; the panel re-reads the state
+        //    (the history list itself is untouched - the resolve only
+        //    recomputes the changes-since hint against the new file)
         st.pendingRestore = null;
         st.armedRestore = null;
-        localToast("The file was replaced (a safety snapshot is kept)");
+        localToast("Restored to the active state" +
+            (tabOk === false ? " - the tab update failed (reopen the tab to see the restored file)" : "") +
+            " - the history stays as is");
         await refreshSavedFiles();
         if (idxMode()) await runServerList(true);
         await refreshHistState();
-    } else {
-        localToast("Replace failed: " + ((res.json && res.json.error) || "?"), 5000);
+    } finally {
+        st.cpBusy = false;
+        renderHistPop();
     }
 }
 
@@ -8061,24 +8172,27 @@ function histPopClick(act, btn) {
             return;
         }
         case "histrestore": {
-            // the plan contract: Restore DEFAULTS to opening a COPY; the
-            // file-replace is a SEPARATE confirmed action (the second click)
-            // v122: a TEMP-tab process may have no file location yet - there
-            // is nothing to overwrite, the copy open stays the only mode
-            if (!st.path) {
-                void histRestore(rid, false);
-                localToast("This process has no file on disk yet - the version opens as a copy.");
-                return;
-            }
+            // v128 (owner request): RESTORE restores the ACTIVE state - the
+            // first click ARMS ONLY (no copy opens, nothing is written); the
+            // second click (or the strip's confirm button) writes the
+            // version's content back to the file + the open tab, the history
+            // stays as is. Opening a COPY remains the commit-name click
+            // (histopen) - a location-less process restores its open tab.
+            if (!rid || st.cpBusy) return;
             if (st.armedRestore === rid) {
-                st.pendingRestore = rid;
                 renderHistPop();
                 void histRestore(rid, true);
             } else {
                 st.armedRestore = rid;
-                void histRestore(rid, false); // the non-destructive copy open
-                localToast("Opened as a copy. Click ↺ AGAIN to overwrite the file (confirmed + safety snapshot).", 5000);
+                renderHistPop();
+                localToast("Click ↺ AGAIN to restore this version to the active state · the commit name opens a copy", 5000);
             }
+            return;
+        }
+        case "histrestorecancel": {
+            st.armedRestore = null;
+            st.pendingRestore = null;
+            renderHistPop();
             return;
         }
         case "histrestoreconfirm": {

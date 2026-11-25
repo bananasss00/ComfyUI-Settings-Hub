@@ -1528,6 +1528,24 @@ check("v116 restore: the replace succeeds with a snapshot + index refresh",
       json.dumps(r.json()))
 check("v116 restore: the derived index row refreshed in place",
       r.json().get("indexRefreshed") == 1, json.dumps(r.json()))
+# v128 (the owner's restore semantics): a replace-restore NEVER mutates the
+# history - the revision count, the current pointer and every manifest stay
+# exactly as they were (the restore only writes the ACTIVE state back)
+_hrevs_after = wf_store._wf_hist.list_revisions(_pid)
+_hproc_after = wf_store._wf_hist._read_process(_pid)
+check("v128 restore: the history stays as is (2 revisions, both readable)",
+      len(_hrevs_after) == 2 and
+      {r_["revisionId"] for r_ in _hrevs_after} == {rid1, rid2},
+      json.dumps([r_["revisionId"] for r_ in _hrevs_after]))
+check("v128 restore: the current pointer never moves (no new revision)",
+      _hproc_after.get("currentRevisionId") == rid2 and
+      _hproc_after.get("updatedAt") is not None,
+      json.dumps({"cur": _hproc_after.get("currentRevisionId"), "rid2": rid2}))
+check("v128 restore: the restored revision's bytes are untouched in the store",
+      wf_store._wf_hist.read_revision_bytes(rid1) ==
+      json.dumps(wf_v116("rrrrrrrr-1111-1111-1111-111111111111", seed="v1"),
+                 ensure_ascii=False).encode("utf-8"),
+      "bytes differ")
 # 4) the rollback: a failing os.replace keeps the OLD bytes from the snapshot
 import unittest.mock as _umock
 old_replace = os.replace
