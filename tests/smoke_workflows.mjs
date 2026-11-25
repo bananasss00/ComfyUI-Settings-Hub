@@ -678,6 +678,16 @@ function makeFakeApi() {
                     undo: removed.length ? { opId, expiresAt: Date.now() / 1000 | 0 + 7200 } : null,
                     note: removed.length ? "the process history is NEVER deleted with the files" : null });
             }
+            if (p === "/settings_hub/workflows/files/rename" && method === "POST") {
+                let body2 = {};
+                try { body2 = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
+                // v130 parity: the server speaks the REL dst dialect and
+                // answers the FINAL virtual dst ('workflows/' + rel - the
+                // ext namespace rides inside the rel as the first segment)
+                const rel = String(body2.dst || "").replace(/^\/+/, "");
+                return jsonResp({ ok: true, src: body2.src || null,
+                    dst: "workflows/" + rel });
+            }
             if (p === "/settings_hub/workflows/files/undo" && method === "POST") {
                 let body2 = {};
                 try { body2 = JSON.parse(opts.body); } catch (_) { return jsonResp({ ok: false, error: "bad json" }, 400); }
@@ -2133,22 +2143,23 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v128", /"workflows":\s*"v128"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v130", /"workflows":\s*"v130"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v128 (the restore semantics on top of the v127 import file-dialog + commit name, the v126 import, the v125 save-flow fixes + the v124 external folders)",
-    ENTRY_SRC.includes("web build: v128 - THE RESTORE SEMANTICS") &&
-    ENTRY_SRC.includes("THE HISTORY STAYS EXACTLY AS IS") &&
-    ENTRY_SRC.includes("never createNewTemporary"));
-check("styles.css?v=128", ENTRY_SRC.includes("styles.css?v=128"));
-check("the module self-reports v128",
+check("the entry banner names v130 (the save/rename popup fixes on top of the v129 storages + the v128 restore semantics)",
+    ENTRY_SRC.includes("web build: v130 - SAVE/RENAME/TRANSFER POPUP FIXES") &&
+    ENTRY_SRC.includes("SAVE AS / RENAME / TRANSFER ACROSS STORAGES") &&
+    ENTRY_SRC.includes("Save & Rename") &&
+    ENTRY_SRC.includes("re-index themselves inside ext_store"));
+check("styles.css?v=130", ENTRY_SRC.includes("styles.css?v=130"));
+check("the module self-reports v130",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v128"'));
-check("the web stamp literal is v128",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v130"'));
+check("the web stamp literal is v130",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v128"'));
-check("py stamp bumps together (v128)",
+        .includes('const WF_WEB_VERSION = "v130"'));
+check("py stamp bumps together (v130)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v128"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v130"'));
 check("v121 py: the union-find clustering + the seeds + the honest non-json accounting exist",
     (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
         return src.includes('def _name_stem') && src.includes('SIM_RARE_SLACK')
@@ -2745,7 +2756,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v129"); // ahead of the pack (v128) - a stale web file
+    fakeApi.__setHealthVersion("v131"); // ahead of the pack (v130) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -6507,14 +6518,36 @@ phase("AAD v125: the SAVE-FLOW FIELD FIXES - the Save-As probe reads this build,
         "still temp");
     appStub.extensionManager.command.commands.push({ id: "Comfy.SaveWorkflowAs" });
     const cmdsBefore = appStub.commands.length;
-    // re-query: the first click re-rendered the body (the saveState marker)
-    const saveBtnAad2 = rowAad()?.querySelector('[data-act="savetab"]');
-    await saveBtnAad2.click();
+    // v129: the FIRST temp save click opens THE MANAGER SAVE POPOVER - the
+    // storage picker + the subfolders, NEVER an automatic bypass into the
+    // command ladder
+    const popAad = document.querySelector(".hub-wf-sapop");
+    check("AAD: the temp save opens the manager Save-As popover WITHOUT executing the command (v129: no auto bypass)",
+        !!popAad && appStub.commands.length === cmdsBefore &&
+        !!popAad.querySelector('[data-sa="storage"][data-id="std"]'),
+        JSON.stringify(appStub.commands));
+    check("AAD: the popover prefills the temp tab's own name",
+        (popAad?.querySelector('[data-sa="path"]')?.value || "") === "AAD unsaved",
+        popAad?.querySelector('[data-sa="path"]')?.value);
+    // the native dialog stays the SECONDARY escape hatch - the popover link
+    const linkAad = popAad?.querySelector('[data-sa="native"]');
+    await linkAad.click();
     await settle(20);
-    check("AAD: the command registered -> the ladder executes Comfy.SaveWorkflowAs (the native dialog)",
+    check("AAD: the popover's native link runs the SaveWorkflowAs ladder (the escape hatch works)",
         appStub.commands.length > cmdsBefore &&
         appStub.commands.includes("Comfy.SaveWorkflowAs"),
         JSON.stringify(appStub.commands));
+    hooks.closeSaPop();
+    await settle(10);
+    check("AAD: the popover closes cleanly after the ladder (the tab stays temp)",
+        !document.querySelector(".hub-wf-sapop") && tmpDom.isTemporary, "close failed");
+    // the toggle: a repeated 💾 click REOPENS the popover (the state was cleared)
+    const saveBtnAad2 = rowAad()?.querySelector('[data-act="savetab"]');
+    await saveBtnAad2.click();
+    await settle(20);
+    check("AAD: the repeated save click reopens the popover (the toggle state)",
+        !!document.querySelector(".hub-wf-sapop"), "reopen failed");
+    hooks.closeSaPop();
     appStub.extensionManager.command.commands.length = 0;
 
     // ---- 9) the registry re-sync rides the ext registry changes -----------
@@ -6526,6 +6559,295 @@ phase("AAD v125: the SAVE-FLOW FIELD FIXES - the Save-As probe reads this build,
 }
 
 // ===========================================================================
+
+// ===========================================================================
+// v129: the SAVE AS / RENAME / TRANSFER ACROSS STORAGES machinery - the pure
+// helpers + the popover states (the disk truth is py-tested; here the UI
+// contracts: the storage model, the path math, the two-mode temp rename,
+// the batch dst computation, the no-auto-bypass rule)
+// ===========================================================================
+phase("ZZ v129+v130: the save-as / rename / transfer storages machinery (v130 fixes the dst dialect, the checkbox toggles, the temp-rename record, the keeping rebind + the folder search)");
+{
+    // the storage model: the Standard root first, then the ⬡ registry
+    hooks.refreshExtDirs();
+    await settle(10);
+    const stor129 = hooks.saveStorages();
+    check("ZZ: the storage model carries the Standard root first",
+        stor129.length >= 1 && stor129[0].id === "std" && stor129[0].ext === false,
+        JSON.stringify(stor129.map((s) => s.id)));
+    check("ZZ: every registered ext folder becomes a storage with its flags",
+        stor129.slice(1).every((s) => s.ext === true && (s.writable !== false)),
+        JSON.stringify(stor129.map((s) => s.id)));
+
+    // the path math: dirs/name split, .json handling, virtual round-trips
+    const p1 = hooks.splitRelPath("flux/inpaint/my_flow");
+    check("ZZ: splitRelPath splits the dirs and keeps the bare name",
+        p1.dirs.join("/") === "flux/inpaint" && p1.name === "my_flow" && p1.hasSlash === true,
+        JSON.stringify(p1));
+    const p2 = hooks.splitRelPath("My Flow (2).json");
+    check("ZZ: splitRelPath strips .json and keeps the (2) suffix",
+        p2.name === "My Flow (2)" && p2.dirs.length === 0 && p2.hasSlash === false,
+        JSON.stringify(p2));
+    const p3 = hooks.splitRelPath("a/../b/c");
+    check("ZZ: splitRelPath drops the traversal segments",
+        p3.dirs.join("/") === "a/b" && p3.name === "c", JSON.stringify(p3));
+    check("ZZ: joinRelPath rejoins dirs + name",
+        hooks.joinRelPath(["a", "b"], "c") === "a/b/c" &&
+        hooks.joinRelPath([], "c") === "c", "join");
+    const virtStd = hooks.virtOfStorage({ id: "std", ext: false }, "sub/flow");
+    check("ZZ: the standard rel maps to the native userdata path",
+        virtStd === "workflows/sub/flow.json", virtStd);
+    check("ZZ: relOfVirtPath inverts the standard path",
+        (() => { const r = hooks.relOfVirtPath("workflows/sub/flow.json");
+            return r && r.storageId === "std" && r.rel === "sub/flow" && r.ext === false;
+        })(), "std inverse");
+    check("ZZ: relOfVirtPath refuses a non-library path",
+        hooks.relOfVirtPath("other/thing.json") === null, "foreign");
+
+    // the Save-As popover on a temp tab: the manager popover, never a bypass
+    hooks.openSaveAsPop({ key: "zz1", name: "Unsaved Workflow (4)", isTemporary: true,
+        isActive: false, isPersisted: false }, null);
+    await settle(10);
+    const saEl = hooks.saPopEl();
+    check("ZZ: the temp save popover opens with the storage chips",
+        !!saEl && !!saEl.querySelector('[data-sa="storage"][data-id="std"]'), "no popover");
+    check("ZZ: the template temp name never prefills the path (Unsaved Workflow (N))",
+        hooks.saState().mode === "temp" && hooks.saState().rel === "",
+        JSON.stringify(hooks.saState().rel));
+    check("ZZ: the Save-As options row is hidden for a temp tab (no switch/new-id)",
+        !saEl.querySelector('[data-sa="optswitch"]'), "options leaked");
+    hooks.closeSaPop();
+    await settle(6);
+    check("ZZ: the popover closes and the state clears", !hooks.saPopEl() && !hooks.saState(), "leak");
+
+    // the Save-As popover on a persisted tab: the prefill + the options
+    hooks.openSaveAsPop({ key: "zz2", name: "Old Name", isTemporary: false,
+        isActive: true, isPersisted: true, path: "workflows/flux/v1/old_name.json" }, null);
+    await settle(10);
+    const st2 = hooks.saState();
+    check("ZZ: the persisted prefill carries the FULL relative path without .json",
+        st2 && st2.rel === "flux/v1/old_name" && st2.mode === "saveas" &&
+        st2.storage === "std", JSON.stringify(st2 && st2.rel));
+    check("ZZ: the Save-As options row exists with switch ON and new-ID OFF",
+        !!hooks.saPopEl().querySelector('[data-sa="optswitch"]:checked') &&
+        !!hooks.saPopEl().querySelector('[data-sa="optnewid"]') &&
+        !hooks.saPopEl().querySelector('[data-sa="optnewid"]:checked'),
+        "options defaults");
+    hooks.closeSaPop();
+
+    // the TWO-MODE temp rename (plan §4B): a name-only rename stays in memory
+    const tmpRef = { path: "workflows/Unsaved Workflow (3).json", size: -1, name: "Unsaved Workflow (3)" };
+    const tmpTab = { key: "zz3", name: "Unsaved Workflow (3)", isTemporary: true,
+        isPersisted: false, isActive: false, ref: tmpRef,
+        path: "workflows/Unsaved Workflow (3).json" };
+    hooks.openRenamePop({ tab: tmpTab }, null);
+    await settle(10);
+    check("ZZ: the temp rename popover opens in the MEMORY mode (the ok button reads Rename)",
+        !!hooks.rnPopEl() && hooks.rnPopEl().innerHTML.includes("✎ Rename") &&
+        !hooks.rnPopEl().innerHTML.includes("Save &amp; Rename") &&
+        !hooks.rnPopEl().innerHTML.includes("Save & Rename"),
+        hooks.rnPopEl()?.innerHTML?.slice(0, 200));
+    // the plan §4B-1: a NAME-ONLY rename - set the input, submit, nothing is
+    // written; the ref path flips, the size stays -1
+    hooks.rnPopEl().querySelector('[data-sa="path"]').value = "My Renamed Flow";
+    hooks.rnSubmitMemory();
+    await settle(10);
+    check("ZZ: the memory rename flips the ref path + the tab name, keeps the temp size",
+        tmpRef.path === "workflows/My Renamed Flow.json" &&
+        tmpTab.name === "My Renamed Flow" && tmpRef.size === -1 &&
+        tmpTab.isTemporary === true,
+        JSON.stringify({ p: tmpRef.path, s: tmpRef.size }));
+    check("ZZ: the memory-renamed tab is GUARDED from the adoption rungs (renamedTempKeys)",
+        hooks.renamedTempKeys.has("zz3") && tmpTab.path === tmpRef.path,
+        JSON.stringify([...hooks.renamedTempKeys]));
+    check("ZZ: the memory rename never wrote to the store",
+        !wfStore.calls.some((c) => c.op === "save"), JSON.stringify(wfStore.calls));
+    hooks.closeRnPop();
+
+    // the batch transfer math (plan §5): keep-structure vs flatten
+    const sel129 = ["workflows/keep/a.json", "workflows/keep/deep/b.json"];
+    const trState129 = { items: sel129, base: "archive", keep: true };
+    const trItems = hooks.trComputeItems(trState129, { id: "std", ext: false });
+    check("ZZ: keep-structure carries the file's own subfolders (the REL server dst dialect - v130)",
+        trItems.items[0].dst === "archive/keep/a.json" &&
+        trItems.items[1].dst === "archive/keep/deep/b.json",
+        JSON.stringify(trItems));
+    const trFlat = hooks.trComputeItems({ items: sel129, base: "archive", keep: false },
+        { id: "std", ext: false });
+    check("ZZ: flatten drops the structure into one folder (the REL dst dialect)",
+        trFlat.items[0].dst === "archive/a.json" &&
+        trFlat.items[1].dst === "archive/b.json", JSON.stringify(trFlat));
+    check("ZZ: a .json base folder is refused (the target is a folder)",
+        hooks.trComputeItems({ items: sel129, base: "archive/x.json", keep: true },
+            { id: "std", ext: false }).error, "bad base accepted");
+    check("ZZ: an ext storage maps the dst into the virtual namespace",
+        hooks.virtOfStorage({ id: "dirid", ext: true }, "sub/x").startsWith(
+            "workflows/.settings_hub_ext/dirid/sub/x"), "ext mapping");
+
+    // the transfer popover needs a selection - empty -> an honest toast, no pop
+    hooks.filesSelClear();
+    await settle(6);
+    hooks.openTransferPop("copy", null);
+    await settle(6);
+    check("ZZ: the batch transfer without a selection does not open",
+        !hooks.trPopEl(), "opened empty");
+    // ...and with a selection it opens with the count + the conflict policy
+    hooks.filesSelAdd(["workflows/keep/a.json", "workflows/keep/deep/b.json"]);
+    await settle(6);
+    hooks.openTransferPop("move", null);
+    await settle(10);
+    check("ZZ: the batch transfer opens with the count + the conflict select",
+        !!hooks.trPopEl() && hooks.trPopEl().innerHTML.includes("2 file(s) to…") &&
+        !!hooks.trPopEl().querySelector('[data-sa="onconflict"]') &&
+        !!hooks.trPopEl().querySelector('[data-sa="keep"]:checked'),
+        "no popover");
+    hooks.closeTrPop();
+    await settle(6);
+    check("ZZ: the transfer popover closes cleanly", !hooks.trPopEl() && !hooks.trState(), "leak");
+
+    // == v130: the owner's five bug reports =================================
+    // (1) the REL dst dialect - the server never double-prefixes again
+    check("ZZ v130: the server dst dialect - the standard rel stays bare",
+        hooks.dstRelOfStorage({ id: "std", ext: false }, "archive/keep/a") ===
+            "archive/keep/a.json" &&
+        hooks.dstRelOfStorage({ id: "std", ext: false }, "x.json") === "x.json",
+        "std rel");
+    check("ZZ v130: the server dst dialect - the ext rel carries the namespace as the FIRST segment",
+        hooks.dstRelOfStorage({ id: "dirid", ext: true }, "sub/x") ===
+            ".settings_hub_ext/dirid/sub/x.json", "ext rel");
+    check("ZZ v130: trComputeItems maps the ext dst into the namespace (REL dialect)",
+        (() => {
+            const t130x = hooks.trComputeItems({ items: sel129, base: "", keep: false },
+                { id: "dirid", ext: true });
+            return t130x.items[0].dst === ".settings_hub_ext/dirid/a.json" &&
+                t130x.items[1].dst === ".settings_hub_ext/dirid/b.json";
+        })(), "ext keep");
+
+    // (2) the checkboxes toggle - the v130 click guard (the blanket
+    // preventDefault froze every [data-sa] input)
+    hooks.openSaveAsPop({ key: "zz130cb", name: "CB Flow", isTemporary: false,
+        isActive: true, isPersisted: true, path: "workflows/cb/flow.json" }, null);
+    await settle(10);
+    const cb130 = hooks.saPopEl().querySelector('[data-sa="optswitch"]');
+    const swBefore = hooks.saState().switchTab;
+    cb130.click();
+    await settle(6);
+    check("ZZ v130: the Save-As 'Switch this tab' checkbox TOGGLES on click",
+        hooks.saState().switchTab === !swBefore,
+        JSON.stringify({ before: swBefore, after: hooks.saState().switchTab }));
+    cb130.click();
+    await settle(6);
+    check("ZZ v130: the Save-As checkbox toggles BACK",
+        hooks.saState().switchTab === swBefore,
+        JSON.stringify(hooks.saState().switchTab));
+    hooks.closeSaPop();
+    await settle(6);
+    hooks.filesSelClear();
+    hooks.filesSelAdd(["workflows/keep/a.json"]);
+    await settle(6);
+    hooks.openTransferPop("copy", null);
+    await settle(10);
+    const cbKeep = hooks.trPopEl().querySelector('[data-sa="keep"]');
+    cbKeep.click();
+    await settle(6);
+    check("ZZ v130: the transfer 'Keep subfolder structure' checkbox toggles",
+        cbKeep.checked === false && hooks.trState().keep === false,
+        JSON.stringify({ cb: cbKeep.checked, st: hooks.trState().keep }));
+    cbKeep.click();
+    await settle(6);
+    check("ZZ v130: the transfer checkbox toggles back",
+        cbKeep.checked === true && hooks.trState().keep === true, "keep back");
+    hooks.closeTrPop();
+    await settle(6);
+
+    // (3) the temp memory rename flips the STORE RECORD (both name fields)
+    // - the v129 code set neither, the next re-wrap rebuilt the old name
+    const tmpRef130 = makeTab({ name: "Unsaved Workflow (9)", isTemporary: true,
+        path: "workflows/Unsaved Workflow (9).json" });
+    const tmpTab130 = { key: "zz130t", name: "Unsaved Workflow (9)", isTemporary: true,
+        isPersisted: false, isActive: false, ref: tmpRef130,
+        path: "workflows/Unsaved Workflow (9).json" };
+    hooks.openRenamePop({ tab: tmpTab130 }, null);
+    await settle(10);
+    hooks.rnPopEl().querySelector('[data-sa="path"]').value = "My Renamed 130";
+    hooks.rnSubmitMemory();
+    await settle(10);
+    check("ZZ v130: the memory rename flips the STORE RECORD (path + both name fields, temp size kept)",
+        tmpRef130.path === "workflows/My Renamed 130.json" &&
+        tmpRef130.filename === "My Renamed 130" && tmpRef130.name === "My Renamed 130" &&
+        tmpRef130.size === -1,
+        JSON.stringify({ p: tmpRef130.path, f: tmpRef130.filename,
+            n: tmpRef130.name, s: tmpRef130.size }));
+    check("ZZ v130: the renamed temp stays guarded under its NEW path key too",
+        hooks.renamedTempKeys.has("workflows/My Renamed 130.json") &&
+        hooks.renamedTempKeys.has("zz130t"),
+        JSON.stringify([...hooks.renamedTempKeys].slice(-4)));
+    hooks.closeRnPop();
+    await settle(6);
+
+    // (4) the persisted rename: the POST speaks the REL dialect and the
+    // SERVER's dst drives the rebind - the tab NEVER closes
+    const rnTab130 = makeTab({ name: "flow.json", isPersisted: true,
+        path: "workflows/rn/flow.json" });
+    wfStore.openWorkflows = [rnTab130];
+    const closeMark130 = wfStore.calls.filter((c) => c.op === "close").length;
+    hooks.openRenamePop({ path: "workflows/rn/flow.json" }, null);
+    await settle(10);
+    hooks.rnPopEl().querySelector('[data-sa="path"]').value = "rn/flow-v2";
+    await hooks.rnSubmit(false);
+    await settle(10);
+    const renBody130 = fakeApi.__calls().reverse().find((c) =>
+        c.url.split("?")[0] === "/settings_hub/workflows/files/rename");
+    check("ZZ v130: the rename POST speaks the REL dialect (no 'workflows/' prefix)",
+        renBody130 && JSON.parse(renBody130.body).dst === "rn/flow-v2.json" &&
+        JSON.parse(renBody130.body).src === "workflows/rn/flow.json",
+        JSON.stringify(renBody130));
+    check("ZZ v130: the open tab followed the SERVER's dst (in place)",
+        rnTab130.path === "workflows/rn/flow-v2.json" &&
+        rnTab130.name === "flow-v2" && rnTab130.filename === "flow-v2",
+        JSON.stringify({ p: rnTab130.path, n: rnTab130.name, f: rnTab130.filename }));
+    check("ZZ v130: the rebind closed NOTHING (no close call, the record stays open)",
+        wfStore.calls.filter((c) => c.op === "close").length === closeMark130 &&
+        wfStore.openWorkflows.includes(rnTab130), "closed");
+    hooks.closeRnPop();
+    await settle(6);
+
+    // (5) the in-place rebind unit: EVERY tab on the src follows
+    const d1 = makeTab({ name: "dup.json", isPersisted: true, path: "workflows/dup/x.json" });
+    const d2 = makeTab({ name: "dup.json", isPersisted: true, path: "workflows/dup/x.json" });
+    wfStore.openWorkflows = [d1, d2];
+    hooks.rebindMovedTabs([["workflows/dup/x.json", "workflows/dup/y.json"]]);
+    check("ZZ v130: the rebind moves EVERY tab bound to the src (a rename never forks a tab)",
+        d1.path === "workflows/dup/y.json" && d2.path === "workflows/dup/y.json" &&
+        d1.name === "y" && d2.name === "y", JSON.stringify([d1.path, d2.path]));
+    wfStore.openWorkflows = [];
+
+    // (6) the multi-word folder search of the subfolder chips
+    check("ZZ v130: the folder filter - every word must hit the dir string",
+        JSON.stringify(hooks.subsFilterDirs({ subs: [],
+            subdirs: ["flux/inpaint", "flux/upscale", "anime/v2", "inpaint2"],
+            subQuery: "flux inpaint" }).rows.map((r) => r.dir)) ===
+            JSON.stringify(["flux/inpaint"]), "filter");
+    check("ZZ v130: the folder filter is case-insensitive and covers the recents too",
+        JSON.stringify(hooks.subsFilterDirs({ subs: ["Anime Refs"],
+            subdirs: ["other"], subQuery: "anime" }).rows.map((r) => r.dir)) ===
+            JSON.stringify(["Anime Refs"]), "filter case");
+    check("ZZ v130: the search input rides in from 9+ chips (below that the chips ARE the search)",
+        hooks.subsRowHtml({ subs: [],
+            subdirs: ["d1","d2","d3","d4","d5","d6","d7","d8","d9","d10"],
+            subQuery: "" }).includes('data-sa="subsearch"') &&
+        !hooks.subsRowHtml({ subs: [], subdirs: ["d1", "d2"],
+            subQuery: "" }).includes('data-sa="subsearch"'),
+        "search threshold");
+    check("ZZ v130: an unmatched query answers with the no-match note",
+        hooks.subsRowHtml({ subs: [], subdirs: ["a"], subQuery: "zzz" })
+            .includes("No folders match"), "no match note");
+    check("ZZ v130: a matched query filters the chips to the hits",
+        (() => { const h = hooks.subsRowHtml({ subs: [],
+            subdirs: ["flux/inpaint", "flux/upscale"], subQuery: "flux" });
+            return h.includes("flux/inpaint") && h.includes("flux/upscale") &&
+                h.includes('data-sa="subslist"'); })(), "filtered chips");
+}
 
 console.log(`\nworkflows smoke: PASS ${pass}  FAIL ${fail}`);
 if (failures.length) {

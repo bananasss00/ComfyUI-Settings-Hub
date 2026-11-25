@@ -44,23 +44,23 @@ const num = (css, sel) => {
 phase("PA build v95 + version manifest");
 {
     const entry = fs.readFileSync(path.join(WEB, "settings_hub.js"), "utf8");
-    check("PA the entry reports v128 (exactly once)",
-        (entry.match(/globalThis\.__SettingsHubBuild = "v128"/g) || []).length === 1);
-    check("PA the banner names the v128 restore-semantics release",
-        entry.includes("web build: v128 - THE RESTORE SEMANTICS"));
+    check("PA the entry reports v130 (exactly once)",
+        (entry.match(/globalThis\.__SettingsHubBuild = "v130"/g) || []).length === 1);
+    check("PA the banner names the v130 save/rename popup fixes (the dst dialect, the toggles, the record flip, the keeping rebind, the folder search)",
+        entry.includes("web build: v130 - SAVE/RENAME/TRANSFER POPUP FIXES"));
     check("PA styles.css?v= follows the entry (cache-bust)",
-        entry.includes("styles.css?v=128"));
-    check("PA stack v101, launcher v101, chat v111 (smart queue unload), workflows v128 (the restore-semantics release)",
+        entry.includes("styles.css?v=130"));
+    check("PA stack v101, launcher v101, chat v111 (smart queue unload), workflows v130 (the dst-dialect/popup-fix release)",
         entry.includes('"chat": "v111"') && entry.includes('"stack": "v101"') && entry.includes('"hub_ui_renderer": "v94"') &&
-        entry.includes('"launcher": "v101"') && entry.includes('"workflows": "v128"') && entry.includes('"core": "v93"'));
+        entry.includes('"launcher": "v101"') && entry.includes('"workflows": "v130"') && entry.includes('"core": "v93"'));
     const py = fs.readFileSync(path.join(ROOT, "py", "stack_store.py"), "utf8");
-    check("PA py STACK_SERVER_VERSION = v128 (bumps together with the entry)",
-        py.includes('STACK_SERVER_VERSION = "v128"'));
+    check("PA py STACK_SERVER_VERSION = v130 (bumps together with the entry)",
+        py.includes('STACK_SERVER_VERSION = "v130"'));
     const wpy = fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8");
-    check("PA py WORKFLOWS_SERVER_VERSION = v128 (bumps together with the entry)",
-        wpy.includes('WORKFLOWS_SERVER_VERSION = "v128"'));
+    check("PA py WORKFLOWS_SERVER_VERSION = v130 (bumps together with the entry)",
+        wpy.includes('WORKFLOWS_SERVER_VERSION = "v130"'));
     const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
-    check("PA README badge is v128", /web%20build-v128-/.test(readme));
+    check("PA README badge is v130", /web%20build-v130-/.test(readme));
 }
 
 // ---------------------------------------------------------------------------

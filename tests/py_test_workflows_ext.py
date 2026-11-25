@@ -32,6 +32,10 @@ Covers:
   * _resolve_library_file(): the virtual branch resolves (the delete+undo,
     the history and the inspector reach the real files), a broken ext path
     answers (None, None)
+  * v130 the DST DIALECT: the full virtual ext dst ('workflows/.settings_hub_ext/
+    ...') un-aliases, ext -> standard ROOT lands in the root (never in
+    workflows/workflows/), standard -> ext takes the namespace as the first
+    rel segment, the batch transfer crosses the storages both ways
 
 Run: python3 tests/py_test_workflows_ext.py   (exit 0 = all good)
 """
@@ -514,6 +518,119 @@ try:
     check("files: the detached rows leave the listing",
           not any(".settings_hub_ext/" in (f["path"] or "")
                   for f in files2), json.dumps(len(files2)))
+
+    # ==================================================================
+    print("== v129 ext: the SUBDIRS suggestions + the cross-storage rename ==")
+    wfx._dirs_cache = []
+    lib2 = tempfile.mkdtemp(prefix="shub-ext-sub-")
+    os.makedirs(os.path.join(lib2, "a", "b"), exist_ok=True)
+    os.makedirs(os.path.join(lib2, "empty"), exist_ok=True)
+    with open(os.path.join(lib2, "a", "b", "deep.json"), "w", encoding="utf-8") as f:
+        f.write(wf_json("deep"))
+    r = run(H_DIRS_ADD(FakeRequest(json_body={"path": lib2})))
+    did2 = (r.json().get("dir") or {}).get("id")
+    H_SUBS = wfx.ext_subdirs
+    r = run(H_SUBS(FakeRequest(method="GET", query={"dir": did2})))
+    j = r.json()
+    check("v129 ext subdirs: ok", r.status == 200 and j.get("ok") is True, str(j))
+    check("v129 ext subdirs: the EMPTY folder is listed (empty dirs included)",
+          "empty" in (j.get("dirs") or []), str(j.get("dirs")))
+    check("v129 ext subdirs: the nested chain is listed",
+          "a" in (j.get("dirs") or []) and "a/b" in (j.get("dirs") or []),
+          str(j.get("dirs")))
+    check("v129 ext subdirs: sorted",
+          (j.get("dirs") or []) == sorted(j.get("dirs") or []))
+    r = run(H_SUBS(FakeRequest(method="GET", query={"dir": "nosuchid"})))
+    check("v129 ext subdirs: an unknown id -> 404", r.status == 404, str(r.status))
+
+    # the cross-storage rename: the ext virtual namespace -> the STANDARD
+    # workflows folder - one server call, the REAL file moves across disks
+    std_root = os.path.join(_USER_DIR, "default", "workflows")
+    os.makedirs(std_root, exist_ok=True)
+    H_REN = wf_store.workflows_files_rename
+    r = run(H_REN(FakeRequest(json_body={
+        "src": "workflows/.settings_hub_ext/%s/a/b/deep.json" % did2,
+        "dst": "from-ext/deep.json"})))
+    j = r.json()
+    check("v129 ext rename: ext -> standard ok",
+          r.status == 200 and j.get("ok") is True, str(j))
+    check("v129 ext rename: the REAL file landed in the standard root",
+          os.path.isfile(os.path.join(std_root, "from-ext", "deep.json")))
+    check("v129 ext rename: the ext copy is gone",
+          not os.path.isfile(os.path.join(lib2, "a", "b", "deep.json")))
+    r = run(H_REN(FakeRequest(json_body={
+        "src": "workflows/.settings_hub_ext/%s/a/b/deep.json" % did2,
+        "dst": "nowhere.json"})))
+    check("v129 ext rename: a missing ext src -> 400", r.status == 400,
+          str(r.status))
+
+    # == v130: the dst DIALECT fixes (the owner's bug report) ==============
+    # 1) the FULL VIRTUAL ext dst ('workflows/.settings_hub_ext/<id>/...')
+    #    un-aliases - the v129 frontend shipped exactly this shape
+    with open(os.path.join(lib2, "a", "b", "dialect.json"), "w",
+              encoding="utf-8") as f:
+        f.write(wf_json("dialect"))
+    r = run(H_REN(FakeRequest(json_body={
+        "src": "workflows/.settings_hub_ext/%s/a/b/dialect.json" % did2,
+        "dst": "workflows/.settings_hub_ext/%s/a/b/dialect-moved.json" % did2})))
+    j = r.json()
+    check("v130 rename: the full VIRTUAL ext dst un-aliases (ok)",
+          r.status == 200 and j.get("ok") is True, str(j))
+    check("v130 rename: the file moved INSIDE the ext folder",
+          os.path.isfile(os.path.join(lib2, "a", "b", "dialect-moved.json")) and
+          not os.path.isfile(os.path.join(lib2, "a", "b", "dialect.json")),
+          str(j))
+    check("v130 rename: the answer dst is the canonical virtual path",
+          j.get("dst") == "workflows/.settings_hub_ext/%s/a/b/dialect-moved.json" % did2,
+          str(j.get("dst")))
+
+    # 2) ext -> STANDARD with a ROOT-level rel dst - the file lands in the
+    #    STANDARD ROOT, never in workflows/workflows/ (the owner's bug)
+    r = run(H_REN(FakeRequest(json_body={
+        "src": "workflows/.settings_hub_ext/%s/a/b/dialect-moved.json" % did2,
+        "dst": "dialect-root.json"})))
+    j = r.json()
+    check("v130 rename: ext -> standard ROOT ok",
+          r.status == 200 and j.get("ok") is True, str(j))
+    check("v130 rename: the file sits in the standard ROOT (no workflows/workflows/)",
+          os.path.isfile(os.path.join(std_root, "dialect-root.json")) and
+          not os.path.isfile(os.path.join(std_root, "workflows", "dialect-root.json")) and
+          not os.path.isdir(os.path.join(std_root, "workflows")), str(j))
+    check("v130 rename: the answer dst is the standard virtual path",
+          j.get("dst") == "workflows/dialect-root.json", str(j.get("dst")))
+
+    # 3) standard -> ext: the rel dst carries the namespace as the FIRST segment
+    r = run(H_REN(FakeRequest(json_body={
+        "src": "workflows/dialect-root.json",
+        "dst": ".settings_hub_ext/%s/back.json" % did2})))
+    j = r.json()
+    check("v130 rename: standard -> ext (the rel namespace dst) ok",
+          r.status == 200 and j.get("ok") is True, str(j))
+    check("v130 rename: the REAL file is back in the ext folder",
+          os.path.isfile(os.path.join(lib2, "back.json")), str(j))
+
+    # 4) the batch transfer across the storages (the same rel dialect)
+    H_TRF = wf_store.workflows_files_transfer
+    with open(os.path.join(lib2, "batch-src.json"), "w", encoding="utf-8") as f:
+        f.write(wf_json("batch"))
+    r = run(H_TRF(FakeRequest(json_body={"op": "copy", "items": [
+        {"src": "workflows/.settings_hub_ext/%s/batch-src.json" % did2,
+         "dst": "batch-copy.json"}]})))
+    j = r.json()
+    check("v130 transfer: ext -> standard copy ok",
+          r.status == 200 and j.get("copied") == 1, str(j))
+    check("v130 transfer: the copy landed in the standard ROOT",
+          os.path.isfile(os.path.join(std_root, "batch-copy.json")) and
+          os.path.isfile(os.path.join(lib2, "batch-src.json")), str(j))
+    r = run(H_TRF(FakeRequest(json_body={"op": "move", "items": [
+        {"src": "workflows/batch-copy.json",
+         "dst": ".settings_hub_ext/%s/batch-back.json" % did2}]})))
+    j = r.json()
+    check("v130 transfer: standard -> ext move ok",
+          r.status == 200 and j.get("moved") == 1, str(j))
+    check("v130 transfer: the REAL file crossed back to the ext disk",
+          os.path.isfile(os.path.join(lib2, "batch-back.json")) and
+          not os.path.isfile(os.path.join(std_root, "batch-copy.json")), str(j))
 
     # the cap check (a fresh registry, 24 + 1 entries would need 25 real
     # dirs - the cap answers before any 25th folder exists)

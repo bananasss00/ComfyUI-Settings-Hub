@@ -1616,7 +1616,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v129"
+WORKFLOWS_SERVER_VERSION = "v130"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -2358,7 +2358,13 @@ def _clean_library_rel(raw, for_dst=False):
     service folders (presets/, temp/, ...) are refused as DESTINATION
     segments - a rename must never materialize a file inside the storage
     housekeeping. The '.settings_hub_ext' namespace stays addressable ONLY
-    as the first segment (the resolver then validates the registered id)."""
+    as the first segment (the resolver then validates the registered id).
+    v130: a dst may arrive as the FULL virtual ext path
+    ('workflows/.settings_hub_ext/<id>/...') - the 'workflows/' prefix is
+    un-aliased when it leads straight into the ext namespace; the STANDARD
+    'workflows/...' dst stays a LITERAL rel (a real 'workflows' subfolder is
+    legal), so the client must speak the rel dialect for standard targets
+    (the v129 frontend shipped the double-prefix bug workflows/workflows/)."""
     if not isinstance(raw, str):
         return None, "path must be a string"
     p = raw.strip()
@@ -2381,6 +2387,9 @@ def _clean_library_rel(raw, for_dst=False):
         if any(ord(c) < 32 for c in s):
             return None, "control characters are not allowed"
     if for_dst:
+        if (len(parts) >= 2 and parts[0] == "workflows"
+                and parts[1] == ".settings_hub_ext"):
+            parts = parts[1:]
         for i, s in enumerate(parts):
             if s in _LIB_SERVICE_DIRS:
                 return None, "the service folders are not addressable: " + s

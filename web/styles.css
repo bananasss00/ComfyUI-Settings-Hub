@@ -7066,13 +7066,42 @@ button.hub-wf-dirrow:hover { background: rgba(90, 110, 200, 0.18); }
     border-color: #6f7fd0;
 }
 
+/* v130: the wrap carries the optional multi-word folder search + the
+   chips; the search input lives OUTSIDE the chips node so a keystroke
+   re-renders only the list (the caret survives every letter) */
+.hub-wf-sasubwrap {
+    margin-top: 5px;
+}
+
+.hub-wf-sasusearch {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 3px 6px;
+    background: #191926;
+    border: 1px solid #33334a;
+    border-radius: 4px;
+    color: #e8e8f2;
+    font-size: calc(var(--sh-fs, 1) * 10.5px);
+}
+
+.hub-wf-sasusearch:focus {
+    outline: none;
+    border-color: #6f7fd0;
+}
+
 .hub-wf-sasubs {
     display: flex;
     flex-wrap: wrap;
     gap: 3px;
-    margin-top: 5px;
+    margin-top: 4px;
     max-height: 96px;
     overflow-y: auto;
+}
+
+.hub-wf-sasnous {
+    color: #8b8fa8;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    padding: 2px 1px;
 }
 
 .hub-wf-sasub {

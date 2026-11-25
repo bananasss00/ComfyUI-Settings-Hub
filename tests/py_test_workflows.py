@@ -2128,6 +2128,198 @@ _impcount2 = len(wf_store._wf_hist.list_revisions(_imppid))
 check("v127 content import: the count is 4 (disk + foreign file + tab graph + one content import)",
       _impcount2 == 4, str(_impcount2))
 
+# ===========================================================================
+print("== v129: the library rename / transfer / subdirs / index refresh ==")
+reset_state()
+
+REN = H[("POST", "/settings_hub/workflows/files/rename")]
+TRF = H[("POST", "/settings_hub/workflows/files/transfer")]
+SUBD = H[("GET", "/settings_hub/workflows/files/subdirs")]
+IREF = H[("POST", "/settings_hub/workflows/index/refresh")]
+
+lib129 = os.path.join(_USER_DIR, "default", "workflows")
+os.makedirs(os.path.join(lib129, "sub"), exist_ok=True)
+os.makedirs(os.path.join(lib129, "empty_dir"), exist_ok=True)
+os.makedirs(os.path.join(lib129, "presets"), exist_ok=True)
+
+
+def mk129(rel, content):
+    p = os.path.join(lib129, rel)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    return p
+
+
+mk129("alpha.json", '{"id":"uuid-alpha-129","nodes":[]}')
+mk129("sub/beta.json", '{"id":"uuid-beta-129","nodes":[]}')
+mk129("gamma.json", '{"id":"uuid-gamma-129","nodes":[]}')
+
+# --- the unit contract of the free-text rel cleaner ------------------------
+_c1, _e1 = wf_store._clean_library_rel("My Flow (2)")
+check("v129 clean rel: .json appended", _c1 == "My Flow (2).json" and _e1 is None,
+      str((_c1, _e1)))
+_c2, _e2 = wf_store._clean_library_rel("a/../b")
+check("v129 clean rel: traversal refused", _c2 is None and _e2, str(_e2))
+_c3, _e3 = wf_store._clean_library_rel("presets/evil", for_dst=True)
+check("v129 clean rel: presets/ refused as dst", _c3 is None, str(_e3))
+_c4, _e4 = wf_store._clean_library_rel('.settings_hub_ext/abc/x', for_dst=True)
+check("v129 clean rel: the ext namespace stays addressable as the first segment",
+      _c4 == ".settings_hub_ext/abc/x.json" and _e4 is None, str((_c4, _e4)))
+# --- v130: the dst DIALECT fixes (the owner's bug report) -------------------
+_c5, _e5 = wf_store._clean_library_rel("workflows/.settings_hub_ext/abc/x",
+                                       for_dst=True)
+check("v130 clean rel: the FULL virtual ext dst un-aliases (the 'workflows/' prefix strips)",
+      _c5 == ".settings_hub_ext/abc/x.json" and _e5 is None, str((_c5, _e5)))
+_c6, _e6 = wf_store._clean_library_rel("sub/.settings_hub_ext/x", for_dst=True)
+check("v130 clean rel: the ext namespace in a NON-first segment still refuses",
+      _c6 is None and _e6 and "first segment" in _e6, str(_e6))
+_c7, _e7 = wf_store._clean_library_rel("workflows/deep/name", for_dst=True)
+check("v130 clean rel: a standard 'workflows/...' dst stays a LITERAL rel "
+      "(a real 'workflows' subfolder is legal - the client speaks rel)",
+      _c7 == "workflows/deep/name.json" and _e7 is None, str((_c7, _e7)))
+
+# --- subdirs: the save/rename pickers' suggestions -------------------------
+r = loop(SUBD(FakeRequest(method="GET")))
+j = r.json()
+_dirs129 = j.get("dirs") or []
+check("v129 subdirs: ok", r.status == 200 and j.get("ok") is True)
+check("v129 subdirs: the EMPTY dir is listed (empty folders included)",
+      "empty_dir" in _dirs129, str(_dirs129))
+check("v129 subdirs: the nested folder is listed", "sub" in _dirs129)
+check("v129 subdirs: the presets/ housekeeping never shows",
+      not any(d == "presets" or d.startswith("presets/") for d in _dirs129),
+      str(_dirs129))
+check("v129 subdirs: sorted", _dirs129 == sorted(_dirs129))
+
+# --- rename: the name + the subfolders in ONE step --------------------------
+r = loop(REN(FakeRequest(json_body={"src": "workflows/alpha.json",
+                                    "dst": "archive/2026/alpha-renamed"})))
+j = r.json()
+check("v129 rename: ok", r.status == 200 and j.get("ok") is True, str(j))
+check("v129 rename: the dst is the virtual path with .json",
+      j.get("dst") == "workflows/archive/2026/alpha-renamed.json", str(j.get("dst")))
+check("v129 rename: the source is gone",
+      not os.path.isfile(os.path.join(lib129, "alpha.json")))
+check("v129 rename: the dest sits at the real nested path",
+      os.path.isfile(os.path.join(lib129, "archive", "2026", "alpha-renamed.json")))
+
+# --- the favorites follow a move --------------------------------------------
+wf_store._write_file_favs(["workflows/sub/beta.json"])
+r = loop(REN(FakeRequest(json_body={"src": "workflows/sub/beta.json",
+                                    "dst": "sub2/beta2.json"})))
+check("v129 rename: ok (the fav case)",
+      r.status == 200 and r.json().get("ok") is True)
+check("v129 rename: the ★ favorite followed the file",
+      wf_store._read_file_favs() == ["workflows/sub2/beta2.json"],
+      str(wf_store._read_file_favs()))
+
+# --- the history locations follow a move ------------------------------------
+_hist129 = wf_store._wf_hist
+_proc129, _new129 = _hist129._ensure_process("uuid-tr-129", "V129 TR")
+_hist129.attach_location(_proc129["processId"], "workflows/sub2/beta2.json")
+r = loop(REN(FakeRequest(json_body={"src": "workflows/sub2/beta2.json",
+                                    "dst": "moved/beta3.json"})))
+_p129 = _hist129.get_process(_proc129["processId"])
+_locs129 = [l.get("path") for l in (_p129 or {}).get("locations", [])]
+check("v129 rename: ok (the history case)",
+      r.status == 200 and r.json().get("ok") is True)
+check("v129 rename: the old history location detached",
+      "workflows/sub2/beta2.json" not in _locs129, str(_locs129))
+
+# --- the conflicts: honest 409, nothing moves -------------------------------
+r = loop(REN(FakeRequest(json_body={"src": "workflows/gamma.json",
+                                    "dst": "moved/beta3.json"})))
+check("v129 rename: an existing dst without overwrite -> 409 exists",
+      r.status == 409 and r.json().get("error") == "exists",
+      str(r.status) + " " + str(r.json()))
+check("v129 rename: nothing moved on the 409",
+      os.path.isfile(os.path.join(lib129, "gamma.json")))
+check("v129 rename: the target survived the 409 too",
+      os.path.isfile(os.path.join(lib129, "moved", "beta3.json")))
+
+# --- overwrite=true replaces the dest (a snapshot of it for the undo) ------
+r = loop(REN(FakeRequest(json_body={"src": "workflows/gamma.json",
+                                    "dst": "moved/beta3.json",
+                                    "overwrite": True})))
+j = r.json()
+check("v129 rename: overwrite ok", r.status == 200 and j.get("ok") is True, str(j))
+check("v129 rename: the overwritten bytes are snapshotted (overwrittenTxId)",
+      bool(j.get("overwrittenTxId")))
+with open(os.path.join(lib129, "moved", "beta3.json"), "r", encoding="utf-8") as fh:
+    _ovr129 = fh.read()
+check("v129 rename: the dest now carries the source content",
+      _ovr129 == '{"id":"uuid-gamma-129","nodes":[]}', _ovr129[:60])
+
+# --- the refusals ------------------------------------------------------------
+r = loop(REN(FakeRequest(json_body={"src": "workflows/../evil.json", "dst": "x.json"})))
+check("v129 rename: a traversal src -> 400", r.status == 400, str(r.status))
+r = loop(REN(FakeRequest(json_body={"src": "workflows/nonexistent.json",
+                                    "dst": "y.json"})))
+check("v129 rename: a missing src -> 400", r.status == 400, str(r.status))
+r = loop(REN(FakeRequest(json_body={"src": "workflows/moved/beta3.json",
+                                    "dst": "presets/evil"})))
+check("v129 rename: a presets/ dst -> 400 (the housekeeping is not addressable)",
+      r.status == 400, str(r.status))
+
+# --- the batch transfer -------------------------------------------------------
+mk129("keep/a.json", '{"id":"uuid-a-129","nodes":[]}')
+mk129("keep/deep/b.json", '{"id":"uuid-b-129","nodes":[]}')
+r = loop(TRF(FakeRequest(json_body={"op": "copy", "items": [
+    {"src": "workflows/keep/a.json", "dst": "out/a.json"},
+    {"src": "workflows/keep/deep/b.json", "dst": "out/deep/b.json"},
+]})))
+j = r.json()
+check("v129 transfer copy: ok", r.status == 200 and j.get("ok") is True, str(j))
+check("v129 transfer copy: copied 2", j.get("copied") == 2, str(j.get("copied")))
+check("v129 transfer copy: the sources survive",
+      os.path.isfile(os.path.join(lib129, "keep", "a.json")))
+check("v129 transfer copy: the copies sit at the nested real paths",
+      os.path.isfile(os.path.join(lib129, "out", "a.json")) and
+      os.path.isfile(os.path.join(lib129, "out", "deep", "b.json")))
+
+r = loop(TRF(FakeRequest(json_body={"op": "move", "onConflict": "skip", "items": [
+    {"src": "workflows/keep/a.json", "dst": "out/a.json"},
+    {"src": "workflows/keep/deep/b.json", "dst": "out/moved-b.json"},
+]})))
+j = r.json()
+check("v129 transfer move/skip: ok", r.status == 200 and j.get("ok") is True)
+check("v129 transfer move/skip: 1 skipped + 1 moved",
+      j.get("skipped") == 1 and j.get("moved") == 1, str(j))
+check("v129 transfer move/skip: the conflicting source stayed",
+      os.path.isfile(os.path.join(lib129, "keep", "a.json")))
+check("v129 transfer move/skip: the free file moved (and vanished from src)",
+      not os.path.isfile(os.path.join(lib129, "keep", "deep", "b.json")) and
+      os.path.isfile(os.path.join(lib129, "out", "moved-b.json")))
+
+r = loop(TRF(FakeRequest(json_body={"op": "move", "onConflict": "auto", "items": [
+    {"src": "workflows/keep/a.json", "dst": "out/a.json"},
+]})))
+j = r.json()
+check("v129 transfer move/auto: ok", r.status == 200 and j.get("ok") is True)
+check("v129 transfer move/auto: lands as 'a (2).json' - never a silent overwrite",
+      os.path.isfile(os.path.join(lib129, "out", "a (2).json")),
+      str(j.get("results")))
+
+r = loop(TRF(FakeRequest(json_body={"op": "nope",
+                                    "items": [{"src": "workflows/keep/a.json",
+                                               "dst": "z.json"}]})))
+check("v129 transfer: a bad op -> 400", r.status == 400, str(r.status))
+r = loop(TRF(FakeRequest(json_body={"op": "copy", "items": []})))
+check("v129 transfer: empty items -> 400", r.status == 400, str(r.status))
+r = loop(TRF(FakeRequest(json_body={"op": "copy", "onConflict": "nope", "items": [
+    {"src": "workflows/keep/a.json", "dst": "z.json"}]})))
+check("v129 transfer: a bad onConflict -> 400", r.status == 400, str(r.status))
+
+# --- the index point refresh --------------------------------------------------
+r = loop(IREF(FakeRequest(json_body={"paths": ["workflows/out/moved-b.json"]})))
+j = r.json()
+check("v129 index refresh: ok", r.status == 200 and j.get("ok") is True, str(j))
+check("v129 index refresh: the existing file is updated (updated >= 1)",
+      (j.get("updated") or 0) >= 1, str(j))
+r = loop(IREF(FakeRequest(json_body={"paths": []})))
+check("v129 index refresh: no paths -> 400", r.status == 400, str(r.status))
+
 reset_state()
 # ===========================================================================
 

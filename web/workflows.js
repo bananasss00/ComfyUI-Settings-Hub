@@ -360,9 +360,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v129";
+const WF_WEB_VERSION = "v130";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v129";
+globalThis.__SettingsHubLoaded["workflows"] = "v130";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -8720,6 +8720,9 @@ const SA_LAST_SUBS = "settingshub.wf.saveSubs";
 const SA_OPTS_KEY = "settingshub.wf.saveOpts";
 const SA_RECENT_SUBS_CAP = 4;
 const SA_SUBDIRS_CAP = 60;
+// v130: the folder search rides in from this many chips (below that the
+// chips ARE the search - an input would be noise)
+const SA_SUBS_SEARCH_MIN = 9;
 // the DEFAULT temp names ("Unsaved Workflow (N)") never prefill the save
 // popover - they are ComfyUI placeholders, not names the user chose
 const SA_TEMPLATE_NAME_RE = /^unsaved workflow( \(\d+\))?$/i;
@@ -8797,6 +8800,19 @@ function virtOfStorage(st, rel) {
     let r = String(rel || "").replace(/^\/+|\/+$/g, "");
     if (!r.toLowerCase().endsWith(".json")) r += ".json";
     return st && st.ext ? extVirtPathOf(st.id, r) : normWfPath("workflows/" + r);
+}
+/** v130 fix (the owner's bug report): the SERVER dst dialect - the RELATIVE
+ *  path under the storage root, NOT the virtual path. The v129 frontend
+ *  sent 'workflows/...' and the server prepended its own 'workflows/' -
+ *  a move to the Standard root landed in 'workflows/workflows/', an ext
+ *  dst died on 'the external namespace is addressable only as the first
+ *  segment'. Standard targets speak the bare rel ('sub/name.json'); the
+ *  ext targets keep the FIRST-SEGMENT namespace rule
+ *  ('.settings_hub_ext/<id>/sub/name.json'). */
+function dstRelOfStorage(st, rel) {
+    let r = String(rel || "").replace(/^\/+|\/+$/g, "");
+    if (!r.toLowerCase().endsWith(".json")) r += ".json";
+    return st && st.ext ? ".settings_hub_ext/" + st.id + "/" + r : r;
 }
 /** The inverse mapping: a virtual path -> {storageId, rel (no .json), ext},
  *  or null when the path is not an addressable library file (an unregistered
@@ -8977,22 +8993,26 @@ function anchorPopFixed(pop, anchorBtn) {
     }
 }
 
-/** A re-render that keeps the path input's value + caret (the chips and the
+/** A re-render that keeps the FOCUSED text entry (the path input AND the
+ *  v130 folder search) - value + caret + focus survive (the chips and the
  *  hint re-render around the typing, never through it). */
 function renderPopHtml(pop, html) {
     if (!pop) return;
-    const inp = pop.querySelector('[data-sa="path"]');
+    const ae = document.activeElement;
+    const inp = (ae && pop.contains(ae) && isTextEntryEl(ae)) ? ae : null;
     const keep = inp ? {
-        v: inp.value, a: inp.selectionStart, b: inp.selectionEnd,
-        focused: document.activeElement === inp,
+        sa: (inp.dataset && inp.dataset.sa) || "", v: inp.value,
+        a: inp.selectionStart, b: inp.selectionEnd,
     } : null;
     pop.innerHTML = html;
-    const inp2 = pop.querySelector('[data-sa="path"]');
-    if (keep && inp2) {
-        inp2.value = keep.v;
-        if (keep.focused) { try { inp2.focus(); } catch (_) {} }
-        if (keep.a != null && keep.a <= keep.v.length) {
-            try { inp2.setSelectionRange(keep.a, keep.b); } catch (_) {}
+    if (keep && keep.sa) {
+        const el = pop.querySelector('[data-sa="' + keep.sa + '"]');
+        if (el && typeof el.value === "string") {
+            el.value = keep.v;
+            try { el.focus(); } catch (_) {}
+            if (keep.a != null && keep.a <= keep.v.length) {
+                try { el.setSelectionRange(keep.a, keep.b); } catch (_) {}
+            }
         }
     }
 }
@@ -9023,21 +9043,83 @@ function storageChipsHtml(curId) {
     }).join("");
 }
 
+/** v130 (the owner's ask): the MULTI-WORD filter of the subfolder chips -
+ *  every whitespace-separated word must hit the dir string (a
+ *  case-insensitive substring; "flux inpaint" matches flux/inpaint2). */
+function subsFilterDirs(st) {
+    const recents = (st.subs || []).filter((s) => s && (!st.subdirs || !st.subdirs.includes(s)));
+    const existing = (st.subdirs || []).slice(0, SA_SUBDIRS_CAP);
+    const all = recents.map((d) => ({ dir: d, recent: true }))
+        .concat(existing.map((d) => ({ dir: d, recent: false })));
+    const words = String(st.subQuery || "").toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return { rows: all, filtered: false };
+    return {
+        rows: all.filter((x) => words.every((w) => x.dir.toLowerCase().includes(w))),
+        filtered: true,
+    };
+}
+
+function subsListInnerHtml(st) {
+    const { rows, filtered } = subsFilterDirs(st);
+    if (!rows.length) {
+        return filtered
+            ? `<div class="hub-wf-sasnous">No folders match "${esc(st.subQuery || "")}"</div>`
+            : "";
+    }
+    return rows.map((x) =>
+        `<button type="button" class="hub-wf-sasub${x.recent ? " hub-wf-sasub-recent" : ""}" data-sa="sub" ` +
+        `data-dir="${esc(x.dir)}" title="${x.recent ? "Recent: use this subfolder (the file name stays)" : "Use this subfolder (the file name stays; missing folders are created on save)"}">${esc(x.dir)}</button>`
+    ).join("");
+}
+
 /** The subfolder chips row: the 2-4 RECENT targets first (the plan §3.2),
  *  then the existing folders of the picked storage (empty ones included -
  *  the subdirs routes walk the real tree). Click = replace the folder
- *  prefix, keep the file name. */
+ *  prefix, keep the file name. v130: when the storage carries MANY folders
+ *  (or a query is already typed) a MULTI-WORD SEARCH input rides above the
+ *  chips - it lives OUTSIDE the chips node, so a keystroke re-renders only
+ *  the list and the caret survives every letter. */
 function subsRowHtml(st) {
     const recents = (st.subs || []).filter((s) => s && (!st.subdirs || !st.subdirs.includes(s)));
     const existing = (st.subdirs || []).slice(0, SA_SUBDIRS_CAP);
-    if (!recents.length && !existing.length) return "";
-    const chip = (dir, recent) =>
-        `<button type="button" class="hub-wf-sasub${recent ? " hub-wf-sasub-recent" : ""}" data-sa="sub" ` +
-        `data-dir="${esc(dir)}" title="${recent ? "Recent: use this subfolder (the file name stays)" : "Use this subfolder (the file name stays; missing folders are created on save)"}">${esc(dir)}</button>`;
-    return `<div class="hub-wf-sasubs">` +
-        recents.map((d) => chip(d, true)).join("") +
-        existing.map((d) => chip(d, false)).join("") +
+    const total = recents.length + existing.length;
+    if (!total && !(st.subQuery || "").trim()) return "";
+    const showSearch = total > SA_SUBS_SEARCH_MIN || !!(st.subQuery || "").trim();
+    return `<div class="hub-wf-sasubwrap">` +
+        (showSearch
+            ? `<input type="text" class="hub-wf-sasusearch" data-sa="subsearch" spellcheck="false" ` +
+              `placeholder="Search folders - every word must match" value="${esc(st.subQuery || "")}">`
+            : "") +
+        `<div class="hub-wf-sasubs" data-sa="subslist">${subsListInnerHtml(st)}</div>` +
         `</div>`;
+}
+
+function rerenderSubsList(pop, st) {
+    const list = pop?.querySelector('[data-sa="subslist"]');
+    if (list) list.innerHTML = subsListInnerHtml(st);
+}
+
+/** The FIRST visible folder match - the Enter key of the search accepts it
+ *  (the chip semantics: the file name stays). */
+function firstSubMatch(st) {
+    return subsFilterDirs(st || {}).rows[0]?.dir || null;
+}
+
+/** The shared "use this subfolder" of the save/rename popovers - the folder
+ *  prefix is replaced, the file name stays (the chip click + the search
+ *  Enter run the same code). */
+function saApplySubDir(st, pop, dir) {
+    const inp = pop?.querySelector('[data-sa="path"]');
+    const cur = splitRelPath(inp ? inp.value : (st?.rel || ""));
+    const dirs = (dir || "") ? String(dir).split("/") : [];
+    const nv = joinRelPath(dirs, cur.name || "");
+    if (inp) inp.value = nv;
+    if (st) {
+        st.rel = nv;
+        st.hasSlash = dirs.length > 0;
+        st.conflict = null;
+    }
+    return nv;
 }
 
 async function loadSubdirsFor(storageId, into, renderFn) {
@@ -9137,6 +9219,7 @@ function openSaveAsPop(t, anchorBtn) {
         switchTab: o.switchTab, newId: o.newId,
         busy: false, err: "", conflict: null,
         subdirs: null, subs: saRecentSubs(),
+        subQuery: "",   // v130: the multi-word folder search
     };
     saPop = document.createElement("div");
     saPop.className = "hub-menu hub-wf-sapop";
@@ -9159,6 +9242,12 @@ function wireSaPop() {
     saPop.addEventListener("click", async (e) => {
         const b = e.target?.closest?.("[data-sa]");
         if (!b) return;
+        // v130 fix (the owner: "the checkboxes do not change state"): the
+        // blanket preventDefault() froze EVERY [data-sa] target - the
+        // browser never toggled the checkbox and the change handler never
+        // fired. Only BUTTONS (and the native link) take the
+        // preventDefault path now; inputs/selects behave natively.
+        if (b.tagName !== "BUTTON" && b.dataset?.sa !== "native") return;
         e.preventDefault();
         const act = b.dataset.sa;
         if (act === "cancel") { closeSaPop(); return; }
@@ -9168,22 +9257,14 @@ function wireSaPop() {
                 saState.storage = id;
                 saState.conflict = null;
                 saState.subdirs = null;
+                saState.subQuery = "";   // the query belonged to the old storage
                 renderSaPop();
                 void loadSubdirsFor(id, saState, renderSaPop);
             }
             return;
         }
         if (act === "sub") {
-            const inp = saPop.querySelector('[data-sa="path"]');
-            const cur = splitRelPath(inp ? inp.value : (saState?.rel || ""));
-            const dirs = (b.dataset.dir || "") ? b.dataset.dir.split("/") : [];
-            const nv = joinRelPath(dirs, cur.name || "");
-            if (inp) inp.value = nv;
-            if (saState) {
-                saState.rel = nv;
-                saState.hasSlash = dirs.length > 0;
-                saState.conflict = null;
-            }
+            saApplySubDir(saState, saPop, b.dataset.dir || "");
             renderSaPop();
             focusPopPath(saPop);
             return;
@@ -9209,7 +9290,15 @@ function wireSaPop() {
     });
     saPop.addEventListener("input", (e) => {
         const t = e.target;
-        if (!t || !saState || t.dataset?.sa !== "path") return;
+        if (!t || !saState) return;
+        if (t.dataset?.sa === "subsearch") {
+            // v130: the folder search re-renders ONLY the chips node (the
+            // input itself never leaves the DOM - no caret churn)
+            saState.subQuery = t.value;
+            rerenderSubsList(saPop, saState);
+            return;
+        }
+        if (t.dataset?.sa !== "path") return;
         const was = saState.hasSlash;
         saState.rel = t.value;
         saState.hasSlash = splitRelPath(t.value).hasSlash;
@@ -9219,6 +9308,18 @@ function wireSaPop() {
     saPop.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
             const t = e.target;
+            if (t && t.matches?.('[data-sa="subsearch"]')) {
+                // v130: Enter accepts the FIRST visible folder match
+                e.preventDefault();
+                e.stopPropagation();
+                const dir = firstSubMatch(saState);
+                if (dir) {
+                    saApplySubDir(saState, saPop, dir);
+                    renderSaPop();
+                    focusPopPath(saPop);
+                }
+                return;
+            }
             if (t && t.matches?.('[data-sa="path"]')) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -9366,6 +9467,7 @@ function openRenamePop(src, anchorBtn) {
         touchedStorage: false,
         busy: false, err: "", conflict: null,
         subdirs: null, subs: saRecentSubs(),
+        subQuery: "",   // v130: the multi-word folder search
     };
     rnPop = document.createElement("div");
     rnPop.className = "hub-menu hub-wf-sapop";
@@ -9388,6 +9490,9 @@ function wireRnPop() {
     rnPop.addEventListener("click", async (e) => {
         const b = e.target?.closest?.("[data-sa]");
         if (!b) return;
+        // v130 fix: the blanket preventDefault froze the checkboxes here
+        // exactly like in the save popover (the same guard as wireSaPop)
+        if (b.tagName !== "BUTTON" && b.dataset?.sa !== "native") return;
         e.preventDefault();
         const act = b.dataset.sa;
         const st = rnState;
@@ -9400,20 +9505,14 @@ function wireRnPop() {
                 st.touchedStorage = true;
                 st.conflict = null;
                 st.subdirs = null;
+                st.subQuery = "";   // the query belonged to the old storage
                 renderRnPop();
                 void loadSubdirsFor(id, st, renderRnPop);
             }
             return;
         }
         if (act === "sub") {
-            const inp = rnPop.querySelector('[data-sa="path"]');
-            const cur = splitRelPath(inp ? inp.value : st.rel);
-            const dirs = (b.dataset.dir || "") ? b.dataset.dir.split("/") : [];
-            const nv = joinRelPath(dirs, cur.name || "");
-            if (inp) inp.value = nv;
-            st.rel = nv;
-            st.hasSlash = dirs.length > 0;
-            st.conflict = null;
+            saApplySubDir(st, rnPop, b.dataset.dir || "");
             renderRnPop();
             focusPopPath(rnPop);
             return;
@@ -9424,7 +9523,13 @@ function wireRnPop() {
     });
     rnPop.addEventListener("input", (e) => {
         const t = e.target;
-        if (!t || !rnState || t.dataset?.sa !== "path") return;
+        if (!t || !rnState) return;
+        if (t.dataset?.sa === "subsearch") {
+            rnState.subQuery = t.value;
+            rerenderSubsList(rnPop, rnState);
+            return;
+        }
+        if (t.dataset?.sa !== "path") return;
         const was = rnState.hasSlash;
         rnState.rel = t.value;
         rnState.hasSlash = splitRelPath(t.value).hasSlash;
@@ -9434,6 +9539,18 @@ function wireRnPop() {
     rnPop.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
             const t = e.target;
+            if (t && t.matches?.('[data-sa="subsearch"]')) {
+                // v130: Enter accepts the FIRST visible folder match
+                e.preventDefault();
+                e.stopPropagation();
+                const dir = firstSubMatch(rnState);
+                if (dir) {
+                    saApplySubDir(rnState, rnPop, dir);
+                    renderRnPop();
+                    focusPopPath(rnPop);
+                }
+                return;
+            }
             if (t && t.matches?.('[data-sa="path"]')) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -9477,16 +9594,28 @@ function rnSubmitMemory() {
     const t = st.tab;
     const np = normWfPath("workflows/" + parsed.name + ".json");
     if (t) {
+        // v130 fix (the owner: "renaming a temp process does nothing"):
+        // the wrapper t is a THROWAWAY snapshot - the store record (t.ref)
+        // is the live object, and the display name is read from
+        // ref.filename || ref.name (the v129 code set neither, so the very
+        // next getOpenWorkflows re-wrap rebuilt the OLD name). Both name
+        // fields + the path flip on the record itself.
         try {
             if (t.ref) {
                 t.ref.path = np;
+                try { t.ref.filename = parsed.name; } catch (_) {}
                 try { t.ref.name = parsed.name; } catch (_) {}
             }
         } catch (_) {}
         t.name = parsed.name;
         t.path = np;
+        // the adoption guards ride BOTH keys - the tab key IS the path
+        // here and the path has just changed (the old key alone stopped
+        // guarding the renamed tab on the very next re-wrap)
         try { adoptChecked.set(t.key, true); } catch (_) {}
+        try { adoptChecked.set(np, true); } catch (_) {}
         try { renamedTempKeys.add(t.key); } catch (_) {}
+        try { renamedTempKeys.add(String(np)); } catch (_) {}
     }
     closeRnPop();
     refreshOpen(true);
@@ -9541,7 +9670,14 @@ async function rnSubmitFile(overwrite) {
     const srcInfo = relOfVirtPath(st.srcPath);
     if (!srcInfo) { st.err = "The current path is not addressable"; renderRnPop(); return; }
     const srcVirt = normWfPath(st.srcPath);
-    const dstVirt = virtOfStorage(storage, joinRelPath(parsed.dirs, parsed.name));
+    const dstFull = joinRelPath(parsed.dirs, parsed.name);
+    const dstVirt = virtOfStorage(storage, dstFull);
+    // v130 fix: the server speaks the REL dialect ('sub/name.json' for the
+    // standard root, '.settings_hub_ext/<id>/...' for the ext) - the v129
+    // body carried the FULL virtual dst and the server prepended its own
+    // 'workflows/' (the owner's file landed in workflows/workflows/ and
+    // the ext targets died on the namespace check)
+    const dstRel = dstRelOfStorage(storage, dstFull);
     st.busy = true;
     st.err = "";
     renderRnPop();
@@ -9550,7 +9686,7 @@ async function rnSubmitFile(overwrite) {
         res = await jfetch("/settings_hub/workflows/files/rename", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ src: srcVirt, dst: dstVirt, overwrite: !!overwrite }),
+            body: JSON.stringify({ src: srcVirt, dst: dstRel, overwrite: !!overwrite }),
         });
     } catch (e) {
         st.busy = false;
@@ -9573,7 +9709,13 @@ async function rnSubmitFile(overwrite) {
     }
     st.busy = false;
     closeRnPop();
-    await rebindMovedTabs([[srcVirt, dstVirt]], parsed.name);
+    // v130 fix: the SERVER names the final dst (the virtual path of the
+    // REAL file) - the client's guess never disagrees with the disk again
+    // (the v129 rebind looked the tab up by the WRONG path, the lookup came
+    // back null and the tab stayed on the dead external binding - the
+    // picker then showed the external storage for a file already moved)
+    const finalDst = normWfPath(res.json?.dst || "") || dstVirt;
+    await rebindMovedTabs([[srcVirt, finalDst]], parsed.name);
     await refreshOpen(true);
     await refreshSavedFiles();
     void fetchFileFavs();
@@ -9679,6 +9821,7 @@ function openTransferPop(op, anchorBtn) {
         keep: true, onConflict: "skip",
         busy: false, err: "", result: null,
         subdirs: null, subs: saRecentSubs(),
+        subQuery: "",   // v130: the multi-word folder search
     };
     trPop = document.createElement("div");
     trPop.className = "hub-menu hub-wf-sapop";
@@ -9700,6 +9843,9 @@ function wireTrPop() {
     trPop.addEventListener("click", async (e) => {
         const b = e.target?.closest?.("[data-sa]");
         if (!b) return;
+        // v130 fix: the blanket preventDefault froze the 'Keep subfolder
+        // structure' checkbox (the same guard as wireSaPop)
+        if (b.tagName !== "BUTTON" && b.dataset?.sa !== "native") return;
         e.preventDefault();
         const act = b.dataset.sa;
         const st = trState;
@@ -9710,6 +9856,7 @@ function wireTrPop() {
             if (st.storage !== id) {
                 st.storage = id;
                 st.subdirs = null;
+                st.subQuery = "";   // the query belonged to the old storage
                 renderTrPop();
                 void loadSubdirsFor(id, st, renderTrPop);
             }
@@ -9732,12 +9879,31 @@ function wireTrPop() {
     });
     trPop.addEventListener("input", (e) => {
         const t = e.target;
-        if (!t || !trState || t.dataset?.sa !== "path") return;
+        if (!t || !trState) return;
+        if (t.dataset?.sa === "subsearch") {
+            trState.subQuery = t.value;
+            rerenderSubsList(trPop, trState);
+            return;
+        }
+        if (t.dataset?.sa !== "path") return;
         trState.base = t.value;
     });
     trPop.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
             const t = e.target;
+            if (t && t.matches?.('[data-sa="subsearch"]')) {
+                // v130: Enter accepts the FIRST visible folder match
+                e.preventDefault();
+                e.stopPropagation();
+                const dir = firstSubMatch(trState);
+                if (dir) {
+                    const inp = trPop.querySelector('[data-sa="path"]');
+                    if (inp) inp.value = dir;
+                    if (trState) trState.base = dir;
+                    renderTrPop();
+                }
+                return;
+            }
             if (t && t.matches?.('[data-sa="path"]')) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -9781,7 +9947,9 @@ function trComputeItems(st, storage) {
         const dstDirs = st.keep ? base.concat(srcDirs) : base.slice();
         items.push({
             src: normWfPath(srcVirt),
-            dst: virtOfStorage(storage, joinRelPath(dstDirs, name)),
+            // v130 fix: the REL dialect (see dstRelOfStorage) - the v129
+            // full-virtual dst landed standard copies in workflows/workflows/
+            dst: dstRelOfStorage(storage, joinRelPath(dstDirs, name)),
         });
     }
     return { items };
@@ -9844,42 +10012,28 @@ async function trSubmit() {
         (j.errors ? " · errors " + j.errors : ""), 4200);
 }
 
-/** The open tabs of MOVED files follow (plan §5 + §4A-2): the in-memory
- *  graph rebinds to the new path (the unsaved edits survive), the old ref
- *  closes without the Recently-closed record. One tab per path. */
-async function rebindMovedTabs(pairs, nameOverride) {
+/** The open tabs of MOVED files follow (plan §5 + §4A-2). v130 fix (the
+ *  owner's report: "the tab closes" / "the picker still shows the external
+ *  storage"): the v129 dance looked the NEW path up in the store registry
+ *  (a fresh rename is not registered yet -> wf = null more often than
+ *  not), left the tab on the dead OLD path and could close the tab
+ *  outright (the loadGraphData+closeWorkflow pair). Now the rebind is an
+ *  IN-PLACE mutation of the store's own record: ref.path + the display
+ *  name flip, the graph and the unsaved edits are never touched, the tab
+ *  NEVER closes, the next save (💾 / Ctrl+S) writes the NEW path. Every
+ *  open tab bound to the src follows (a rename can never fork a tab). */
+function rebindMovedTabs(pairs, nameOverride) {
     if (!pairs || !pairs.length) return;
-    const store = wfStoreOf();
-    if (!store) return;
-    await syncStoreRegistry();
     for (const [src, dst] of pairs) {
-        let wf = null;
-        try {
-            wf = store.getWorkflowByPath ? store.getWorkflowByPath(dst) : null;
-            if (wf && typeof wf.then === "function") wf = await wf;
-        } catch (_) { wf = null; }
-        if (!wf && Array.isArray(store.workflows)) {
-            wf = store.workflows.find((x) => x && normWfPath(x.path) === normWfPath(dst)) || null;
-        }
         for (const t of getOpenWorkflows()) {
             if (!t.path || !sameWfPath(normWfPath(t.path), src)) continue;
-            const g = graphJsonOfOpenTab(t);
-            if (wf && g) {
-                try {
-                    await app.loadGraphData(g, true, true, wf, {
-                        showMissingModelsDialog: false,
-                        showMissingNodesDialog: false,
-                        checkForRerouteMigration: false,
-                    });
-                } catch (_) {}
-            }
-            if (wf && t.ref && t.ref !== wf) {
-                try { await store.closeWorkflow(t.ref, { warnIfUnsaved: false }); } catch (_) {}
-            }
-            if (wf) { try { t.ref = wf; } catch (_) {} }
+            const nm = String(nameOverride ||
+                (baseName(dst) || "").replace(/\.json$/i, ""));
+            try { t.ref.path = dst; } catch (_) {}
+            try { t.ref.filename = nm; } catch (_) {}
+            try { t.ref.name = nm; } catch (_) {}
             t.path = dst;
-            t.name = nameOverride || (baseName(dst) || "").replace(/\.json$/i, "");
-            break;   // one tab per path
+            t.name = nm;
         }
     }
 }
@@ -10029,8 +10183,15 @@ export function __workflowsTestHooks() {
         trSubmit,
         trState: () => trState ? { ...trState } : null,
         trComputeItems: (st, storageId) =>
-            trComputeItems(st, saStorageById(storageId || "std")),
+            trComputeItems(st, (storageId && typeof storageId === "object")
+                ? storageId : saStorageById(storageId || "std")),
         trParseBase,
+        // v130: the rel dst dialect + the folder search + the in-place rebind
+        dstRelOfStorage,
+        subsFilterDirs,
+        subsRowHtml,
+        firstSubMatch,
+        rebindMovedTabs,
         trPopEl: () => trPop,
         renamedTempKeys,
         writeWfFile,

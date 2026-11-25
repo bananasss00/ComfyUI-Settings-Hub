@@ -285,10 +285,9 @@ phase("PA build v95 + version manifest");
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat v98 + renderer v94",
         entrySrc.includes('"chat": "v111"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the current release (the v128 restore semantics; the v127 import file-dialog + commit name, the v126 process-history import, the v125 save-flow fixes, the v124 external folders + group selection, the roadmap + unload kept in the prose)",
-        entrySrc.includes("web build: v128 - THE RESTORE SEMANTICS") &&
-        entrySrc.includes("THE WORKFLOW MANAGER ROADMAP") &&
-        entrySrc.includes("THE SMART QUEUE-START UNLOAD"));
+    check("PA the banner names the current release (the v130 popup fixes: the dst dialect, the toggles, the record flip, the keeping rebind, the folder search; the v129 storages prose kept)",
+        entrySrc.includes("web build: v130 - SAVE/RENAME/TRANSFER POPUP FIXES") &&
+        entrySrc.includes("the Workflows Manager gets ITS OWN save/rename layer over every storage"));
 }
 
 // ---------------------------------------------------------------------------
