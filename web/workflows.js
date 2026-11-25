@@ -360,9 +360,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v128";
+const WF_WEB_VERSION = "v129";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v128";
+globalThis.__SettingsHubLoaded["workflows"] = "v129";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -1598,7 +1598,7 @@ async function saveWorkflowTabAs(w) {
 /** The per-row 💾 action (plan 6): a persisted tab saves IN PLACE; a temp
  *  tab runs the Save As ladder; a clean persisted tab still saves explicitly
  *  (the unified UX: always enabled). The row shows saving/saved/error. */
-async function saveTabRow(t) {
+async function saveTabRow(t, anchorBtn = null) {
     if (!t || saveState.get(t.key) === "saving") return;
     saveState.set(t.key, "saving");
     renderAll();
@@ -1606,7 +1606,25 @@ async function saveTabRow(t) {
     if (t.isPersisted) {
         r = await saveWorkflowTab(t);
     } else {
-        r = await saveWorkflowTabAs(t);
+        // v129 (the owner's save plan §2): a TEMP tab first tries the
+        // REAL-FILE ADOPTION (the tab was opened from a file the store
+        // registry missed - it saves IN PLACE, no dialog). A tab renamed
+        // in memory (renamedTempKeys) never adopts - its name is a display
+        // choice, not a file binding, and a foreign file sharing the name
+        // must not be silently overwritten. Everything else opens the
+        // MANAGER save popover (the storage picker + the subfolders) - the
+        // native Save-As ladder stays a secondary escape hatch INSIDE the
+        // popover, never an automatic bypass.
+        if (!renamedTempKeys.has(t.key)) {
+            const ad = await adoptTempToRealFile(t);
+            if (ad && ad.ok) r = { ok: true, via: "adopt" };
+        }
+        if (!r) {
+            saveState.delete(t.key);
+            renderAll();
+            openSaveAsPop(t, anchorBtn);
+            return;
+        }
     }
     if (r?.ok) {
         saveState.set(t.key, "saved");
@@ -3807,6 +3825,13 @@ function openTabHtml() {
             `<button type="button" class="hub-wf-name" data-act="activate" data-key="${esc(t.key)}" title="${esc(t.path ? extRealPathHint(t.path) : "temporary tab")}${t.path && isExtVirtPath(t.path) ? " · ⬡ external folder" : ""}">${esc(t.name)}${t.isModified ? " *" : ""}</button>` +
             `<span class="hub-wf-marks">${marks}</span>` +
             saveBtn +
+            // v129: the explicit Save-As / storage entry - the manager's own
+            // popover (the storage picker + the subfolders), NEVER an auto
+            // bypass into the native dialog (plan §1)
+            `<button type="button" class="hub-wf-lockbtn" data-act="saveas" data-key="${esc(t.key)}" title="Save As / Save to storage…: pick the storage (Standard + ⬡ external folders), the subfolders and the file name">${t.isPersisted ? "💾+" : "⤵"}</button>` +
+            // v129: the rename/move entry - persisted AND temp tabs (the
+            // temp one works in two modes: a memory rename vs Save & Rename)
+            `<button type="button" class="hub-wf-lockbtn" data-act="tabrename" data-key="${esc(t.key)}" title="Rename / Move: the name, the subfolders and the storage${t.isTemporary ? " (a temp tab: a name-only rename stays in memory" : ""}">✎</button>` +
             histBtn +
             `<button type="button" class="hub-wf-lockbtn${locked ? " hub-wf-locked" : ""}" data-act="lock" data-key="${esc(t.key)}" title="${locked ? "Unlock - allow mass close" : "Lock - protect from mass close (📌)"}">📌</button>` +
             `<button type="button" class="hub-wf-closebtn${armedClose?.key === t.key ? " hub-wf-armed" : ""}" data-act="close" data-key="${esc(t.key)}" title="${(t.isModified || t.isTemporary) ? (armedClose?.key === t.key ? "Click AGAIN to confirm closing the UNSAVED tab" : "Close (unsaved - click twice)") : "Close this tab"}">✕</button>` +
@@ -4291,6 +4316,10 @@ function filesTabHtml() {
               `<button type="button" class="hub-wf-act${fileOpsArmed ? " hub-wf-armed" : ""}" data-act="filedel" ` +
               `title="${fileOpsArmed ? "Click AGAIN to delete the selected files (a verified safety copy of each is kept for 2 h - Undo stays available)" : "Delete the selected files (the process history is NEVER deleted; a verified safety copy of each file is taken first)"}">` +
               `${fileOpsArmed ? "⚠ Click AGAIN to delete " + fileSel.size : "🗑 Delete selected"}</button>` +
+              // v129: the batch COPY/MOVE across the storages - the same
+              // target picker as the save/rename popovers (plan §5)
+              `<button type="button" class="hub-wf-act" data-act="filecopyto" title="Copy the selected files to another storage / subfolder">📥 Copy to…</button>` +
+              `<button type="button" class="hub-wf-act" data-act="filemoveto" title="Move the selected files to another storage / subfolder - the open tabs, the ★ favorites, the index and the history follow">📦 Move to…</button>` +
               (fileOpsUndo ? `<button type="button" class="hub-wf-act" data-act="fileundo" title="Restore the last deleted batch from its verified safety copies (2 h window)">↩ Undo delete</button>` : "") +
               `<button type="button" class="hub-wf-act" data-act="fileclear" title="Clear the selection">✕ Clear</button>` +
               `</div>`
@@ -4714,6 +4743,10 @@ function savedFileRowHtml(f, depth = 0) {
         `title="Inspect: the identity, the nodes, the models, the parameters, the dependencies of this workflow">🔍</button>`) +
         (idxReady === false ? "" : `<button type="button" class="hub-wf-cbtn" data-act="filehist" data-path="${esc(f.path)}" ` +
         `title="Process history: the Checkpoints, Compare, Restore of this workflow${uuid ? " (UUID " + uuid + ")" : ""}${hrevTitle}">${hrevChip}🕘</button>`) +
+        // v129: the rename/move of one file - the name, the subfolders and
+        // the storage (Standard ↔ ⬡ external) in one popover
+        `<button type="button" class="hub-wf-cbtn" data-act="filerename" data-path="${esc(f.path)}" ` +
+        `title="Rename / Move: the name, the subfolders and the storage (Standard ↔ ⬡ external folders) - the open tabs, the ★ favorites, the index and the history follow">✎</button>` +
         `<button type="button" class="hub-wf-favbtn${fav ? " hub-wf-favbtn-on" : ""}" data-act="filefav" data-path="${esc(f.path)}" ` +
         `title="${fav ? "Remove from favorites" : "Add to favorites (★)"}">${fav ? "★" : "☆"}</button>` +
         `</div>`;
@@ -4858,9 +4891,28 @@ async function onBodyClick(e) {
         // v112 stage 3 (plan 6): the per-tab Save / Save As
         case "savetab": {
             const t = byKey(btn.dataset.key);
-            if (t) void saveTabRow(t);
+            if (t) void saveTabRow(t, btn);
             return;
         }
+        // v129: the per-tab Save-As / storage popover + the rename entry
+        case "saveas": {
+            const t = byKey(btn.dataset.key);
+            if (t) openSaveAsPop(t, btn);
+            return;
+        }
+        case "tabrename": {
+            const t = byKey(btn.dataset.key);
+            if (t) openRenamePop({ tab: t }, btn);
+            return;
+        }
+        // v129: the Files-tab rename/move of one file
+        case "filerename": {
+            if (btn.dataset.path) openRenamePop({ path: btn.dataset.path }, btn);
+            return;
+        }
+        // v129: the batch Copy/Move of the selected files
+        case "filecopyto": return void openTransferPop("copy", btn);
+        case "filemoveto": return void openTransferPop("move", btn);
         // v112 stage 2.5: the process-history panel of one file
         case "filehist": {
             if (btn.dataset.path) void openHistPop(btn.dataset.path, btn);
@@ -8628,6 +8680,1211 @@ function renderInspPop() {
 // v101 test hooks (the smoke suite drives the panel through its real UI)
 // ---------------------------------------------------------------------------
 
+// ============================================================================
+// v129 - SAVE AS / RENAME / TRANSFER ACROSS STORAGES (the owner's plan)
+// ----------------------------------------------------------------------------
+// THE UX CONTRACT (plan §1): the manager's own save popover opens ALWAYS -
+// the storage picker (Standard `workflows/` + every ⬡ registered external
+// folder) and the relative path WITH subfolder structure are available
+// right inside it. The native ComfyUI Save-As stays a SECONDARY escape
+// hatch (a link in the popover), never an automatic bypass.
+//   * 💾 on a PERSISTED tab keeps the one-click in-place save;
+//   * 💾+ (⤵ on a temp) opens the Save-As popover;
+//   * 💾 on a TEMP tab first tries the real-file ADOPTION (no dialog) and
+//     otherwise opens the same popover;
+//   * ✎ renames/moves - persisted tabs, temp tabs (two modes: a name-only
+//     rename stays IN MEMORY, a path with folders / a picked storage turns
+//     into "Save & Rename") and the Files-tab rows;
+//   * the Files selection toolbar gains 📥 Copy to… / 📦 Move to….
+// THE WRITE PATH (plan §6): the graph is POSTed to
+// /userdata/<virtual>?overwrite=&full_info=true - the installExtFetchHook
+// re-points the EXTERNAL namespace to the ext mirrors (the real files on
+// the real disks), the STANDARD paths go to the native userdata store. A
+// conflict is asked BEFORE the write (a GET existence probe) and answered
+// inline (Overwrite / "name (2).json") - inside the virtual namespace the
+// v125 hook force-flips overwrite=false, so the probe is the only honest
+// conflict window there. After a write: syncStoreRegistry →
+// getWorkflowByPath → loadGraphData(..., persistedWf) binds the SAME tab
+// to the new file (the unsaved edits survive - the graph comes from the
+// tab's memory), the OLD ref closes WITHOUT the Recently-closed record.
+// THE SERVER SIDE: POST /settings_hub/workflows/files/rename and
+// /files/transfer move files ACROSS the storages and carry the derived
+// state with them (the ★ favorites, the SQLite index, the process-history
+// locations, the tx snapshots); GET /files/subdirs + /ext/subdirs feed
+// the subfolder chips (empty folders included); POST /index/refresh makes
+// a fresh native save searchable immediately.
+// ============================================================================
+
+const SA_LAST_STORAGE = "settingshub.wf.saveStorage";
+const SA_LAST_SUBS = "settingshub.wf.saveSubs";
+const SA_OPTS_KEY = "settingshub.wf.saveOpts";
+const SA_RECENT_SUBS_CAP = 4;
+const SA_SUBDIRS_CAP = 60;
+// the DEFAULT temp names ("Unsaved Workflow (N)") never prefill the save
+// popover - they are ComfyUI placeholders, not names the user chose
+const SA_TEMPLATE_NAME_RE = /^unsaved workflow( \(\d+\))?$/i;
+const TRANSFER_MAX_ITEMS = 200;
+
+let saPop = null, saState = null, saOut = null;
+let rnPop = null, rnState = null, rnOut = null;
+let trPop = null, trState = null, trOut = null;
+// v129 §4B: the temp tabs renamed IN MEMORY - the adoption rungs must
+// never "adopt" them onto a foreign file that happens to share the name
+const renamedTempKeys = new Set();
+
+function saLsJson(key, def) {
+    try {
+        const v = localStorage.getItem(key);
+        return v ? JSON.parse(v) : def;
+    } catch (_) { return def; }
+}
+function saLsSet(key, v) {
+    try { localStorage.setItem(key, JSON.stringify(v)); } catch (_) {}
+}
+
+/** The storages the popovers offer: the Standard userdata workflows folder
+ *  + every registered external folder (the ⚙ registry answer). A folder
+ *  missing on the disk (⚠) or read-only (🔒) stays visible but refused. */
+function saveStorages() {
+    const out = [{ id: "std", name: "Standard (workflows/)", ext: false }];
+    for (const d of extDirs) {
+        out.push({
+            id: d.id, name: "⬡ " + (d.name || d.path), ext: true,
+            path: d.path, exists: d.exists !== false, writable: d.writable !== false,
+        });
+    }
+    return out;
+}
+function saStorageById(id) {
+    return saveStorages().find((s) => s.id === id) || null;
+}
+function saLastStorageId() {
+    const id = saLsJson(SA_LAST_STORAGE, "std");
+    return saStorageById(id) ? id : "std";
+}
+function saRecentSubs() {
+    const a = saLsJson(SA_LAST_SUBS, []);
+    return Array.isArray(a) ? a.filter((s) => typeof s === "string" && s) : [];
+}
+function saPushRecentSub(sub) {
+    if (!sub) return;
+    const a = saRecentSubs().filter((s) => s !== sub);
+    a.unshift(sub);
+    saLsSet(SA_LAST_SUBS, a.slice(0, SA_RECENT_SUBS_CAP));
+}
+function saOpts() {
+    const o = saLsJson(SA_OPTS_KEY, {});
+    return { switchTab: o.switchTab !== false, newId: o.newId === true };
+}
+function saSetOpts(patch) { saLsSet(SA_OPTS_KEY, { ...saOpts(), ...patch }); }
+
+/** "dir/sub/name" (+ an optional .json) -> {dirs, name, hasSlash}. The
+ *  traversal segments never survive - the server re-validates anyway. */
+function splitRelPath(v) {
+    const s = String(v || "").replace(/\\/g, "/").trim();
+    const parts = s.split("/").filter((x) => x && x !== "." && x !== "..");
+    if (!parts.length) return { dirs: [], name: "", hasSlash: false };
+    let name = parts[parts.length - 1];
+    if (name.toLowerCase().endsWith(".json")) name = name.slice(0, -5);
+    return { dirs: parts.slice(0, -1), name, hasSlash: parts.length > 1 };
+}
+function joinRelPath(dirs, name) {
+    return [...(dirs || []).filter(Boolean), name].filter(Boolean).join("/");
+}
+/** The virtual path of a rel under a storage (the .json suffix appended
+ *  when missing): "workflows/<rel>" or the ext namespace equivalent. */
+function virtOfStorage(st, rel) {
+    let r = String(rel || "").replace(/^\/+|\/+$/g, "");
+    if (!r.toLowerCase().endsWith(".json")) r += ".json";
+    return st && st.ext ? extVirtPathOf(st.id, r) : normWfPath("workflows/" + r);
+}
+/** The inverse mapping: a virtual path -> {storageId, rel (no .json), ext},
+ *  or null when the path is not an addressable library file (an unregistered
+ *  ext id counts as foreign). */
+function relOfVirtPath(p) {
+    const n = normWfPath(p || "");
+    if (!n) return null;
+    const m = n.match(/^workflows\/\.settings_hub_ext\/([^/]+)\/(.+)$/i);
+    if (m) {
+        if (!extDirById(m[1])) return null;
+        return { storageId: m[1], rel: m[2].replace(/\.json$/i, ""), ext: true };
+    }
+    if (!/^workflows\//i.test(n)) return null;
+    return { storageId: "std", rel: n.slice(10).replace(/\.json$/i, ""), ext: false };
+}
+
+async function wfFileExists(virt) {
+    try {
+        const res = await app.api.fetchApi("/userdata/" + encodeURIComponent(virt) +
+            "?full_info=true");
+        return res.status === 200;
+    } catch (_) { return false; }
+}
+
+/** The freshest serializable graph of a tab (plan §6.1): the ACTIVE tab
+ *  prefers the live app.graph.serialize(), the background tabs fall to the
+ *  per-tab ladder (graphJsonOfOpenTab). */
+function graphForSave(t) {
+    if (t && t.isActive) {
+        try {
+            const g = app.graph?.serialize?.();
+            if (g && typeof g === "object") return g;
+        } catch (_) {}
+    }
+    return graphJsonOfOpenTab(t);
+}
+
+/** ONE write of a graph to a virtual library path. The fetchApi hook re-points
+ *  the ext namespace (overwrite=false is force-flipped there - v125), the
+ *  standard paths go to the native userdata store (an honest 409). */
+async function writeWfFile(virt, graph, overwrite) {
+    const res = await app.api.fetchApi("/userdata/" + encodeURIComponent(virt) +
+        "?overwrite=" + (overwrite ? "true" : "false") + "&full_info=true", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(graph),
+    });
+    let j = null;
+    try { j = await res.json(); } catch (_) { j = null; }
+    return { status: res.status, json: j };
+}
+
+/** ONE rebind of an open tab to a NEW persisted file (plan §6.3): the
+ *  registry re-sync, the store lookup, the in-place loadGraphData (the
+ *  unsaved edits survive - the graph comes from the tab's memory), the OLD
+ *  ref closed DIRECTLY (warnIfUnsaved:false) - closeWorkflowTab would
+ *  record the workflow in 🕘 Recently closed and duplicate the process. */
+async function rebindTabToPath(t, virt, graph) {
+    const store = wfStoreOf();
+    await syncStoreRegistry();
+    let wf = null;
+    try {
+        wf = store?.getWorkflowByPath ? store.getWorkflowByPath(virt) : null;
+        if (wf && typeof wf.then === "function") wf = await wf;
+    } catch (_) { wf = null; }
+    if (!wf && store && Array.isArray(store.workflows)) {
+        wf = store.workflows.find((x) => x && normWfPath(x.path) === normWfPath(virt)) || null;
+    }
+    if (!wf) return { ok: false, error: "the saved file is not in the store registry yet" };
+    try {
+        await app.loadGraphData(graph, true, true, wf, {
+            showMissingModelsDialog: false,
+            showMissingNodesDialog: false,
+            checkForRerouteMigration: false,
+        });
+    } catch (e) {
+        return { ok: false, error: "loadGraphData failed: " + String((e && e.message) || e) };
+    }
+    if (t && t.ref) {
+        try { await store.closeWorkflow(t.ref, { warnIfUnsaved: false }); } catch (_) {}
+    }
+    return { ok: true };
+}
+
+/** The SHARED write+bind core of the Save-As and the temp Save&Rename
+ *  popovers. Returns {ok, virt, rel, storage} | {ok:false, conflict} |
+ *  {ok:false, error}. The conflict is asked BEFORE the write (an existence
+ *  probe) and re-asked by the 409 rung (the standard store answers it). */
+async function saveTabToStorageCore(o) {
+    const t = o.tab || null;
+    const parsed = splitRelPath(o.relInput);
+    if (!parsed.name) return { ok: false, error: "Enter a file name" };
+    const storage = saStorageById(o.storageId);
+    if (!storage) return { ok: false, error: "Pick a storage" };
+    if (storage.ext && (storage.exists === false || storage.writable === false)) {
+        return { ok: false, error: "This storage is " +
+            (storage.exists === false ? "missing on the disk (⚠)" : "read-only (🔒)") };
+    }
+    const graph = graphForSave(t);
+    if (!graph || typeof graph !== "object") {
+        return { ok: false, error: "Could not serialize the tab - activate it and try again" };
+    }
+    let g = graph;
+    if (o.newId) {
+        // plan §3: "New workflow ID (independent history)" - a temp tab
+        // KEEPS its graph.id (the v122 pre-save checkpoints rebind to the
+        // created file); a checked Save-As starts an independent branch
+        try {
+            g = { ...graph, id: (globalThis.crypto?.randomUUID
+                ? crypto.randomUUID()
+                : ("wf-" + Date.now().toString(16) + Math.random().toString(16).slice(2))) };
+        } catch (_) { g = graph; }
+    }
+    const rel = joinRelPath(parsed.dirs, parsed.name);
+    const virt = virtOfStorage(storage, rel);
+    if (!o.overwrite) {
+        let ex = false;
+        try { ex = await wfFileExists(virt); } catch (_) { ex = false; }
+        if (ex) {
+            return { ok: false, conflict: { virt, name: parsed.name,
+                altName: parsed.name + " (2)" } };
+        }
+    }
+    let w;
+    try { w = await writeWfFile(virt, g, !!o.overwrite); }
+    catch (e) {
+        return { ok: false, error: "Save failed: " + String((e && e.message) || e) };
+    }
+    if (w.status === 409) {
+        return { ok: false, conflict: { virt, name: parsed.name,
+            altName: parsed.name + " (2)" } };
+    }
+    if (w.status >= 400) {
+        return { ok: false, error: "Save failed (HTTP " + w.status + ")" };
+    }
+    saLsSet(SA_LAST_STORAGE, o.storageId);
+    const sub = parsed.dirs.join("/");
+    if (sub) saPushRecentSub(sub);
+    if (o.bind && t) {
+        const rb = await rebindTabToPath(t, virt, g);
+        if (!rb.ok) localToast("Saved, but the tab could not switch: " + rb.error, 4600);
+    }
+    // the index point-refresh - the ext writes re-index themselves inside
+    // ext_store; this covers the STANDARD paths (an old py answers 404 and
+    // the next full Refresh catches up)
+    try {
+        await jfetch("/settings_hub/workflows/index/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ paths: [virt] }),
+        });
+    } catch (_) {}
+    await refreshSavedFiles();
+    if (idxMode()) await runServerList(true);
+    if (groupsState.on && idxMode()) await runGroups(true);
+    await refreshOpen(true);
+    renderAll();
+    return { ok: true, virt, rel, storage };
+}
+
+// --- the shared popover plumbing ---------------------------------------------
+
+function anchorPopFixed(pop, anchorBtn) {
+    try {
+        const r = (anchorBtn && anchorBtn.getBoundingClientRect)
+            ? anchorBtn.getBoundingClientRect()
+            : { left: 120, top: 160, bottom: 200 };
+        const vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+        const w = pop.offsetWidth || 330, h = pop.offsetHeight || 240;
+        const x = Math.min(Math.max(8, r.left - 30), Math.max(8, vw - w - 8));
+        let y = r.bottom + 6;
+        if (y + h > vh - 8) y = Math.max(8, (r.top || 100) - h - 6);
+        pop.style.left = x + "px";
+        pop.style.top = y + "px";
+    } catch (_) {
+        pop.style.left = "90px";
+        pop.style.top = "130px";
+    }
+}
+
+/** A re-render that keeps the path input's value + caret (the chips and the
+ *  hint re-render around the typing, never through it). */
+function renderPopHtml(pop, html) {
+    if (!pop) return;
+    const inp = pop.querySelector('[data-sa="path"]');
+    const keep = inp ? {
+        v: inp.value, a: inp.selectionStart, b: inp.selectionEnd,
+        focused: document.activeElement === inp,
+    } : null;
+    pop.innerHTML = html;
+    const inp2 = pop.querySelector('[data-sa="path"]');
+    if (keep && inp2) {
+        inp2.value = keep.v;
+        if (keep.focused) { try { inp2.focus(); } catch (_) {} }
+        if (keep.a != null && keep.a <= keep.v.length) {
+            try { inp2.setSelectionRange(keep.a, keep.b); } catch (_) {}
+        }
+    }
+}
+
+function focusPopPath(pop) {
+    const inp = pop?.querySelector('[data-sa="path"]');
+    if (!inp) return;
+    try { inp.focus(); } catch (_) {}
+    const v = inp.value || "";
+    const slash = v.lastIndexOf("/");
+    const a = slash >= 0 ? slash + 1 : 0;
+    let b = v.length;
+    if (v.toLowerCase().endsWith(".json")) b -= 5;
+    if (b > a) { try { inp.setSelectionRange(a, b); } catch (_) {} }
+}
+
+/** The storage chips row shared by all three popovers (the plan §3.1: the
+ *  missing (⚠) / read-only (🔒) storages stay visible but marked). */
+function storageChipsHtml(curId) {
+    return saveStorages().map((s) => {
+        const bad = s.ext && (s.exists === false || s.writable === false);
+        const mark = s.ext ? (s.exists === false ? " ⚠" : (s.writable === false ? " 🔒" : "")) : "";
+        const title = s.ext
+            ? (s.path || "") + (bad ? (s.exists === false ? " - MISSING on the disk" : " - READ-ONLY") : "")
+            : "The native ComfyUI userdata workflows folder";
+        return `<button type="button" class="hub-wf-sachip${curId === s.id ? " hub-wf-sachip-on" : ""}${bad ? " hub-wf-sachip-bad" : ""}" ` +
+            `data-sa="storage" data-id="${esc(s.id)}" title="${esc(title)}">${esc(s.name + mark)}</button>`;
+    }).join("");
+}
+
+/** The subfolder chips row: the 2-4 RECENT targets first (the plan §3.2),
+ *  then the existing folders of the picked storage (empty ones included -
+ *  the subdirs routes walk the real tree). Click = replace the folder
+ *  prefix, keep the file name. */
+function subsRowHtml(st) {
+    const recents = (st.subs || []).filter((s) => s && (!st.subdirs || !st.subdirs.includes(s)));
+    const existing = (st.subdirs || []).slice(0, SA_SUBDIRS_CAP);
+    if (!recents.length && !existing.length) return "";
+    const chip = (dir, recent) =>
+        `<button type="button" class="hub-wf-sasub${recent ? " hub-wf-sasub-recent" : ""}" data-sa="sub" ` +
+        `data-dir="${esc(dir)}" title="${recent ? "Recent: use this subfolder (the file name stays)" : "Use this subfolder (the file name stays; missing folders are created on save)"}">${esc(dir)}</button>`;
+    return `<div class="hub-wf-sasubs">` +
+        recents.map((d) => chip(d, true)).join("") +
+        existing.map((d) => chip(d, false)).join("") +
+        `</div>`;
+}
+
+async function loadSubdirsFor(storageId, into, renderFn) {
+    const storage = saStorageById(storageId);
+    let dirs = [];
+    try {
+        if (storage && storage.ext) {
+            const res = await jfetch("/settings_hub/workflows/ext/subdirs?dir=" +
+                encodeURIComponent(storage.id));
+            if (res.json?.ok && Array.isArray(res.json.dirs)) dirs = res.json.dirs;
+        } else {
+            const res = await jfetch("/settings_hub/workflows/files/subdirs");
+            if (res.json?.ok && Array.isArray(res.json.dirs)) dirs = res.json.dirs;
+        }
+    } catch (_) { /* an old py / an unreachable server - no chips today */ }
+    if (into && (into === saState || into === rnState || into === trState)) {
+        into.subdirs = dirs;
+        if (renderFn) renderFn();
+    }
+}
+
+// ============================================================================
+// THE SAVE / SAVE-AS POPOVER (plan §3)
+// ============================================================================
+
+function saPopoverHtml() {
+    const st = saState;
+    const opts = st.mode === "saveas"
+        ? `<div class="hub-wf-saopts">` +
+          `<label class="hub-pop-auto"><input type="checkbox" data-sa="optswitch"${st.switchTab ? " checked" : ""}> Switch this tab to the new file</label>` +
+          `<label class="hub-pop-auto"><input type="checkbox" data-sa="optnewid"${st.newId ? " checked" : ""}> New workflow ID (independent history)</label>` +
+          `</div>`
+        : (st.hasSlash
+            ? `<div class="hub-wf-sahint">A temporary process with a folder structure is saved to the disk - pick the storage above.</div>`
+            : "");
+    const conflict = st.conflict
+        ? `<div class="hub-wf-saconf">` +
+          `<div>The file already exists:<br><b>${esc(st.conflict.virt)}</b></div>` +
+          `<div class="hub-pop-btns">` +
+          `<button type="button" class="hub-wf-act" data-sa="overwrite">Overwrite</button>` +
+          `<button type="button" class="hub-wf-act" data-sa="suffix">Save as ${esc(st.conflict.altName)}.json</button>` +
+          `</div></div>`
+        : "";
+    return `<div class="hub-menu-title">${st.mode === "saveas"
+        ? "Save As / Copy to storage…"
+        : "Save workflow to…"}</div>` +
+        `<div class="hub-wf-sachips">${storageChipsHtml(st.storage)}</div>` +
+        `<input type="text" class="hub-wf-sapath" data-sa="path" spellcheck="false" placeholder="folder/sub/name" value="${esc(st.rel)}">` +
+        subsRowHtml(st) +
+        opts +
+        conflict +
+        `<div class="hub-wf-saerr">${st.err ? esc(st.err) : ""}</div>` +
+        `<div class="hub-pop-btns">` +
+        `<button type="button" class="hub-wf-act" data-sa="ok"${st.busy ? " disabled" : ""}>${st.busy ? "Saving…" : "💾 Save"}</button>` +
+        `<button type="button" class="hub-wf-act" data-sa="cancel">Cancel</button>` +
+        `</div>` +
+        `<div class="hub-wf-salink" data-sa="native" title="The native ComfyUI dialog stays the way back - the secondary escape hatch, never the automatic path">Native ComfyUI Save As…</div>`;
+}
+
+function renderSaPop() { renderPopHtml(saPop, saPopoverHtml()); }
+
+function saPrefillFor(t) {
+    if (t && !t.isTemporary && t.path) {
+        const r = relOfVirtPath(t.path);
+        if (r) return { storage: r.storageId, rel: r.rel };
+        // a detached ext folder (or a foreign path) - keep the NAME, drop
+        // the storage binding
+        return { storage: saLastStorageId(),
+            rel: (baseName(t.path) || "").replace(/\.json$/i, "") };
+    }
+    if (t) {
+        const nm = String(t.name || "").trim();
+        if (nm && !SA_TEMPLATE_NAME_RE.test(nm)) {
+            return { storage: saLastStorageId(), rel: nm.replace(/\.json$/i, "") };
+        }
+        return { storage: saLastStorageId(), rel: "" };
+    }
+    return { storage: saLastStorageId(), rel: "" };
+}
+
+function openSaveAsPop(t, anchorBtn) {
+    const mode = t && !t.isTemporary ? "saveas" : "temp";
+    if (saPop) {
+        const same = saState && saState.mode === mode &&
+            (saState.tab?.key || null) === (t?.key || null);
+        closeSaPop();
+        if (same) return;   // the toggle
+    }
+    if (rnPop) closeRnPop();
+    if (trPop) closeTrPop();
+    const pre = saPrefillFor(t);
+    const o = saOpts();
+    saState = {
+        mode, tab: t || null,
+        storage: pre.storage, rel: pre.rel,
+        hasSlash: splitRelPath(pre.rel).hasSlash,
+        switchTab: o.switchTab, newId: o.newId,
+        busy: false, err: "", conflict: null,
+        subdirs: null, subs: saRecentSubs(),
+    };
+    saPop = document.createElement("div");
+    saPop.className = "hub-menu hub-wf-sapop";
+    saPop.innerHTML = saPopoverHtml();
+    document.body.appendChild(saPop);
+    anchorPopFixed(saPop, anchorBtn);
+    wireSaPop();
+    void loadSubdirsFor(saState.storage, saState, renderSaPop);
+    focusPopPath(saPop);
+}
+
+function closeSaPop() {
+    if (saOut) { window.removeEventListener("mousedown", saOut, true); saOut = null; }
+    saPop?.remove();
+    saPop = null;
+    saState = null;
+}
+
+function wireSaPop() {
+    saPop.addEventListener("click", async (e) => {
+        const b = e.target?.closest?.("[data-sa]");
+        if (!b) return;
+        e.preventDefault();
+        const act = b.dataset.sa;
+        if (act === "cancel") { closeSaPop(); return; }
+        if (act === "storage") {
+            const id = b.dataset.id || "std";
+            if (saState && saState.storage !== id) {
+                saState.storage = id;
+                saState.conflict = null;
+                saState.subdirs = null;
+                renderSaPop();
+                void loadSubdirsFor(id, saState, renderSaPop);
+            }
+            return;
+        }
+        if (act === "sub") {
+            const inp = saPop.querySelector('[data-sa="path"]');
+            const cur = splitRelPath(inp ? inp.value : (saState?.rel || ""));
+            const dirs = (b.dataset.dir || "") ? b.dataset.dir.split("/") : [];
+            const nv = joinRelPath(dirs, cur.name || "");
+            if (inp) inp.value = nv;
+            if (saState) {
+                saState.rel = nv;
+                saState.hasSlash = dirs.length > 0;
+                saState.conflict = null;
+            }
+            renderSaPop();
+            focusPopPath(saPop);
+            return;
+        }
+        if (act === "overwrite") {
+            if (saState) { saState.conflict = null; await saSubmit(true); }
+            return;
+        }
+        if (act === "suffix") { await saSubmitSuffix(); return; }
+        if (act === "native") {
+            const t = saState?.tab;
+            closeSaPop();
+            if (t) void saveWorkflowTabAs(t);
+            return;
+        }
+        if (act === "ok") { await saSubmit(false); return; }
+    });
+    saPop.addEventListener("change", (e) => {
+        const t = e.target;
+        if (!t || !saState) return;
+        if (t.dataset?.sa === "optswitch") saState.switchTab = t.checked;
+        else if (t.dataset?.sa === "optnewid") saState.newId = t.checked;
+    });
+    saPop.addEventListener("input", (e) => {
+        const t = e.target;
+        if (!t || !saState || t.dataset?.sa !== "path") return;
+        const was = saState.hasSlash;
+        saState.rel = t.value;
+        saState.hasSlash = splitRelPath(t.value).hasSlash;
+        if (saState.conflict) saState.conflict = null;
+        if (was !== saState.hasSlash) renderSaPop();   // the temp hint flips
+    });
+    saPop.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            const t = e.target;
+            if (t && t.matches?.('[data-sa="path"]')) {
+                e.preventDefault();
+                e.stopPropagation();
+                void saSubmit(false);
+            }
+        } else if (e.key === "Escape") {
+            e.stopPropagation();
+            closeSaPop();
+        }
+    });
+    try { containPopTextKeys(saPop); } catch (_) {}
+    saOut = (e) => { if (saPop && !saPop.contains(e.target)) closeSaPop(); };
+    window.addEventListener("mousedown", saOut, true);
+}
+
+async function saSubmit(overwrite) {
+    const st = saState;
+    if (!st || st.busy) return;
+    const inp = saPop?.querySelector('[data-sa="path"]');
+    const relInput = inp ? inp.value : st.rel;
+    st.busy = true;
+    st.err = "";
+    renderSaPop();
+    const out = await saveTabToStorageCore({
+        tab: st.tab, storageId: st.storage, relInput,
+        overwrite: !!overwrite,
+        newId: st.mode === "saveas" && st.newId,
+        bind: st.mode === "temp" ? true : st.switchTab,
+    });
+    if (out.ok) {
+        saSetOpts({ switchTab: st.switchTab, newId: st.newId });
+        const storage = out.storage;
+        closeSaPop();
+        localToast("Saved to " + (storage.ext ? storage.name : "Standard workflows/") +
+            " · " + out.rel + ".json", 3800);
+        return;
+    }
+    st.busy = false;
+    if (out.conflict) st.conflict = out.conflict;
+    else st.err = out.error || "Save failed";
+    renderSaPop();
+}
+
+/** "Save as <name> (2).json" - the first FREE variant (2..99) becomes the
+ *  new path, the write reruns through the normal submit. */
+async function saSubmitSuffix() {
+    const st = saState;
+    if (!st || st.busy) return;
+    const inp = saPop?.querySelector('[data-sa="path"]');
+    const parsed = splitRelPath(inp ? inp.value : st.rel);
+    if (!parsed.name) return;
+    st.busy = true;
+    st.err = "";
+    st.conflict = null;
+    renderSaPop();
+    for (let n = 2; n < 100; n++) {
+        const candRel = joinRelPath(parsed.dirs, parsed.name + " (" + n + ")");
+        const virt = virtOfStorage(saStorageById(st.storage), candRel);
+        let ex = false;
+        try { ex = await wfFileExists(virt); } catch (_) { ex = false; }
+        if (!ex) {
+            if (inp) inp.value = candRel;
+            st.rel = candRel;
+            st.busy = false;
+            await saSubmit(false);
+            return;
+        }
+    }
+    st.busy = false;
+    st.err = "No free name (2..99) found in this storage";
+    renderSaPop();
+}
+
+// ============================================================================
+// THE RENAME / MOVE POPOVER (plan §4) - persisted tabs + Files rows share
+// one flow; a TEMP tab works in TWO modes:
+//   A. a NAME-ONLY rename (no folders, no picked storage) stays IN MEMORY:
+//      the display name + the ref path flip, no disk write, the tab stays
+//      temp (renamedTempKeys guards it from the adoption rungs);
+//   B. a path WITH folders or a picked storage becomes "Save & Rename" -
+//      the file is written to the picked storage and the tab turns
+//      persisted (the graph.id is kept - plan §3).
+// ============================================================================
+
+function rnPopoverHtml() {
+    const st = rnState;
+    const diskMode = st.isTemp && (st.hasSlash || st.touchedStorage);
+    const hint = st.isTemp
+        ? `<div class="hub-wf-sahint">${diskMode
+            ? "A temporary process with a folder structure is SAVED TO DISK (the tab turns persisted; the workflow ID is kept)."
+            : "A name-only rename keeps the tab temporary - nothing is written. Add a folder or pick a storage to save to disk."}</div>`
+        : "";
+    const conflict = st.conflict
+        ? `<div class="hub-wf-saconf">` +
+          `<div>The target already exists.</div>` +
+          `<div class="hub-pop-btns">` +
+          `<button type="button" class="hub-wf-act" data-sa="overwrite">Overwrite</button>` +
+          (st.isTemp && diskMode
+              ? `<button type="button" class="hub-wf-act" data-sa="suffix">Save as ${esc(st.conflict.altName)}.json</button>`
+              : `<button type="button" class="hub-wf-act" data-sa="suffix">Rename to ${esc(st.conflict.altName)}.json</button>`) +
+          `</div></div>`
+        : "";
+    const title = st.isTemp ? "Rename (temp workflow)"
+        : st.kind === "file" ? "Rename / Move file" : "Rename / Move workflow";
+    return `<div class="hub-menu-title">${title}</div>` +
+        `<div class="hub-wf-sachips">${storageChipsHtml(st.storage)}</div>` +
+        `<input type="text" class="hub-wf-sapath" data-sa="path" spellcheck="false" placeholder="folder/sub/name" value="${esc(st.rel)}">` +
+        subsRowHtml(st) +
+        hint +
+        conflict +
+        `<div class="hub-wf-saerr">${st.err ? esc(st.err) : ""}</div>` +
+        `<div class="hub-pop-btns">` +
+        `<button type="button" class="hub-wf-act" data-sa="ok"${st.busy ? " disabled" : ""}>${st.busy ? "Working…" : (st.isTemp && diskMode ? "💾 Save & Rename" : "✎ Rename")}</button>` +
+        `<button type="button" class="hub-wf-act" data-sa="cancel">Cancel</button>` +
+        `</div>`;
+}
+
+function renderRnPop() { renderPopHtml(rnPop, rnPopoverHtml()); }
+
+function openRenamePop(src, anchorBtn) {
+    if (rnPop) closeRnPop();
+    if (saPop) closeSaPop();
+    if (trPop) closeTrPop();
+    const isTab = !!src.tab;
+    const tab = src.tab || null;
+    const path = isTab ? (tab.path || "") : String(src.path || "");
+    const isTemp = isTab && !!tab.isTemporary;
+    const relInfo = relOfVirtPath(path);
+    let storage = saLastStorageId();
+    let rel = "";
+    if (relInfo) {
+        storage = relInfo.storageId;
+        rel = relInfo.rel;
+    } else if (isTab && isTemp) {
+        const nm = String(tab.name || "").trim();
+        rel = nm && !SA_TEMPLATE_NAME_RE.test(nm) ? nm.replace(/\.json$/i, "") : "";
+    } else if (path) {
+        rel = (baseName(path) || "").replace(/\.json$/i, "");
+    }
+    rnState = {
+        kind: isTab ? "tab" : "file",
+        tab, srcPath: path, isTemp,
+        storage, rel,
+        hasSlash: splitRelPath(rel).hasSlash,
+        touchedStorage: false,
+        busy: false, err: "", conflict: null,
+        subdirs: null, subs: saRecentSubs(),
+    };
+    rnPop = document.createElement("div");
+    rnPop.className = "hub-menu hub-wf-sapop";
+    rnPop.innerHTML = rnPopoverHtml();
+    document.body.appendChild(rnPop);
+    anchorPopFixed(rnPop, anchorBtn);
+    wireRnPop();
+    void loadSubdirsFor(rnState.storage, rnState, renderRnPop);
+    focusPopPath(rnPop);
+}
+
+function closeRnPop() {
+    if (rnOut) { window.removeEventListener("mousedown", rnOut, true); rnOut = null; }
+    rnPop?.remove();
+    rnPop = null;
+    rnState = null;
+}
+
+function wireRnPop() {
+    rnPop.addEventListener("click", async (e) => {
+        const b = e.target?.closest?.("[data-sa]");
+        if (!b) return;
+        e.preventDefault();
+        const act = b.dataset.sa;
+        const st = rnState;
+        if (!st) return;
+        if (act === "cancel") { closeRnPop(); return; }
+        if (act === "storage") {
+            const id = b.dataset.id || "std";
+            if (st.storage !== id) {
+                st.storage = id;
+                st.touchedStorage = true;
+                st.conflict = null;
+                st.subdirs = null;
+                renderRnPop();
+                void loadSubdirsFor(id, st, renderRnPop);
+            }
+            return;
+        }
+        if (act === "sub") {
+            const inp = rnPop.querySelector('[data-sa="path"]');
+            const cur = splitRelPath(inp ? inp.value : st.rel);
+            const dirs = (b.dataset.dir || "") ? b.dataset.dir.split("/") : [];
+            const nv = joinRelPath(dirs, cur.name || "");
+            if (inp) inp.value = nv;
+            st.rel = nv;
+            st.hasSlash = dirs.length > 0;
+            st.conflict = null;
+            renderRnPop();
+            focusPopPath(rnPop);
+            return;
+        }
+        if (act === "overwrite") { st.conflict = null; await rnSubmit(true); return; }
+        if (act === "suffix") { await rnSubmitSuffix(); return; }
+        if (act === "ok") { await rnSubmit(false); return; }
+    });
+    rnPop.addEventListener("input", (e) => {
+        const t = e.target;
+        if (!t || !rnState || t.dataset?.sa !== "path") return;
+        const was = rnState.hasSlash;
+        rnState.rel = t.value;
+        rnState.hasSlash = splitRelPath(t.value).hasSlash;
+        if (rnState.conflict) rnState.conflict = null;
+        if (was !== rnState.hasSlash) renderRnPop();   // the mode hint flips
+    });
+    rnPop.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            const t = e.target;
+            if (t && t.matches?.('[data-sa="path"]')) {
+                e.preventDefault();
+                e.stopPropagation();
+                void rnSubmit(false);
+            }
+        } else if (e.key === "Escape") {
+            e.stopPropagation();
+            closeRnPop();
+        }
+    });
+    try { containPopTextKeys(rnPop); } catch (_) {}
+    rnOut = (e) => { if (rnPop && !rnPop.contains(e.target)) closeRnPop(); };
+    window.addEventListener("mousedown", rnOut, true);
+}
+
+async function rnSubmit(overwrite) {
+    const st = rnState;
+    if (!st || st.busy) return;
+    if (st.isTemp) {
+        const diskMode = st.hasSlash || st.touchedStorage;
+        if (!diskMode) return rnSubmitMemory();
+        return rnDiskSubmit(overwrite);
+    }
+    return rnSubmitFile(overwrite);
+}
+
+/** §4B-1: the IN-MEMORY rename of a temp tab - the displayed name and the
+ *  ref path flip ("workflows/<new_name>.json"), size stays -1 (temp), NO
+ *  disk write. renamedTempKeys + adoptChecked guard the adoption rungs:
+ *  a foreign file sharing the name must never swallow the tab. */
+function rnSubmitMemory() {
+    const st = rnState;
+    if (!st || st.busy) return;
+    const inp = rnPop?.querySelector('[data-sa="path"]');
+    const parsed = splitRelPath(inp ? inp.value : st.rel);
+    if (!parsed.name || parsed.hasSlash) {
+        st.err = "A name without folders keeps the tab temporary - add a folder to save to disk";
+        renderRnPop();
+        return;
+    }
+    const t = st.tab;
+    const np = normWfPath("workflows/" + parsed.name + ".json");
+    if (t) {
+        try {
+            if (t.ref) {
+                t.ref.path = np;
+                try { t.ref.name = parsed.name; } catch (_) {}
+            }
+        } catch (_) {}
+        t.name = parsed.name;
+        t.path = np;
+        try { adoptChecked.set(t.key, true); } catch (_) {}
+        try { renamedTempKeys.add(t.key); } catch (_) {}
+    }
+    closeRnPop();
+    refreshOpen(true);
+    renderAll();
+    localToast("Renamed in memory: " + parsed.name + " (temp - not written yet)", 3400);
+}
+
+/** §4B-2: the temp tab with folders / a picked storage - the file is
+ *  written, the tab turns persisted, the graph.id is KEPT (plan §3). */
+async function rnDiskSubmit(overwrite) {
+    const st = rnState;
+    if (!st || st.busy) return;
+    const inp = rnPop?.querySelector('[data-sa="path"]');
+    const relInput = inp ? inp.value : st.rel;
+    st.busy = true;
+    st.err = "";
+    renderRnPop();
+    const out = await saveTabToStorageCore({
+        tab: st.tab, storageId: st.storage, relInput,
+        overwrite: !!overwrite, newId: false, bind: true,
+    });
+    if (out.ok) {
+        if (st.tab) { try { renamedTempKeys.delete(st.tab.key); } catch (_) {} }
+        closeRnPop();
+        localToast("Saved & renamed: " + out.rel + ".json" +
+            (out.storage.ext ? " (⬡ " + out.storage.name + ")" : ""), 3800);
+        return;
+    }
+    st.busy = false;
+    if (out.conflict) st.conflict = out.conflict;
+    else st.err = out.error || "Save failed";
+    renderRnPop();
+}
+
+/** §4A: the persisted tab / Files-row rename+move - ONE server call
+ *  (POST /files/rename), the derived state follows server-side, the open
+ *  tabs rebind client-side (the unsaved edits survive). */
+async function rnSubmitFile(overwrite) {
+    const st = rnState;
+    if (!st || st.busy) return;
+    const inp = rnPop?.querySelector('[data-sa="path"]');
+    const parsed = splitRelPath(inp ? inp.value : st.rel);
+    if (!parsed.name) { st.err = "Enter a file name"; renderRnPop(); return; }
+    const storage = saStorageById(st.storage);
+    if (!storage) { st.err = "Pick a storage"; renderRnPop(); return; }
+    if (storage.ext && (storage.exists === false || storage.writable === false)) {
+        st.err = "This storage is " +
+            (storage.exists === false ? "missing on the disk (⚠)" : "read-only (🔒)");
+        renderRnPop();
+        return;
+    }
+    const srcInfo = relOfVirtPath(st.srcPath);
+    if (!srcInfo) { st.err = "The current path is not addressable"; renderRnPop(); return; }
+    const srcVirt = normWfPath(st.srcPath);
+    const dstVirt = virtOfStorage(storage, joinRelPath(parsed.dirs, parsed.name));
+    st.busy = true;
+    st.err = "";
+    renderRnPop();
+    let res;
+    try {
+        res = await jfetch("/settings_hub/workflows/files/rename", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ src: srcVirt, dst: dstVirt, overwrite: !!overwrite }),
+        });
+    } catch (e) {
+        st.busy = false;
+        st.err = "Rename failed: " + String((e && e.message) || e);
+        renderRnPop();
+        return;
+    }
+    if (res.status === 409 || res.json?.error === "exists") {
+        st.busy = false;
+        st.conflict = { altName: parsed.name + " (2)" };
+        renderRnPop();
+        return;
+    }
+    if (!res.json?.ok) {
+        st.busy = false;
+        st.err = (res.json?.error || ("HTTP " + res.status)) +
+            (res.status === 404 ? " - old py? update the FULL pack" : "");
+        renderRnPop();
+        return;
+    }
+    st.busy = false;
+    closeRnPop();
+    await rebindMovedTabs([[srcVirt, dstVirt]], parsed.name);
+    await refreshOpen(true);
+    await refreshSavedFiles();
+    void fetchFileFavs();
+    if (idxMode()) await runServerList(true);
+    if (groupsState.on && idxMode()) await runGroups(true);
+    refreshHistBadges(true);
+    renderAll();
+    localToast("Renamed: " + joinRelPath(parsed.dirs, parsed.name) + ".json" +
+        (storage.ext ? " (⬡ " + storage.name + ")" : ""), 3600);
+}
+
+async function rnSubmitSuffix() {
+    const st = rnState;
+    if (!st || st.busy) return;
+    const inp = rnPop?.querySelector('[data-sa="path"]');
+    const parsed = splitRelPath(inp ? inp.value : st.rel);
+    if (!parsed.name) return;
+    st.busy = true;
+    st.err = "";
+    st.conflict = null;
+    renderRnPop();
+    const diskMode = st.isTemp && (st.hasSlash || st.touchedStorage);
+    for (let n = 2; n < 100; n++) {
+        const candRel = joinRelPath(parsed.dirs, parsed.name + " (" + n + ")");
+        if (st.isTemp && !diskMode) {
+            // the memory mode never collides on the disk
+            if (inp) inp.value = candRel;
+            st.busy = false;
+            rnSubmitMemory();
+            return;
+        }
+        const virt = virtOfStorage(saStorageById(st.storage), candRel);
+        let ex = false;
+        try { ex = await wfFileExists(virt); } catch (_) { ex = false; }
+        if (!ex) {
+            if (inp) inp.value = candRel;
+            st.rel = candRel;
+            st.busy = false;
+            await rnSubmit(false);
+            return;
+        }
+    }
+    st.busy = false;
+    st.err = "No free name (2..99) found";
+    renderRnPop();
+}
+
+// ============================================================================
+// THE BATCH COPY TO… / MOVE TO… POPOVER (plan §5)
+// ============================================================================
+
+function trPopoverHtml() {
+    const st = trState;
+    const results = st.result && Array.isArray(st.result.results)
+        ? `<div class="hub-wf-sares">` +
+          st.result.results.map((r) => {
+              const cls = r.status === "moved" || r.status === "copied" ? "ok"
+                  : r.status === "error" ? "bad" : "skip";
+              return `<div><b class="${cls}">${esc(r.status)}</b> ${esc((r.dst || "").replace(/^workflows\//, ""))}` +
+                  (r.error ? ` - ${esc(r.error)}` : "") + `</div>`;
+          }).join("") +
+          `</div>`
+        : "";
+    return `<div class="hub-menu-title">${st.op === "copy" ? "📥 Copy" : "📦 Move"} ${st.items.length} file(s) to…</div>` +
+        `<div class="hub-wf-sachips">${storageChipsHtml(st.storage)}</div>` +
+        `<input type="text" class="hub-wf-sapath" data-sa="path" spellcheck="false" placeholder="target folder, e.g. archive/flux (empty = the storage root)" value="${esc(st.base)}">` +
+        subsRowHtml(st) +
+        `<div class="hub-wf-saopts">` +
+        `<label class="hub-pop-auto"><input type="checkbox" data-sa="keep"${st.keep ? " checked" : ""}> Keep subfolder structure</label>` +
+        `<label class="hub-pop-auto">If a name exists: ` +
+        `<select class="hub-wf-fsel" data-sa="onconflict" title="skip - never overwrite (the honest default) · overwrite - replace the target · auto - save as name (2).json">` +
+        `<option value="skip"${st.onConflict === "skip" ? " selected" : ""}>skip</option>` +
+        `<option value="overwrite"${st.onConflict === "overwrite" ? " selected" : ""}>overwrite</option>` +
+        `<option value="auto"${st.onConflict === "auto" ? " selected" : ""}>auto (name (2))</option>` +
+        `</select></label>` +
+        `</div>` +
+        (st.op === "move"
+            ? `<div class="hub-wf-sahint">A move takes the ★ favorites, the index and the history locations with the files; a safety snapshot of every source is kept for 2 h.</div>`
+            : "") +
+        `<div class="hub-wf-saerr">${st.err ? esc(st.err) : ""}</div>` +
+        `<div class="hub-pop-btns">` +
+        `<button type="button" class="hub-wf-act" data-sa="ok"${st.busy ? " disabled" : ""}>${st.busy ? "Working…" : (st.op === "copy" ? "📥 Copy" : "📦 Move")}</button>` +
+        `<button type="button" class="hub-wf-act" data-sa="cancel">Cancel</button>` +
+        `</div>` +
+        results;
+}
+
+function renderTrPop() { renderPopHtml(trPop, trPopoverHtml()); }
+
+function openTransferPop(op, anchorBtn) {
+    if (trPop) closeTrPop();
+    if (saPop) closeSaPop();
+    if (rnPop) closeRnPop();
+    const items = [...fileSel];
+    if (!items.length) { localToast("Select the files first"); return; }
+    if (items.length > TRANSFER_MAX_ITEMS) {
+        localToast("Too many files selected (max " + TRANSFER_MAX_ITEMS + ")");
+        return;
+    }
+    trState = {
+        op, items,
+        storage: saLastStorageId(), base: "",
+        keep: true, onConflict: "skip",
+        busy: false, err: "", result: null,
+        subdirs: null, subs: saRecentSubs(),
+    };
+    trPop = document.createElement("div");
+    trPop.className = "hub-menu hub-wf-sapop";
+    trPop.innerHTML = trPopoverHtml();
+    document.body.appendChild(trPop);
+    anchorPopFixed(trPop, anchorBtn);
+    wireTrPop();
+    void loadSubdirsFor(trState.storage, trState, renderTrPop);
+}
+
+function closeTrPop() {
+    if (trOut) { window.removeEventListener("mousedown", trOut, true); trOut = null; }
+    trPop?.remove();
+    trPop = null;
+    trState = null;
+}
+
+function wireTrPop() {
+    trPop.addEventListener("click", async (e) => {
+        const b = e.target?.closest?.("[data-sa]");
+        if (!b) return;
+        e.preventDefault();
+        const act = b.dataset.sa;
+        const st = trState;
+        if (!st) return;
+        if (act === "cancel") { closeTrPop(); return; }
+        if (act === "storage") {
+            const id = b.dataset.id || "std";
+            if (st.storage !== id) {
+                st.storage = id;
+                st.subdirs = null;
+                renderTrPop();
+                void loadSubdirsFor(id, st, renderTrPop);
+            }
+            return;
+        }
+        if (act === "sub") {
+            const inp = trPop.querySelector('[data-sa="path"]');
+            if (inp) inp.value = b.dataset.dir || "";
+            if (st) st.base = b.dataset.dir || "";
+            renderTrPop();
+            return;
+        }
+        if (act === "ok") { await trSubmit(); return; }
+    });
+    trPop.addEventListener("change", (e) => {
+        const t = e.target;
+        if (!t || !trState) return;
+        if (t.dataset?.sa === "keep") trState.keep = t.checked;
+        else if (t.dataset?.sa === "onconflict") trState.onConflict = t.value || "skip";
+    });
+    trPop.addEventListener("input", (e) => {
+        const t = e.target;
+        if (!t || !trState || t.dataset?.sa !== "path") return;
+        trState.base = t.value;
+    });
+    trPop.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            const t = e.target;
+            if (t && t.matches?.('[data-sa="path"]')) {
+                e.preventDefault();
+                e.stopPropagation();
+                void trSubmit();
+            }
+        } else if (e.key === "Escape") {
+            e.stopPropagation();
+            closeTrPop();
+        }
+    });
+    try { containPopTextKeys(trPop); } catch (_) {}
+    trOut = (e) => { if (trPop && !trPop.contains(e.target)) closeTrPop(); };
+    window.addEventListener("mousedown", trOut, true);
+}
+
+/** The target folder parse - a FOLDER only (a trailing .json is a mistake
+ *  the user hears about). */
+function trParseBase(v) {
+    const s = String(v || "").replace(/\\/g, "/").trim().replace(/^\/+|\/+$/g, "");
+    const parts = s.split("/").filter((x) => x && x !== "." && x !== "..");
+    if (parts.length && parts[parts.length - 1].toLowerCase().endsWith(".json")) return null;
+    for (const p of parts) {
+        if (p === "..") return null;
+    }
+    return parts;
+}
+
+/** The per-file dst list of a batch (the client-side join, plan §5):
+ *  keep-structure = base + the file's OWN subfolders, flatten = base + the
+ *  bare name. The server re-validates every pair. */
+function trComputeItems(st, storage) {
+    const base = trParseBase(st.base);
+    if (base === null) return { error: "The target folder cannot end with .json or contain .." };
+    const items = [];
+    for (const srcVirt of st.items) {
+        const info = relOfVirtPath(srcVirt);
+        if (!info) return { error: "Not an addressable library path: " + srcVirt };
+        const relParts = info.rel.split("/");
+        const name = relParts[relParts.length - 1];
+        const srcDirs = relParts.slice(0, -1);
+        const dstDirs = st.keep ? base.concat(srcDirs) : base.slice();
+        items.push({
+            src: normWfPath(srcVirt),
+            dst: virtOfStorage(storage, joinRelPath(dstDirs, name)),
+        });
+    }
+    return { items };
+}
+
+async function trSubmit() {
+    const st = trState;
+    if (!st || st.busy) return;
+    const storage = saStorageById(st.storage);
+    if (!storage) { st.err = "Pick a storage"; renderTrPop(); return; }
+    if (storage.ext && (storage.exists === false || storage.writable === false)) {
+        st.err = "This storage is " +
+            (storage.exists === false ? "missing on the disk (⚠)" : "read-only (🔒)");
+        renderTrPop();
+        return;
+    }
+    const cmp = trComputeItems(st, storage);
+    if (cmp.error) { st.err = cmp.error; renderTrPop(); return; }
+    st.busy = true;
+    st.err = "";
+    st.result = null;
+    renderTrPop();
+    let res;
+    try {
+        res = await jfetch("/settings_hub/workflows/files/transfer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ op: st.op, items: cmp.items, onConflict: st.onConflict }),
+        });
+    } catch (e) {
+        st.busy = false;
+        st.err = "Transfer failed: " + String((e && e.message) || e);
+        renderTrPop();
+        return;
+    }
+    const j = res.json || {};
+    if (!j.ok) {
+        st.busy = false;
+        st.err = (j.error || ("HTTP " + res.status)) +
+            (res.status === 404 ? " - old py? update the FULL pack" : "");
+        renderTrPop();
+        return;
+    }
+    st.busy = false;
+    st.result = j;
+    const pairs = (j.results || []).filter((r) => r.status === "moved")
+        .map((r) => [r.src, r.dst]);
+    await rebindMovedTabs(pairs);
+    await refreshOpen(true);
+    await refreshSavedFiles();
+    void fetchFileFavs();
+    if (idxMode()) await runServerList(true);
+    if (groupsState.on && idxMode()) await runGroups(true);
+    refreshHistBadges(true);
+    renderAll();
+    renderTrPop();
+    const n = (st.op === "copy" ? j.copied : j.moved) || 0;
+    localToast((st.op === "copy" ? "Copied " : "Moved ") + n + " file(s)" +
+        (j.skipped ? " · skipped " + j.skipped : "") +
+        (j.errors ? " · errors " + j.errors : ""), 4200);
+}
+
+/** The open tabs of MOVED files follow (plan §5 + §4A-2): the in-memory
+ *  graph rebinds to the new path (the unsaved edits survive), the old ref
+ *  closes without the Recently-closed record. One tab per path. */
+async function rebindMovedTabs(pairs, nameOverride) {
+    if (!pairs || !pairs.length) return;
+    const store = wfStoreOf();
+    if (!store) return;
+    await syncStoreRegistry();
+    for (const [src, dst] of pairs) {
+        let wf = null;
+        try {
+            wf = store.getWorkflowByPath ? store.getWorkflowByPath(dst) : null;
+            if (wf && typeof wf.then === "function") wf = await wf;
+        } catch (_) { wf = null; }
+        if (!wf && Array.isArray(store.workflows)) {
+            wf = store.workflows.find((x) => x && normWfPath(x.path) === normWfPath(dst)) || null;
+        }
+        for (const t of getOpenWorkflows()) {
+            if (!t.path || !sameWfPath(normWfPath(t.path), src)) continue;
+            const g = graphJsonOfOpenTab(t);
+            if (wf && g) {
+                try {
+                    await app.loadGraphData(g, true, true, wf, {
+                        showMissingModelsDialog: false,
+                        showMissingNodesDialog: false,
+                        checkForRerouteMigration: false,
+                    });
+                } catch (_) {}
+            }
+            if (wf && t.ref && t.ref !== wf) {
+                try { await store.closeWorkflow(t.ref, { warnIfUnsaved: false }); } catch (_) {}
+            }
+            if (wf) { try { t.ref = wf; } catch (_) {} }
+            t.path = dst;
+            t.name = nameOverride || (baseName(dst) || "").replace(/\.json$/i, "");
+            break;   // one tab per path
+        }
+    }
+}
+
+// ============================================================================
 export function __workflowsTestHooks() {
     return {
         panelEl: () => panel,
@@ -8742,6 +9999,43 @@ export function __workflowsTestHooks() {
         addPop: () => addPop,
         closeAddPop,
         openWfSettingsPop: (opts) => openWfSettingsPop(opts || {}),
+        // v129: the save-as / rename / transfer machinery - the pure helpers
+        // + the popover states (the smoke suite drives the logic level)
+        saveStorages,
+        saStorageById,
+        splitRelPath,
+        joinRelPath,
+        virtOfStorage,
+        relOfVirtPath,
+        saLsState: () => ({ lastStorage: saLsJson(SA_LAST_STORAGE, "std"),
+            subs: saRecentSubs(), opts: saOpts() }),
+        openSaveAsPop: (t, anchor) => openSaveAsPop(t, anchor || null),
+        closeSaPop,
+        saSubmit: (ow) => saSubmit(!!ow),
+        saSubmitSuffix,
+        saState: () => saState ? { ...saState,
+            tab: saState.tab ? { key: saState.tab.key, name: saState.tab.name,
+                isTemporary: !!saState.tab.isTemporary } : null } : null,
+        saPopEl: () => saPop,
+        openRenamePop,
+        closeRnPop,
+        rnSubmit: (ow) => rnSubmit(!!ow),
+        rnSubmitMemory,
+        rnState: () => rnState ? { ...rnState,
+            tab: rnState.tab ? { key: rnState.tab.key } : null } : null,
+        rnPopEl: () => rnPop,
+        openTransferPop: (op, anchor) => openTransferPop(op, anchor || null),
+        closeTrPop,
+        trSubmit,
+        trState: () => trState ? { ...trState } : null,
+        trComputeItems: (st, storageId) =>
+            trComputeItems(st, saStorageById(storageId || "std")),
+        trParseBase,
+        trPopEl: () => trPop,
+        renamedTempKeys,
+        writeWfFile,
+        wfFileExists,
+        graphForSave,
         // v124: the EXTERNAL folders hooks (the registry, the fetchApi
         // interception, the display mapping) + the SHOWN/group selection
         extState: () => ({
@@ -8761,6 +10055,14 @@ export function __workflowsTestHooks() {
         filesSelToggleShown: () => filesSelToggleShown(),
         filesSelToggleGroup: (k) => filesSelToggleGroup(k),
         filesSelSet: () => [...fileSel],
+        filesSelClear: () => { fileSel.clear(); renderAll(); },
+        filesSelAdd: (paths) => {
+            for (const p of (paths || [])) {
+                const n = normWfPath(p);
+                if (n) fileSel.add(n);
+            }
+            renderAll();
+        },
         installExtFetchHook,
         wfPop: () => wfPop,
         closeWfPop,

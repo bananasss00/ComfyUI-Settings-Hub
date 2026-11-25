@@ -7003,3 +7003,168 @@ button.hub-wf-dirrow:hover { background: rgba(90, 110, 200, 0.18); }
     0%, 60% { color: #ffd98e; text-shadow: 0 0 6px rgba(255, 217, 142, 0.55); }
     100% { color: inherit; text-shadow: none; }
 }
+
+/* ==========================================================================
+   v129 - SAVE AS / RENAME / TRANSFER ACROSS STORAGES
+   The shared popover machinery of the save/save-as, the rename/move and the
+   batch copy/move popovers (the .hub-menu base carries the frame, the dark
+   palette stays the panel's own).
+   ========================================================================== */
+
+.hub-wf-sapop {
+    min-width: 300px;
+    max-width: 420px;
+    padding: 8px;
+}
+
+.hub-wf-sachips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 2px 0 6px;
+}
+
+.hub-wf-sachip {
+    padding: 2px 8px;
+    background: #1c1c2e;
+    border: 1px solid #33334a;
+    border-radius: 10px;
+    color: #b6bccf;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.hub-wf-sachip:hover {
+    border-color: #4a4a6e;
+    color: #e8e8f2;
+}
+
+.hub-wf-sachip-on {
+    background: #2c2c50;
+    border-color: #6f7fd0;
+    color: #fff;
+}
+
+.hub-wf-sachip-bad {
+    opacity: 0.55;
+}
+
+.hub-wf-sapath {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 4px 6px;
+    background: #191926;
+    border: 1px solid #33334a;
+    border-radius: 4px;
+    color: #e8e8f2;
+    font-size: calc(var(--sh-fs, 1) * 11px);
+}
+
+.hub-wf-sapath:focus {
+    outline: none;
+    border-color: #6f7fd0;
+}
+
+.hub-wf-sasubs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-top: 5px;
+    max-height: 96px;
+    overflow-y: auto;
+}
+
+.hub-wf-sasub {
+    padding: 1px 7px;
+    background: #1c1c2e;
+    border: 1px dashed #3a3a55;
+    border-radius: 10px;
+    color: #9aa0c0;
+    font-size: calc(var(--sh-fs, 1) * 9.5px);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.hub-wf-sasub:hover {
+    color: #fff;
+    border-color: #6f7fd0;
+}
+
+.hub-wf-sasub-recent {
+    border-style: solid;
+    color: #c9c9e6;
+}
+
+.hub-wf-saopts {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 7px;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    color: #b6bccf;
+}
+
+.hub-wf-saopts select {
+    padding: 1px 4px;
+    background: #191926;
+    border: 1px solid #33334a;
+    border-radius: 4px;
+    color: #e8e8f2;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+}
+
+.hub-wf-sahint {
+    margin-top: 5px;
+    color: #8a8aae;
+    font-size: calc(var(--sh-fs, 1) * 9.5px);
+}
+
+.hub-wf-saconf {
+    border: 1px solid #d05252;
+    background: rgba(208, 82, 82, 0.10);
+    border-radius: 4px;
+    padding: 6px;
+    margin-top: 6px;
+    font-size: calc(var(--sh-fs, 1) * 10.5px);
+    color: #e8d8d8;
+}
+
+.hub-wf-saconf .hub-pop-btns {
+    margin-top: 5px;
+}
+
+.hub-wf-saerr {
+    color: #ff9d9d;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    margin-top: 4px;
+    min-height: 2px;
+    white-space: pre-wrap;
+}
+
+.hub-wf-salink {
+    margin-top: 7px;
+    text-align: center;
+    color: #77778e;
+    cursor: pointer;
+    font-size: calc(var(--sh-fs, 1) * 9.5px);
+    text-decoration: underline;
+}
+
+.hub-wf-salink:hover {
+    color: #aaa;
+}
+
+.hub-wf-sares {
+    margin-top: 6px;
+    max-height: 110px;
+    overflow-y: auto;
+    font-size: calc(var(--sh-fs, 1) * 9.5px);
+    color: #b6bccf;
+    border-top: 1px solid #2a2a3e;
+    padding-top: 4px;
+}
+
+.hub-wf-sares b.ok { color: #9fd09f; }
+.hub-wf-sares b.skip { color: #c9b46a; }
+.hub-wf-sares b.bad { color: #ff9d9d; }

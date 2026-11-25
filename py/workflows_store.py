@@ -144,6 +144,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 import uuid
 
@@ -1615,7 +1616,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v128"
+WORKFLOWS_SERVER_VERSION = "v129"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -2299,6 +2300,462 @@ async def workflows_files_fav_post(request):
                 {"ok": False, "error": "could not write the favorites file"},
                 status=500)
     return web.json_response({"ok": True, "favs": favs})
+
+
+# ---------------------------------------------------------------------------
+# v129 (the owner's SAVE AS plan): the LIBRARY-LEVEL file operations across
+# storages - RENAME/MOVE of one file and the batch COPY/MOVE ("Copy to…" /
+# "Move to…" on the Files tab). The save/save-as/rename popovers live on the
+# frontend; this module owns the disk truth. Every source AND destination is
+# a 'workflows/<rel>' path - the virtual EXTERNAL namespace included - so a
+# rename changes the name, the subfolders AND the storage in one step
+# (Standard ↔ Standard, Standard ↔ External, External A ↔ External B). Each
+# pair resolves through _resolve_library_file (the same traversal/symlink
+# guarantees as delete/undo/history). The derived state follows the file on
+# the SERVER side, once per operation: the ★ favorites remap, the SQLite
+# index rows (forget + point refresh), the process-history locations
+# (detach + reconcile-cache reset - the UUID re-bind picks the new path up
+# on its next pass) and the tx safety snapshots (the 6 h undo window of a
+# destructive move / an overwritten destination).
+# ---------------------------------------------------------------------------
+MAX_TRANSFER_ITEMS = 200          # one batch
+MAX_FILE_SUBDIRS = 2000           # the subdir suggestions of the standard roots
+MAX_LIBRARY_REL_CHARS = 400       # one relative path (mirrors MAX_EXT_REL_CHARS)
+TRANSFER_CONFLICTS = ("skip", "overwrite", "auto")
+_LIB_SERVICE_DIRS = ("presets", "temp", "__system", "settings_hub")
+_LIB_SEG_MAX = 80
+
+
+def _norm_lib_virt(raw):
+    """The client's virtual library path -> the canonical 'workflows/<rel>'
+    form, or None. STRICT (the sources come from the listings, never from
+    free text): no backslashes, no traversal, no leading slashes; the
+    existing-file names keep their case and spacing."""
+    if not isinstance(raw, str):
+        return None
+    p = raw.strip()
+    if not p or "\\" in p:
+        return None
+    while p[:1] == "/":
+        p = p[1:]
+    if p.startswith("workflows/"):
+        p = p[len("workflows/"):]
+    if not p or p.startswith("/"):
+        return None
+    parts = [s for s in p.split("/") if s and s != "."]
+    if not parts or any(s == ".." for s in parts):
+        return None
+    rel = "/".join(parts)
+    if len(rel) > MAX_LIBRARY_REL_CHARS:
+        return None
+    return "workflows/" + rel
+
+
+def _clean_library_rel(raw, for_dst=False):
+    """A FREE-TEXT relative path ('sub/dir/name' with an optional '.json')
+    -> (canonical_rel_WITH_json, None) or (None, error). Backslashes,
+    traversal, a leading slash and control characters are refused; the
+    service folders (presets/, temp/, ...) are refused as DESTINATION
+    segments - a rename must never materialize a file inside the storage
+    housekeeping. The '.settings_hub_ext' namespace stays addressable ONLY
+    as the first segment (the resolver then validates the registered id)."""
+    if not isinstance(raw, str):
+        return None, "path must be a string"
+    p = raw.strip()
+    while len(p) > 1 and p[:1] in ('"', "'") and p.endswith(p[0]):
+        p = p[1:-1].strip()
+    if not p:
+        return None, "empty path"
+    if "\\" in p:
+        return None, "backslashes are not allowed"
+    if p.startswith("/"):
+        return None, "an absolute path is not allowed"
+    parts = [s for s in p.split("/") if s and s != "."]
+    if not parts:
+        return None, "empty path"
+    for s in parts:
+        if s == "..":
+            return None, "traversal is not allowed"
+        if len(s) > _LIB_SEG_MAX:
+            return None, "a path segment is too long"
+        if any(ord(c) < 32 for c in s):
+            return None, "control characters are not allowed"
+    if for_dst:
+        for i, s in enumerate(parts):
+            if s in _LIB_SERVICE_DIRS:
+                return None, "the service folders are not addressable: " + s
+            if s == ".settings_hub_ext" and i != 0:
+                return None, ("the external namespace is addressable "
+                              "only as the first segment")
+    name = parts[-1]
+    if name.lower().endswith(".json"):
+        name = name[:-5]
+    name = name.strip()
+    if not name:
+        return None, "an empty file name"
+    parts = parts[:-1] + [name + ".json"]
+    rel = "/".join(parts)
+    if len(rel) > MAX_LIBRARY_REL_CHARS:
+        return None, "the path is too long"
+    return rel, None
+
+
+def _virt_exists(request, virt):
+    """Does the virtual library path exist on the disk RIGHT NOW?"""
+    phys, _root = _resolve_library_file(request, virt)
+    return bool(phys) and os.path.isfile(phys)
+
+
+def _auto_variant_rel(dst_rel, request):
+    """'name (2).json', 'name (3).json'... - the FIRST free variant of the
+    destination (cap 99), or None when everything is taken."""
+    stem = dst_rel[:-5] if dst_rel.lower().endswith(".json") else dst_rel
+    for n in range(2, 100):
+        cand = "%s (%d).json" % (stem, n)
+        if not _virt_exists(request, "workflows/" + cand):
+            return cand
+    return None
+
+
+def _remap_file_favs(remap):
+    """{old_virtual: new_virtual} applied to the ★ favorites - a move
+    carries the mark with the file (the plan §4A-3). Best-effort: a failed
+    write leaves the old marks (they re-toggle manually)."""
+    if not remap:
+        return 0
+    favs = _read_file_favs()
+    if not favs:
+        return 0
+    changed = 0
+    for i, x in enumerate(favs):
+        nx = remap.get(x)
+        if nx and nx != x:
+            favs[i] = nx
+            changed += 1
+    if changed:
+        try:
+            _write_file_favs(favs)
+        except Exception:
+            return 0
+    return changed
+
+
+def _library_transfer_core(request, op, items, on_conflict):
+    """The shared engine of /files/rename and /files/transfer. op is
+    "copy"|"move"; items are {src, dst} pairs (the src VIRTUAL, the dst
+    free-text); on_conflict is one of TRANSFER_CONFLICTS. NOTHING here
+    trusts the client paths: every pair goes through the hardened
+    resolvers, the copy is an atomic tmp+replace, the move keeps a VERIFIED
+    tx snapshot of the source (and of the overwritten destination) for the
+    6 h undo window. Returns (results, moved_pairs, final_dsts):
+      results     - [{src, dst, status: moved|copied|skipped|same|error,
+                      error?, txId?, overwrittenTxId?}]
+      moved_pairs - [(src_virt, dst_virt)] of the SUCCESSFUL moves only
+      final_dsts  - every destination path that exists after the batch."""
+    results = []
+    moved_pairs = []
+    final_dsts = []
+    for it in items:
+        src = it.get("src") if isinstance(it, dict) else None
+        dst_raw = it.get("dst") if isinstance(it, dict) else None
+        res = {"src": src if isinstance(src, str) else "",
+               "dst": dst_raw if isinstance(dst_raw, str) else ""}
+        src_virt = _norm_lib_virt(src)
+        if not src_virt:
+            res.update(status="error", error="bad source path")
+            results.append(res)
+            continue
+        res["src"] = src_virt
+        dst_rel, err = _clean_library_rel(dst_raw, for_dst=True)
+        if err:
+            res.update(status="error", error=err)
+            results.append(res)
+            continue
+        dst_virt = "workflows/" + dst_rel
+        res["dst"] = dst_virt
+        if src_virt == dst_virt:
+            res.update(status="same")
+            results.append(res)
+            continue
+        phys_src, _root_src = _resolve_library_file(request, src_virt)
+        if not phys_src or not os.path.isfile(phys_src):
+            res.update(status="error", error="no such file: " + src_virt)
+            results.append(res)
+            continue
+        phys_dst, _root_dst = _resolve_library_file(request, dst_virt)
+        if not phys_dst:
+            res.update(status="error", error="the destination cannot be resolved")
+            results.append(res)
+            continue
+        if os.path.exists(phys_dst):
+            if on_conflict == "skip":
+                res.update(status="skipped", error="exists")
+                results.append(res)
+                continue
+            if on_conflict == "auto":
+                vrel = _auto_variant_rel(dst_rel, request)
+                if not vrel:
+                    res.update(status="skipped", error="no free name")
+                    results.append(res)
+                    continue
+                dst_virt = "workflows/" + vrel
+                res["dst"] = dst_virt
+                phys_dst, _root_dst = _resolve_library_file(request, dst_virt)
+                if not phys_dst:
+                    res.update(status="error",
+                               error="the destination cannot be resolved")
+                    results.append(res)
+                    continue
+        # the safety snapshot of the SOURCE (a move destroys it) - verified
+        # like the delete preflight does
+        try:
+            with open(phys_src, "rb") as fh:
+                src_bytes = fh.read()
+        except OSError as e:
+            res.update(status="error", error="read failed: " + str(e)[:100])
+            results.append(res)
+            continue
+        if op == "move":
+            tx = (_wf_hist.make_tx_snapshot(src_virt, src_bytes)
+                  if _wf_hist is not None else {"ok": False})
+            if not tx.get("ok"):
+                res.update(status="error", error="the safety snapshot failed")
+                results.append(res)
+                continue
+            res["txId"] = tx.get("txId")
+        # the safety snapshot of the OVERWRITTEN destination (if any)
+        if os.path.exists(phys_dst):
+            try:
+                with open(phys_dst, "rb") as fh:
+                    dst_bytes = fh.read()
+            except OSError:
+                dst_bytes = None
+            if dst_bytes is not None and _wf_hist is not None:
+                tx2 = _wf_hist.make_tx_snapshot(dst_virt, dst_bytes)
+                if tx2.get("ok"):
+                    res["overwrittenTxId"] = tx2.get("txId")
+        try:
+            os.makedirs(os.path.dirname(phys_dst), exist_ok=True)
+            if op == "move":
+                shutil.move(phys_src, phys_dst)
+            else:
+                fd, tmp = tempfile.mkstemp(dir=os.path.dirname(phys_dst))
+                try:
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(src_bytes)
+                    os.replace(tmp, phys_dst)
+                except Exception:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
+        except Exception as e:
+            res.update(status="error", error="write failed: " + str(e)[:120])
+            results.append(res)
+            continue
+        res["status"] = "moved" if op == "move" else "copied"
+        results.append(res)
+        if op == "move":
+            moved_pairs.append((src_virt, dst_virt))
+        final_dsts.append(dst_virt)
+    return results, moved_pairs, final_dsts
+
+
+def _library_after_effects(request, moved_pairs=(), dst_paths=(),
+                           user_scope=None):
+    """The derived-state sweep of the successful v129 operations (once per
+    batch, best-effort - a partial pack degrades to the next full Refresh,
+    never to a broken route): the favorites follow a move, the history
+    detaches the old location (the UUID re-bind attaches the new path on
+    the next reconcile), the index drops the dead rows and point-refreshes
+    the live ones."""
+    scope = user_scope or "default"
+    old_paths = [s for s, _d in moved_pairs]
+    if moved_pairs:
+        try:
+            _remap_file_favs({s: d for s, d in moved_pairs})
+        except Exception:
+            pass
+        if _wf_hist is not None:
+            try:
+                _wf_hist.detach_locations(old_paths)
+            except Exception:
+                pass
+            try:
+                _wf_hist.expire_reconcile_cache()
+            except Exception:
+                pass
+    if (moved_pairs or dst_paths) and _wf_index is not None:
+        if old_paths:
+            try:
+                _wf_index.forget_paths(user_scope=scope, rel_paths=old_paths)
+            except Exception:
+                pass
+        try:
+            _wf_index.refresh_paths(user_scope=scope,
+                                    root_dirs=_workflows_user_dirs(request),
+                                    rel_paths=list(dst_paths),
+                                    path_map=_ext_refresh_map(list(dst_paths)))
+        except Exception:
+            pass
+
+
+@PromptServer.instance.routes.post("/settings_hub/workflows/files/rename")
+async def workflows_files_rename(request):
+    """Rename / move ONE library file (v129). Body {src, dst, overwrite?}:
+    src is a 'workflows/<rel>' path (the virtual EXTERNAL namespace
+    included), dst is the free-text relative path ('archive/2026/new_name')
+    with an optional storage change - the name, the subfolders and the
+    storage move in ONE step. Answers 409 {dst} when the destination exists
+    and overwrite is false (the UI shows the conflict block). The derived
+    state (favorites, index, history locations) follows server-side."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    overwrite = body.get("overwrite") is True or body.get("overwrite") == "true"
+    results, moved, dsts = _library_transfer_core(
+        request, "move",
+        [{"src": body.get("src"), "dst": body.get("dst")}],
+        "overwrite" if overwrite else "skip")
+    r = results[0] if results else {"status": "error", "error": "no item"}
+    if r.get("status") == "same":
+        return web.json_response({"ok": True, "same": True,
+                                  "src": r.get("src"), "dst": r.get("dst")})
+    if r.get("status") != "moved":
+        if r.get("error") == "exists":
+            return web.json_response({"ok": False, "error": "exists",
+                                      "src": r.get("src"),
+                                      "dst": r.get("dst")}, status=409)
+        return web.json_response({"ok": False,
+                                  "error": r.get("error", "error")}, status=400)
+    _library_after_effects(request, moved_pairs=moved, dst_paths=dsts,
+                           user_scope=_request_user_scope(request))
+    out = {"ok": True, "src": r.get("src"), "dst": r.get("dst")}
+    if r.get("txId"):
+        out["txId"] = r["txId"]
+    if r.get("overwrittenTxId"):
+        out["overwrittenTxId"] = r["overwrittenTxId"]
+    return web.json_response(out)
+
+
+@PromptServer.instance.routes.post("/settings_hub/workflows/files/transfer")
+async def workflows_files_transfer(request):
+    """Batch COPY / MOVE across the library storages (v129). Body
+    {op: "copy"|"move", items: [{src, dst}],
+     onConflict?: "skip"|"overwrite"|"auto"}.
+    The FRONTEND computes every dst (the 'Keep subfolder structure' option
+    is a client-side join); the server validates EVERY pair independently
+    and answers per-item results - no silent overwrites, no silent partial
+    success. The derived-state sweep runs ONCE for the whole batch."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    op = body.get("op")
+    items = body.get("items")
+    if op not in ("copy", "move"):
+        return web.json_response({"ok": False, "error": "op must be copy or move"},
+                                 status=400)
+    if not isinstance(items, list) or not items or len(items) > MAX_TRANSFER_ITEMS:
+        return web.json_response(
+            {"ok": False,
+             "error": "items must be a list of 1..%d pairs" % MAX_TRANSFER_ITEMS},
+            status=400)
+    on_conflict = body.get("onConflict") or "skip"
+    if on_conflict not in TRANSFER_CONFLICTS:
+        return web.json_response(
+            {"ok": False,
+             "error": "onConflict must be one of: " + ", ".join(TRANSFER_CONFLICTS)},
+            status=400)
+    results, moved, dsts = _library_transfer_core(request, op, items, on_conflict)
+    _library_after_effects(request, moved_pairs=moved, dst_paths=dsts,
+                           user_scope=_request_user_scope(request))
+    counts = {"moved": 0, "copied": 0, "skipped": 0, "same": 0, "errors": 0}
+    for r in results:
+        counts[{"moved": "moved", "copied": "copied", "skipped": "skipped",
+                "same": "same", "error": "errors"}.get(r.get("status"),
+                                                       "errors")] += 1
+    return web.json_response({"ok": True, "op": op, "results": results,
+                              **counts})
+
+
+@PromptServer.instance.routes.get("/settings_hub/workflows/files/subdirs")
+async def workflows_files_subdirs(request):
+    """Every relative SUBFOLDER of the standard workflows roots (v129) -
+    the EMPTY directories included - for the save/rename pickers. The
+    storage housekeeping (presets/, temp/, the ext namespace, the system
+    users, the pack's own settings_hub namespace) never shows up."""
+    skip_names = set(_LIB_SERVICE_DIRS) | {".settings_hub_ext"}
+    out, seen = [], set()
+    for wroot in _workflows_user_dirs(request):
+        hides = set(_files_hide_dirs(wroot))
+        try:
+            for dirpath, dirnames, _fn in os.walk(wroot):
+                keep = []
+                for dn in sorted(dirnames):
+                    full = os.path.join(dirpath, dn)
+                    if os.path.normcase(os.path.abspath(full)) in hides:
+                        continue
+                    if dn in skip_names:
+                        continue
+                    keep.append(dn)
+                dirnames[:] = keep
+                for dn in keep:
+                    try:
+                        rel = os.path.relpath(os.path.join(dirpath, dn),
+                                              wroot).replace(os.sep, "/")
+                    except Exception:
+                        continue
+                    if rel in seen:
+                        continue
+                    seen.add(rel)
+                    out.append(rel)
+                if len(out) >= MAX_FILE_SUBDIRS:
+                    break
+            if len(out) >= MAX_FILE_SUBDIRS:
+                break
+        except OSError:
+            continue
+    out.sort()
+    return web.json_response({"ok": True, "dirs": out[:MAX_FILE_SUBDIRS],
+                              "truncated": len(out) > MAX_FILE_SUBDIRS})
+
+
+@PromptServer.instance.routes.post("/settings_hub/workflows/index/refresh")
+async def workflows_index_refresh_point(request):
+    """The point re-index of specific paths (v129): the frontend calls it
+    right after a NATIVE /userdata save (the ext writes re-index themselves
+    inside ext_store). Body {paths: ['workflows/<rel>', ...]} - the virtual
+    EXTERNAL paths resolve through the ext map, the standard ones through
+    the ordinary walk roots."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad json"}, status=400)
+    raw = body.get("paths")
+    paths = []
+    if isinstance(raw, list):
+        for x in raw[:200]:
+            v = _norm_lib_virt(x) if isinstance(x, str) else None
+            if v:
+                paths.append(v)
+    if not paths:
+        return web.json_response({"ok": False, "error": "no paths"}, status=400)
+    if _wf_index is None:
+        return web.json_response(
+            {"ok": False, "error": "the index module is unavailable"}, status=503)
+    try:
+        r = _wf_index.refresh_paths(user_scope=_request_user_scope(request),
+                                    root_dirs=_workflows_user_dirs(request),
+                                    rel_paths=paths,
+                                    path_map=_ext_refresh_map(paths))
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)[:150]}, status=500)
+    return web.json_response({"ok": True,
+                              "updated": int(r.get("updated") or 0),
+                              "removed": int(r.get("removed") or 0)})
 
 
 # ---------------------------------------------------------------------------

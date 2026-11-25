@@ -75,6 +75,7 @@ MAX_EXT_FILES_LISTED = 6000       # one ext listing walk (the store's bound)
 MAX_EXT_WRITE_BYTES = 64 * 1024 * 1024   # one workflow json is far smaller
 MAX_EXT_BROWSE_ENTRIES = 500      # subdirs shown by the folder picker
 MAX_EXT_REL_CHARS = 300           # one virtual relative path
+MAX_EXT_SUBDIRS = 2000            # v129: the subdir suggestions of one folder
 
 # the virtual namespace inside the userdata workflows tree
 VIRT_DIR_NAME = ".settings_hub_ext"
@@ -643,9 +644,11 @@ async def ext_store(request):
         return web.Response(status=400, reason="Invalid filename. Please avoid "
                             "special characters like :\\/*?\"<>|",
                             text=str(e)[:200])
+    vpath = virtual_path(d, rel)
+    _index_refresh_quiet([vpath])
     if full_info:
         return web.json_response(_full_info_for(phys, d, rel))
-    return web.json_response(virtual_path(d, rel))
+    return web.json_response(vpath)
 
 
 def _full_info_for(phys, d, rel):
@@ -705,3 +708,54 @@ async def ext_delete(request):
     except OSError as e:
         return web.Response(status=400, text=str(e)[:200])
     return web.Response(status=204)
+
+
+def _index_refresh_quiet(paths):
+    """v129: the point re-index of the freshly written files - the Files
+    search/groups see the new save without waiting for a full scan.
+    Best-effort: the index is a sibling module of the same pack; an old or
+    partial install (and a busy/locked DB) silently degrade to the next
+    full Refresh - the write route itself never fails because of it."""
+    try:
+        try:
+            from . import workflows_index as _wi
+        except Exception:
+            import workflows_index as _wi  # type: ignore
+        if not hasattr(_wi, "refresh_paths"):
+            return
+        _wi.refresh_paths(rel_paths=list(paths),
+                          path_map=ext_refresh_map(list(paths)))
+    except Exception:
+        pass
+
+
+@PromptServer.instance.routes.get("/settings_hub/workflows/ext/subdirs")
+async def ext_subdirs(request):
+    """v129: EVERY relative subfolder of one registered folder - the empty
+    directories included (os.walk yields them) - for the save/rename
+    pickers. The same bounded-walk style as the folder picker: a huge
+    external tree cannot stall the server, the answer caps at
+    MAX_EXT_SUBDIRS with an honest `truncated` flag."""
+    d = _find_dir_by_id(request.query.get("dir", ""))
+    if d is None:
+        return _bad("no such registered folder", 404)
+    root = d["path"]
+    out = []
+    if os.path.isdir(root):
+        try:
+            for dirpath, dirnames, _fn in os.walk(root):
+                dirnames.sort()
+                for dn in dirnames:
+                    try:
+                        out.append(os.path.relpath(
+                            os.path.join(dirpath, dn), root).replace(os.sep, "/"))
+                    except Exception:
+                        continue
+                if len(out) >= MAX_EXT_SUBDIRS:
+                    break
+        except OSError:
+            pass
+    out.sort()
+    return web.json_response({"ok": True, "dir": _dir_row(d),
+                              "dirs": out[:MAX_EXT_SUBDIRS],
+                              "truncated": len(out) > MAX_EXT_SUBDIRS})
