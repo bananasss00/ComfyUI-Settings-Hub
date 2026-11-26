@@ -7104,6 +7104,15 @@ button.hub-wf-dirrow:hover { background: rgba(90, 110, 200, 0.18); }
     padding: 2px 1px;
 }
 
+/* v131: the honest tail of the folder search - the rendered matches are
+   capped (SUBS_MATCH_CAP), the row says how many hits stayed off-screen */
+.hub-wf-sasmore {
+    color: #8b8fa8;
+    font-size: calc(var(--sh-fs, 1) * 10px);
+    padding: 3px 1px 1px;
+    white-space: nowrap;
+}
+
 .hub-wf-sasub {
     padding: 1px 7px;
     background: #1c1c2e;

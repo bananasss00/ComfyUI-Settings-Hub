@@ -2180,12 +2180,26 @@ check("v130 clean rel: a standard 'workflows/...' dst stays a LITERAL rel "
       _c7 == "workflows/deep/name.json" and _e7 is None, str((_c7, _e7)))
 
 # --- subdirs: the save/rename pickers' suggestions -------------------------
+# v131: a folder shows only when its SUBTREE holds at least one usable file
+os.makedirs(os.path.join(lib129, "junk_only"), exist_ok=True)
+open(os.path.join(lib129, "junk_only", ".DS_Store"), "w").close()
+os.makedirs(os.path.join(lib129, "deep", "a", "b"), exist_ok=True)
+mk129("deep/a/b/deep.json", '{"id":"uuid-deep-131","nodes":[]}')
+os.makedirs(os.path.join(lib129, "deepempty", "inner"), exist_ok=True)
 r = loop(SUBD(FakeRequest(method="GET")))
 j = r.json()
 _dirs129 = j.get("dirs") or []
-check("v129 subdirs: ok", r.status == 200 and j.get("ok") is True)
-check("v129 subdirs: the EMPTY dir is listed (empty folders included)",
-      "empty_dir" in _dirs129, str(_dirs129))
+check("v131 subdirs: ok", r.status == 200 and j.get("ok") is True)
+check("v131 subdirs: the EMPTY dir is NOT listed (empty folders are noise)",
+      "empty_dir" not in _dirs129, str(_dirs129))
+check("v131 subdirs: a junk-only dir (.DS_Store) is NOT listed either",
+      "junk_only" not in _dirs129, str(_dirs129))
+check("v131 subdirs: an empty branch + its inner dir are BOTH hidden",
+      not any(d == "deepempty" or d.startswith("deepempty/") for d in _dirs129),
+      str(_dirs129))
+check("v131 subdirs: every ancestor of a file-bearing dir is listed",
+      "deep" in _dirs129 and "deep/a" in _dirs129 and "deep/a/b" in _dirs129,
+      str(_dirs129))
 check("v129 subdirs: the nested folder is listed", "sub" in _dirs129)
 check("v129 subdirs: the presets/ housekeeping never shows",
       not any(d == "presets" or d.startswith("presets/") for d in _dirs129),

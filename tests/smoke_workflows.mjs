@@ -2143,23 +2143,24 @@ check("a healthy server clears the note",
 phase("WH entry integration (source contract)");
 
 check("FILES lists ./workflows.js", ENTRY_SRC.includes('"./workflows.js"'));
-check("EXPECTED carries workflows: v130", /"workflows":\s*"v130"/.test(ENTRY_SRC));
+check("EXPECTED carries workflows: v131", /"workflows":\s*"v131"/.test(ENTRY_SRC));
 check("the entry registers initWorkflows", ENTRY_SRC.includes("initWorkflows()"));
-check("the entry banner names v130 (the save/rename popup fixes on top of the v129 storages + the v128 restore semantics)",
-    ENTRY_SRC.includes("web build: v130 - SAVE/RENAME/TRANSFER POPUP FIXES") &&
+check("the entry banner names v131 (the whole-storage folder search + the empty folders gone on top of the v130 popup fixes)",
+    ENTRY_SRC.includes("web build: v131 - THE FOLDER SEARCH OVER THE WHOLE STORAGE") &&
+    ENTRY_SRC.includes("SAVE/RENAME/TRANSFER POPUP FIXES") &&
     ENTRY_SRC.includes("SAVE AS / RENAME / TRANSFER ACROSS STORAGES") &&
     ENTRY_SRC.includes("Save & Rename") &&
     ENTRY_SRC.includes("re-index themselves inside ext_store"));
-check("styles.css?v=130", ENTRY_SRC.includes("styles.css?v=130"));
-check("the module self-reports v130",
+check("styles.css?v=131", ENTRY_SRC.includes("styles.css?v=131"));
+check("the module self-reports v131",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v130"'));
-check("the web stamp literal is v130",
+        .includes('globalThis.__SettingsHubLoaded["workflows"] = "v131"'));
+check("the web stamp literal is v131",
     fs.readFileSync(path.join(WEB, "workflows.js"), "utf8")
-        .includes('const WF_WEB_VERSION = "v130"'));
-check("py stamp bumps together (v130)",
+        .includes('const WF_WEB_VERSION = "v131"'));
+check("py stamp bumps together (v131)",
     fs.readFileSync(path.join(ROOT, "py", "workflows_store.py"), "utf8")
-        .includes('WORKFLOWS_SERVER_VERSION = "v130"'));
+        .includes('WORKFLOWS_SERVER_VERSION = "v131"'));
 check("v121 py: the union-find clustering + the seeds + the honest non-json accounting exist",
     (() => { const src = fs.readFileSync(path.join(ROOT, "py", "workflows_index.py"), "utf8");
         return src.includes('def _name_stem') && src.includes('SIM_RARE_SLACK')
@@ -2756,7 +2757,7 @@ await settle();
     const stTxt2 = bodyEl().querySelector(".hub-wf-status").textContent;
     check("WL: the presets status shows the stale srv version + ⚠",
         stTxt2.includes("srv v107") && stTxt2.includes("⚠"), stTxt2);
-    fakeApi.__setHealthVersion("v131"); // ahead of the pack (v130) - a stale web file
+    fakeApi.__setHealthVersion("v132"); // ahead of the pack (v131) - a stale web file
     await hooks.probeServer();
     hooks.renderAll();
     await settle();
@@ -6847,6 +6848,26 @@ phase("ZZ v129+v130: the save-as / rename / transfer storages machinery (v130 fi
             subdirs: ["flux/inpaint", "flux/upscale"], subQuery: "flux" });
             return h.includes("flux/inpaint") && h.includes("flux/upscale") &&
                 h.includes('data-sa="subslist"'); })(), "filtered chips");
+
+    // (7) v131: the search SPACE is the FULL list, not the shown chips; the
+    // empty folders never arrive (the py filters them) + the match cap tail
+    const big131 = [];
+    for (let i = 0; i < 70; i++) big131.push("grp" + (i % 3) + "/dir" + i);
+    check("ZZ v131: the search runs over the FULL list (dir69 sits past the 60-chip cap)",
+        JSON.stringify(hooks.subsFilterDirs({ subs: [], subdirs: big131,
+            subQuery: "dir69" }).rows.map((r) => r.dir)) ===
+            JSON.stringify(["grp0/dir69"]), "search beyond cap");
+    check("ZZ v131: the default view still caps the chips at 60 and reports the tail",
+        (() => { const f = hooks.subsFilterDirs({ subs: [], subdirs: big131, subQuery: "" });
+            return f.rows.length === 60 && f.more === 10 && !f.filtered; })(), "default cap");
+    const huge131 = [];
+    for (let i = 0; i < 400; i++) huge131.push("d" + i);
+    check("ZZ v131: the rendered matches cap at 300 with the honest +N tail",
+        hooks.subsListInnerHtml({ subs: [], subdirs: huge131, subQuery: "d" })
+            .includes("+100 more - keep typing"), "match cap tail");
+    check("ZZ v131: the search rides in on the FULL folder count (70 > 9, no cap lie)",
+        hooks.subsRowHtml({ subs: [], subdirs: big131, subQuery: "" })
+            .includes('data-sa="subsearch"'), "search on full count");
 }
 
 console.log(`\nworkflows smoke: PASS ${pass}  FAIL ${fail}`);

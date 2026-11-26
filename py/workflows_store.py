@@ -1616,7 +1616,7 @@ async def workflows_health(request):
 # v101: server pack version - MUST bump together with the web build stamps
 # (tools/version.py checks both against the entry stamp; the panel compares
 # it against globalThis.__SettingsHubBuild). AGENTS.md release rule.
-WORKFLOWS_SERVER_VERSION = "v130"
+WORKFLOWS_SERVER_VERSION = "v131"
 
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/root")
@@ -2320,6 +2320,9 @@ async def workflows_files_fav_post(request):
 # ---------------------------------------------------------------------------
 MAX_TRANSFER_ITEMS = 200          # one batch
 MAX_FILE_SUBDIRS = 2000           # the subdir suggestions of the standard roots
+# v131: these files NEVER make a folder "occupied" for the subdir
+# suggestions - OS junk must not resurrect a genuinely empty branch
+_SUBDIR_JUNK_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
 MAX_LIBRARY_REL_CHARS = 400       # one relative path (mirrors MAX_EXT_REL_CHARS)
 TRANSFER_CONFLICTS = ("skip", "overwrite", "auto")
 _LIB_SERVICE_DIRS = ("presets", "temp", "__system", "settings_hub")
@@ -2692,8 +2695,11 @@ async def workflows_files_transfer(request):
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/files/subdirs")
 async def workflows_files_subdirs(request):
-    """Every relative SUBFOLDER of the standard workflows roots (v129) -
-    the EMPTY directories included - for the save/rename pickers. The
+    """Every relative SUBFOLDER of the standard workflows roots (v129) for
+    the save/rename pickers. v131 (the owner's ask - the empty folders are
+    noise): a folder shows only when its SUBTREE holds at least one usable
+    file (OS junk like .DS_Store does not count) - an empty branch and its
+    dead intermediate dirs never reach the chips or the search. The
     storage housekeeping (presets/, temp/, the ext namespace, the system
     users, the pack's own settings_hub namespace) never shows up."""
     skip_names = set(_LIB_SERVICE_DIRS) | {".settings_hub_ext"}
@@ -2701,7 +2707,8 @@ async def workflows_files_subdirs(request):
     for wroot in _workflows_user_dirs(request):
         hides = set(_files_hide_dirs(wroot))
         try:
-            for dirpath, dirnames, _fn in os.walk(wroot):
+            file_dirs, all_dirs = set(), []
+            for dirpath, dirnames, filenames in os.walk(wroot):
                 keep = []
                 for dn in sorted(dirnames):
                     full = os.path.join(dirpath, dn)
@@ -2711,20 +2718,31 @@ async def workflows_files_subdirs(request):
                         continue
                     keep.append(dn)
                 dirnames[:] = keep
+                if any(f.lower() not in _SUBDIR_JUNK_FILES for f in filenames):
+                    try:
+                        file_dirs.add(os.path.relpath(
+                            dirpath, wroot).replace(os.sep, "/"))
+                    except Exception:
+                        pass
                 for dn in keep:
                     try:
-                        rel = os.path.relpath(os.path.join(dirpath, dn),
-                                              wroot).replace(os.sep, "/")
+                        all_dirs.append(os.path.relpath(
+                            os.path.join(dirpath, dn),
+                            wroot).replace(os.sep, "/"))
                     except Exception:
                         continue
-                    if rel in seen:
-                        continue
+                if len(all_dirs) >= MAX_FILE_SUBDIRS:
+                    break
+            # the occupied set = the dirs holding files + every ancestor
+            occupied = set(file_dirs)
+            for rel in file_dirs:
+                parts = rel.split("/")
+                for i in range(1, len(parts) + 1):
+                    occupied.add("/".join(parts[:i]))
+            for rel in all_dirs:
+                if rel in occupied and rel not in seen:
                     seen.add(rel)
                     out.append(rel)
-                if len(out) >= MAX_FILE_SUBDIRS:
-                    break
-            if len(out) >= MAX_FILE_SUBDIRS:
-                break
         except OSError:
             continue
     out.sort()

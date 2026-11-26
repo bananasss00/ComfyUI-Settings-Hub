@@ -525,6 +525,8 @@ try:
     lib2 = tempfile.mkdtemp(prefix="shub-ext-sub-")
     os.makedirs(os.path.join(lib2, "a", "b"), exist_ok=True)
     os.makedirs(os.path.join(lib2, "empty"), exist_ok=True)
+    os.makedirs(os.path.join(lib2, "junk"), exist_ok=True)
+    open(os.path.join(lib2, "junk", "Thumbs.db"), "w").close()
     with open(os.path.join(lib2, "a", "b", "deep.json"), "w", encoding="utf-8") as f:
         f.write(wf_json("deep"))
     r = run(H_DIRS_ADD(FakeRequest(json_body={"path": lib2})))
@@ -532,10 +534,12 @@ try:
     H_SUBS = wfx.ext_subdirs
     r = run(H_SUBS(FakeRequest(method="GET", query={"dir": did2})))
     j = r.json()
-    check("v129 ext subdirs: ok", r.status == 200 and j.get("ok") is True, str(j))
-    check("v129 ext subdirs: the EMPTY folder is listed (empty dirs included)",
-          "empty" in (j.get("dirs") or []), str(j.get("dirs")))
-    check("v129 ext subdirs: the nested chain is listed",
+    check("v131 ext subdirs: ok", r.status == 200 and j.get("ok") is True, str(j))
+    check("v131 ext subdirs: the EMPTY folder is NOT listed (empty dirs are noise)",
+          "empty" not in (j.get("dirs") or []), str(j.get("dirs")))
+    check("v131 ext subdirs: a junk-only folder (Thumbs.db) is NOT listed either",
+          "junk" not in (j.get("dirs") or []), str(j.get("dirs")))
+    check("v131 ext subdirs: the occupied nested chain is listed",
           "a" in (j.get("dirs") or []) and "a/b" in (j.get("dirs") or []),
           str(j.get("dirs")))
     check("v129 ext subdirs: sorted",

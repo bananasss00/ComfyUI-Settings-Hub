@@ -360,9 +360,9 @@ import { getUiFontScale, setUiFontScale, UI_FONT_SCALE_CHOICES, uiFontScaleLabel
 // v105: this build's OWN stamp (the mismatch check against /health). The
 // release rule keeps WORKFLOWS_SERVER_VERSION and __SettingsHubBuild equal,
 // so "server older than this build" == "the py half is stale = restart".
-const WF_WEB_VERSION = "v130";
+const WF_WEB_VERSION = "v131";
 globalThis.__SettingsHubLoaded = globalThis.__SettingsHubLoaded ?? {};
-globalThis.__SettingsHubLoaded["workflows"] = "v130";
+globalThis.__SettingsHubLoaded["workflows"] = "v131";
 
 // ---------------------------------------------------------------------------
 // Constants + tiny utils
@@ -8711,8 +8711,9 @@ function renderInspPop() {
 // /files/transfer move files ACROSS the storages and carry the derived
 // state with them (the ★ favorites, the SQLite index, the process-history
 // locations, the tx snapshots); GET /files/subdirs + /ext/subdirs feed
-// the subfolder chips (empty folders included); POST /index/refresh makes
-// a fresh native save searchable immediately.
+// the subfolder chips (v131: the OCCUPIED folders only - a branch with no
+// file beneath never shows); POST /index/refresh makes a fresh native
+// save searchable immediately.
 // ============================================================================
 
 const SA_LAST_STORAGE = "settingshub.wf.saveStorage";
@@ -8723,6 +8724,10 @@ const SA_SUBDIRS_CAP = 60;
 // v130: the folder search rides in from this many chips (below that the
 // chips ARE the search - an input would be noise)
 const SA_SUBS_SEARCH_MIN = 9;
+// v131: the search SPACE is the FULL subdirs list of the storage; this cap
+// bounds only the RENDERED matches (a broad word in a 2000-folder tree
+// cannot flood the DOM) - the tail row reports the rest honestly
+const SUBS_MATCH_CAP = 300;
 // the DEFAULT temp names ("Unsaved Workflow (N)") never prefill the save
 // popover - they are ComfyUI placeholders, not names the user chose
 const SA_TEMPLATE_NAME_RE = /^unsaved workflow( \(\d+\))?$/i;
@@ -9045,22 +9050,31 @@ function storageChipsHtml(curId) {
 
 /** v130 (the owner's ask): the MULTI-WORD filter of the subfolder chips -
  *  every whitespace-separated word must hit the dir string (a
- *  case-insensitive substring; "flux inpaint" matches flux/inpaint2). */
+ *  case-insensitive substring; "flux inpaint" matches flux/inpaint2).
+ *  v131 (the owner's follow-up - "the search sees only the shown folders"):
+ *  the words now run over the FULL subdirs list of the storage, not the
+ *  first SA_SUBDIRS_CAP chips; the cap bounds the DEFAULT view and the
+ *  RENDERED matches (SUBS_MATCH_CAP + the "+N more" tail), never the
+ *  search space itself. */
 function subsFilterDirs(st) {
     const recents = (st.subs || []).filter((s) => s && (!st.subdirs || !st.subdirs.includes(s)));
-    const existing = (st.subdirs || []).slice(0, SA_SUBDIRS_CAP);
     const all = recents.map((d) => ({ dir: d, recent: true }))
-        .concat(existing.map((d) => ({ dir: d, recent: false })));
+        .concat((st.subdirs || []).map((d) => ({ dir: d, recent: false })));
     const words = String(st.subQuery || "").toLowerCase().split(/\s+/).filter(Boolean);
-    if (!words.length) return { rows: all, filtered: false };
-    return {
-        rows: all.filter((x) => words.every((w) => x.dir.toLowerCase().includes(w))),
-        filtered: true,
-    };
+    if (!words.length) {
+        // the default view: the recent targets + the first SA_SUBDIRS_CAP folders
+        return { rows: all.slice(0, recents.length + SA_SUBDIRS_CAP),
+            more: Math.max(0, all.length - recents.length - SA_SUBDIRS_CAP),
+            filtered: false };
+    }
+    const hits = all.filter((x) => words.every((w) => x.dir.toLowerCase().includes(w)));
+    return { rows: hits.slice(0, SUBS_MATCH_CAP),
+        more: Math.max(0, hits.length - SUBS_MATCH_CAP),
+        filtered: true };
 }
 
 function subsListInnerHtml(st) {
-    const { rows, filtered } = subsFilterDirs(st);
+    const { rows, more, filtered } = subsFilterDirs(st);
     if (!rows.length) {
         return filtered
             ? `<div class="hub-wf-sasnous">No folders match "${esc(st.subQuery || "")}"</div>`
@@ -9069,20 +9083,22 @@ function subsListInnerHtml(st) {
     return rows.map((x) =>
         `<button type="button" class="hub-wf-sasub${x.recent ? " hub-wf-sasub-recent" : ""}" data-sa="sub" ` +
         `data-dir="${esc(x.dir)}" title="${x.recent ? "Recent: use this subfolder (the file name stays)" : "Use this subfolder (the file name stays; missing folders are created on save)"}">${esc(x.dir)}</button>`
-    ).join("");
+    ).join("") +
+    (more > 0 ? `<div class="hub-wf-sasmore">+${more} more - keep typing</div>` : "");
 }
 
 /** The subfolder chips row: the 2-4 RECENT targets first (the plan §3.2),
- *  then the existing folders of the picked storage (empty ones included -
- *  the subdirs routes walk the real tree). Click = replace the folder
- *  prefix, keep the file name. v130: when the storage carries MANY folders
- *  (or a query is already typed) a MULTI-WORD SEARCH input rides above the
- *  chips - it lives OUTSIDE the chips node, so a keystroke re-renders only
- *  the list and the caret survives every letter. */
+ *  then the existing folders of the picked storage (v131: the OCCUPIED
+ *  ones only - the subdirs routes skip every branch with no file beneath).
+ *  Click = replace the folder prefix, keep the file name. v130: when the
+ *  storage carries MANY folders (or a query is already typed) a MULTI-WORD
+ *  SEARCH input rides above the chips - it lives OUTSIDE the chips node,
+ *  so a keystroke re-renders only the list and the caret survives every
+ *  letter. v131: the search rides in on the FULL folder count (the chips
+ *  show SA_SUBDIRS_CAP of them, the search still sees every folder). */
 function subsRowHtml(st) {
     const recents = (st.subs || []).filter((s) => s && (!st.subdirs || !st.subdirs.includes(s)));
-    const existing = (st.subdirs || []).slice(0, SA_SUBDIRS_CAP);
-    const total = recents.length + existing.length;
+    const total = recents.length + (st.subdirs || []).length;
     if (!total && !(st.subQuery || "").trim()) return "";
     const showSearch = total > SA_SUBS_SEARCH_MIN || !!(st.subQuery || "").trim();
     return `<div class="hub-wf-sasubwrap">` +
@@ -10187,9 +10203,11 @@ export function __workflowsTestHooks() {
                 ? storageId : saStorageById(storageId || "std")),
         trParseBase,
         // v130: the rel dst dialect + the folder search + the in-place rebind
+        // v131: the full-list search + the match cap (subsListInnerHtml)
         dstRelOfStorage,
         subsFilterDirs,
         subsRowHtml,
+        subsListInnerHtml,
         firstSubMatch,
         rebindMovedTabs,
         trPopEl: () => trPop,

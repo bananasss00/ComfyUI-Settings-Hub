@@ -76,6 +76,8 @@ MAX_EXT_WRITE_BYTES = 64 * 1024 * 1024   # one workflow json is far smaller
 MAX_EXT_BROWSE_ENTRIES = 500      # subdirs shown by the folder picker
 MAX_EXT_REL_CHARS = 300           # one virtual relative path
 MAX_EXT_SUBDIRS = 2000            # v129: the subdir suggestions of one folder
+# v131: these files NEVER make a folder "occupied" (mirrors the store side)
+_SUBDIR_JUNK_FILES = {".ds_store", "thumbs.db", "desktop.ini"}
 
 # the virtual namespace inside the userdata workflows tree
 VIRT_DIR_NAME = ".settings_hub_ext"
@@ -731,11 +733,14 @@ def _index_refresh_quiet(paths):
 
 @PromptServer.instance.routes.get("/settings_hub/workflows/ext/subdirs")
 async def ext_subdirs(request):
-    """v129: EVERY relative subfolder of one registered folder - the empty
-    directories included (os.walk yields them) - for the save/rename
-    pickers. The same bounded-walk style as the folder picker: a huge
-    external tree cannot stall the server, the answer caps at
-    MAX_EXT_SUBDIRS with an honest `truncated` flag."""
+    """v129: EVERY relative subfolder of one registered folder for the
+    save/rename pickers. v131 (the owner's ask - the empty folders are
+    noise): a folder shows only when its SUBTREE holds at least one usable
+    file (OS junk like .DS_Store does not count) - a truly empty branch and
+    its dead intermediate dirs never reach the chips or the search. The
+    same bounded-walk style as the folder picker: a huge external tree
+    cannot stall the server, the answer caps at MAX_EXT_SUBDIRS with an
+    honest `truncated` flag."""
     d = _find_dir_by_id(request.query.get("dir", ""))
     if d is None:
         return _bad("no such registered folder", 404)
@@ -743,16 +748,30 @@ async def ext_subdirs(request):
     out = []
     if os.path.isdir(root):
         try:
-            for dirpath, dirnames, _fn in os.walk(root):
+            file_dirs, all_dirs = set(), []
+            for dirpath, dirnames, filenames in os.walk(root):
                 dirnames.sort()
+                if any(f.lower() not in _SUBDIR_JUNK_FILES for f in filenames):
+                    try:
+                        file_dirs.add(os.path.relpath(
+                            dirpath, root).replace(os.sep, "/"))
+                    except Exception:
+                        pass
                 for dn in dirnames:
                     try:
-                        out.append(os.path.relpath(
-                            os.path.join(dirpath, dn), root).replace(os.sep, "/"))
+                        all_dirs.append(os.path.relpath(
+                            os.path.join(dirpath, dn),
+                            root).replace(os.sep, "/"))
                     except Exception:
                         continue
-                if len(out) >= MAX_EXT_SUBDIRS:
+                if len(all_dirs) >= MAX_EXT_SUBDIRS:
                     break
+            occupied = set(file_dirs)
+            for rel in file_dirs:
+                parts = rel.split("/")
+                for i in range(1, len(parts) + 1):
+                    occupied.add("/".join(parts[:i]))
+            out = [rel for rel in all_dirs if rel in occupied]
         except OSError:
             pass
     out.sort()

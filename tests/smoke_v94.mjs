@@ -285,8 +285,8 @@ phase("PA build v95 + version manifest");
         rsrc.includes('__SettingsHubLoaded["hub_ui_renderer"] = "v94"'));
     check("PA the EXPECTED manifest expects chat v98 + renderer v94",
         entrySrc.includes('"chat": "v111"') && entrySrc.includes('"hub_ui_renderer": "v94"'));
-    check("PA the banner names the current release (the v130 popup fixes: the dst dialect, the toggles, the record flip, the keeping rebind, the folder search; the v129 storages prose kept)",
-        entrySrc.includes("web build: v130 - SAVE/RENAME/TRANSFER POPUP FIXES") &&
+    check("PA the banner names the current release (the v131 whole-storage folder search + the empty folders gone; the v130 popup fixes and the v129 storages prose kept)",
+        entrySrc.includes("web build: v131 - THE FOLDER SEARCH OVER THE WHOLE STORAGE") &&
         entrySrc.includes("the Workflows Manager gets ITS OWN save/rename layer over every storage"));
 }
 
